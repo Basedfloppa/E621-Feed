@@ -1,6 +1,7 @@
 use serde::de::DeserializeOwned;
 use std::cell::Cell;
 use std::rc::Rc;
+use web_sys::js_sys;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::Closure;
 use wasm_bindgen_futures::spawn_local;
@@ -59,6 +60,13 @@ pub fn feed_page() -> Html {
     let inflight = use_mut_ref(|| Cell::new(false));
     let error = use_state(|| Option::<String>::None);
     let selected_user = use_state(|| Option::<UserInfo>::None);
+    let session_id = use_state(|| {
+        format!(
+            "feed-{}-{}",
+            js_sys::Date::now() as u64,
+            (js_sys::Math::random() * 1_000_000_000.0) as u64
+        )
+    });
     let affinity = use_state(|| {
         window()
             .and_then(|w| w.local_storage().ok().flatten())
@@ -155,11 +163,6 @@ pub fn feed_page() -> Html {
                         );
                         let added = new_items.len();
                         if added > 0 {
-                            new_items.sort_by(|a, b| {
-                                b.score
-                                    .partial_cmp(&a.score)
-                                    .unwrap_or(std::cmp::Ordering::Equal)
-                            });
                             merged.extend(new_items);
                             posts.set(merged);
                             page.set(*page + 1);
@@ -413,11 +416,23 @@ pub fn feed_page() -> Html {
 
             <div class="row g-3 m-3" aria-busy={(*is_loading).to_string()}>
                 {
-                    posts.iter().map(|sp| {
+                    posts.iter().enumerate().map(|(idx, sp)| {
                         let sp = sp.clone();
+                        let position = (idx + 1) as i32;
+                        let backend_url = read_config_from_head()
+                            .map(|cfg| cfg.backend_domain)
+                            .unwrap_or_default();
                         html! {
                             <div key={sp.post.id} class={ (*grid).col_class() } style="min-width: 200px">
-                                <PostCard affinity={sp.score} post={Rc::new(sp.post)}/>
+                                <PostCard
+                                    affinity={sp.score}
+                                    post={Rc::new(sp.post.clone())}
+                                    backend_url={backend_url}
+                                    account_id={selected_user.as_ref().map(|u| u.id as i32).unwrap_or_default()}
+                                    session_id={(*session_id).clone()}
+                                    position={position}
+                                    breakdown={sp.breakdown.clone()}
+                                />
                             </div>
                         }
                     }).collect::<Html>()

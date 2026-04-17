@@ -1,6 +1,7 @@
 use crate::models::{
     AccountMediaStat, AccountPreferenceProfile, AccountQualityProfile, AccountRatingStat,
-    AccountRecencyProfile, Post, TagCount, TruncatedAccount,
+    AccountRecencyProfile, AccountTagFeedback, FeedInteractionRequest, FeedInteractionType, Post,
+    TagCount, TruncatedAccount,
 };
 use chrono::{DateTime, Utc};
 use rocket::{
@@ -285,6 +286,77 @@ pub fn save_posts(posts: &[Post], account_id: i32) -> Result<(), String> {
     tx.commit()
         .map_err(|e| format!("Failed to commit transaction: {e}"))?;
 
+    Ok(())
+}
+
+pub fn upsert_catalog_posts(posts: &[Post]) -> Result<(), String> {
+    let mut connection = open_db()?;
+    let tx = connection
+        .transaction()
+        .map_err(|e| format!("Failed to get transaction: {e}"))?;
+
+    {
+        let mut insert_post = tx
+            .prepare_cached(
+                "
+            INSERT INTO posts (
+                id, created_at, updated_at, score_total, fav_count, rating, last_seen_at,
+                file_ext, file_width, file_height, file_size, is_animated, duration,
+                comment_count, has_notes, is_deleted, has_children
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
+            ON CONFLICT(id) DO UPDATE SET
+                updated_at = excluded.updated_at,
+                score_total = excluded.score_total,
+                fav_count = excluded.fav_count,
+                rating = excluded.rating,
+                last_seen_at = excluded.last_seen_at,
+                file_ext = excluded.file_ext,
+                file_width = excluded.file_width,
+                file_height = excluded.file_height,
+                file_size = excluded.file_size,
+                is_animated = excluded.is_animated,
+                duration = excluded.duration,
+                comment_count = excluded.comment_count,
+                has_notes = excluded.has_notes,
+                is_deleted = excluded.is_deleted,
+                has_children = excluded.has_children
+            ",
+            )
+            .map_err(|e| format!("Failed to prepare catalog upsert: {e}"))?;
+
+        for post in posts {
+            let file_ext = post.file.as_ref().and_then(|f| f.ext.clone());
+            let file_width = post.file.as_ref().map(|f| f.width);
+            let file_height = post.file.as_ref().map(|f| f.height);
+            let file_size = post.file.as_ref().map(|f| f.size);
+
+            insert_post
+                .execute(params![
+                    post.id,
+                    post.created_at.to_rfc3339(),
+                    post.updated_at.to_rfc3339(),
+                    post.score.total,
+                    post.fav_count,
+                    post.rating.to_string(),
+                    Utc::now().to_rfc3339(),
+                    file_ext,
+                    file_width,
+                    file_height,
+                    file_size,
+                    if post.is_animated() { 1 } else { 0 },
+                    post.duration,
+                    post.comment_count,
+                    if post.has_notes { 1 } else { 0 },
+                    if post.flags.deleted { 1 } else { 0 },
+                    if post.relationships.has_children { 1 } else { 0 }
+                ])
+                .map_err(|e| format!("Failed to upsert catalog post: {e}"))?;
+        }
+    }
+
+    tx.commit()
+        .map_err(|e| format!("Failed to commit catalog post transaction: {e}"))?;
     Ok(())
 }
 
@@ -649,9 +721,109 @@ pub fn get_account_preference_profile(account_id: i32) -> Result<AccountPreferen
     Ok(AccountPreferenceProfile {
         rating: get_account_rating_profile(account_id)?,
         media: get_account_media_profile(account_id)?,
+        feedback: get_account_tag_feedback(account_id)?,
         quality: get_account_quality_profile(account_id)?,
         recency: get_account_recency_profile(account_id)?,
     })
+}
+
+pub fn get_account_tag_feedback(account_id: i32) -> Result<Vec<AccountTagFeedback>, String> {
+    let conn = open_db()?;
+    let mut stmt = conn
+        .prepare(
+            "
+            SELECT tag_name, group_type, impression_count, positive_count, negative_count
+            FROM account_tag_feedback
+            WHERE account_id = ?
+            ORDER BY (positive_count - negative_count) DESC, impression_count DESC
+            ",
+        )
+        .map_err(|e| format!("Failed to prepare tag feedback query: {e}"))?;
+
+    stmt.query_map([account_id], |row| {
+        Ok(AccountTagFeedback {
+            tag_name: row.get(0)?,
+            group_type: row.get(1)?,
+            impression_count: row.get(2)?,
+            positive_count: row.get(3)?,
+            negative_count: row.get(4)?,
+        })
+    })
+    .map_err(|e| format!("Failed to fetch tag feedback: {e}"))?
+    .collect::<Result<Vec<_>, _>>()
+    .map_err(|e| format!("Failed to enumerate tag feedback: {e}"))
+}
+
+pub fn record_feed_interaction(interaction: &FeedInteractionRequest) -> Result<(), String> {
+    let mut connection = open_db()?;
+    let tx = connection
+        .transaction()
+        .map_err(|e| format!("Failed to get transaction: {e}"))?;
+
+    let inserted = tx
+        .execute(
+            "
+            INSERT OR IGNORE INTO feed_interactions (
+                account_id, post_id, event_type, position, session_id, created_at
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            ",
+            params![
+                interaction.account_id,
+                interaction.post_id,
+                interaction.event_type.to_string(),
+                interaction.position,
+                interaction.session_id,
+                Utc::now().to_rfc3339(),
+            ],
+        )
+        .map_err(|e| format!("Failed to record feed interaction: {e}"))?;
+
+    if inserted > 0 {
+        let (impression_delta, positive_delta, negative_delta) = match interaction.event_type {
+            FeedInteractionType::QualifiedImpression => (1, 0, 0),
+            FeedInteractionType::Open => (0, 1, 0),
+            FeedInteractionType::Hide => (0, 0, 1),
+        };
+
+        tx.execute(
+            "
+            INSERT INTO account_tag_feedback (
+                account_id, tag_name, group_type,
+                impression_count, positive_count, negative_count, last_interaction_at
+            )
+            SELECT
+                ?1,
+                t.name,
+                t.group_type,
+                ?2,
+                ?3,
+                ?4,
+                ?5
+            FROM tags t
+            INNER JOIN tags_posts tp ON tp.tag_id = t.id
+            WHERE tp.post_id = ?6
+            ON CONFLICT(account_id, tag_name, group_type) DO UPDATE SET
+                impression_count = account_tag_feedback.impression_count + excluded.impression_count,
+                positive_count = account_tag_feedback.positive_count + excluded.positive_count,
+                negative_count = account_tag_feedback.negative_count + excluded.negative_count,
+                last_interaction_at = excluded.last_interaction_at
+            ",
+            params![
+                interaction.account_id,
+                impression_delta,
+                positive_delta,
+                negative_delta,
+                Utc::now().to_rfc3339(),
+                interaction.post_id,
+            ],
+        )
+        .map_err(|e| format!("Failed to update tag feedback aggregates: {e}"))?;
+    }
+
+    tx.commit()
+        .map_err(|e| format!("Failed to commit feed interaction transaction: {e}"))?;
+    Ok(())
 }
 
 pub fn save_posts_tags_batch(posts: &[Post], blacklist: &HashSet<String>) -> Result<(), String> {

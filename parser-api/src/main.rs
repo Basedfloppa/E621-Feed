@@ -9,19 +9,21 @@ use std::collections::HashSet;
 use rocket_cors::AllowedOrigins;
 
 use crate::models::{
-    ScoredPost, UserApiResponse, cfg, default_path, reload_from, start_config_watcher,
+    FeedInteractionRequest, ScoredPost, UserApiResponse, cfg, default_path, reload_from,
+    start_config_watcher,
 };
 use crate::{
     db::{
         DbInit, get_account_by_id, get_account_by_name, get_account_preference_profile,
-        get_tag_counts, refresh_account_profiles, set_account,
+        get_tag_counts, record_feed_interaction, refresh_account_profiles, set_account,
+        upsert_catalog_posts,
     },
     models::{Post, TagCount, TruncatedAccount},
     rocket::serde::json
 };
 use rocket_okapi::okapi::openapi3::OpenApi;
 use rocket_okapi::{openapi, openapi_get_routes_spec, settings::OpenApiSettings, swagger_ui::*};
-use crate::utils::{IdfIndex, score_post};
+use crate::utils::{IdfIndex, diversify_scored_posts, score_post};
 
 mod api;
 mod db;
@@ -133,6 +135,12 @@ async fn create_account(account: Json<TruncatedAccount>) -> Result<(), String> {
 }
 
 #[openapi(tag = "Recommendations")]
+#[post("/interaction", data = "<payload>")]
+async fn log_feed_interaction(payload: Json<FeedInteractionRequest>) -> Result<(), String> {
+    record_feed_interaction(&payload)
+}
+
+#[openapi(tag = "Recommendations")]
 #[get("/recommendations/<account_id>?<page>&<affinity_threshold>")]
 async fn get_recommendations(
     account_id: i32,
@@ -153,6 +161,10 @@ async fn get_recommendations(
     let account = get_account_by_id(account_id)
         .map_err(|e| std::io::Error::other(format!("Failed to get account: {e}")))?;
     let posts: Vec<Post> = api::get_posts(&account, page).await;
+    upsert_catalog_posts(&posts)
+        .map_err(|e| std::io::Error::other(format!("Failed to store recommendation catalog posts: {e}")))?;
+    db::save_posts_tags_batch(&posts, &HashSet::new())
+        .map_err(|e| std::io::Error::other(format!("Failed to store recommendation tags: {e}")))?;
     let idf = IdfIndex::from_db(db::get_tags_df, db::post_count, priors.now)
         .map_err(|e| std::io::Error::other(format!("Failed to build IDF index: {e}")))?;
 
@@ -179,6 +191,8 @@ async fn get_recommendations(
     if let Some(threshold) = affinity_threshold {
         scored.retain(|sp| sp.score >= threshold);
     }
+
+    let scored = diversify_scored_posts(scored);
 
     Ok(Json(scored))
 }
@@ -212,6 +226,7 @@ async fn rocket() -> _ {
     let (api_routes, spec) = openapi_get_routes_spec![
         settings:
         process_posts,
+        log_feed_interaction,
         get_account_tag_counts,
         get_account_id,
         get_account_name,

@@ -1,7 +1,13 @@
 use std::rc::Rc;
+use reqwasm::http::Request;
+use wasm_bindgen::JsValue;
 use wasm_bindgen::closure::Closure;
 use wasm_bindgen::JsCast;
-use web_sys::{window, Element, ResizeObserver, ResizeObserverEntry};
+use wasm_bindgen_futures::spawn_local;
+use web_sys::{
+    window, Element, IntersectionObserver, IntersectionObserverEntry, IntersectionObserverInit,
+    ResizeObserver, ResizeObserverEntry,
+};
 use yew::prelude::*;
 
 use crate::models::*;
@@ -10,6 +16,12 @@ use crate::models::*;
 pub struct PostCardProps {
     pub post: Rc<Post>,
     pub affinity: f32,
+    pub backend_url: AttrValue,
+    pub account_id: i32,
+    pub session_id: AttrValue,
+    pub position: i32,
+    #[prop_or_default]
+    pub breakdown: Option<ScoreBreakdown>,
     #[prop_or_default]
     pub alt: Option<AttrValue>,
 }
@@ -19,6 +31,7 @@ pub fn post_card(props: &PostCardProps) -> Html {
     let post = &props.post;
 
     let root_ref = use_node_ref();
+    let impression_logged = use_state(|| false);
     let current_img_url = {
         let url = fallback_image_url(post);
         let initial = Some(AttrValue::from(url.clone()));
@@ -112,6 +125,100 @@ pub fn post_card(props: &PostCardProps) -> Html {
         });
     }
 
+    {
+        let root_ref = root_ref.clone();
+        let backend_url = props.backend_url.to_string();
+        let session_id = props.session_id.to_string();
+        let account_id = props.account_id;
+        let position = props.position;
+        let post_id = post.id;
+        let impression_logged = impression_logged.clone();
+
+        use_effect_with(post.id, move |_| {
+            let mut observer: Option<IntersectionObserver> = None;
+            let mut observer_callback: Option<Closure<dyn FnMut(web_sys::js_sys::Array, IntersectionObserver)>> = None;
+
+            if !*impression_logged {
+                if let Some(el) = root_ref.cast::<Element>() {
+                    let is_visible = std::rc::Rc::new(std::cell::Cell::new(false));
+                    let is_scheduled = std::rc::Rc::new(std::cell::Cell::new(false));
+
+                    let callback = {
+                        let is_visible = is_visible.clone();
+                        let is_scheduled = is_scheduled.clone();
+                        let impression_logged = impression_logged.clone();
+                        let backend_url = backend_url.clone();
+                        let session_id = session_id.clone();
+
+                        Closure::wrap(Box::new(move |entries: web_sys::js_sys::Array, _obs: IntersectionObserver| {
+                            let Some(entry) = entries.get(0).dyn_ref::<IntersectionObserverEntry>().cloned() else {
+                                return;
+                            };
+
+                            if entry.intersection_ratio() >= 0.5 {
+                                is_visible.set(true);
+                                if !is_scheduled.get() && !*impression_logged {
+                                    is_scheduled.set(true);
+
+                                    let is_visible_timeout = is_visible.clone();
+                                    let is_scheduled_timeout = is_scheduled.clone();
+                                    let impression_logged = impression_logged.clone();
+                                    let backend_url = backend_url.clone();
+                                    let session_id = session_id.clone();
+
+                                    let timeout_cb = Closure::once_into_js(move || {
+                                        is_scheduled_timeout.set(false);
+                                        if is_visible_timeout.get() && !*impression_logged {
+                                            impression_logged.set(true);
+                                            send_interaction(
+                                                backend_url,
+                                                FeedInteractionRequest {
+                                                    account_id,
+                                                    post_id,
+                                                    event_type: FeedInteractionType::QualifiedImpression,
+                                                    position,
+                                                    session_id,
+                                                },
+                                            );
+                                        }
+                                    });
+
+                                    if let Some(win) = window() {
+                                        let _ = win.set_timeout_with_callback_and_timeout_and_arguments_0(
+                                            timeout_cb.as_ref().unchecked_ref(),
+                                            800,
+                                        );
+                                    }
+                                }
+                            } else {
+                                is_visible.set(false);
+                            }
+                        }) as Box<dyn FnMut(web_sys::js_sys::Array, IntersectionObserver)>)
+                    };
+
+                    let options = IntersectionObserverInit::new();
+                    options.set_threshold(&JsValue::from_f64(0.5));
+                    let created = IntersectionObserver::new_with_options(
+                        callback.as_ref().unchecked_ref(),
+                        &options,
+                    )
+                    .expect("create IntersectionObserver");
+                    created.observe(&el);
+
+                    observer = Some(created);
+                    observer_callback = Some(callback);
+                }
+            }
+
+            move || {
+                if let Some(observer) = observer {
+                    observer.disconnect();
+                }
+                drop(observer_callback);
+            }
+        });
+    }
+
     let img_url = (*current_img_url).clone();
 
     let alt_text = {
@@ -142,7 +249,21 @@ pub fn post_card(props: &PostCardProps) -> Html {
     let onclick = {
         let cfg = read_config_from_head().unwrap();
         let id = post.id;
+        let backend_url = props.backend_url.to_string();
+        let session_id = props.session_id.to_string();
+        let account_id = props.account_id;
+        let position = props.position;
         Callback::from(move |e: MouseEvent| {
+            send_interaction(
+                backend_url.clone(),
+                FeedInteractionRequest {
+                    account_id,
+                    post_id: id,
+                    event_type: FeedInteractionType::Open,
+                    position,
+                    session_id: session_id.clone(),
+                },
+            );
             if e.button() == 1 {
                 e.prevent_default();
                 if let Some(win) = window() {
@@ -229,6 +350,21 @@ pub fn post_card(props: &PostCardProps) -> Html {
                         html! { <p class="card-text text-muted small mb-0">{ "—" }</p> }
                     }
                 }
+
+                {
+                    if let Some(breakdown) = &props.breakdown {
+                        html! {
+                            <div class="d-flex flex-wrap gap-1 mt-2">
+                                <span class="badge text-bg-primary">{ format!("Tag {:.2}", breakdown.tag_similarity) }</span>
+                                <span class="badge text-bg-secondary">{ format!("Interact {:.2}", breakdown.interaction_fit) }</span>
+                                <span class="badge text-bg-success">{ format!("Quality {:.2}", breakdown.quality_fit) }</span>
+                                <span class="badge text-bg-info">{ format!("Recent {:.2}", breakdown.recency_fit) }</span>
+                            </div>
+                        }
+                    } else {
+                        html! {}
+                    }
+                }
             </div>
         </>
     };
@@ -247,6 +383,27 @@ pub fn post_card(props: &PostCardProps) -> Html {
             { inner }
         </button>
     }
+}
+
+fn send_interaction(backend_url: String, payload: FeedInteractionRequest) {
+    spawn_local(async move {
+        let body = match serde_json::to_string(&payload) {
+            Ok(body) => body,
+            Err(err) => {
+                web_sys::console::warn_1(&format!("failed to encode interaction: {err}").into());
+                return;
+            }
+        };
+
+        if let Err(err) = Request::post(&format!("{backend_url}/interaction"))
+            .header("Content-Type", "application/json")
+            .body(body)
+            .send()
+            .await
+        {
+            web_sys::console::warn_1(&format!("failed to send interaction: {err}").into());
+        }
+    });
 }
 
 fn is_supported_image(url: &str) -> bool {

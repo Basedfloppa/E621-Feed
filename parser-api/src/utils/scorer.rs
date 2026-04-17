@@ -1,8 +1,8 @@
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
-use crate::models::{AccountPreferenceProfile, Post, ScoreBreakdown, TagCount};
+use crate::models::{AccountPreferenceProfile, Post, ScoreBreakdown, ScoredPost, TagCount};
 use crate::utils::idf::IdfIndex;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -17,6 +17,7 @@ pub struct Priors {
     pub mix_rating: Option<f32>,
     pub mix_media: Option<f32>,
     pub mix_popularity: Option<f32>,
+    pub mix_interaction: Option<f32>,
     pub idf_lambda: Option<f32>,
     pub idf_alpha:  Option<f32>,
     pub freq_alpha: f32,
@@ -128,6 +129,101 @@ fn media_fit(origin_post: &Post, profile: &AccountPreferenceProfile) -> f32 {
     )
 }
 
+fn interaction_fit(origin_post: &Post, profile: &AccountPreferenceProfile) -> f32 {
+    let mut total_weight = 0.0f32;
+    let mut weighted = 0.0f32;
+
+    let mut apply = |tags: &[String], group: &str, group_weight: f32| {
+        for tag in tags {
+            if tag.is_empty() {
+                continue;
+            }
+            if let Some(feedback) = profile.feedback.iter().find(|entry| {
+                entry.group_type == group && entry.tag_name.eq_ignore_ascii_case(tag)
+            }) {
+                total_weight += group_weight;
+                weighted += group_weight * feedback.interaction_score();
+            }
+        }
+    };
+
+    apply(&origin_post.tags.artist, "artist", 1.20);
+    apply(&origin_post.tags.character, "character", 1.10);
+    apply(&origin_post.tags.copyright, "copyright", 1.00);
+    apply(&origin_post.tags.species, "species", 0.95);
+    apply(&origin_post.tags.general, "general", 0.75);
+    apply(&origin_post.tags.lore, "lore", 0.60);
+
+    if total_weight <= 0.0 {
+        0.5
+    } else {
+        (weighted / total_weight).clamp(0.0, 1.0)
+    }
+}
+
+fn overlap_ratio(left: &[String], right: &[String]) -> f32 {
+    if left.is_empty() || right.is_empty() {
+        return 0.0;
+    }
+
+    let lhs: HashSet<&str> = left.iter().map(String::as_str).collect();
+    let rhs: HashSet<&str> = right.iter().map(String::as_str).collect();
+    let intersection = lhs.intersection(&rhs).count() as f32;
+    let union = lhs.union(&rhs).count() as f32;
+
+    if union <= 0.0 { 0.0 } else { intersection / union }
+}
+
+fn diversity_penalty(candidate: &ScoredPost, selected: &[ScoredPost]) -> f32 {
+    let mut penalty = 0.0f32;
+
+    for chosen in selected.iter().rev().take(8) {
+        let same_artist = overlap_ratio(&candidate.post.tags.artist, &chosen.post.tags.artist);
+        let same_character = overlap_ratio(&candidate.post.tags.character, &chosen.post.tags.character);
+        let same_general = overlap_ratio(&candidate.post.tags.general, &chosen.post.tags.general);
+
+        penalty += same_artist * 0.22;
+        penalty += same_character * 0.16;
+        penalty += same_general * 0.08;
+    }
+
+    let interaction_bonus = candidate
+        .breakdown
+        .as_ref()
+        .map(|b| b.interaction_fit)
+        .unwrap_or(0.5);
+
+    (penalty * (1.0 - 0.35 * interaction_bonus)).clamp(0.0, 0.45)
+}
+
+pub fn diversify_scored_posts(mut posts: Vec<ScoredPost>) -> Vec<ScoredPost> {
+    posts.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    let mut pool = posts;
+    let mut selected: Vec<ScoredPost> = Vec::with_capacity(pool.len());
+
+    while !pool.is_empty() {
+        let mut best_idx = 0usize;
+        let mut best_value = f32::MIN;
+
+        for (idx, candidate) in pool.iter().enumerate() {
+            let adjusted = candidate.score - diversity_penalty(candidate, &selected);
+            if adjusted > best_value {
+                best_value = adjusted;
+                best_idx = idx;
+            }
+        }
+
+        selected.push(pool.remove(best_idx));
+    }
+
+    selected
+}
+
 pub fn score_post(
     account_tag_counts: &[TagCount],
     origin_post: &Post,
@@ -203,18 +299,21 @@ pub fn score_post(
     let popularity = popularity_fit(origin_post, profile);
     let rating = rating_fit(origin_post, profile);
     let media = media_fit(origin_post, profile);
+    let interaction = interaction_fit(origin_post, profile);
     let recency = recency_fit(age_days, priors, profile);
 
     let mix_rating = priors.mix_rating.unwrap_or(0.12);
     let mix_media = priors.mix_media.unwrap_or(0.08);
     let mix_popularity = priors.mix_popularity.unwrap_or(0.15);
+    let mix_interaction = priors.mix_interaction.unwrap_or(0.14);
     let sum = priors.mix_sim
         + priors.mix_quality
         + priors.mix_recency
         + mix_rating
         + mix_media
-        + mix_popularity;
-    let (ms, mq, mr, mrat, mmed, mpop) = if sum > 0.0 {
+        + mix_popularity
+        + mix_interaction;
+    let (ms, mq, mr, mrat, mmed, mpop, mint) = if sum > 0.0 {
         (
             priors.mix_sim / sum,
             priors.mix_quality / sum,
@@ -222,9 +321,10 @@ pub fn score_post(
             mix_rating / sum,
             mix_media / sum,
             mix_popularity / sum,
+            mix_interaction / sum,
         )
     } else {
-        (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+        (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
     };
 
     let breakdown = ScoreBreakdown {
@@ -234,6 +334,7 @@ pub fn score_post(
         rating_fit: rating,
         media_fit: media,
         popularity_fit: popularity,
+        interaction_fit: interaction,
     };
 
     let score = (
@@ -243,6 +344,7 @@ pub fn score_post(
             + mrat * breakdown.rating_fit
             + mmed * breakdown.media_fit
             + mpop * breakdown.popularity_fit
+            + mint * breakdown.interaction_fit
     )
     .clamp(0.0, 1.0);
 

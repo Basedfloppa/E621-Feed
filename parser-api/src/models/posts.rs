@@ -155,6 +155,24 @@ pub enum Rating {
     E,
 }
 
+#[derive(Debug, Serialize, Deserialize, JsonSchema, Clone, PartialEq, Eq)]
+#[serde(crate = "rocket::serde", rename_all = "snake_case")]
+pub enum FeedInteractionType {
+    QualifiedImpression,
+    Open,
+    Hide,
+}
+
+impl Display for FeedInteractionType {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            FeedInteractionType::QualifiedImpression => write!(f, "qualified_impression"),
+            FeedInteractionType::Open => write!(f, "open"),
+            FeedInteractionType::Hide => write!(f, "hide"),
+        }
+    }
+}
+
 impl Display for Rating {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
@@ -181,6 +199,17 @@ pub struct ScoreBreakdown {
     pub rating_fit: f32,
     pub media_fit: f32,
     pub popularity_fit: f32,
+    pub interaction_fit: f32,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema, Clone)]
+#[serde(crate = "rocket::serde")]
+pub struct FeedInteractionRequest {
+    pub account_id: i32,
+    pub post_id: i64,
+    pub event_type: FeedInteractionType,
+    pub position: i32,
+    pub session_id: String,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema, Clone)]

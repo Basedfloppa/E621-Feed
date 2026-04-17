@@ -124,6 +124,14 @@ pub enum Rating {
     E,
 }
 
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FeedInteractionType {
+    QualifiedImpression,
+    Open,
+    Hide,
+}
+
 #[derive(Deserialize, Serialize, Clone, PartialEq)]
 pub struct Relationships {
     pub parent_id: Option<i64>,
@@ -132,8 +140,29 @@ pub struct Relationships {
     pub children: Vec<i64>,
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, PartialEq)]
+pub struct ScoreBreakdown {
+    pub tag_similarity: f32,
+    pub quality_fit: f32,
+    pub recency_fit: f32,
+    pub rating_fit: f32,
+    pub media_fit: f32,
+    pub popularity_fit: f32,
+    pub interaction_fit: f32,
+}
+
+#[derive(Serialize, Deserialize, Clone, PartialEq)]
+pub struct FeedInteractionRequest {
+    pub account_id: i32,
+    pub post_id: i64,
+    pub event_type: FeedInteractionType,
+    pub position: i32,
+    pub session_id: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, PartialEq)]
 pub struct ScoredPost {
     pub post: Post,
     pub score: f32,
+    pub breakdown: Option<ScoreBreakdown>,
 }
