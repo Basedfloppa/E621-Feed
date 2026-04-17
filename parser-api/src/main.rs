@@ -13,14 +13,15 @@ use crate::models::{
 };
 use crate::{
     db::{
-        DbInit, get_account_by_id, get_account_by_name, get_tag_counts, set_account, set_tag_counts,
+        DbInit, get_account_by_id, get_account_by_name, get_account_preference_profile,
+        get_tag_counts, refresh_account_profiles, set_account,
     },
     models::{Post, TagCount, TruncatedAccount},
     rocket::serde::json
 };
 use rocket_okapi::okapi::openapi3::OpenApi;
 use rocket_okapi::{openapi, openapi_get_routes_spec, settings::OpenApiSettings, swagger_ui::*};
-use crate::utils::IdfIndex;
+use crate::utils::{IdfIndex, score_post};
 
 mod api;
 mod db;
@@ -60,7 +61,8 @@ async fn process_posts(account_id: i32) -> Result<String, String> {
             .map_err(|e| format!("Failed to save tags for page {i}: {e}"))?;
     }
 
-    set_tag_counts(account_id).map_err(|e| format!("Failed to set account tag counts: {e}"))?;
+    refresh_account_profiles(account_id)
+        .map_err(|e| format!("Failed to refresh account profiles: {e}"))?;
     Ok(json::to_string(&"okay :3").unwrap())
 }
 
@@ -145,27 +147,32 @@ async fn get_recommendations(
     let tags: Vec<TagCount> = get_tag_counts(account_id)
         .map_err(|e| std::io::Error::other(format!("Failed to get tag counts: {e}")))?
         .to_vec();
+    let profile = get_account_preference_profile(account_id)
+        .map_err(|e| std::io::Error::other(format!("Failed to get account profile: {e}")))?;
 
     let account = get_account_by_id(account_id)
         .map_err(|e| std::io::Error::other(format!("Failed to get account: {e}")))?;
     let posts: Vec<Post> = api::get_posts(&account, page).await;
+    let idf = IdfIndex::from_db(db::get_tags_df, db::post_count, priors.now)
+        .map_err(|e| std::io::Error::other(format!("Failed to build IDF index: {e}")))?;
 
     let mut scored: Vec<ScoredPost> = Vec::with_capacity(posts.len());
     for post in posts {
         let tmp_post = post.clone();
 
-        let idf = IdfIndex::from_db(db::get_tags_df, db::post_count, priors.now).unwrap();
-        let s = utils::post_affinity(
+        let (s, breakdown) = score_post(
             &tags,
             &post,
             &cfg.group_weights,
             &priors,
-            &idf
+            &idf,
+            &profile,
         );
 
         scored.push(ScoredPost {
             post: tmp_post,
             score: s,
+            breakdown: Some(breakdown),
         });
     }
 

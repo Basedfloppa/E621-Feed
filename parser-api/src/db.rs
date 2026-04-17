@@ -1,13 +1,15 @@
-use crate::models::{Post, TagCount, TruncatedAccount};
-use chrono::Utc;
+use crate::models::{
+    AccountMediaStat, AccountPreferenceProfile, AccountQualityProfile, AccountRatingStat,
+    AccountRecencyProfile, Post, TagCount, TruncatedAccount,
+};
+use chrono::{DateTime, Utc};
 use rocket::{
     Build, Rocket,
     fairing::{Fairing, Info, Kind},
 };
-use rusqlite::{Connection, Result, params};
-use std::{collections::HashSet, fs};
+use rusqlite::{params, Connection};
 use std::collections::HashMap;
-use rusqlite::fallible_streaming_iterator::FallibleStreamingIterator;
+use std::{collections::HashSet, fs};
 
 mod embedded {
     use refinery::embed_migrations;
@@ -61,6 +63,20 @@ fn open_db() -> Result<Connection, String> {
         .map_err(|e| format!("Failed to assert pragma: {e}"))?;
 
     Ok(connection)
+}
+
+fn parse_db_datetime(raw: &str) -> Result<DateTime<Utc>, String> {
+    chrono::DateTime::parse_from_rfc3339(raw)
+        .map(|dt| dt.with_timezone(&Utc))
+        .or_else(|_| {
+            chrono::DateTime::parse_from_str(raw, "%Y-%m-%d %H:%M:%S%.f %Z")
+                .map(|dt| dt.with_timezone(&Utc))
+        })
+        .or_else(|_| {
+            chrono::DateTime::parse_from_str(raw, "%Y-%m-%d %H:%M:%S %Z")
+                .map(|dt| dt.with_timezone(&Utc))
+        })
+        .map_err(|e| format!("Failed to parse datetime '{raw}': {e}"))
 }
 
 pub fn ensure_sqlite() -> Result<(), String> {
@@ -202,13 +218,28 @@ pub fn save_posts(posts: &[Post], account_id: i32) -> Result<(), String> {
         let mut insert_post = tx
             .prepare_cached(
                 "
-            INSERT INTO posts (id, created_at, score_total, fav_count, rating, last_seen_at) 
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            INSERT INTO posts (
+                id, created_at, updated_at, score_total, fav_count, rating, last_seen_at,
+                file_ext, file_width, file_height, file_size, is_animated, duration,
+                comment_count, has_notes, is_deleted, has_children
+            ) 
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
             ON CONFLICT(id) DO UPDATE SET
+            updated_at   = excluded.updated_at,
             score_total = excluded.score_total,
             fav_count   = excluded.fav_count,
             rating      = excluded.rating,
-            last_seen_at= excluded.last_seen_at;",
+            last_seen_at = excluded.last_seen_at,
+            file_ext     = excluded.file_ext,
+            file_width   = excluded.file_width,
+            file_height  = excluded.file_height,
+            file_size    = excluded.file_size,
+            is_animated  = excluded.is_animated,
+            duration     = excluded.duration,
+            comment_count= excluded.comment_count,
+            has_notes    = excluded.has_notes,
+            is_deleted   = excluded.is_deleted,
+            has_children = excluded.has_children;",
             )
             .map_err(|e| format!("Failed to prepare transaction: {e}"))?;
         let mut insert_account = tx
@@ -218,14 +249,30 @@ pub fn save_posts(posts: &[Post], account_id: i32) -> Result<(), String> {
             .map_err(|e| format!("Failed to prepare transaction: {e}"))?;
 
         for post in posts {
+            let file_ext = post.file.as_ref().and_then(|f| f.ext.clone());
+            let file_width = post.file.as_ref().map(|f| f.width);
+            let file_height = post.file.as_ref().map(|f| f.height);
+            let file_size = post.file.as_ref().map(|f| f.size);
+
             insert_post
                 .execute(params![
                     post.id,
-                    post.created_at.to_string(),
+                    post.created_at.to_rfc3339(),
+                    post.updated_at.to_rfc3339(),
                     post.score.total,
                     post.fav_count,
                     post.rating.to_string(),
-                    Utc::now().to_string()
+                    Utc::now().to_rfc3339(),
+                    file_ext,
+                    file_width,
+                    file_height,
+                    file_size,
+                    if post.is_animated() { 1 } else { 0 },
+                    post.duration,
+                    post.comment_count,
+                    if post.has_notes { 1 } else { 0 },
+                    if post.flags.deleted { 1 } else { 0 },
+                    if post.relationships.has_children { 1 } else { 0 }
                 ])
                 .map_err(|e| format!("Failed to execute transaction: {e}"))?;
 
@@ -241,11 +288,182 @@ pub fn save_posts(posts: &[Post], account_id: i32) -> Result<(), String> {
     Ok(())
 }
 
+pub fn set_rating_profile(account_id: i32) -> Result<(), String> {
+    let mut connection = open_db()?;
+    let tx = connection
+        .transaction()
+        .map_err(|e| format!("Failed to get transaction: {e}"))?;
+
+    tx.execute(
+        "DELETE FROM account_rating_profile WHERE account_id = ?1",
+        params![account_id],
+    )
+    .map_err(|e| format!("Failed to clear rating profile: {e}"))?;
+
+    tx.execute(
+        "
+        INSERT INTO account_rating_profile (account_id, rating, count)
+        SELECT ?1, p.rating, COUNT(*)
+        FROM posts p
+        INNER JOIN accounts_post ap ON ap.post_id = p.id
+        WHERE ap.account_id = ?1
+        GROUP BY p.rating
+        ",
+        params![account_id],
+    )
+    .map_err(|e| format!("Failed to populate rating profile: {e}"))?;
+
+    tx.commit()
+        .map_err(|e| format!("Failed to commit rating profile transaction: {e}"))?;
+    Ok(())
+}
+
+pub fn set_media_profile(account_id: i32) -> Result<(), String> {
+    let mut connection = open_db()?;
+    let tx = connection
+        .transaction()
+        .map_err(|e| format!("Failed to get transaction: {e}"))?;
+
+    tx.execute(
+        "DELETE FROM account_media_profile WHERE account_id = ?1",
+        params![account_id],
+    )
+    .map_err(|e| format!("Failed to clear media profile: {e}"))?;
+
+    tx.execute(
+        "
+        INSERT INTO account_media_profile (account_id, media_type, count)
+        SELECT
+            ?1,
+            CASE
+                WHEN LOWER(COALESCE(p.file_ext, '')) = 'gif' THEN 'animated'
+                WHEN LOWER(COALESCE(p.file_ext, '')) IN ('webm', 'mp4') OR COALESCE(p.duration, 0) > 0 THEN 'video'
+                WHEN COALESCE(p.is_animated, 0) = 1 THEN 'animated'
+                ELSE 'image'
+            END AS media_type,
+            COUNT(*)
+        FROM posts p
+        INNER JOIN accounts_post ap ON ap.post_id = p.id
+        WHERE ap.account_id = ?1
+        GROUP BY media_type
+        ",
+        params![account_id],
+    )
+    .map_err(|e| format!("Failed to populate media profile: {e}"))?;
+
+    tx.commit()
+        .map_err(|e| format!("Failed to commit media profile transaction: {e}"))?;
+    Ok(())
+}
+
+pub fn set_quality_profile(account_id: i32) -> Result<(), String> {
+    let mut connection = open_db()?;
+    let tx = connection
+        .transaction()
+        .map_err(|e| format!("Failed to get transaction: {e}"))?;
+
+    tx.execute(
+        "DELETE FROM account_quality_profile WHERE account_id = ?1",
+        params![account_id],
+    )
+    .map_err(|e| format!("Failed to clear quality profile: {e}"))?;
+
+    tx.execute(
+        "
+        INSERT INTO account_quality_profile (
+            account_id, avg_score_total, avg_fav_count, avg_comment_count, avg_duration
+        )
+        SELECT
+            ?1,
+            COALESCE(AVG(p.score_total), 0),
+            COALESCE(AVG(p.fav_count), 0),
+            COALESCE(AVG(p.comment_count), 0),
+            COALESCE(AVG(COALESCE(p.duration, 0)), 0)
+        FROM posts p
+        INNER JOIN accounts_post ap ON ap.post_id = p.id
+        WHERE ap.account_id = ?1
+        ",
+        params![account_id],
+    )
+    .map_err(|e| format!("Failed to populate quality profile: {e}"))?;
+
+    tx.commit()
+        .map_err(|e| format!("Failed to commit quality profile transaction: {e}"))?;
+    Ok(())
+}
+
+pub fn set_recency_profile(account_id: i32) -> Result<(), String> {
+    let connection = open_db()?;
+    let mut stmt = connection
+        .prepare(
+            "
+            SELECT p.created_at
+            FROM posts p
+            INNER JOIN accounts_post ap ON ap.post_id = p.id
+            WHERE ap.account_id = ?1
+            ",
+        )
+        .map_err(|e| format!("Failed to prepare recency profile query: {e}"))?;
+
+    let now = Utc::now();
+    let created_raw = stmt
+        .query_map([account_id], |row| row.get::<_, String>(0))
+        .map_err(|e| format!("Failed to fetch recency profile rows: {e}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("Failed to enumerate recency rows: {e}"))?;
+
+    let mut ages: Vec<f32> = Vec::with_capacity(created_raw.len());
+    for raw in created_raw {
+        let created_at = parse_db_datetime(&raw)?;
+        let age_days = (now - created_at).num_seconds() as f32 / 86_400.0;
+        ages.push(age_days.max(0.0));
+    }
+
+    drop(stmt);
+
+    let avg_age_days = if ages.is_empty() {
+        0.0
+    } else {
+        ages.iter().sum::<f32>() / ages.len() as f32
+    };
+    let avg_abs_dev_days = if ages.is_empty() {
+        0.0
+    } else {
+        ages.iter()
+            .map(|age| (age - avg_age_days).abs())
+            .sum::<f32>()
+            / ages.len() as f32
+    };
+
+    connection
+        .execute(
+            "
+            INSERT INTO account_recency_profile (account_id, avg_age_days, avg_abs_dev_days)
+            VALUES (?1, ?2, ?3)
+            ON CONFLICT(account_id) DO UPDATE SET
+                avg_age_days = excluded.avg_age_days,
+                avg_abs_dev_days = excluded.avg_abs_dev_days
+            ",
+            params![account_id, avg_age_days, avg_abs_dev_days],
+        )
+        .map_err(|e| format!("Failed to upsert recency profile: {e}"))?;
+
+    Ok(())
+}
+
+pub fn refresh_account_profiles(account_id: i32) -> Result<(), String> {
+    set_tag_counts(account_id)?;
+    set_rating_profile(account_id)?;
+    set_media_profile(account_id)?;
+    set_quality_profile(account_id)?;
+    set_recency_profile(account_id)?;
+    Ok(())
+}
+
 pub fn set_tag_counts(account_id: i32) -> Result<(), String> {
-    let mut counts: Vec<TagCount> = Vec::new();
     let mut connection = open_db()?;
 
-    {
+    let counts: Vec<TagCount> = {
         let mut stmt = connection
             .prepare(
                 r#"
@@ -260,7 +478,7 @@ pub fn set_tag_counts(account_id: i32) -> Result<(), String> {
             )
             .map_err(|e| format!("Failed to construct query: {e}"))?;
 
-        counts = stmt
+        stmt
             .query_map([account_id], |row| {
                 Ok(TagCount {
                     name: row.get(0)?,
@@ -270,8 +488,8 @@ pub fn set_tag_counts(account_id: i32) -> Result<(), String> {
             })
             .map_err(|e| format!("Failed to get accounts: {e}"))?
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| format!("Failed to enumerate accounts: {e}"))?;
-    }
+            .map_err(|e| format!("Failed to enumerate accounts: {e}"))?
+    };
 
     let tx = connection
         .transaction()
@@ -333,6 +551,107 @@ pub fn get_tag_counts(account_id: i32) -> Result<Vec<TagCount>, String> {
         .map_err(|e| format!("Failed to enumerate accounts: {e}"))?;
 
     Ok(counts)
+}
+
+pub fn get_account_rating_profile(account_id: i32) -> Result<Vec<AccountRatingStat>, String> {
+    let conn = open_db()?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT rating, count FROM account_rating_profile WHERE account_id = ? ORDER BY count DESC",
+        )
+        .map_err(|e| format!("Failed to prepare rating profile query: {e}"))?;
+
+    stmt.query_map([account_id], |row| {
+        Ok(AccountRatingStat {
+            rating: row.get(0)?,
+            count: row.get(1)?,
+        })
+    })
+    .map_err(|e| format!("Failed to fetch rating profile: {e}"))?
+    .collect::<Result<Vec<_>, _>>()
+    .map_err(|e| format!("Failed to enumerate rating profile: {e}"))
+}
+
+pub fn get_account_media_profile(account_id: i32) -> Result<Vec<AccountMediaStat>, String> {
+    let conn = open_db()?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT media_type, count FROM account_media_profile WHERE account_id = ? ORDER BY count DESC",
+        )
+        .map_err(|e| format!("Failed to prepare media profile query: {e}"))?;
+
+    stmt.query_map([account_id], |row| {
+        Ok(AccountMediaStat {
+            media_type: row.get(0)?,
+            count: row.get(1)?,
+        })
+    })
+    .map_err(|e| format!("Failed to fetch media profile: {e}"))?
+    .collect::<Result<Vec<_>, _>>()
+    .map_err(|e| format!("Failed to enumerate media profile: {e}"))
+}
+
+pub fn get_account_quality_profile(account_id: i32) -> Result<AccountQualityProfile, String> {
+    let conn = open_db()?;
+    let mut stmt = conn
+        .prepare(
+            "
+            SELECT avg_score_total, avg_fav_count, avg_comment_count, avg_duration
+            FROM account_quality_profile
+            WHERE account_id = ?
+            ",
+        )
+        .map_err(|e| format!("Failed to prepare quality profile query: {e}"))?;
+
+    match stmt.query_row([account_id], |row| {
+        Ok(AccountQualityProfile {
+            avg_score_total: row.get(0)?,
+            avg_fav_count: row.get(1)?,
+            avg_comment_count: row.get(2)?,
+            avg_duration: row.get(3)?,
+        })
+    }) {
+        Ok(profile) => Ok(profile),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(AccountQualityProfile {
+            avg_score_total: 0.0,
+            avg_fav_count: 0.0,
+            avg_comment_count: 0.0,
+            avg_duration: 0.0,
+        }),
+        Err(e) => Err(format!("Failed to fetch quality profile: {e}")),
+    }
+}
+
+pub fn get_account_recency_profile(account_id: i32) -> Result<AccountRecencyProfile, String> {
+    let conn = open_db()?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT avg_age_days, avg_abs_dev_days FROM account_recency_profile WHERE account_id = ?",
+        )
+        .map_err(|e| format!("Failed to prepare recency profile query: {e}"))?;
+
+    match stmt.query_row([account_id], |row| {
+        Ok(AccountRecencyProfile {
+            avg_age_days: row.get(0)?,
+            avg_abs_dev_days: row.get(1)?,
+        })
+    }) {
+        Ok(profile) => Ok(profile),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(AccountRecencyProfile {
+            avg_age_days: 0.0,
+            avg_abs_dev_days: 0.0,
+        }),
+        Err(e) => Err(format!("Failed to fetch recency profile: {e}")),
+    }
+}
+
+pub fn get_account_preference_profile(account_id: i32) -> Result<AccountPreferenceProfile, String> {
+    Ok(AccountPreferenceProfile {
+        rating: get_account_rating_profile(account_id)?,
+        media: get_account_media_profile(account_id)?,
+        quality: get_account_quality_profile(account_id)?,
+        recency: get_account_recency_profile(account_id)?,
+    })
 }
 
 pub fn save_posts_tags_batch(posts: &[Post], blacklist: &HashSet<String>) -> Result<(), String> {
@@ -401,7 +720,7 @@ pub fn post_count() -> i64 {
         .expect("COUNT(*) query failed")
 }
 
-pub fn get_tags_df() -> Result<HashMap<String, i64>> {
+pub fn get_tags_df() -> rusqlite::Result<HashMap<String, i64>> {
     let conn = open_db().unwrap();
     let mut stmt = conn.prepare("SELECT name, df FROM tags")?;
 

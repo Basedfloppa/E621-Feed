@@ -38,6 +38,27 @@ pub struct Post {
     pub duration: Option<f64>,
 }
 
+impl Post {
+    pub fn media_type(&self) -> &'static str {
+        let ext = self
+            .file
+            .as_ref()
+            .and_then(|file| file.ext.as_deref())
+            .map(|ext| ext.to_ascii_lowercase());
+
+        match ext.as_deref() {
+            Some("webm") | Some("mp4") => "video",
+            Some("gif") => "animated",
+            _ if self.duration.unwrap_or(0.0) > 0.0 => "video",
+            _ => "image",
+        }
+    }
+
+    pub fn is_animated(&self) -> bool {
+        self.media_type() != "image"
+    }
+}
+
 #[derive(Serialize, Deserialize, JsonSchema, Clone)]
 pub struct FileInfo {
     pub width: i64,
@@ -153,7 +174,18 @@ pub struct Relationships {
 }
 
 #[derive(Serialize, Deserialize, JsonSchema, Clone)]
+pub struct ScoreBreakdown {
+    pub tag_similarity: f32,
+    pub quality_fit: f32,
+    pub recency_fit: f32,
+    pub rating_fit: f32,
+    pub media_fit: f32,
+    pub popularity_fit: f32,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema, Clone)]
 pub struct ScoredPost {
     pub post: Post,
     pub score: f32,
+    pub breakdown: Option<ScoreBreakdown>,
 }
