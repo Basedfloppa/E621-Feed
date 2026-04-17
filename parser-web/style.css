@@ -1,3 +1,148 @@
 html {
     transition: background-color 0.3s, color 0.3s;
 }
+
+body {
+    min-width: 320px;
+    overflow-x: hidden;
+}
+
+#header .container-fluid {
+    row-gap: 0.75rem;
+}
+
+#header .navbar-brand {
+    font-size: 1rem;
+}
+
+#header .navbar-nav {
+    row-gap: 0.25rem;
+}
+
+.feed-toolbar > .col-auto {
+    min-width: 0;
+}
+
+.feed-toolbar input.form-control {
+    min-width: 7rem;
+}
+
+.feed-statusbar {
+    pointer-events: none;
+}
+
+.feed-statusbar .badge {
+    max-width: min(48vw, 24rem);
+    white-space: normal;
+}
+
+.post-breakdown {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.25rem;
+}
+
+.post-breakdown .badge {
+    font-weight: 500;
+}
+
+.post-tags-preview {
+    overflow-wrap: anywhere;
+}
+
+@media (max-width: 991.98px) {
+    #header {
+        padding-inline: 0.25rem;
+    }
+
+    #header .container-fluid {
+        flex-wrap: wrap !important;
+        align-items: flex-start !important;
+    }
+
+    #header .navbar-brand {
+        width: 100%;
+        margin-right: 0;
+    }
+
+    #header .navbar-nav {
+        flex-wrap: wrap;
+    }
+}
+
+@media (max-width: 767.98px) {
+    .feed-page {
+        padding-bottom: 1rem;
+    }
+
+    .feed-toolbar {
+        row-gap: 0.75rem;
+        align-items: stretch !important;
+    }
+
+    .feed-toolbar > .col-auto {
+        width: 100%;
+    }
+
+    .feed-toolbar label,
+    .feed-toolbar .btn-group {
+        width: 100%;
+    }
+
+    .feed-toolbar .btn-group > .btn {
+        flex: 1 1 0;
+    }
+
+    .feed-grid-col,
+    .feed-affinity-col {
+        width: 100%;
+    }
+
+    .feed-statusbar {
+        position: static !important;
+        transform: none !important;
+        width: 100% !important;
+        display: flex;
+        flex-direction: column;
+        align-items: stretch;
+        gap: 0.5rem;
+        margin-top: 1rem;
+        pointer-events: auto;
+    }
+
+    .feed-statusbar .badge {
+        max-width: none;
+        width: 100%;
+        margin: 0 !important;
+        border-radius: 0.75rem !important;
+        text-align: center;
+        padding: 0.65rem 0.8rem;
+    }
+
+    .feed-grid {
+        margin-inline: 0 !important;
+    }
+
+    .feed-grid > [class*="col-"] {
+        min-width: 0 !important;
+        padding-inline: 0.35rem;
+    }
+
+    .feed-grid .card {
+        border-radius: 0.9rem;
+    }
+
+    .post-breakdown .badge {
+        font-size: 0.72rem;
+    }
+}
+
+@media (max-width: 575.98px) {
+    #header .nav-link {
+        padding-inline: 0.5rem;
+    }
+
+    .feed-page h2 {
+        font-size: 1.35rem;
+    }
+}

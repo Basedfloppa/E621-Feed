@@ -1,12 +1,12 @@
-use std::rc::Rc;
 use reqwasm::http::Request;
+use std::rc::Rc;
+use wasm_bindgen::JsCast;
 use wasm_bindgen::JsValue;
 use wasm_bindgen::closure::Closure;
-use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::spawn_local;
 use web_sys::{
     window, Element, IntersectionObserver, IntersectionObserverEntry, IntersectionObserverInit,
-    ResizeObserver, ResizeObserverEntry,
+    ResizeObserver, ResizeObserverEntry
 };
 use yew::prelude::*;
 
@@ -32,6 +32,7 @@ pub fn post_card(props: &PostCardProps) -> Html {
 
     let root_ref = use_node_ref();
     let impression_logged = use_state(|| false);
+    let card_width = use_state(|| 0.0f64);
     let current_img_url = {
         let url = fallback_image_url(post);
         let initial = Some(AttrValue::from(url.clone()));
@@ -39,10 +40,15 @@ pub fn post_card(props: &PostCardProps) -> Html {
     };
 
     let ro_handle = use_mut_ref::<
-        Option<(ResizeObserver, Closure<dyn FnMut(web_sys::js_sys::Array, ResizeObserver)>)>
-        , _>(|| None);
+        Option<(
+            ResizeObserver,
+            Closure<dyn FnMut(web_sys::js_sys::Array, ResizeObserver)>,
+        )>,
+        _,
+    >(|| None);
 
     {
+        let card_width = card_width.clone();
         let root_ref = root_ref.clone();
         let post = Rc::clone(post);
         let current_img_url = current_img_url.clone();
@@ -50,18 +56,25 @@ pub fn post_card(props: &PostCardProps) -> Html {
 
         use_effect_with(post.id, move |_pid| {
             let choose = {
+                let card_width = card_width.clone();
                 let root_ref = root_ref.clone();
                 let post = Rc::clone(&post);
                 let current_img_url = current_img_url.clone();
 
                 move || {
-                    let Some(win) = window() else { return; };
+                    let Some(win) = window() else {
+                        return;
+                    };
                     let dpr = win.device_pixel_ratio();
 
                     let required_css_px = root_ref
                         .cast::<Element>()
                         .map(|el| el.client_width() as f64)
                         .unwrap_or(0.0);
+
+                    if (*card_width - required_css_px).abs() > f64::EPSILON {
+                        card_width.set(required_css_px);
+                    }
 
                     let required_device_px = (required_css_px * dpr).ceil() as i64;
                     let new_url = preferred_image_url(post.as_ref(), required_device_px);
@@ -76,36 +89,51 @@ pub fn post_card(props: &PostCardProps) -> Html {
                 let cb = {
                     let current_img_url = current_img_url.clone();
                     let post = Rc::clone(&post);
+                    let card_width = card_width.clone();
                     let root_ref = root_ref.clone();
 
-                    Closure::wrap(Box::new(move |entries: web_sys::js_sys::Array, _obs: ResizeObserver| {
-                        if let Some(entry) = entries.get(0).dyn_ref::<ResizeObserverEntry>() {
-                            let Some(win) = window() else { return; };
-                            let dpr = win.device_pixel_ratio();
+                    Closure::wrap(Box::new(
+                        move |entries: web_sys::js_sys::Array, _obs: ResizeObserver| {
+                            if let Some(entry) = entries.get(0).dyn_ref::<ResizeObserverEntry>() {
+                                let Some(win) = window() else {
+                                    return;
+                                };
+                                let dpr = win.device_pixel_ratio();
 
-                            let css_w = entry.content_rect().width();
-                            let required_device_px = (css_w * dpr).ceil() as i64;
+                                let css_w = entry.content_rect().width();
+                                if (*card_width - css_w).abs() > f64::EPSILON {
+                                    card_width.set(css_w);
+                                }
+                                let required_device_px = (css_w * dpr).ceil() as i64;
 
-                            let new_url =
-                                preferred_image_url(post.as_ref(), required_device_px);
+                                let new_url =
+                                    preferred_image_url(post.as_ref(), required_device_px);
 
-                            if *current_img_url != new_url {
-                                current_img_url.set(new_url);
+                                if *current_img_url != new_url {
+                                    current_img_url.set(new_url);
+                                }
+                            } else {
+                                let Some(win) = window() else {
+                                    return;
+                                };
+                                let dpr = win.device_pixel_ratio();
+                                let required_css_px = root_ref
+                                    .cast::<Element>()
+                                    .map(|el| el.client_width() as f64)
+                                    .unwrap_or(0.0);
+                                if (*card_width - required_css_px).abs() > f64::EPSILON {
+                                    card_width.set(required_css_px);
+                                }
+                                let required_device_px = (required_css_px * dpr).ceil() as i64;
+                                let new_url =
+                                    preferred_image_url(post.as_ref(), required_device_px);
+                                if *current_img_url != new_url {
+                                    current_img_url.set(new_url);
+                                }
                             }
-                        } else {
-                            let Some(win) = window() else { return; };
-                            let dpr = win.device_pixel_ratio();
-                            let required_css_px = root_ref
-                                .cast::<Element>()
-                                .map(|el| el.client_width() as f64)
-                                .unwrap_or(0.0);
-                            let required_device_px = (required_css_px * dpr).ceil() as i64;
-                            let new_url = preferred_image_url(post.as_ref(), required_device_px);
-                            if *current_img_url != new_url {
-                                current_img_url.set(new_url);
-                            }
-                        }
-                    }) as Box<dyn FnMut(web_sys::js_sys::Array, ResizeObserver)>)
+                        },
+                    )
+                        as Box<dyn FnMut(web_sys::js_sys::Array, ResizeObserver)>)
                 };
 
                 let ro = ResizeObserver::new(cb.as_ref().unchecked_ref())
@@ -136,7 +164,9 @@ pub fn post_card(props: &PostCardProps) -> Html {
 
         use_effect_with(post.id, move |_| {
             let mut observer: Option<IntersectionObserver> = None;
-            let mut observer_callback: Option<Closure<dyn FnMut(web_sys::js_sys::Array, IntersectionObserver)>> = None;
+            let mut observer_callback: Option<
+                Closure<dyn FnMut(web_sys::js_sys::Array, IntersectionObserver)>,
+            > = None;
 
             if !*impression_logged {
                 if let Some(el) = root_ref.cast::<Element>() {
@@ -150,50 +180,58 @@ pub fn post_card(props: &PostCardProps) -> Html {
                         let backend_url = backend_url.clone();
                         let session_id = session_id.clone();
 
-                        Closure::wrap(Box::new(move |entries: web_sys::js_sys::Array, _obs: IntersectionObserver| {
-                            let Some(entry) = entries.get(0).dyn_ref::<IntersectionObserverEntry>().cloned() else {
-                                return;
-                            };
+                        Closure::wrap(Box::new(
+                            move |entries: web_sys::js_sys::Array, _obs: IntersectionObserver| {
+                                let Some(entry) = entries
+                                    .get(0)
+                                    .dyn_ref::<IntersectionObserverEntry>()
+                                    .cloned()
+                                else {
+                                    return;
+                                };
 
-                            if entry.intersection_ratio() >= 0.5 {
-                                is_visible.set(true);
-                                if !is_scheduled.get() && !*impression_logged {
-                                    is_scheduled.set(true);
+                                if entry.intersection_ratio() >= 0.5 {
+                                    is_visible.set(true);
+                                    if !is_scheduled.get() && !*impression_logged {
+                                        is_scheduled.set(true);
 
-                                    let is_visible_timeout = is_visible.clone();
-                                    let is_scheduled_timeout = is_scheduled.clone();
-                                    let impression_logged = impression_logged.clone();
-                                    let backend_url = backend_url.clone();
-                                    let session_id = session_id.clone();
+                                        let is_visible_timeout = is_visible.clone();
+                                        let is_scheduled_timeout = is_scheduled.clone();
+                                        let impression_logged = impression_logged.clone();
+                                        let backend_url = backend_url.clone();
+                                        let session_id = session_id.clone();
 
-                                    let timeout_cb = Closure::once_into_js(move || {
-                                        is_scheduled_timeout.set(false);
-                                        if is_visible_timeout.get() && !*impression_logged {
-                                            impression_logged.set(true);
-                                            send_interaction(
-                                                backend_url,
-                                                FeedInteractionRequest {
-                                                    account_id,
-                                                    post_id,
-                                                    event_type: FeedInteractionType::QualifiedImpression,
-                                                    position,
-                                                    session_id,
-                                                },
-                                            );
-                                        }
-                                    });
+                                        let timeout_cb = Closure::once_into_js(move || {
+                                            is_scheduled_timeout.set(false);
+                                            if is_visible_timeout.get() && !*impression_logged {
+                                                impression_logged.set(true);
+                                                send_interaction(
+                                                    backend_url,
+                                                    FeedInteractionRequest {
+                                                        account_id,
+                                                        post_id,
+                                                        event_type:
+                                                            FeedInteractionType::QualifiedImpression,
+                                                        position,
+                                                        session_id,
+                                                    },
+                                                );
+                                            }
+                                        });
 
-                                    if let Some(win) = window() {
-                                        let _ = win.set_timeout_with_callback_and_timeout_and_arguments_0(
+                                        if let Some(win) = window() {
+                                            let _ = win.set_timeout_with_callback_and_timeout_and_arguments_0(
                                             timeout_cb.as_ref().unchecked_ref(),
                                             800,
                                         );
+                                        }
                                     }
+                                } else {
+                                    is_visible.set(false);
                                 }
-                            } else {
-                                is_visible.set(false);
-                            }
-                        }) as Box<dyn FnMut(web_sys::js_sys::Array, IntersectionObserver)>)
+                            },
+                        )
+                            as Box<dyn FnMut(web_sys::js_sys::Array, IntersectionObserver)>)
                     };
 
                     let options = IntersectionObserverInit::new();
@@ -220,6 +258,7 @@ pub fn post_card(props: &PostCardProps) -> Html {
     }
 
     let img_url = (*current_img_url).clone();
+    let preview_count = preview_tag_count(*card_width);
 
     let alt_text = {
         let post = Rc::clone(post);
@@ -338,12 +377,27 @@ pub fn post_card(props: &PostCardProps) -> Html {
             </div>
 
             <div class="card-text p-2">
-                <h6 class="card-title mb-1">{ format!("#{}", post.id) }</h6>
+                {
+                    if let Some(breakdown) = &props.breakdown {
+                        html! {
+                            <div class="post-breakdown mb-1">
+                                <span class="badge">{ format!("Tag {:.2}", breakdown.tag_similarity) }</span>
+                                <span class="badge">{ format!("Interact {:.2}", breakdown.interaction_fit) }</span>
+                                <span class="badge">{ format!("Quality {:.2}", breakdown.quality_fit) }</span>
+                                <span class="badge">{ format!("Recent {:.2}", breakdown.recency_fit) }</span>
+                            </div>
+                        }
+                    } else {
+                        html! {}
+                    }
+                }
+
+                <h6 class="card-title mt-1">{ format!("#{}", post.id) }</h6>
                 {
                     if !post.tags.general.is_empty() {
                         html! {
-                            <p class="card-text text-muted small mb-0">
-                                { tag_preview(&post.tags.general, 3) }
+                            <p class="card-text text-muted small mb-0 post-tags-preview">
+                                { tag_preview(&post.tags.general, preview_count) }
                             </p>
                         }
                     } else {
@@ -351,20 +405,7 @@ pub fn post_card(props: &PostCardProps) -> Html {
                     }
                 }
 
-                {
-                    if let Some(breakdown) = &props.breakdown {
-                        html! {
-                            <div class="d-flex flex-wrap gap-1 mt-2">
-                                <span class="badge text-bg-primary">{ format!("Tag {:.2}", breakdown.tag_similarity) }</span>
-                                <span class="badge text-bg-secondary">{ format!("Interact {:.2}", breakdown.interaction_fit) }</span>
-                                <span class="badge text-bg-success">{ format!("Quality {:.2}", breakdown.quality_fit) }</span>
-                                <span class="badge text-bg-info">{ format!("Recent {:.2}", breakdown.recency_fit) }</span>
-                            </div>
-                        }
-                    } else {
-                        html! {}
-                    }
-                }
+
             </div>
         </>
     };
@@ -409,20 +450,25 @@ fn send_interaction(backend_url: String, payload: FeedInteractionRequest) {
 fn is_supported_image(url: &str) -> bool {
     const ALLOWED: [&str; 7] = [".gif", ".png", ".jpg", ".jpeg", ".webp", ".avif", ".apng"];
 
-    ALLOWED.iter().any(|ext| url.to_ascii_lowercase().ends_with(ext))
+    ALLOWED
+        .iter()
+        .any(|ext| url.to_ascii_lowercase().ends_with(ext))
 }
 
 fn fallback_image_url(post: &Post) -> String {
-    if post.preview.clone().unwrap().url.is_some() && is_supported_image(&post.preview.clone().unwrap().url.unwrap()) {
+    if post.preview.clone().unwrap().url.is_some()
+        && is_supported_image(&post.preview.clone().unwrap().url.unwrap())
+    {
         post.preview.clone().unwrap().url.unwrap()
-    }
-    else if post.sample.clone().unwrap().url.is_some() && is_supported_image(&post.sample.clone().unwrap().url.unwrap()) {
+    } else if post.sample.clone().unwrap().url.is_some()
+        && is_supported_image(&post.sample.clone().unwrap().url.unwrap())
+    {
         post.sample.clone().unwrap().url.unwrap()
-    }
-    else if post.file.clone().unwrap().url.is_some() && is_supported_image(&post.file.clone().unwrap().url.unwrap()) {
+    } else if post.file.clone().unwrap().url.is_some()
+        && is_supported_image(&post.file.clone().unwrap().url.unwrap())
+    {
         post.file.clone().unwrap().url.unwrap()
-    }
-    else {
+    } else {
         "".to_string()
     }
 }
@@ -430,20 +476,29 @@ fn fallback_image_url(post: &Post) -> String {
 fn preferred_image_url(post: &Post, required_width: i64) -> Option<AttrValue> {
     let mut candidates: Vec<(AttrValue, i64)> = Vec::new();
 
-    if post.preview.clone()?.url.is_some() && is_supported_image(&post.preview.clone().unwrap().url.unwrap()) {
-        candidates.push((AttrValue::from(
-            post.preview.clone()?.url?.clone()),
-            post.preview.clone()?.width));
+    if post.preview.clone()?.url.is_some()
+        && is_supported_image(&post.preview.clone().unwrap().url.unwrap())
+    {
+        candidates.push((
+            AttrValue::from(post.preview.clone()?.url?.clone()),
+            post.preview.clone()?.width,
+        ));
     }
-    if post.sample.clone()?.url.is_some() && is_supported_image(&post.sample.clone().unwrap().url.unwrap()) {
-        candidates.push((AttrValue::from(
-            post.sample.clone()?.url?.clone()),
-            post.sample.clone()?.width?));
+    if post.sample.clone()?.url.is_some()
+        && is_supported_image(&post.sample.clone().unwrap().url.unwrap())
+    {
+        candidates.push((
+            AttrValue::from(post.sample.clone()?.url?.clone()),
+            post.sample.clone()?.width?,
+        ));
     }
-    if post.file.clone()?.url.is_some() && is_supported_image(&post.file.clone().unwrap().url.unwrap()) {
-        candidates.push((AttrValue::from(
-            post.file.clone()?.url?.clone()),
-            post.file.clone()?.width));
+    if post.file.clone()?.url.is_some()
+        && is_supported_image(&post.file.clone().unwrap().url.unwrap())
+    {
+        candidates.push((
+            AttrValue::from(post.file.clone()?.url?.clone()),
+            post.file.clone()?.width,
+        ));
     }
 
     candidates.sort_by_key(|&(_, w)| w);
@@ -471,4 +526,15 @@ fn tag_preview(tags: &[String], n: usize) -> String {
         .map(String::as_str)
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+fn preview_tag_count(card_width: f64) -> usize {
+    match card_width {
+        w if w >= 520.0 => 8,
+        w if w >= 420.0 => 6,
+        w if w >= 320.0 => 5,
+        w if w >= 260.0 => 4,
+        w if w >= 210.0 => 3,
+        _ => 2,
+    }
 }

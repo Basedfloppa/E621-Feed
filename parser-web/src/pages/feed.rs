@@ -285,7 +285,7 @@ pub fn feed_page() -> Html {
     }
 
     html! {
-        <div class="container my-4 gap-2">
+        <div class="container my-4 gap-2 feed-page">
             <h2 class="mb-3">{ "Latest Posts" }</h2>
 
             <div id="feed-account">
@@ -295,8 +295,8 @@ pub fn feed_page() -> Html {
                 />
             </div>
 
-            <div class="row g-3 align-items-center">
-                <div class="col-auto" id="feed-affinity">
+            <div class="row g-3 align-items-center feed-toolbar">
+                <div class="col-auto feed-affinity-col" id="feed-affinity">
                     <label>{"Minimal affinity"}
                         <input
                             type="number"
@@ -319,7 +319,7 @@ pub fn feed_page() -> Html {
                     </label>
                 </div>
 
-                <div class="col-auto" id="feed-grid">
+                <div class="col-auto feed-grid-col" id="feed-grid">
                     <span class="d-block">{"Grid type"}</span>
                     <div class="btn-group" role="group" aria-label="Grid type">
                         <button
@@ -369,7 +369,7 @@ pub fn feed_page() -> Html {
                 </div>
             </div>
 
-            <div class="position-fixed bottom-0 start-50 translate-middle-x w-100 d-flex justify-content-between z-1">
+            <div class="position-fixed bottom-0 start-50 translate-middle-x w-100 d-flex justify-content-between z-1 feed-statusbar">
                 {
                     if let Some(u) = &*selected_user {
                         html! { <span class="text-muted small m-3 bg-dark bg-opacity-50 rounded-pill badge">{ format!("User: {} (ID: {})", u.name, u.id) }</span> }
@@ -414,7 +414,7 @@ pub fn feed_page() -> Html {
                 } else { html!{} }
             }
 
-            <div class="row g-3 m-3" aria-busy={(*is_loading).to_string()}>
+            <div class="row g-3 m-3 feed-grid" aria-busy={(*is_loading).to_string()}>
                 {
                     posts.iter().enumerate().map(|(idx, sp)| {
                         let sp = sp.clone();

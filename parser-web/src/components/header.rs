@@ -185,12 +185,12 @@ pub fn header() -> Html {
     }
 
     html! {
-        <nav class="navbar bg-body-tertiary border flex-nowrap" id="header">
-            <div class="container-fluid d-flex align-items-center gap-3 flex-nowrap">
+        <nav class="navbar bg-body-tertiary border" id="header">
+            <div class="container-fluid d-flex align-items-center gap-3 flex-wrap">
                 <a class="navbar-brand text-nowrap" href="/">
                     {"e621 Account parser"}
                 </a>
-                <ul class="navbar-nav flex-row me-auto gap-2 flex-nowrap">
+                <ul class="navbar-nav flex-row me-auto gap-2 flex-wrap">
                     <li class="nav-item">
                         <a
                             class={classes!("nav-link", is_active("/").then_some("active"))}
@@ -219,7 +219,7 @@ pub fn header() -> Html {
                         </a>
                     </li>
                 </ul>
-                <ul class="navbar-nav flex-row ms-auto flex-nowrap">
+                <ul class="navbar-nav flex-row ms-auto flex-wrap">
                     <li class="nav-item">
                         <ThemeToggle />
                     </li>
