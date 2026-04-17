@@ -19,6 +19,8 @@ A tiny web app for storing personal favorites and generating a personalized post
 ## ✨ Features
 - Save and manage personal favorites
 - Generate a customized feed based on your preferences
+- Learn lightweight preference signals from feed usage
+- Show recommendation score breakdowns in the feed UI
 - Simple local dev setup (Rust backend + Trunk-served frontend)
 
 ---
@@ -44,7 +46,7 @@ admin_user = "username"
 admin_api = "api_key"
 tag_blacklist = ["tag1", "tag2", "tagN"]
 posts_domain = "https://uri.com"
-posts_limit = 320 # 320 is max
+posts_limit = 160 # 320 is max
 rps_delay_ms = 250
 max_retries = 3
 df_floor = 0.7
@@ -52,24 +54,27 @@ idf_max = 100.0
 
 [group_weights]
 'artist' = 2.0
-'character' = 1.5
-'copyright' = 1.3
-'species' = 1.2
+'character' = 1.6
+'copyright' = 1.2
+'species' = 1.1
 'general' = 1.0
-'meta' = 0.4
-'lore' = 0.6
+'lore' = 0.45
 
 [priors]
 now = "2000-1-01T12:00:00Z" # dummy value, will be replaced with current date
-recency_tau_days = 14.0
-quality_a = 0.00
-quality_b = 0.00
-mix_sim = 1.0
-mix_quality = 0.0
-mix_recency = 0.0
-idf_lambda = 0.0
-idf_alpha = 1.0
-freq_alpha = 0.5
+recency_tau_days = 10.0
+quality_a = 0.003
+quality_b = 0.00035
+mix_sim = 0.48
+mix_quality = 0.10
+mix_recency = 0.07
+mix_rating = 0.10
+mix_media = 0.08
+mix_popularity = 0.07
+mix_interaction = 0.10
+idf_lambda = 0.35
+idf_alpha = 0.65
+freq_alpha = 0.45
 ```
 
 Small guide on scoring vars
@@ -87,6 +92,10 @@ Small guide on scoring vars
 |`mix_sim`|personalization weaker|personalization stronger|
 |`mix_quality`|quality matters less|quality matters more|
 |`mix_recency`|freshness matters less|freshness matters more|
+|`mix_rating`|rating compatibility matters less|rating compatibility matters more|
+|`mix_media`|media-type preference matters less|media-type preference matters more|
+|`mix_popularity`|popularity fit matters less|feed tracks account's usual popularity range more|
+|`mix_interaction`|feed history matters less|recent browsing behavior matters more|
 
 http://localhost:8080
 
