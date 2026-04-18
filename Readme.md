@@ -9,14 +9,13 @@ A tiny web app for storing personal favorites and generating a personalized post
 [![License](https://img.shields.io/github/license/Basedfloppa/e621-Account-Parser?style=flat-square)](https://github.com/Basedfloppa/E621-Account-Parser/blob/master/LICENCE)
 [![Last Commit](https://img.shields.io/github/last-commit/Basedfloppa/e621-Account-Parser?style=flat-square)](https://github.com/Basedfloppa/e621-Account-Parser/commits)
 [![Commit Activity](https://img.shields.io/github/commit-activity/m/Basedfloppa/e621-Account-Parser?style=flat-square)](https://github.com/Basedfloppa/e621-Account-Parser/pulse)
-[![Latest Release](https://img.shields.io/github/v/release/Basedfloppa/e621-Account-Parser?display_name=tag&sort=semver&style=flat-square)](https://github.com/Basedfloppa/e621-Account-Parser/releases)
 
 ## Live at a temporary domain
 https://e621scraper.duckdns.org
 
 ---
 
-## ✨ Features
+## Features
 - Save and manage personal favorites
 - Generate a customized feed based on your preferences
 - Learn lightweight preference signals from feed usage
@@ -25,7 +24,7 @@ https://e621scraper.duckdns.org
 
 ---
 
-## 🧰 Tooling Installation
+## Tooling Installation
 Make sure you have [Rust](https://www.rust-lang.org/tools/install) and `cargo` installed. Then:
 
 ```bash
@@ -34,7 +33,7 @@ cargo install --locked trunk
 ```
 >cargo-watch enables hot-reload for the backend, and trunk serves/builds the frontend.
 
-# 🚀 Running Locally
+# Running Locally
 
 ---
 
