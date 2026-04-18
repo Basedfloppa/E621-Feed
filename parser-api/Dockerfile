@@ -50,8 +50,6 @@ COPY --from=builder /app/migrations ./migrations
 
 ENV RUST_BACKTRACE=1
 
-USER app
-
 EXPOSE 8080
 
 CMD ["/usr/local/bin/e621-account-parser-api"]
