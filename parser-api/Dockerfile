@@ -1,12 +1,12 @@
 # --- Stage 1: Planner (collect build graph)
-FROM rust:1-bookworm AS planner
+FROM rust:slim-trixie AS planner
 WORKDIR /app
 RUN cargo install cargo-chef --locked
 COPY . .
 RUN cargo chef prepare --recipe-path recipe.json
 
 # --- Stage 2: Cacher (build only dependencies)
-FROM rust:1-bookworm AS cacher
+FROM rust:slim-trixie AS cacher
 WORKDIR /app
 RUN cargo install cargo-chef --locked
 COPY --from=planner /app/recipe.json recipe.json
@@ -14,7 +14,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends pkg-config libs
 RUN cargo chef cook --release --recipe-path recipe.json
 
 # --- Stage 3: Builder (compile your binary)
-FROM rust:1-bookworm AS builder
+FROM rust:slim-trixie AS builder
 ARG BIN_NAME=e621-account-parser-api
 WORKDIR /app
 
