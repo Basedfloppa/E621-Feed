@@ -19,20 +19,18 @@ FROM chef-base AS cacher
 
 COPY --from=planner /app/recipe.json recipe.json
 
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/usr/local/cargo/git \
-    --mount=type=cache,target=/app/target \
+RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry \
+    --mount=type=cache,id=cargo-git,target=/usr/local/cargo/git \
+    --mount=type=cache,id=cargo-target,target=/app/target \
     cargo chef cook --release --recipe-path recipe.json
 
 FROM chef-base AS builder
 
-COPY --from=cacher /app/target /app/target
-COPY --from=cacher /usr/local/cargo /usr/local/cargo
 COPY . .
 
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/usr/local/cargo/git \
-    --mount=type=cache,target=/app/target \
+RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry \
+    --mount=type=cache,id=cargo-git,target=/usr/local/cargo/git \
+    --mount=type=cache,id=cargo-target,target=/app/target \
     cargo build --release --locked --bin e621-account-parser-api \
     && strip /app/target/release/e621-account-parser-api
 
