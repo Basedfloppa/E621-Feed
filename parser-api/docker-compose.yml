@@ -2,7 +2,7 @@ services:
   app:
     build:
       context: .
-      dockerfile: parser-api/Dockerfile
+      dockerfile: Dockerfile
     container_name: app
     ports:
       - "8181:8181"
