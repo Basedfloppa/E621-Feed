@@ -205,6 +205,7 @@ pub struct ScoreBreakdown {
 #[derive(Debug, Serialize, Deserialize, JsonSchema, Clone)]
 #[serde(crate = "rocket::serde")]
 pub struct FeedInteractionRequest {
+    pub owner_token: String,
     pub account_id: i32,
     pub post_id: i64,
     pub event_type: FeedInteractionType,

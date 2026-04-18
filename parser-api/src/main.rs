@@ -9,16 +9,16 @@ use std::collections::HashSet;
 use rocket_cors::AllowedOrigins;
 
 use crate::models::{
-    FeedInteractionRequest, ScoredPost, UserApiResponse, cfg, default_path, reload_from,
-    start_config_watcher,
+    DeviceScopedAccount, FeedInteractionRequest, ScoredPost, TruncatedAccount, UserApiResponse,
+    cfg, default_path, reload_from, start_config_watcher,
 };
 use crate::{
     db::{
         DbInit, get_account_by_id, get_account_by_name, get_account_preference_profile,
-        get_tag_counts, record_feed_interaction, refresh_account_profiles, set_account,
-        upsert_catalog_posts,
+        get_accounts_for_owner, get_tag_counts, record_feed_interaction, refresh_account_profiles,
+        set_account, upsert_catalog_posts,
     },
-    models::{Post, TagCount, TruncatedAccount},
+    models::{Post, TagCount},
     rocket::serde::json
 };
 use rocket_okapi::okapi::openapi3::OpenApi;
@@ -31,15 +31,15 @@ mod models;
 mod utils;
 
 #[openapi(tag = "Processing")]
-#[post("/process/<account_id>")]
-async fn process_posts(account_id: i32) -> Result<String, String> {
+#[post("/process/<account_id>?<owner_token>")]
+async fn process_posts(account_id: i32, owner_token: &str) -> Result<String, String> {
     let cfg = cfg();
     let blacklist: HashSet<String> = cfg
         .tag_blacklist
         .iter()
         .map(|s| s.to_lowercase())
         .collect();
-    let account = get_account_by_id(account_id).map_err(|e| e.to_string())?;
+    let account = get_account_by_id(owner_token, account_id).map_err(|e| e.to_string())?;
     let user = api::get_account(&account).await;
     let favcount = match user {
         UserApiResponse::FullCurrentUser(u) => u.favorite_count,
@@ -83,8 +83,10 @@ fn strip_blacklisted_tags(mut p: Post, blacklist: &HashSet<String>) -> Post {
 }
 
 #[openapi(tag = "Accounts")]
-#[get("/account/<account_id>/tag_counts")]
-async fn get_account_tag_counts(account_id: i32) -> Result<Json<Vec<TagCount>>, String> {
+#[get("/account/<account_id>/tag_counts?<owner_token>")]
+async fn get_account_tag_counts(account_id: i32, owner_token: &str) -> Result<Json<Vec<TagCount>>, String> {
+    get_account_by_id(owner_token, account_id)
+        .map_err(|e| format!("Failed to validate account access: {e}"))?;
     match get_tag_counts(account_id) {
         Ok(counts) => Ok(Json(counts.to_vec())),
         Err(e) => {
@@ -96,9 +98,9 @@ async fn get_account_tag_counts(account_id: i32) -> Result<Json<Vec<TagCount>>, 
 }
 
 #[openapi(tag = "Users")]
-#[get("/user/name/<name>")]
-async fn get_account_name(name: &str) -> Result<Json<TruncatedAccount>, String> {
-    match get_account_by_name(name.to_string()) {
+#[get("/user/name/<name>?<owner_token>")]
+async fn get_account_name(name: &str, owner_token: &str) -> Result<Json<TruncatedAccount>, String> {
+    match get_account_by_name(owner_token, name.to_string()) {
         Ok(account) => Ok(Json(account)),
         Err(e) => {
             let error_msg = format!("Failed to get account: {e}");
@@ -109,9 +111,9 @@ async fn get_account_name(name: &str) -> Result<Json<TruncatedAccount>, String> 
 }
 
 #[openapi(tag = "Users")]
-#[get("/user/id/<id>")]
-async fn get_account_id(id: i32) -> Result<Json<TruncatedAccount>, String> {
-    match get_account_by_id(id) {
+#[get("/user/id/<id>?<owner_token>")]
+async fn get_account_id(id: i32, owner_token: &str) -> Result<Json<TruncatedAccount>, String> {
+    match get_account_by_id(owner_token, id) {
         Ok(account) => Ok(Json(account)),
         Err(e) => {
             let error_msg = format!("Failed to get account: {e}");
@@ -122,10 +124,21 @@ async fn get_account_id(id: i32) -> Result<Json<TruncatedAccount>, String> {
 }
 
 #[openapi(tag = "Accounts")]
+#[get("/accounts?<owner_token>")]
+async fn list_accounts(owner_token: &str) -> Result<Json<Vec<TruncatedAccount>>, String> {
+    get_accounts_for_owner(owner_token).map(Json)
+}
+
+#[openapi(tag = "Accounts")]
 #[post("/account", data = "<account>")]
-async fn create_account(account: Json<TruncatedAccount>) -> Result<(), String> {
-    match set_account(account.id, &account.name, &account.blacklist) {
-        Ok(_) => Ok(()),
+async fn create_account(account: Json<DeviceScopedAccount>) -> Result<Json<TruncatedAccount>, String> {
+    match set_account(
+        &account.owner_token,
+        account.id,
+        &account.name,
+        &account.blacklist,
+    ) {
+        Ok(saved) => Ok(Json(saved)),
         Err(e) => {
             let error_msg = format!("Failed to get account: {e}");
             eprintln!("{error_msg}");
@@ -141,9 +154,10 @@ async fn log_feed_interaction(payload: Json<FeedInteractionRequest>) -> Result<(
 }
 
 #[openapi(tag = "Recommendations")]
-#[get("/recommendations/<account_id>?<page>&<affinity_threshold>")]
+#[get("/recommendations/<account_id>?<owner_token>&<page>&<affinity_threshold>")]
 async fn get_recommendations(
     account_id: i32,
+    owner_token: &str,
     page: Option<i32>,
     affinity_threshold: Option<f32>,
 ) -> Result<Json<Vec<ScoredPost>>, std::io::Error> {
@@ -158,7 +172,7 @@ async fn get_recommendations(
     let profile = get_account_preference_profile(account_id)
         .map_err(|e| std::io::Error::other(format!("Failed to get account profile: {e}")))?;
 
-    let account = get_account_by_id(account_id)
+    let account = get_account_by_id(owner_token, account_id)
         .map_err(|e| std::io::Error::other(format!("Failed to get account: {e}")))?;
     let posts: Vec<Post> = api::get_posts(&account, page).await;
     upsert_catalog_posts(&posts)
@@ -227,6 +241,7 @@ async fn rocket() -> _ {
         settings:
         process_posts,
         log_feed_interaction,
+        list_accounts,
         get_account_tag_counts,
         get_account_id,
         get_account_name,

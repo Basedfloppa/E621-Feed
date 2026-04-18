@@ -1,8 +1,7 @@
-use crate::models::read_config_from_head;
+use crate::models::{get_or_create_owner_token, read_config_from_head};
 use crate::pages::UserInfo;
 use reqwasm::http::Request;
-use serde_json::to_string;
-use web_sys::{HtmlInputElement, window};
+use web_sys::HtmlInputElement;
 use yew::prelude::*;
 
 #[function_component(Account)]
@@ -14,15 +13,7 @@ pub fn account_creator() -> Html {
     let error = use_state(|| false);
     let loading = use_state(|| false);
 
-    let saved_accounts = use_state(|| match window().and_then(|w| w.local_storage().ok()?) {
-        Some(storage) => match storage.get_item("e621_accounts") {
-            Ok(Some(accounts_json)) => {
-                serde_json::from_str::<Vec<UserInfo>>(&accounts_json).unwrap_or_else(|_| vec![])
-            }
-            _ => vec![],
-        },
-        _ => vec![],
-    });
+    let saved_accounts = use_state(Vec::<UserInfo>::new);
 
     let on_id_change = {
         let id = id.clone();
@@ -62,6 +53,12 @@ pub fn account_creator() -> Html {
             loading.set(true);
 
             let cfg = read_config_from_head().unwrap();
+            let Some(owner_token) = get_or_create_owner_token() else {
+                message.set("Failed to create local device token".to_string());
+                error.set(true);
+                loading.set(false);
+                return;
+            };
             let raw_id = id.trim().to_string();
             let raw_name = name.trim().to_string();
             let raw_blacklist = blacklist.trim().to_string();
@@ -100,15 +97,22 @@ pub fn account_creator() -> Html {
                 blacklist: raw_blacklist.clone(),
             };
 
+            let payload = serde_json::json!({
+                "owner_token": owner_token,
+                "id": account_id,
+                "name": raw_name,
+                "blacklist": raw_blacklist,
+            });
+
             let message = message.clone();
             let error = error.clone();
             let loading = loading.clone();
-            let mut saved_accounts = saved_accounts.clone().to_vec();
+            let saved_accounts = saved_accounts.clone();
 
             wasm_bindgen_futures::spawn_local(async move {
                 let response = Request::post(&format!("{0}/account", cfg.backend_domain))
                     .header("Content-Type", "application/json")
-                    .body(to_string(&account).unwrap())
+                    .body(payload.to_string())
                     .send()
                     .await;
 
@@ -117,20 +121,15 @@ pub fn account_creator() -> Html {
                 match response {
                     Ok(resp) => {
                         if resp.status() >= 200 && resp.status() < 300 {
+                            let saved = resp.json::<UserInfo>().await.unwrap_or(account);
+                            let mut accounts = (*saved_accounts).clone();
+                            if let Some(existing) = accounts.iter_mut().find(|acc| acc.id == saved.id) {
+                                *existing = saved.clone();
+                            } else {
+                                accounts.push(saved);
+                            }
+                            saved_accounts.set(accounts);
                             message.set("Account created successfully!".to_string());
-
-                            saved_accounts.push(account);
-
-                            let _ = window()
-                                .unwrap()
-                                .local_storage()
-                                .unwrap()
-                                .unwrap()
-                                .set_item(
-                                    "e621_accounts",
-                                    to_string(&saved_accounts).unwrap().as_str(),
-                                );
-
                             error.set(false);
                         } else {
                             let error_msg = resp

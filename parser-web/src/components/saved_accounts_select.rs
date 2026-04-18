@@ -1,8 +1,9 @@
 use yew::{
     Callback, Event, Html, Properties, TargetCast, UseStateHandle, function_component, html,
-    use_state,
+    use_effect_with, use_state,
 };
 
+use crate::models::{get_or_create_owner_token, read_config_from_head};
 use crate::pages::UserInfo;
 
 #[derive(Properties, PartialEq)]
@@ -14,20 +15,28 @@ pub struct SavedAccountsProps {
 #[function_component(SavedAccountsSelect)]
 pub fn saved_accounts_select(props: &SavedAccountsProps) -> Html {
     let user_query: UseStateHandle<String> = use_state(|| "".to_string());
+    let saved_accounts = use_state(Vec::<UserInfo>::new);
 
-    let saved_accounts =
-        use_state(
-            || match web_sys::window().and_then(|w| w.local_storage().ok()?) {
-                Some(storage) => match storage.get_item("e621_accounts") {
-                    Ok(Some(accounts_json)) => {
-                        serde_json::from_str::<Vec<UserInfo>>(&accounts_json)
-                            .unwrap_or_else(|_| vec![])
+    {
+        let saved_accounts = saved_accounts.clone();
+        use_effect_with((), move |_| {
+            if let (Some(cfg), Some(owner_token)) = (read_config_from_head(), get_or_create_owner_token()) {
+                wasm_bindgen_futures::spawn_local(async move {
+                    let url = format!("{}/accounts?owner_token={}", cfg.backend_domain, urlencoding::encode(&owner_token));
+                    match reqwasm::http::Request::get(&url).send().await {
+                        Ok(response) if response.ok() => {
+                            match response.json::<Vec<UserInfo>>().await {
+                                Ok(accounts) => saved_accounts.set(accounts),
+                                Err(_) => saved_accounts.set(Vec::new()),
+                            }
+                        }
+                        _ => saved_accounts.set(Vec::new()),
                     }
-                    _ => vec![],
-                },
-                _ => vec![],
-            },
-        );
+                });
+            }
+            || ()
+        });
+    }
 
     let on_select = {
         let saved_accounts = saved_accounts.clone();

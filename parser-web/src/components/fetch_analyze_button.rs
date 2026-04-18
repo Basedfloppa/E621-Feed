@@ -3,6 +3,7 @@ use yew::{
     Callback, Html, MouseEvent, Properties, UseStateHandle, function_component, html, use_state,
 };
 
+use crate::models::get_or_create_owner_token;
 use crate::pages::{TagCount, UserInfo};
 
 #[derive(Properties, PartialEq)]
@@ -29,11 +30,17 @@ pub fn fetch_analyze_button(props: &AnalyzeButtonProps) -> Html {
 
         Callback::from(move |_| {
             let api_base = api_base.clone();
+            let owner_token = get_or_create_owner_token();
 
             if found_user.is_none() {
                 error.set(Some("No user selected".to_string()));
                 return;
             }
+
+            let Some(owner_token) = owner_token else {
+                error.set(Some("Missing device token".to_string()));
+                return;
+            };
 
             let user_id = found_user.as_ref().unwrap().id;
             let tag_count = tag_count.clone();
@@ -46,7 +53,12 @@ pub fn fetch_analyze_button(props: &AnalyzeButtonProps) -> Html {
             error.set(None);
 
             wasm_bindgen_futures::spawn_local(async move {
-                match Request::get(&format!("{}/account/{}/tag_counts", &api_base, user_id))
+                match Request::get(&format!(
+                    "{}/account/{}/tag_counts?owner_token={}",
+                    &api_base,
+                    user_id,
+                    urlencoding::encode(&owner_token)
+                ))
                     .send()
                     .await
                 {
@@ -92,11 +104,17 @@ pub fn fetch_analyze_button(props: &AnalyzeButtonProps) -> Html {
         Callback::from(move |_| {
             let fetch_tags = fetch_tags.clone();
             let api_base = api_base.clone();
+            let owner_token = get_or_create_owner_token();
 
             if found_user.is_none() {
                 error.set(Some("No user selected".to_string()));
                 return;
             }
+
+            let Some(owner_token) = owner_token else {
+                error.set(Some("Missing device token".to_string()));
+                return;
+            };
 
             let user_id = found_user.as_ref().unwrap().id;
             let is_analyzing = is_analyzing.clone();
@@ -108,7 +126,12 @@ pub fn fetch_analyze_button(props: &AnalyzeButtonProps) -> Html {
             error.set(None);
 
             wasm_bindgen_futures::spawn_local(async move {
-                match Request::post(&format!("{}/process/{}", &api_base, user_id))
+                match Request::post(&format!(
+                    "{}/process/{}?owner_token={}",
+                    &api_base,
+                    user_id,
+                    urlencoding::encode(&owner_token)
+                ))
                     .send()
                     .await
                 {

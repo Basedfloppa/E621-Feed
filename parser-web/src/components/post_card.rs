@@ -208,6 +208,7 @@ pub fn post_card(props: &PostCardProps) -> Html {
                                                 send_interaction(
                                                     backend_url,
                                                     FeedInteractionRequest {
+                                                        owner_token: get_or_create_owner_token().unwrap_or_default(),
                                                         account_id,
                                                         post_id,
                                                         event_type:
@@ -296,6 +297,7 @@ pub fn post_card(props: &PostCardProps) -> Html {
             send_interaction(
                 backend_url.clone(),
                 FeedInteractionRequest {
+                    owner_token: get_or_create_owner_token().unwrap_or_default(),
                     account_id,
                     post_id: id,
                     event_type: FeedInteractionType::Open,
@@ -377,14 +379,16 @@ pub fn post_card(props: &PostCardProps) -> Html {
             </div>
 
             <div class="card-text p-2">
+                <h6 class="card-title mt-1">{ format!("#{}", post.id) }</h6>
+
                 {
                     if let Some(breakdown) = &props.breakdown {
                         html! {
                             <div class="post-breakdown mb-1">
-                                <span class="badge">{ format!("Tag {:.2}", breakdown.tag_similarity) }</span>
-                                <span class="badge">{ format!("Interact {:.2}", breakdown.interaction_fit) }</span>
-                                <span class="badge">{ format!("Quality {:.2}", breakdown.quality_fit) }</span>
-                                <span class="badge">{ format!("Recent {:.2}", breakdown.recency_fit) }</span>
+                                <span class="badge text-muted">{ format!("Tag {:.2}", breakdown.tag_similarity) }</span>
+                                <span class="badge text-muted">{ format!("Interact {:.2}", breakdown.interaction_fit) }</span>
+                                <span class="badge text-muted">{ format!("Quality {:.2}", breakdown.quality_fit) }</span>
+                                <span class="badge text-muted">{ format!("Recent {:.2}", breakdown.recency_fit) }</span>
                             </div>
                         }
                     } else {
@@ -392,7 +396,6 @@ pub fn post_card(props: &PostCardProps) -> Html {
                     }
                 }
 
-                <h6 class="card-title mt-1">{ format!("#{}", post.id) }</h6>
                 {
                     if !post.tags.general.is_empty() {
                         html! {

@@ -4,6 +4,7 @@ use yew::{
     Callback, Html, Properties, TargetCast, UseStateHandle, function_component, html, use_state,
 };
 
+use crate::models::get_or_create_owner_token;
 use crate::pages::UserInfo;
 
 #[derive(Properties, PartialEq)]
@@ -44,6 +45,12 @@ pub fn user_search_form(props: &UserSearchProps) -> Html {
             is_loading.set(true);
             error.set(None);
 
+            let Some(owner_token) = get_or_create_owner_token() else {
+                error.set(Some("Missing device token".into()));
+                is_loading.set(false);
+                return;
+            };
+
             let is_id = query.parse::<i64>().is_ok();
             let encoded = if is_id {
                 query.clone()
@@ -52,9 +59,9 @@ pub fn user_search_form(props: &UserSearchProps) -> Html {
             };
 
             let url = if is_id {
-                format!("{api_base}/user/id/{encoded}")
+                format!("{api_base}/user/id/{encoded}?owner_token={}", urlencoding::encode(&owner_token))
             } else {
-                format!("{api_base}/user/name/{encoded}")
+                format!("{api_base}/user/name/{encoded}?owner_token={}", urlencoding::encode(&owner_token))
             };
 
             let found_user = found_user.clone();

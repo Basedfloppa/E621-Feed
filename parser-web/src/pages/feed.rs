@@ -123,10 +123,18 @@ pub fn feed_page() -> Html {
                 return;
             };
 
+            let Some(owner_token) = get_or_create_owner_token() else {
+                error.set(Some("Missing device token".to_string()));
+                return;
+            };
+
             let cfg = read_config_from_head().unwrap();
             let mut url = format!(
-                "{}/recommendations/{}?page={}",
-                cfg.backend_domain, user.id, *page
+                "{}/recommendations/{}?owner_token={}&page={}",
+                cfg.backend_domain,
+                user.id,
+                urlencoding::encode(&owner_token),
+                *page
             );
 
             let value = *affinity;

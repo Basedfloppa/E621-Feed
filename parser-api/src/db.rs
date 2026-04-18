@@ -94,7 +94,26 @@ pub fn ensure_sqlite() -> Result<(), String> {
     Ok(())
 }
 
-pub fn set_account(account_id: i32, name: &str, mut blacklisted_tags: &str) -> Result<(), String> {
+fn touch_account_link(conn: &Connection, owner_token: &str, account_id: i32) -> Result<(), String> {
+    conn.execute(
+        "
+        UPDATE account_device_links
+        SET last_seen_at = ?3
+        WHERE owner_token = ?1 AND account_id = ?2
+        ",
+        params![owner_token, account_id, Utc::now().to_rfc3339()],
+    )
+    .map_err(|e| format!("Failed to touch account device link: {e}"))?;
+
+    Ok(())
+}
+
+pub fn set_account(
+    owner_token: &str,
+    account_id: i32,
+    name: &str,
+    mut blacklisted_tags: &str,
+) -> Result<TruncatedAccount, String> {
     if blacklisted_tags.is_empty() {
         blacklisted_tags = "
 gore
@@ -107,8 +126,12 @@ shota";
 
     eprint!("{blacklisted_tags:?}");
 
-    open_db()?
-        .execute(
+    let mut conn = open_db()?;
+    let tx = conn
+        .transaction()
+        .map_err(|e| format!("Failed to start account transaction: {e}"))?;
+
+    tx.execute(
             "
             INSERT INTO accounts (id, name, blacklisted_tags) 
             VALUES (?1, ?2, ?3)
@@ -117,12 +140,26 @@ shota";
             blacklisted_tags = excluded.blacklisted_tags",
             params![account_id, name, blacklisted_tags],
         )
-        .map_err(|e| format!("Failed to execute transaction: {e}"))?;
+        .map_err(|e| format!("Failed to upsert account: {e}"))?;
 
-    Ok(())
+    tx.execute(
+        "
+        INSERT INTO account_device_links (owner_token, account_id, linked_at, last_seen_at)
+        VALUES (?1, ?2, ?3, ?3)
+        ON CONFLICT(owner_token, account_id) DO UPDATE SET
+            last_seen_at = excluded.last_seen_at
+        ",
+        params![owner_token, account_id, Utc::now().to_rfc3339()],
+    )
+    .map_err(|e| format!("Failed to link device token to account: {e}"))?;
+
+    tx.commit()
+        .map_err(|e| format!("Failed to commit account transaction: {e}"))?;
+
+    get_account_by_id(owner_token, account_id)
 }
 
-pub fn get_account_by_name(name: String) -> Result<TruncatedAccount, String> {
+pub fn get_accounts_for_owner(owner_token: &str) -> Result<Vec<TruncatedAccount>, String> {
     let conn = open_db()?;
 
     let mut stmt = conn
@@ -130,13 +167,15 @@ pub fn get_account_by_name(name: String) -> Result<TruncatedAccount, String> {
             r#"
         SELECT a.id, a.name, a.blacklisted_tags
         FROM accounts a
-        WHERE a.name = ?
+        INNER JOIN account_device_links adl ON adl.account_id = a.id
+        WHERE adl.owner_token = ?
+        ORDER BY adl.last_seen_at DESC, a.name ASC
         "#,
         )
         .map_err(|e| format!("Failed to construct query: {e}"))?;
 
     let accounts = stmt
-        .query_map([name], |row| {
+        .query_map([owner_token], |row| {
             Ok(TruncatedAccount {
                 id: row.get(0)?,
                 name: row.get(1)?,
@@ -147,14 +186,52 @@ pub fn get_account_by_name(name: String) -> Result<TruncatedAccount, String> {
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| format!("Failed to enumerate accounts: {e}"))?;
 
+    drop(stmt);
+
+    for account in &accounts {
+        let _ = touch_account_link(&conn, owner_token, account.id);
+    }
+
+    Ok(accounts)
+}
+
+pub fn get_account_by_name(owner_token: &str, name: String) -> Result<TruncatedAccount, String> {
+    let conn = open_db()?;
+
+    let mut stmt = conn
+        .prepare(
+            r#"
+        SELECT a.id, a.name, a.blacklisted_tags
+        FROM accounts a
+        INNER JOIN account_device_links adl ON adl.account_id = a.id
+        WHERE a.name = ?1 AND adl.owner_token = ?2
+        "#,
+        )
+        .map_err(|e| format!("Failed to construct query: {e}"))?;
+
+    let accounts = stmt
+        .query_map(params![name, owner_token], |row| {
+            Ok(TruncatedAccount {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                blacklist: row.get(2)?,
+            })
+        })
+        .map_err(|e| format!("Failed to get accounts: {e}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("Failed to enumerate accounts: {e}"))?;
+
+    drop(stmt);
+
     if let Some(account) = accounts.first() {
+        let _ = touch_account_link(&conn, owner_token, account.id);
         Ok(account.clone())
     } else {
         Err("No account found".to_string())
     }
 }
 
-pub fn get_account_by_id(id: i32) -> Result<TruncatedAccount, String> {
+pub fn get_account_by_id(owner_token: &str, id: i32) -> Result<TruncatedAccount, String> {
     let conn = open_db()?;
 
     let mut stmt = conn
@@ -162,13 +239,14 @@ pub fn get_account_by_id(id: i32) -> Result<TruncatedAccount, String> {
             r#"
         SELECT a.id, a.name, a.blacklisted_tags
         FROM accounts a
-        WHERE a.id = ?
+        INNER JOIN account_device_links adl ON adl.account_id = a.id
+        WHERE a.id = ?1 AND adl.owner_token = ?2
         "#,
         )
         .map_err(|e| format!("Failed to construct query: {e}"))?;
 
     let accounts = stmt
-        .query_map([id], |row| {
+        .query_map(params![id, owner_token], |row| {
             Ok(TruncatedAccount {
                 id: row.get(0)?,
                 name: row.get(1)?,
@@ -179,7 +257,10 @@ pub fn get_account_by_id(id: i32) -> Result<TruncatedAccount, String> {
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| format!("Failed to enumerate accounts: {e}"))?;
 
+    drop(stmt);
+
     if let Some(account) = accounts.first() {
+        let _ = touch_account_link(&conn, owner_token, account.id);
         Ok(account.clone())
     } else {
         Err("No account found".to_string())
@@ -759,6 +840,23 @@ pub fn record_feed_interaction(interaction: &FeedInteractionRequest) -> Result<(
     let tx = connection
         .transaction()
         .map_err(|e| format!("Failed to get transaction: {e}"))?;
+
+    let linked: bool = tx
+        .query_row(
+            "
+            SELECT EXISTS(
+                SELECT 1 FROM account_device_links
+                WHERE owner_token = ?1 AND account_id = ?2
+            )
+            ",
+            params![interaction.owner_token, interaction.account_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("Failed to validate feed interaction owner link: {e}"))?;
+
+    if !linked {
+        return Err("Account is not linked to this device token".to_string());
+    }
 
     let inserted = tx
         .execute(
