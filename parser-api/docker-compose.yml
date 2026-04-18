@@ -1,6 +1,9 @@
 services:
   app:
-    image: api:arm64
+    build:
+      context: .
+      dockerfile: parser-api/Dockerfile
+    container_name: app
     ports:
       - "8181:8181"
     volumes:
