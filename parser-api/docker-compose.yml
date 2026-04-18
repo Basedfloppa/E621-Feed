@@ -9,6 +9,6 @@ services:
     volumes:
       - ./config.toml:/app/config.toml:ro
       - ./Rocket.toml:/app/Rocket.toml:ro
-      - ./database.db:/app/database.db:ro
+      - ./database.db:/app/database.db
     environment:
       - CONFIG_PATH=/app/config.toml
