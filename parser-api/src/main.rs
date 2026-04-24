@@ -9,14 +9,14 @@ use std::collections::HashSet;
 use rocket_cors::AllowedOrigins;
 
 use crate::models::{
-    DeviceScopedAccount, FeedInteractionRequest, ScoredPost, TruncatedAccount, UserApiResponse,
-    cfg, default_path, reload_from, start_config_watcher,
+    BlacklistPayload, DeviceScopedAccount, FeedInteractionRequest, ScoredPost, TruncatedAccount,
+    UserApiResponse, cfg, default_path, reload_from, start_config_watcher,
 };
 use crate::{
     db::{
         DbInit, get_account_by_id, get_account_by_name, get_account_preference_profile,
         get_accounts_for_owner, get_tag_counts, record_feed_interaction, refresh_account_profiles,
-        set_account, upsert_catalog_posts,
+        set_account, update_device_blacklist, upsert_catalog_posts,
     },
     models::{Post, TagCount},
     rocket::serde::json
@@ -147,6 +147,36 @@ async fn create_account(account: Json<DeviceScopedAccount>) -> Result<Json<Trunc
     }
 }
 
+#[openapi(tag = "Accounts")]
+#[get("/account/<account_id>/blacklist?<owner_token>")]
+async fn get_account_blacklist(
+    account_id: i32,
+    owner_token: &str,
+) -> Result<Json<BlacklistPayload>, String> {
+    let account = get_account_by_id(owner_token, account_id)
+        .map_err(|e| format!("Failed to get account: {e}"))?;
+    Ok(Json(BlacklistPayload {
+        blacklist: account.blacklist,
+    }))
+}
+
+#[openapi(tag = "Accounts")]
+#[patch("/account/<account_id>/blacklist?<owner_token>", data = "<payload>")]
+async fn update_account_blacklist(
+    account_id: i32,
+    owner_token: &str,
+    payload: Json<BlacklistPayload>,
+) -> Result<Json<TruncatedAccount>, String> {
+    match update_device_blacklist(owner_token, account_id, &payload.blacklist) {
+        Ok(saved) => Ok(Json(saved)),
+        Err(e) => {
+            let error_msg = format!("Failed to update blacklist: {e}");
+            eprintln!("{error_msg}");
+            Err(error_msg)
+        }
+    }
+}
+
 #[openapi(tag = "Recommendations")]
 #[post("/interaction", data = "<payload>")]
 async fn log_feed_interaction(payload: Json<FeedInteractionRequest>) -> Result<(), String> {
@@ -248,6 +278,8 @@ async fn rocket() -> _ {
         get_account_id,
         get_account_name,
         create_account,
+        get_account_blacklist,
+        update_account_blacklist,
         get_recommendations
     ];
 

@@ -56,6 +56,12 @@ pub struct DeviceScopedAccount {
     pub blacklist: String,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone, JsonSchema)]
+#[serde(crate = "rocket::serde")]
+pub struct BlacklistPayload {
+    pub blacklist: String,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct FullCurrentUser {
     pub id: i32,

@@ -1,7 +1,7 @@
 use crate::models::{get_or_create_owner_token, read_config_from_head};
 use crate::pages::UserInfo;
 use reqwasm::http::Request;
-use web_sys::HtmlInputElement;
+use web_sys::{HtmlInputElement, HtmlTextAreaElement};
 use yew::prelude::*;
 
 #[function_component(Account)]
@@ -14,6 +14,34 @@ pub fn account_creator() -> Html {
     let loading = use_state(|| false);
 
     let saved_accounts = use_state(Vec::<UserInfo>::new);
+    let editing_id = use_state(|| None::<i64>);
+    let edit_draft = use_state(String::new);
+    let edit_saving = use_state(|| false);
+
+    {
+        let saved_accounts = saved_accounts.clone();
+        use_effect_with((), move |_| {
+            if let (Some(cfg), Some(owner_token)) =
+                (read_config_from_head(), get_or_create_owner_token())
+            {
+                wasm_bindgen_futures::spawn_local(async move {
+                    let url = format!(
+                        "{}/accounts?owner_token={}",
+                        cfg.backend_domain,
+                        urlencoding::encode(&owner_token)
+                    );
+                    if let Ok(response) = Request::get(&url).send().await {
+                        if response.ok() {
+                            if let Ok(accounts) = response.json::<Vec<UserInfo>>().await {
+                                saved_accounts.set(accounts);
+                            }
+                        }
+                    }
+                });
+            }
+            || ()
+        });
+    }
 
     let on_id_change = {
         let id = id.clone();
@@ -36,6 +64,165 @@ pub fn account_creator() -> Html {
         Callback::from(move |e: Event| {
             let input: HtmlInputElement = e.target_unchecked_into();
             blacklist.set(input.value());
+        })
+    };
+
+    let on_edit_draft_change = {
+        let edit_draft = edit_draft.clone();
+        Callback::from(move |e: Event| {
+            let input: HtmlTextAreaElement = e.target_unchecked_into();
+            edit_draft.set(input.value());
+        })
+    };
+
+    let start_edit = {
+        let editing_id = editing_id.clone();
+        let edit_draft = edit_draft.clone();
+        let saved_accounts = saved_accounts.clone();
+        let message = message.clone();
+        let error = error.clone();
+
+        Callback::from(move |account_id: i64| {
+            let Some(cfg) = read_config_from_head() else {
+                return;
+            };
+            let Some(owner_token) = get_or_create_owner_token() else {
+                return;
+            };
+
+            editing_id.set(Some(account_id));
+
+            if let Some(existing) = (*saved_accounts).iter().find(|a| a.id == account_id) {
+                edit_draft.set(existing.blacklist.clone());
+            } else {
+                edit_draft.set(String::new());
+            }
+
+            let edit_draft = edit_draft.clone();
+            let message = message.clone();
+            let error = error.clone();
+
+            wasm_bindgen_futures::spawn_local(async move {
+                let url = format!(
+                    "{}/account/{}/blacklist?owner_token={}",
+                    cfg.backend_domain,
+                    account_id,
+                    urlencoding::encode(&owner_token)
+                );
+                match Request::get(&url).send().await {
+                    Ok(resp) if resp.ok() => {
+                        if let Ok(payload) = resp.json::<BlacklistResponse>().await {
+                            edit_draft.set(payload.blacklist);
+                        }
+                    }
+                    Ok(resp) => {
+                        message.set(format!(
+                            "Failed to load blacklist (status {})",
+                            resp.status()
+                        ));
+                        error.set(true);
+                    }
+                    Err(e) => {
+                        message.set(format!("Network error loading blacklist: {e}"));
+                        error.set(true);
+                    }
+                }
+            });
+        })
+    };
+
+    let cancel_edit = {
+        let editing_id = editing_id.clone();
+        let edit_draft = edit_draft.clone();
+        Callback::from(move |_| {
+            editing_id.set(None);
+            edit_draft.set(String::new());
+        })
+    };
+
+    let save_edit = {
+        let editing_id = editing_id.clone();
+        let edit_draft = edit_draft.clone();
+        let edit_saving = edit_saving.clone();
+        let saved_accounts = saved_accounts.clone();
+        let message = message.clone();
+        let error = error.clone();
+
+        Callback::from(move |_| {
+            let Some(account_id) = *editing_id else {
+                return;
+            };
+            let Some(cfg) = read_config_from_head() else {
+                return;
+            };
+            let Some(owner_token) = get_or_create_owner_token() else {
+                return;
+            };
+
+            edit_saving.set(true);
+
+            let body = serde_json::json!({
+                "blacklist": (*edit_draft).clone(),
+            })
+            .to_string();
+
+            let editing_id = editing_id.clone();
+            let edit_draft = edit_draft.clone();
+            let edit_saving = edit_saving.clone();
+            let saved_accounts = saved_accounts.clone();
+            let message = message.clone();
+            let error = error.clone();
+
+            wasm_bindgen_futures::spawn_local(async move {
+                let url = format!(
+                    "{}/account/{}/blacklist?owner_token={}",
+                    cfg.backend_domain,
+                    account_id,
+                    urlencoding::encode(&owner_token)
+                );
+                let response = Request::patch(&url)
+                    .header("Content-Type", "application/json")
+                    .body(body)
+                    .send()
+                    .await;
+
+                edit_saving.set(false);
+
+                match response {
+                    Ok(resp) if resp.ok() => match resp.json::<UserInfo>().await {
+                        Ok(saved) => {
+                            let mut accounts = (*saved_accounts).clone();
+                            if let Some(existing) =
+                                accounts.iter_mut().find(|acc| acc.id == saved.id)
+                            {
+                                *existing = saved;
+                            }
+                            saved_accounts.set(accounts);
+                            editing_id.set(None);
+                            edit_draft.set(String::new());
+                            message.set("Blacklist updated".to_string());
+                            error.set(false);
+                        }
+                        Err(e) => {
+                            message.set(format!("Failed to parse response: {e}"));
+                            error.set(true);
+                        }
+                    },
+                    Ok(resp) => {
+                        let status = resp.status();
+                        let text = resp
+                            .text()
+                            .await
+                            .unwrap_or_else(|_| "Unknown error".to_string());
+                        message.set(format!("Error: {text} (Status: {status})"));
+                        error.set(true);
+                    }
+                    Err(e) => {
+                        message.set(format!("Network error: {e}"));
+                        error.set(true);
+                    }
+                }
+            });
         })
     };
 
@@ -165,10 +352,80 @@ pub fn account_creator() -> Html {
         "alert alert-success mt-3"
     };
 
+    let accounts_list = (*saved_accounts).clone();
+    let current_edit = *editing_id;
+
     html! {
         <div class="container mt-5" id="account-page">
             <div class="row justify-content-center">
                 <div class="col-md-6">
+                    if !accounts_list.is_empty() {
+                        <div class="card shadow mb-4">
+                            <div class="card-body">
+                                <h2 class="card-title text-center mb-4">{"Saved Accounts"}</h2>
+                                <ul class="list-group">
+                                    {for accounts_list.iter().map(|acc| {
+                                        let is_editing = current_edit == Some(acc.id);
+                                        let acc_id = acc.id;
+                                        let start_edit = start_edit.clone();
+                                        let cancel_edit = cancel_edit.clone();
+                                        let save_edit = save_edit.clone();
+                                        let on_draft_change = on_edit_draft_change.clone();
+                                        let draft_value = (*edit_draft).clone();
+                                        let is_saving = *edit_saving;
+                                        html! {
+                                            <li class="list-group-item">
+                                                <div class="d-flex justify-content-between align-items-center">
+                                                    <span>
+                                                        <strong>{&acc.name}</strong>
+                                                        {format!(" (ID: {})", acc.id)}
+                                                    </span>
+                                                    if is_editing {
+                                                        <button
+                                                            class="btn btn-sm btn-outline-secondary"
+                                                            onclick={Callback::from(move |_| cancel_edit.emit(()))}
+                                                            disabled={is_saving}
+                                                        >
+                                                            {"Cancel"}
+                                                        </button>
+                                                    } else {
+                                                        <button
+                                                            class="btn btn-sm btn-outline-primary"
+                                                            onclick={Callback::from(move |_| start_edit.emit(acc_id))}
+                                                        >
+                                                            {"Edit blacklist"}
+                                                        </button>
+                                                    }
+                                                </div>
+                                                if is_editing {
+                                                    <div class="mt-3">
+                                                        <textarea
+                                                            class="form-control"
+                                                            rows="5"
+                                                            value={draft_value}
+                                                            onchange={on_draft_change}
+                                                            disabled={is_saving}
+                                                        />
+                                                        <div class="form-text mb-2">
+                                                            {"One tag per line. Leave empty to fall back to the default blacklist."}
+                                                        </div>
+                                                        <button
+                                                            class="btn btn-primary btn-sm"
+                                                            onclick={Callback::from(move |_| save_edit.emit(()))}
+                                                            disabled={is_saving}
+                                                        >
+                                                            { if is_saving { "Saving..." } else { "Save" } }
+                                                        </button>
+                                                    </div>
+                                                }
+                                            </li>
+                                        }
+                                    })}
+                                </ul>
+                            </div>
+                        </div>
+                    }
+
                     <div class="card shadow">
                         <div class="card-body">
                             <h1 class="card-title text-center mb-4">{"Create New Account"}</h1>
@@ -242,4 +499,9 @@ pub fn account_creator() -> Html {
             </div>
         </div>
     }
+}
+
+#[derive(serde::Deserialize)]
+struct BlacklistResponse {
+    blacklist: String,
 }

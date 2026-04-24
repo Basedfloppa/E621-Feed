@@ -159,13 +159,44 @@ shota";
     get_account_by_id(owner_token, account_id)
 }
 
+pub fn update_device_blacklist(
+    owner_token: &str,
+    account_id: i32,
+    blacklisted_tags: &str,
+) -> Result<TruncatedAccount, String> {
+    let conn = open_db()?;
+
+    let affected = conn
+        .execute(
+            "
+            UPDATE account_device_links
+            SET blacklisted_tags = ?3, last_seen_at = ?4
+            WHERE owner_token = ?1 AND account_id = ?2
+            ",
+            params![
+                owner_token,
+                account_id,
+                blacklisted_tags,
+                Utc::now().to_rfc3339(),
+            ],
+        )
+        .map_err(|e| format!("Failed to update device blacklist: {e}"))?;
+
+    if affected == 0 {
+        return Err("No account found for this device token".to_string());
+    }
+
+    drop(conn);
+    get_account_by_id(owner_token, account_id)
+}
+
 pub fn get_accounts_for_owner(owner_token: &str) -> Result<Vec<TruncatedAccount>, String> {
     let conn = open_db()?;
 
     let mut stmt = conn
         .prepare(
             r#"
-        SELECT a.id, a.name, a.blacklisted_tags
+        SELECT a.id, a.name, COALESCE(NULLIF(adl.blacklisted_tags, ''), a.blacklisted_tags)
         FROM accounts a
         INNER JOIN account_device_links adl ON adl.account_id = a.id
         WHERE adl.owner_token = ?
@@ -201,7 +232,7 @@ pub fn get_account_by_name(owner_token: &str, name: String) -> Result<TruncatedA
     let mut stmt = conn
         .prepare(
             r#"
-        SELECT a.id, a.name, a.blacklisted_tags
+        SELECT a.id, a.name, COALESCE(NULLIF(adl.blacklisted_tags, ''), a.blacklisted_tags)
         FROM accounts a
         INNER JOIN account_device_links adl ON adl.account_id = a.id
         WHERE a.name = ?1 AND adl.owner_token = ?2
@@ -237,7 +268,7 @@ pub fn get_account_by_id(owner_token: &str, id: i32) -> Result<TruncatedAccount,
     let mut stmt = conn
         .prepare(
             r#"
-        SELECT a.id, a.name, a.blacklisted_tags
+        SELECT a.id, a.name, COALESCE(NULLIF(adl.blacklisted_tags, ''), a.blacklisted_tags)
         FROM accounts a
         INNER JOIN account_device_links adl ON adl.account_id = a.id
         WHERE a.id = ?1 AND adl.owner_token = ?2
