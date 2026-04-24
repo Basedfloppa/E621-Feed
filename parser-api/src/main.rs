@@ -40,7 +40,7 @@ async fn process_posts(account_id: i32, owner_token: &str) -> Result<String, Str
         .map(|s| s.to_lowercase())
         .collect();
     let account = get_account_by_id(owner_token, account_id).map_err(|e| e.to_string())?;
-    let user = api::get_account(&account).await;
+    let user = api::get_account(&account).await?;
     let favcount = match user {
         UserApiResponse::FullCurrentUser(u) => u.favorite_count,
         UserApiResponse::FullUser(u) => u.favorite_count,
@@ -174,7 +174,9 @@ async fn get_recommendations(
 
     let account = get_account_by_id(owner_token, account_id)
         .map_err(|e| std::io::Error::other(format!("Failed to get account: {e}")))?;
-    let posts: Vec<Post> = api::get_posts(&account, page).await;
+    let posts: Vec<Post> = api::get_posts(&account, page)
+        .await
+        .map_err(|e| std::io::Error::other(format!("Failed to fetch posts: {e}")))?;
     upsert_catalog_posts(&posts)
         .map_err(|e| std::io::Error::other(format!("Failed to store recommendation catalog posts: {e}")))?;
     db::save_posts_tags_batch(&posts, &HashSet::new())
@@ -206,7 +208,7 @@ async fn get_recommendations(
         scored.retain(|sp| sp.score >= threshold);
     }
 
-    let scored = diversify_scored_posts(scored);
+    let scored = diversify_scored_posts(scored, &priors);
 
     Ok(Json(scored))
 }

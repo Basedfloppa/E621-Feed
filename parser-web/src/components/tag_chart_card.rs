@@ -25,10 +25,13 @@ pub fn tag_chart_card(props: &TagChartCardProps) -> Html {
     let current_tags = use_memo(
         (selected_group.clone(), props.tag_counts.clone()),
         |(group, tags)| {
-            tags.iter()
+            let mut filtered: Vec<TagCount> = tags
+                .iter()
                 .filter(|tag| tag.group_type == **group)
                 .cloned()
-                .collect::<Vec<TagCount>>()
+                .collect();
+            filtered.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.name.cmp(&b.name)));
+            filtered
         },
     );
 

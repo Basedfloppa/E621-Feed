@@ -1,11 +1,11 @@
 use serde::de::DeserializeOwned;
 use std::cell::Cell;
 use std::rc::Rc;
-use web_sys::js_sys;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::Closure;
 use wasm_bindgen_futures::spawn_local;
 use web_sys::HtmlInputElement;
+use web_sys::js_sys;
 use web_sys::{Request, RequestInit, RequestMode, Response, window};
 use yew::prelude::*;
 
@@ -305,26 +305,60 @@ pub fn feed_page() -> Html {
 
             <div class="row g-3 align-items-center feed-toolbar">
                 <div class="col-auto feed-affinity-col" id="feed-affinity">
-                    <label>{"Minimal affinity"}
+                    <label for="feed-affinity-input" class="form-label mb-1 d-block">
+                        {"Minimum affinity"}
+                        <small class="text-muted ms-1">
+                            { "(0 = show everything, 1 = only perfect matches)" }
+                        </small>
+                    </label>
+                    <div class="d-flex align-items-center gap-2 flex-wrap">
                         <input
+                            id="feed-affinity-input"
                             type="number"
                             class="form-control"
+                            style="max-width: 8rem"
                             value={affinity.to_string()}
                             step="0.01"
+                            min="0"
+                            max="1"
                             oninput={{
                                 let affinity = affinity.clone();
                                 Callback::from(move |e: InputEvent| {
                                     if let Some(target) = e.target() {
                                         if let Ok(input) = target.dyn_into::<HtmlInputElement>() {
                                             if let Ok(v) = input.value().parse::<f32>() {
-                                                affinity.set(v);
+                                                affinity.set(v.clamp(0.0, 1.0));
                                             }
                                         }
                                     }
                                 })
                             }}
                         />
-                    </label>
+                        <div class="btn-group btn-group-sm" role="group" aria-label="Affinity preset">
+                            {
+                                [
+                                    ("Wide", 0.05f32, "Show most posts — good for discovery."),
+                                    ("Balanced", 0.20f32, "Recommended starting point — filters out the least relevant posts."),
+                                    ("Strict", 0.40f32, "Only posts that match your profile well."),
+                                ].iter().map(|(label, value, tip)| {
+                                    let val = *value;
+                                    let active = (*affinity - val).abs() < 0.005;
+                                    let affinity = affinity.clone();
+                                    html! {
+                                        <button
+                                            type="button"
+                                            class={classes!("btn", "btn-outline-secondary", active.then_some("active"))}
+                                            title={ *tip }
+                                            aria-pressed={active.to_string()}
+                                            onclick={Callback::from(move |_| affinity.set(val))}
+                                        >
+                                            { *label }
+                                        </button>
+                                    }
+                                }).collect::<Html>()
+                            }
+                        </div>
+                    </div>
                 </div>
 
                 <div class="col-auto feed-grid-col" id="feed-grid">

@@ -34,14 +34,7 @@ body {
 .feed-statusbar .badge {
     max-width: min(48vw, 24rem);
     white-space: normal;
-}
-
-.post-breakdown {
-    gap: 0.25rem;
-}
-
-.post-breakdown .badge {
-    font-weight: 500;
+    pointer-events: auto;
 }
 
 .post-tags-preview {
@@ -128,10 +121,6 @@ body {
 
     .feed-grid .card {
         border-radius: 0.9rem;
-    }
-
-    .post-breakdown .badge {
-        font-size: 0.72rem;
     }
 }
 

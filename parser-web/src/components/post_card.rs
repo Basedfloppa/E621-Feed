@@ -5,8 +5,8 @@ use wasm_bindgen::JsValue;
 use wasm_bindgen::closure::Closure;
 use wasm_bindgen_futures::spawn_local;
 use web_sys::{
-    window, Element, IntersectionObserver, IntersectionObserverEntry, IntersectionObserverInit,
-    ResizeObserver, ResizeObserverEntry
+    Element, IntersectionObserver, IntersectionObserverEntry, IntersectionObserverInit,
+    ResizeObserver, ResizeObserverEntry, window,
 };
 use yew::prelude::*;
 
@@ -208,7 +208,8 @@ pub fn post_card(props: &PostCardProps) -> Html {
                                                 send_interaction(
                                                     backend_url,
                                                     FeedInteractionRequest {
-                                                        owner_token: get_or_create_owner_token().unwrap_or_default(),
+                                                        owner_token: get_or_create_owner_token()
+                                                            .unwrap_or_default(),
                                                         account_id,
                                                         post_id,
                                                         event_type:
@@ -384,11 +385,28 @@ pub fn post_card(props: &PostCardProps) -> Html {
                 {
                     if let Some(breakdown) = &props.breakdown {
                         html! {
-                            <div class="post-breakdown mb-1">
-                                <span class="badge text-muted">{ format!("Tag {:.2}", breakdown.tag_similarity) }</span>
-                                <span class="badge text-muted">{ format!("Interact {:.2}", breakdown.interaction_fit) }</span>
-                                <span class="badge text-muted">{ format!("Quality {:.2}", breakdown.quality_fit) }</span>
-                                <span class="badge text-muted">{ format!("Recent {:.2}", breakdown.recency_fit) }</span>
+                            <div class="mb-1 d-flex flex-wrap justify-content-center gap-1" aria-label="Score breakdown">
+                                <span class="badge text-muted text-truncate mw-100" title="Cosine similarity between this post's tags and your favourites (TF-IDF weighted).">
+                                    { format!("Tag {:.2}", breakdown.tag_similarity) }
+                                </span>
+                                <span class="badge text-muted text-truncate mw-100" title="How this post's score, favourites and comments compare to the typical post you like.">
+                                    { format!("Quality {:.2}", breakdown.quality_fit) }
+                                </span>
+                                <span class="badge text-muted text-truncate mw-100" title="How close this post's age is to the ages you usually engage with.">
+                                    { format!("Recent {:.2}", breakdown.recency_fit) }
+                                </span>
+                                <span class="badge text-muted text-truncate mw-100" title="Match between this post's rating (S/Q/E) and the rating mix of your favourites.">
+                                    { format!("Rating {:.2}", breakdown.rating_fit) }
+                                </span>
+                                <span class="badge text-muted text-truncate mw-100" title="Match between this post's media type (image / gif / video) and your usual preference.">
+                                    { format!("Media {:.2}", breakdown.media_fit) }
+                                </span>
+                                <span class="badge text-muted text-truncate mw-100" title="How this post's favourite count and duration compare to the norm in your profile.">
+                                    { format!("Popular {:.2}", breakdown.popularity_fit) }
+                                </span>
+                                <span class="badge text-muted text-truncate mw-100" title="Signal from your recent feed behaviour on this post's tags (views, opens, hides).">
+                                    { format!("Interact {:.2}", breakdown.interaction_fit) }
+                                </span>
                             </div>
                         }
                     } else {

@@ -1,5 +1,5 @@
 use crate::ThemeToggle;
-use yew::{Html, classes, function_component, html};
+use yew::{Callback, Html, MouseEvent, classes, function_component, html};
 use crate::models::{read_config_from_head, start_tour, AttachTo, Button, Step};
 
 #[function_component(Header)]
@@ -142,7 +142,7 @@ pub fn header() -> Html {
                 Step {
                     id: "feed-affinity".into(),
                     title: Some("Post affinity.".into()),
-                    text: "But before that you should pick post affinity, so you dont see things you may not like, i recomment to set it to 0.2 for the starters.".into(),
+                    text: "But before that you should pick post affinity, so you dont see things you may not like, I recommend to set it to 0.2 for the starters.".into(),
                     route: Some("/feed".into()),
                     attach_to: Some(AttachTo { element: "#feed-affinity".into(), on: "bottom".into() }),
                     buttons: Some(vec![
@@ -184,6 +184,16 @@ pub fn header() -> Html {
         }
     }
 
+    let restart_tour = Callback::from(|e: MouseEvent| {
+        e.prevent_default();
+        if let Some(win) = web_sys::window() {
+            if let Some(store) = win.local_storage().ok().flatten() {
+                let _ = store.set_item("finished_tour", "false");
+            }
+            let _ = win.location().reload();
+        }
+    });
+
     html! {
         <nav class="navbar bg-body-tertiary border" id="header">
             <div class="container-fluid d-flex align-items-center gap-3 flex-wrap">
@@ -219,7 +229,18 @@ pub fn header() -> Html {
                         </a>
                     </li>
                 </ul>
-                <ul class="navbar-nav flex-row ms-auto flex-wrap">
+                <ul class="navbar-nav flex-row ms-auto flex-wrap align-items-center">
+                    <li class="nav-item">
+                        <button
+                            type="button"
+                            class="btn btn-link nav-link"
+                            title="Replay the onboarding tour"
+                            aria-label="Replay onboarding tour"
+                            onclick={restart_tour}
+                        >
+                            <i class="bi bi-question-circle"></i>
+                        </button>
+                    </li>
                     <li class="nav-item">
                         <ThemeToggle />
                     </li>

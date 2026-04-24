@@ -123,7 +123,9 @@ pub fn account_creator() -> Html {
                         if resp.status() >= 200 && resp.status() < 300 {
                             let saved = resp.json::<UserInfo>().await.unwrap_or(account);
                             let mut accounts = (*saved_accounts).clone();
-                            if let Some(existing) = accounts.iter_mut().find(|acc| acc.id == saved.id) {
+                            if let Some(existing) =
+                                accounts.iter_mut().find(|acc| acc.id == saved.id)
+                            {
                                 *existing = saved.clone();
                             } else {
                                 accounts.push(saved);
@@ -200,14 +202,17 @@ pub fn account_creator() -> Html {
                                  <div class="mb-3">
                                     <label for="account-blacklist" class="form-label">{"Blacklist"}</label>
                                     <textarea
-                                        type="text-area"
                                         class="form-control"
                                         id="account-blacklist"
+                                        rows="5"
                                         value={(*blacklist).clone()}
                                         onchange={on_blacklist_change}
-                                        placeholder="Enter your blacklisted tags, each one on the separate line"
+                                        placeholder={"One tag per line, for example:\ngore\nyoung -rating:s\n-fav:yourname"}
                                         disabled={*loading}
                                     />
+                                    <div class="form-text">
+                                        { "Optional. Paste the blacklist from your e621 account settings, or leave empty to use the default." }
+                                    </div>
                                 </div>
 
                                 <button

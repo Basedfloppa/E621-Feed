@@ -195,7 +195,7 @@ pub async fn get_favorites(account: &TruncatedAccount, page: i32) -> Vec<Post> {
     posts
 }
 
-pub async fn get_account(account: &TruncatedAccount) -> UserApiResponse {
+pub async fn get_account(account: &TruncatedAccount) -> Result<UserApiResponse, String> {
     info!(
         "Fetching account: id={} name='{}'",
         account.id, account.name
@@ -210,14 +210,23 @@ pub async fn get_account(account: &TruncatedAccount) -> UserApiResponse {
             .basic_auth(cfg.admin_user.clone(), Some(cfg.admin_api.clone())),
     )
     .await
-    .expect("account request failed");
-    let body = resp.text().await.expect("account body read failed");
-    let parsed = json::from_str::<UserApiResponse>(&body).expect("account parse failed");
+    .map_err(|e| format!("account request failed: {e}"))?;
+    let status = resp.status();
+    let body = resp
+        .text()
+        .await
+        .map_err(|e| format!("account body read failed: {e}"))?;
+    if !status.is_success() {
+        let preview = body.chars().take(200).collect::<String>();
+        return Err(format!("account request returned {status}: {preview}"));
+    }
+    let parsed = json::from_str::<UserApiResponse>(&body)
+        .map_err(|e| format!("account parse failed: {e}"))?;
     info!("Fetched account successfully for id={}", account.id);
-    parsed
+    Ok(parsed)
 }
 
-pub async fn get_posts(account: &TruncatedAccount, page: Option<i32>) -> Vec<Post> {
+pub async fn get_posts(account: &TruncatedAccount, page: Option<i32>) -> Result<Vec<Post>, String> {
     let blacklisted_tags = account.blacklist.clone();
     let blacklist = if blacklisted_tags.trim().is_empty() {
         String::new()
@@ -246,13 +255,21 @@ pub async fn get_posts(account: &TruncatedAccount, page: Option<i32>) -> Vec<Pos
             .basic_auth(cfg.admin_user.clone(), Some(cfg.admin_api.clone())),
     )
     .await
-    .expect("posts request failed");
+    .map_err(|e| format!("posts request failed: {e}"))?;
 
-    let body = resp.text().await.expect("posts body read failed");
+    let status = resp.status();
+    let body = resp
+        .text()
+        .await
+        .map_err(|e| format!("posts body read failed: {e}"))?;
+    if !status.is_success() {
+        let preview = body.chars().take(200).collect::<String>();
+        return Err(format!("posts request returned {status}: {preview}"));
+    }
     let posts = json::from_str::<PostsApiResponse>(&body)
-        .expect("posts parse failed")
+        .map_err(|e| format!("posts parse failed: {e}"))?
         .posts;
 
     info!("Fetched {} posts", posts.len());
-    posts
+    Ok(posts)
 }

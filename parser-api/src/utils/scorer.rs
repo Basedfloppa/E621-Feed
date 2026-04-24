@@ -5,6 +5,10 @@ use std::collections::{HashMap, HashSet};
 use crate::models::{AccountPreferenceProfile, Post, ScoreBreakdown, ScoredPost, TagCount};
 use crate::utils::idf::IdfIndex;
 
+const DISCRETE_PREF_FLOOR: f32 = 0.05;
+const DIVERSITY_INTERACTION_DAMP: f32 = 0.35;
+const DIVERSITY_MAX_PENALTY: f32 = 0.45;
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct Priors {
     pub now: DateTime<Utc>,
@@ -14,13 +18,28 @@ pub struct Priors {
     pub mix_sim: f32,
     pub mix_quality: f32,
     pub mix_recency: f32,
-    pub mix_rating: Option<f32>,
-    pub mix_media: Option<f32>,
-    pub mix_popularity: Option<f32>,
-    pub mix_interaction: Option<f32>,
-    pub idf_lambda: Option<f32>,
-    pub idf_alpha:  Option<f32>,
+    pub mix_rating: f32,
+    pub mix_media: f32,
+    pub mix_popularity: f32,
+    pub mix_interaction: f32,
+    pub idf_lambda: f32,
+    pub idf_alpha: f32,
     pub freq_alpha: f32,
+
+    pub quality_w_absolute: f32,
+    pub quality_w_relative_score: f32,
+    pub quality_w_relative_comments: f32,
+
+    pub popularity_w_fav: f32,
+    pub popularity_w_duration: f32,
+
+    pub recency_w_global: f32,
+    pub recency_w_personal: f32,
+
+    pub diversity_window: usize,
+    pub diversity_w_artist: f32,
+    pub diversity_w_character: f32,
+    pub diversity_w_general: f32,
 }
 
 #[inline]
@@ -55,7 +74,25 @@ fn discrete_preference<'a>(items: impl Iterator<Item = (&'a str, i64)>, key: &st
         .map(|(_, count)| *count)
         .unwrap_or_default();
 
-    ((matched as f32 / total as f32).sqrt()).clamp(0.05, 1.0)
+    ((matched as f32 / total as f32).sqrt()).clamp(DISCRETE_PREF_FLOOR, 1.0)
+}
+
+#[inline]
+fn blend3(a: f32, wa: f32, b: f32, wb: f32, c: f32, wc: f32) -> f32 {
+    let sum = wa + wb + wc;
+    if sum <= 0.0 {
+        return 0.0;
+    }
+    ((wa * a + wb * b + wc * c) / sum).clamp(0.0, 1.0)
+}
+
+#[inline]
+fn blend2(a: f32, wa: f32, b: f32, wb: f32) -> f32 {
+    let sum = wa + wb;
+    if sum <= 0.0 {
+        return 0.0;
+    }
+    ((wa * a + wb * b) / sum).clamp(0.0, 1.0)
 }
 
 fn recency_fit(age_days: f32, priors: &Priors, profile: &AccountPreferenceProfile) -> f32 {
@@ -74,7 +111,12 @@ fn recency_fit(age_days: f32, priors: &Priors, profile: &AccountPreferenceProfil
         .exp()
         .clamp(0.0, 1.0);
 
-    (0.4 * global + 0.6 * personal).clamp(0.0, 1.0)
+    blend2(
+        global,
+        priors.recency_w_global,
+        personal,
+        priors.recency_w_personal,
+    )
 }
 
 fn quality_fit(origin_post: &Post, priors: &Priors, profile: &AccountPreferenceProfile) -> f32 {
@@ -92,10 +134,17 @@ fn quality_fit(origin_post: &Post, priors: &Priors, profile: &AccountPreferenceP
         profile.quality.avg_comment_count,
     );
 
-    (0.55 * absolute + 0.30 * relative_score + 0.15 * relative_comments).clamp(0.0, 1.0)
+    blend3(
+        absolute,
+        priors.quality_w_absolute,
+        relative_score,
+        priors.quality_w_relative_score,
+        relative_comments,
+        priors.quality_w_relative_comments,
+    )
 }
 
-fn popularity_fit(origin_post: &Post, profile: &AccountPreferenceProfile) -> f32 {
+fn popularity_fit(origin_post: &Post, priors: &Priors, profile: &AccountPreferenceProfile) -> f32 {
     let fav_fit = safe_ratio(origin_post.fav_count as f32, profile.quality.avg_fav_count);
     let duration_fit = if origin_post.duration.unwrap_or(0.0) > 0.0 || profile.quality.avg_duration > 0.0
     {
@@ -107,7 +156,12 @@ fn popularity_fit(origin_post: &Post, profile: &AccountPreferenceProfile) -> f32
         1.0
     };
 
-    (0.8 * fav_fit + 0.2 * duration_fit).clamp(0.0, 1.0)
+    blend2(
+        fav_fit,
+        priors.popularity_w_fav,
+        duration_fit,
+        priors.popularity_w_duration,
+    )
 }
 
 fn rating_fit(origin_post: &Post, profile: &AccountPreferenceProfile) -> f32 {
@@ -129,11 +183,19 @@ fn media_fit(origin_post: &Post, profile: &AccountPreferenceProfile) -> f32 {
     )
 }
 
-fn interaction_fit(origin_post: &Post, profile: &AccountPreferenceProfile) -> f32 {
+fn interaction_fit(
+    origin_post: &Post,
+    group_wts: &HashMap<&str, f32>,
+    profile: &AccountPreferenceProfile,
+) -> f32 {
     let mut total_weight = 0.0f32;
     let mut weighted = 0.0f32;
 
-    let mut apply = |tags: &[String], group: &str, group_weight: f32| {
+    let mut apply = |tags: &[String], group: &str| {
+        let group_weight = gw(group_wts, group);
+        if group_weight <= 0.0 {
+            return;
+        }
         for tag in tags {
             if tag.is_empty() {
                 continue;
@@ -147,12 +209,12 @@ fn interaction_fit(origin_post: &Post, profile: &AccountPreferenceProfile) -> f3
         }
     };
 
-    apply(&origin_post.tags.artist, "artist", 1.20);
-    apply(&origin_post.tags.character, "character", 1.10);
-    apply(&origin_post.tags.copyright, "copyright", 1.00);
-    apply(&origin_post.tags.species, "species", 0.95);
-    apply(&origin_post.tags.general, "general", 0.75);
-    apply(&origin_post.tags.lore, "lore", 0.60);
+    apply(&origin_post.tags.artist, "artist");
+    apply(&origin_post.tags.character, "character");
+    apply(&origin_post.tags.copyright, "copyright");
+    apply(&origin_post.tags.species, "species");
+    apply(&origin_post.tags.general, "general");
+    apply(&origin_post.tags.lore, "lore");
 
     if total_weight <= 0.0 {
         0.5
@@ -174,17 +236,19 @@ fn overlap_ratio(left: &[String], right: &[String]) -> f32 {
     if union <= 0.0 { 0.0 } else { intersection / union }
 }
 
-fn diversity_penalty(candidate: &ScoredPost, selected: &[ScoredPost]) -> f32 {
+fn diversity_penalty(candidate: &ScoredPost, selected: &[ScoredPost], priors: &Priors) -> f32 {
     let mut penalty = 0.0f32;
 
-    for chosen in selected.iter().rev().take(8) {
+    let window = priors.diversity_window.max(1);
+
+    for chosen in selected.iter().rev().take(window) {
         let same_artist = overlap_ratio(&candidate.post.tags.artist, &chosen.post.tags.artist);
         let same_character = overlap_ratio(&candidate.post.tags.character, &chosen.post.tags.character);
         let same_general = overlap_ratio(&candidate.post.tags.general, &chosen.post.tags.general);
 
-        penalty += same_artist * 0.22;
-        penalty += same_character * 0.16;
-        penalty += same_general * 0.08;
+        penalty += same_artist * priors.diversity_w_artist;
+        penalty += same_character * priors.diversity_w_character;
+        penalty += same_general * priors.diversity_w_general;
     }
 
     let interaction_bonus = candidate
@@ -193,17 +257,18 @@ fn diversity_penalty(candidate: &ScoredPost, selected: &[ScoredPost]) -> f32 {
         .map(|b| b.interaction_fit)
         .unwrap_or(0.5);
 
-    (penalty * (1.0 - 0.35 * interaction_bonus)).clamp(0.0, 0.45)
+    (penalty * (1.0 - DIVERSITY_INTERACTION_DAMP * interaction_bonus))
+        .clamp(0.0, DIVERSITY_MAX_PENALTY)
 }
 
-pub fn diversify_scored_posts(mut posts: Vec<ScoredPost>) -> Vec<ScoredPost> {
-    posts.sort_by(|a, b| {
+pub fn diversify_scored_posts(posts: Vec<ScoredPost>, priors: &Priors) -> Vec<ScoredPost> {
+    let mut pool = posts;
+    pool.sort_by(|a, b| {
         b.score
             .partial_cmp(&a.score)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
 
-    let mut pool = posts;
     let mut selected: Vec<ScoredPost> = Vec::with_capacity(pool.len());
 
     while !pool.is_empty() {
@@ -211,14 +276,14 @@ pub fn diversify_scored_posts(mut posts: Vec<ScoredPost>) -> Vec<ScoredPost> {
         let mut best_value = f32::MIN;
 
         for (idx, candidate) in pool.iter().enumerate() {
-            let adjusted = candidate.score - diversity_penalty(candidate, &selected);
+            let adjusted = candidate.score - diversity_penalty(candidate, &selected, priors);
             if adjusted > best_value {
                 best_value = adjusted;
                 best_idx = idx;
             }
         }
 
-        selected.push(pool.remove(best_idx));
+        selected.push(pool.swap_remove(best_idx));
     }
 
     selected
@@ -235,8 +300,8 @@ pub fn score_post(
     let group_wts_hash: HashMap<&str, f32> =
         group_wts.iter().map(|(k, v)| (k.as_str(), *v)).collect();
 
-    let lambda = priors.idf_lambda.unwrap_or(0.4);
-    let alpha  = priors.idf_alpha.unwrap_or(0.5);
+    let lambda = priors.idf_lambda;
+    let alpha  = priors.idf_alpha;
 
     let mut user: HashMap<String, f32> = HashMap::default();
     let mut u_norm_sq = 0.0f32;
@@ -296,32 +361,28 @@ pub fn score_post(
 
     let age_days = (priors.now - origin_post.created_at).num_seconds() as f32 / 86_400.0;
     let quality = quality_fit(origin_post, priors, profile);
-    let popularity = popularity_fit(origin_post, profile);
+    let popularity = popularity_fit(origin_post, priors, profile);
     let rating = rating_fit(origin_post, profile);
     let media = media_fit(origin_post, profile);
-    let interaction = interaction_fit(origin_post, profile);
+    let interaction = interaction_fit(origin_post, &group_wts_hash, profile);
     let recency = recency_fit(age_days, priors, profile);
 
-    let mix_rating = priors.mix_rating.unwrap_or(0.12);
-    let mix_media = priors.mix_media.unwrap_or(0.08);
-    let mix_popularity = priors.mix_popularity.unwrap_or(0.15);
-    let mix_interaction = priors.mix_interaction.unwrap_or(0.14);
     let sum = priors.mix_sim
         + priors.mix_quality
         + priors.mix_recency
-        + mix_rating
-        + mix_media
-        + mix_popularity
-        + mix_interaction;
+        + priors.mix_rating
+        + priors.mix_media
+        + priors.mix_popularity
+        + priors.mix_interaction;
     let (ms, mq, mr, mrat, mmed, mpop, mint) = if sum > 0.0 {
         (
             priors.mix_sim / sum,
             priors.mix_quality / sum,
             priors.mix_recency / sum,
-            mix_rating / sum,
-            mix_media / sum,
-            mix_popularity / sum,
-            mix_interaction / sum,
+            priors.mix_rating / sum,
+            priors.mix_media / sum,
+            priors.mix_popularity / sum,
+            priors.mix_interaction / sum,
         )
     } else {
         (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)

@@ -1,6 +1,7 @@
 use reqwasm::http::Request;
 use yew::{
-    Callback, Html, MouseEvent, Properties, UseStateHandle, function_component, html, use_state,
+    Callback, Html, MouseEvent, Properties, UseStateHandle, function_component, html,
+    use_effect_with, use_state,
 };
 
 use crate::models::get_or_create_owner_token;
@@ -75,11 +76,13 @@ pub fn fetch_analyze_button(props: &AnalyzeButtonProps) -> Html {
                             }
                         } else {
                             let status = response.status();
-                            let text = response
-                                .text()
-                                .await
-                                .unwrap_or_else(|_| "Unknown error".into());
-                            error.set(Some(format!("Error {status}: {text}")));
+                            if status != 404 {
+                                let text = response
+                                    .text()
+                                    .await
+                                    .unwrap_or_else(|_| "Unknown error".into());
+                                error.set(Some(format!("Error {status}: {text}")));
+                            }
                         }
                     }
                     Err(e) => {
@@ -161,41 +164,50 @@ pub fn fetch_analyze_button(props: &AnalyzeButtonProps) -> Html {
         })
     };
 
+    {
+        let fetch_tags = fetch_tags.clone();
+        use_effect_with((*props.found_user).clone(), move |user| {
+            if user.is_some() {
+                if let Ok(e) = MouseEvent::new("click") {
+                    fetch_tags.emit(e);
+                }
+            }
+        });
+    }
+
+    let busy = *is_analyzing || *is_fetching;
+    let label = if *is_analyzing {
+        "Analyzing..."
+    } else if *is_fetching {
+        "Loading..."
+    } else if props.tag_count.is_empty() {
+        "Analyze Tags"
+    } else {
+        "Re-analyze Tags"
+    };
+
     html! {
         <div class="d-grid gap-2 mb-4">
             <button
                 class="btn btn-warning"
                 onclick={analyze_tags}
                 disabled={*props.is_loading || props.found_user.is_none()}
+                aria-busy={busy.to_string()}
             >
-                {if *is_analyzing {
+                { if busy {
                     html! {
                         <span>
                             <span class="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></span>
-                            {"Analyzing..."}
+                            { label }
                         </span>
                     }
                 } else {
-                    html! {"Analyze Tags"}
+                    html! { { label } }
                 }}
             </button>
-
-            <button
-                class="btn btn-success"
-                onclick={fetch_tags}
-                disabled={*props.is_loading || props.found_user.is_none()}
-            >
-                {if *is_fetching {
-                    html! {
-                        <span>
-                            <span class="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></span>
-                            {"Fetching..."}
-                        </span>
-                    }
-                } else {
-                    html! {"Fetch Tag Counts"}
-                }}
-            </button>
+            <small class="text-muted">
+                { "Scans your favourites on e621 and builds a tag profile used for recommendations. This may take a minute for large accounts." }
+            </small>
         </div>
     }
 }

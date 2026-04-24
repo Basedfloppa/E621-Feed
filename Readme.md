@@ -62,8 +62,10 @@ idf_max = 100.0
 [priors]
 now = "2000-1-01T12:00:00Z" # dummy value, will be replaced with current date
 recency_tau_days = 10.0
+
 quality_a = 0.003
 quality_b = 0.00035
+
 mix_sim = 0.48
 mix_quality = 0.10
 mix_recency = 0.07
@@ -71,9 +73,25 @@ mix_rating = 0.10
 mix_media = 0.08
 mix_popularity = 0.07
 mix_interaction = 0.10
+
 idf_lambda = 0.35
 idf_alpha = 0.65
 freq_alpha = 0.45
+
+quality_w_absolute = 0.55
+quality_w_relative_score = 0.30
+quality_w_relative_comments = 0.15
+
+popularity_w_fav = 0.80
+popularity_w_duration = 0.20
+
+recency_w_global = 0.40
+recency_w_personal = 0.60
+
+diversity_window = 32
+diversity_w_artist = 0.22
+diversity_w_character = 0.16
+diversity_w_general = 0.08
 ```
 
 Small guide on scoring vars
@@ -95,6 +113,17 @@ Small guide on scoring vars
 |`mix_media`|media-type preference matters less|media-type preference matters more|
 |`mix_popularity`|popularity fit matters less|feed tracks account's usual popularity range more|
 |`mix_interaction`|feed history matters less|recent browsing behavior matters more|
+|`quality_w_absolute`|trust user-relative score/comment ratios more|rely more on raw site score + fav thresholds|
+|`quality_w_relative_score`|absolute score dominates|user's typical score level matters more|
+|`quality_w_relative_comments`|comments barely count|comment volume vs user's norm matters more|
+|`popularity_w_fav`|duration dominates|fav count dominates|
+|`popularity_w_duration`|duration ignored|video/animation length near user's norm matters more|
+|`recency_w_global`|personal age profile dominates|newer posts always win regardless of user pattern|
+|`recency_w_personal`|uniform newer-is-better|posts close to user's typical age are favored|
+|`diversity_window`|shorter memory; repeats can resurface|longer memory; more variety per page|
+|`diversity_w_artist`|same artist can stack up|harder cap on back-to-back artists|
+|`diversity_w_character`|same character can stack up|harder cap on repeated characters|
+|`diversity_w_general`|general-tag overlap ignored|penalises posts with too-similar tag sets|
 
 http://localhost:8080
 
