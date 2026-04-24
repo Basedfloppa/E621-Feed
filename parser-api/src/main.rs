@@ -4,14 +4,15 @@ extern crate rocket;
 use chrono::Utc;
 use rocket::{State, get};
 use rocket::{futures::lock::Mutex, serde::json::Json};
+use rocket_cors::AllowedOrigins;
 use rusqlite::Result;
 use std::collections::HashSet;
-use rocket_cors::AllowedOrigins;
 
 use crate::models::{
     BlacklistPayload, DeviceScopedAccount, FeedInteractionRequest, ScoredPost, TruncatedAccount,
     UserApiResponse, cfg, default_path, reload_from, start_config_watcher,
 };
+use crate::utils::{ScoringContext, current_idf, diversify_scored_posts, mark_idf_dirty};
 use crate::{
     db::{
         DbInit, get_account_by_id, get_account_by_name, get_account_preference_profile,
@@ -19,11 +20,10 @@ use crate::{
         set_account, update_device_blacklist, upsert_catalog_posts,
     },
     models::{Post, TagCount},
-    rocket::serde::json
+    rocket::serde::json,
 };
 use rocket_okapi::okapi::openapi3::OpenApi;
 use rocket_okapi::{openapi, openapi_get_routes_spec, settings::OpenApiSettings, swagger_ui::*};
-use crate::utils::{IdfIndex, diversify_scored_posts, score_post};
 
 mod api;
 mod db;
@@ -34,11 +34,7 @@ mod utils;
 #[post("/process/<account_id>?<owner_token>")]
 async fn process_posts(account_id: i32, owner_token: &str) -> Result<String, String> {
     let cfg = cfg();
-    let blacklist: HashSet<String> = cfg
-        .tag_blacklist
-        .iter()
-        .map(|s| s.to_lowercase())
-        .collect();
+    let blacklist: HashSet<String> = cfg.tag_blacklist.iter().map(|s| s.to_lowercase()).collect();
     let account = get_account_by_id(owner_token, account_id).map_err(|e| e.to_string())?;
     let user = api::get_account(&account).await?;
     let favcount = match user {
@@ -61,6 +57,7 @@ async fn process_posts(account_id: i32, owner_token: &str) -> Result<String, Str
 
         db::save_posts_tags_batch(&posts, &blacklist)
             .map_err(|e| format!("Failed to save tags for page {i}: {e}"))?;
+        mark_idf_dirty();
     }
 
     refresh_account_profiles(account_id)
@@ -84,7 +81,10 @@ fn strip_blacklisted_tags(mut p: Post, blacklist: &HashSet<String>) -> Post {
 
 #[openapi(tag = "Accounts")]
 #[get("/account/<account_id>/tag_counts?<owner_token>")]
-async fn get_account_tag_counts(account_id: i32, owner_token: &str) -> Result<Json<Vec<TagCount>>, String> {
+async fn get_account_tag_counts(
+    account_id: i32,
+    owner_token: &str,
+) -> Result<Json<Vec<TagCount>>, String> {
     get_account_by_id(owner_token, account_id)
         .map_err(|e| format!("Failed to validate account access: {e}"))?;
     match get_tag_counts(account_id) {
@@ -131,7 +131,9 @@ async fn list_accounts(owner_token: &str) -> Result<Json<Vec<TruncatedAccount>>,
 
 #[openapi(tag = "Accounts")]
 #[post("/account", data = "<account>")]
-async fn create_account(account: Json<DeviceScopedAccount>) -> Result<Json<TruncatedAccount>, String> {
+async fn create_account(
+    account: Json<DeviceScopedAccount>,
+) -> Result<Json<TruncatedAccount>, String> {
     match set_account(
         &account.owner_token,
         account.id,
@@ -207,38 +209,31 @@ async fn get_recommendations(
     let posts: Vec<Post> = api::get_posts(&account, page)
         .await
         .map_err(|e| std::io::Error::other(format!("Failed to fetch posts: {e}")))?;
-    upsert_catalog_posts(&posts)
-        .map_err(|e| std::io::Error::other(format!("Failed to store recommendation catalog posts: {e}")))?;
+    upsert_catalog_posts(&posts).map_err(|e| {
+        std::io::Error::other(format!("Failed to store recommendation catalog posts: {e}"))
+    })?;
     db::save_posts_tags_batch(&posts, &HashSet::new())
         .map_err(|e| std::io::Error::other(format!("Failed to store recommendation tags: {e}")))?;
-    let idf = IdfIndex::from_db(db::get_tags_df, db::post_count, priors.now)
+    mark_idf_dirty();
+    let idf = current_idf()
         .map_err(|e| std::io::Error::other(format!("Failed to build IDF index: {e}")))?;
+
+    let ctx = ScoringContext::new(&tags, &cfg.group_weights, &priors, &idf, &profile);
 
     let mut scored: Vec<ScoredPost> = Vec::with_capacity(posts.len());
     for post in posts {
-        let tmp_post = post.clone();
-
-        let (s, breakdown) = score_post(
-            &tags,
-            &post,
-            &cfg.group_weights,
-            &priors,
-            &idf,
-            &profile,
-        );
-
+        let (s, breakdown) = ctx.score(&post);
         scored.push(ScoredPost {
-            post: tmp_post,
+            post,
             score: s,
             breakdown: Some(breakdown),
         });
     }
 
+    let mut scored = diversify_scored_posts(scored, &priors);
     if let Some(threshold) = affinity_threshold {
         scored.retain(|sp| sp.score >= threshold);
     }
-
-    let scored = diversify_scored_posts(scored, &priors);
 
     Ok(Json(scored))
 }

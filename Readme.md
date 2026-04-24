@@ -58,13 +58,15 @@ idf_max = 100.0
 'species' = 1.1
 'general' = 1.0
 'lore' = 0.45
+'meta' = 0.0
 
 [priors]
 now = "2000-1-01T12:00:00Z" # dummy value, will be replaced with current date
 recency_tau_days = 10.0
 
-quality_a = 0.003
-quality_b = 0.00035
+quality_a = 0.50
+quality_b = 0.20
+quality_log_bias = -3.0
 
 mix_sim = 0.48
 mix_quality = 0.10
@@ -92,6 +94,13 @@ diversity_window = 32
 diversity_w_artist = 0.22
 diversity_w_character = 0.16
 diversity_w_general = 0.08
+
+# Optional (defaults shown)
+discrete_smoothing_alpha = 1.0
+strong_negative_count = 3
+strong_negative_ratio = 2.0
+strong_negative_penalty = 0.40
+recency_personal_floor_frac = 1.0
 ```
 
 Small guide on scoring vars
@@ -124,6 +133,12 @@ Small guide on scoring vars
 |`diversity_w_artist`|same artist can stack up|harder cap on back-to-back artists|
 |`diversity_w_character`|same character can stack up|harder cap on repeated characters|
 |`diversity_w_general`|general-tag overlap ignored|penalises posts with too-similar tag sets|
+|`quality_log_bias`|more posts register as "quality"|raises the bar before the absolute-quality sigmoid lights up|
+|`discrete_smoothing_alpha`|rating/media prefs react sharply to small samples|cold-start profiles stay near neutral longer|
+|`strong_negative_count`|one or two dislikes can veto a post|requires a pattern of dislikes before vetoing|
+|`strong_negative_ratio`|dislikes trigger veto even if you sometimes opened the tag|negatives must clearly outweigh positives to veto|
+|`strong_negative_penalty`|vetoed posts barely affected|vetoed posts pushed far down the feed (1.0 = zeroed)|
+|`recency_personal_floor_frac`|personal recency window can collapse tight|personal recency always at least this fraction of `recency_tau_days`|
 
 http://localhost:8080
 
