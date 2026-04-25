@@ -74,9 +74,9 @@ impl ViewTransform {
     }
 }
 
-const ZOOM_MIN: f64 = 0.4;
-const ZOOM_MAX: f64 = 100.0;
-const ZOOM_STEP: f64 = 1.0;
+const ZOOM_MIN: f64 = 0.5;
+const ZOOM_MAX: f64 = 2.5;
+const ZOOM_STEP: f64 = 1.1;
 
 /// Barnes-Hut θ. 0.9 is a good legibility/speed tradeoff for n ≤ 1000:
 /// distant clusters use centre-of-mass, nearby pairs are exact.
