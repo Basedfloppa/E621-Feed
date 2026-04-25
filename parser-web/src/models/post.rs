@@ -193,3 +193,24 @@ pub struct TagRelationGraphPayload {
     pub catalog_post_count: i64,
     pub account_post_count: i64,
 }
+
+#[derive(Deserialize, Serialize, Clone, PartialEq, Debug)]
+#[serde(rename_all = "snake_case")]
+pub enum ProcessJobPhase {
+    Running,
+    Done,
+    Failed,
+}
+
+#[derive(Deserialize, Serialize, Clone, PartialEq, Debug)]
+pub struct ProcessJobState {
+    pub account_id: i32,
+    pub phase: ProcessJobPhase,
+    pub pages_total: i32,
+    pub pages_done: i32,
+    #[serde(default)]
+    pub error: Option<String>,
+    pub started_at: String,
+    #[serde(default)]
+    pub finished_at: Option<String>,
+}

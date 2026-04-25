@@ -1,0 +1,103 @@
+//! Background-job tracking for long-running tasks (currently `/process`).
+//!
+//! State lives in-process: a `RwLock<HashMap<account_id, ProcessJobState>>`.
+//! Survives across requests but not server restarts — that's intentional. If
+//! a job dies along with the process, the user just retries.
+
+use std::collections::HashMap;
+use std::sync::{OnceLock, RwLock};
+
+use chrono::{DateTime, Utc};
+use rocket::serde::Serialize;
+use schemars::JsonSchema;
+
+#[derive(Debug, Serialize, Clone, Copy, JsonSchema, PartialEq, Eq)]
+#[serde(crate = "rocket::serde", rename_all = "snake_case")]
+pub enum ProcessJobPhase {
+    Running,
+    Done,
+    Failed,
+}
+
+#[derive(Debug, Serialize, Clone, JsonSchema)]
+#[serde(crate = "rocket::serde")]
+pub struct ProcessJobState {
+    pub account_id: i32,
+    pub phase: ProcessJobPhase,
+    pub pages_total: i32,
+    pub pages_done: i32,
+    pub error: Option<String>,
+    #[schemars(with = "String", description = "RFC3339 timestamp")]
+    pub started_at: DateTime<Utc>,
+    #[schemars(with = "Option<String>", description = "RFC3339 timestamp")]
+    pub finished_at: Option<DateTime<Utc>>,
+}
+
+pub enum BeginResult {
+    Started(ProcessJobState),
+    AlreadyRunning(ProcessJobState),
+}
+
+static JOBS: OnceLock<RwLock<HashMap<i32, ProcessJobState>>> = OnceLock::new();
+
+fn registry() -> &'static RwLock<HashMap<i32, ProcessJobState>> {
+    JOBS.get_or_init(|| RwLock::new(HashMap::new()))
+}
+
+pub fn get_state(account_id: i32) -> Option<ProcessJobState> {
+    registry().read().ok()?.get(&account_id).cloned()
+}
+
+pub fn try_begin(account_id: i32) -> BeginResult {
+    let mut map = registry().write().unwrap_or_else(|e| e.into_inner());
+    if let Some(existing) = map.get(&account_id) {
+        if existing.phase == ProcessJobPhase::Running {
+            return BeginResult::AlreadyRunning(existing.clone());
+        }
+    }
+    let state = ProcessJobState {
+        account_id,
+        phase: ProcessJobPhase::Running,
+        pages_total: 0,
+        pages_done: 0,
+        error: None,
+        started_at: Utc::now(),
+        finished_at: None,
+    };
+    map.insert(account_id, state.clone());
+    BeginResult::Started(state)
+}
+
+pub fn set_pages_total(account_id: i32, total: i32) {
+    if let Ok(mut map) = registry().write() {
+        if let Some(s) = map.get_mut(&account_id) {
+            s.pages_total = total;
+        }
+    }
+}
+
+pub fn record_page_done(account_id: i32) {
+    if let Ok(mut map) = registry().write() {
+        if let Some(s) = map.get_mut(&account_id) {
+            s.pages_done += 1;
+        }
+    }
+}
+
+pub fn finish(account_id: i32, result: Result<(), String>) {
+    if let Ok(mut map) = registry().write() {
+        if let Some(s) = map.get_mut(&account_id) {
+            match result {
+                Ok(()) => {
+                    s.phase = ProcessJobPhase::Done;
+                    s.error = None;
+                }
+                Err(e) => {
+                    s.phase = ProcessJobPhase::Failed;
+                    s.error = Some(e);
+                }
+            }
+            s.finished_at = Some(Utc::now());
+        }
+    }
+}

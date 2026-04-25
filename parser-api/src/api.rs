@@ -1,5 +1,6 @@
 use reqwest::{Client, Response, StatusCode};
 use rocket::serde::json;
+use std::sync::LazyLock;
 use std::time::Duration;
 use tokio::time::sleep;
 use urlencoding::encode;
@@ -25,18 +26,25 @@ fn build_url(path: &str, params: &[(&str, String)]) -> String {
     url
 }
 
-fn get_client() -> Client {
-    info!("Building HTTP client");
+static HTTP_CLIENT: LazyLock<Client> = LazyLock::new(|| {
+    info!("Building shared HTTP client");
     Client::builder()
         .user_agent(format!("account scraper (by {0})", cfg().admin_user))
         .connect_timeout(Duration::from_secs(10))
         .timeout(Duration::from_secs(30))
+        .pool_idle_timeout(Some(Duration::from_secs(90)))
+        .pool_max_idle_per_host(8)
+        .tcp_keepalive(Some(Duration::from_secs(30)))
         .build()
         .map_err(|e| {
             error!("Failed to build client: {e}");
             format!("Failed to build client: {e}")
         })
         .unwrap()
+});
+
+fn get_client() -> &'static Client {
+    &HTTP_CLIENT
 }
 
 async fn send_with_retry(builder: reqwest::RequestBuilder) -> Result<Response, String> {

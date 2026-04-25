@@ -1,7 +1,7 @@
 use arc_swap::ArcSwap;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::{Arc, LazyLock};
 
 pub type GroupKey = u8;
 
@@ -110,24 +110,44 @@ impl TagRelationGraph {
 static GLOBAL_CACHE: LazyLock<ArcSwap<TagRelationGraph>> =
     LazyLock::new(|| ArcSwap::from_pointee(TagRelationGraph::empty()));
 static GLOBAL_DIRTY: AtomicBool = AtomicBool::new(true);
-static GLOBAL_REBUILD_LOCK: Mutex<()> = Mutex::new(());
+static GLOBAL_REBUILDING: AtomicBool = AtomicBool::new(false);
 
 pub fn mark_global_relation_dirty() {
     GLOBAL_DIRTY.store(true, Ordering::Release);
+    spawn_rebuild_if_needed();
 }
 
-pub fn current_global_relation() -> rusqlite::Result<Arc<TagRelationGraph>> {
-    if GLOBAL_DIRTY.load(Ordering::Acquire) {
-        let _guard = GLOBAL_REBUILD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        if GLOBAL_DIRTY.swap(false, Ordering::AcqRel) {
-            match crate::db::load_global_tag_relation() {
-                Ok(new) => GLOBAL_CACHE.store(Arc::new(new)),
-                Err(e) => {
-                    GLOBAL_DIRTY.store(true, Ordering::Release);
-                    return Err(e);
+fn spawn_rebuild_if_needed() {
+    if GLOBAL_REBUILDING.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    std::thread::Builder::new()
+        .name("tag-relation-rebuild".to_string())
+        .spawn(|| {
+            loop {
+                GLOBAL_DIRTY.store(false, Ordering::Release);
+                match crate::db::load_global_tag_relation() {
+                    Ok(new) => GLOBAL_CACHE.store(Arc::new(new)),
+                    Err(e) => {
+                        eprintln!("[tag-relation] rebuild failed: {e}");
+                        GLOBAL_DIRTY.store(true, Ordering::Release);
+                        break;
+                    }
+                }
+                if !GLOBAL_DIRTY.load(Ordering::Acquire) {
+                    break;
                 }
             }
-        }
+            GLOBAL_REBUILDING.store(false, Ordering::Release);
+        })
+        .expect("spawn tag-relation-rebuild thread");
+}
+
+/// Returns the current tag-relation cache. Never blocks; rebuilds happen in
+/// the background and the call returns the previous snapshot in the meantime.
+pub fn current_global_relation() -> Arc<TagRelationGraph> {
+    if GLOBAL_DIRTY.load(Ordering::Acquire) {
+        spawn_rebuild_if_needed();
     }
-    Ok(GLOBAL_CACHE.load_full())
+    GLOBAL_CACHE.load_full()
 }

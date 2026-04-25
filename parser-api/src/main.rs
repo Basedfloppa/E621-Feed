@@ -3,7 +3,10 @@ extern crate rocket;
 
 use chrono::Utc;
 use rocket::{State, get};
-use rocket::{futures::lock::Mutex, serde::json::Json};
+use rocket::{
+    futures::{lock::Mutex, stream::StreamExt},
+    serde::json::Json,
+};
 use rocket_cors::AllowedOrigins;
 use rusqlite::Result;
 use std::collections::HashSet;
@@ -24,49 +27,106 @@ use crate::{
         upsert_catalog_posts,
     },
     models::{Post, TagCount},
-    rocket::serde::json,
 };
 use rocket_okapi::okapi::openapi3::OpenApi;
 use rocket_okapi::{openapi, openapi_get_routes_spec, settings::OpenApiSettings, swagger_ui::*};
 
 mod api;
 mod db;
+mod jobs;
 mod models;
 mod utils;
 
+use jobs::{BeginResult, ProcessJobState};
+
+const PROCESS_FETCH_CONCURRENCY: usize = 4;
+
+/// Kicks off a background `/process` job and returns immediately with the
+/// current job state. If a job for this account is already running, returns
+/// the existing state instead of starting a new one.
 #[openapi(tag = "Processing")]
 #[post("/process/<account_id>?<owner_token>")]
-async fn process_posts(account_id: i32, owner_token: &str) -> Result<String, String> {
+async fn process_posts(
+    account_id: i32,
+    owner_token: &str,
+) -> Result<Json<ProcessJobState>, String> {
+    let _ = get_account_by_id(owner_token, account_id).map_err(|e| e.to_string())?;
+
+    match jobs::try_begin(account_id) {
+        BeginResult::AlreadyRunning(state) => Ok(Json(state)),
+        BeginResult::Started(state) => {
+            let owner_token_owned = owner_token.to_string();
+            tokio::spawn(async move {
+                let result = run_process(account_id, owner_token_owned).await;
+                if let Err(ref e) = result {
+                    warn!("/process for {account_id} failed: {e}");
+                }
+                jobs::finish(account_id, result);
+            });
+            Ok(Json(state))
+        }
+    }
+}
+
+#[openapi(tag = "Processing")]
+#[get("/process/<account_id>/status?<owner_token>")]
+async fn process_status(
+    account_id: i32,
+    owner_token: &str,
+) -> Result<Json<Option<ProcessJobState>>, String> {
+    let _ = get_account_by_id(owner_token, account_id).map_err(|e| e.to_string())?;
+    Ok(Json(jobs::get_state(account_id)))
+}
+
+async fn run_process(account_id: i32, owner_token: String) -> Result<(), String> {
     let cfg = cfg();
-    let blacklist: HashSet<String> = cfg.tag_blacklist.iter().map(|s| s.to_lowercase()).collect();
-    let account = get_account_by_id(owner_token, account_id).map_err(|e| e.to_string())?;
+    let blacklist: HashSet<String> =
+        cfg.tag_blacklist.iter().map(|s| s.to_lowercase()).collect();
+
+    let account = get_account_by_id(&owner_token, account_id).map_err(|e| e.to_string())?;
     let user = api::get_account(&account).await?;
     let favcount = match user {
         UserApiResponse::FullCurrentUser(u) => u.favorite_count,
         UserApiResponse::FullUser(u) => u.favorite_count,
     };
-    let pages = (favcount / cfg.posts_limit) + (if favcount % cfg.posts_limit > 0 { 1 } else { 0 });
+    let pages =
+        (favcount / cfg.posts_limit) + (if favcount % cfg.posts_limit > 0 { 1 } else { 0 });
+    jobs::set_pages_total(account_id, pages);
 
-    db::drop_account_posts(account_id).map_err(|e| format!("Failed to drop account posts: {e}"))?;
+    db::drop_account_posts(account_id)
+        .map_err(|e| format!("Failed to drop account posts: {e}"))?;
 
-    for i in 1..=pages {
-        let raw_posts = api::get_favorites(&account, i).await;
-        let posts: Vec<Post> = raw_posts
-            .into_iter()
-            .map(|p| strip_blacklisted_tags(p, &blacklist))
-            .collect();
+    // Fetch pages in parallel; writes stay serial because SQLite is
+    // single-writer anyway.
+    let account_for_fetch = account.clone();
+    let blacklist_for_fetch = blacklist.clone();
+    let mut stream = rocket::futures::stream::iter(1..=pages)
+        .map(move |i| {
+            let acc = account_for_fetch.clone();
+            let bl = blacklist_for_fetch.clone();
+            async move {
+                let raw = api::get_favorites(&acc, i).await;
+                let posts: Vec<Post> = raw
+                    .into_iter()
+                    .map(|p| strip_blacklisted_tags(p, &bl))
+                    .collect();
+                (i, posts)
+            }
+        })
+        .buffer_unordered(PROCESS_FETCH_CONCURRENCY);
+
+    while let Some((i, posts)) = stream.next().await {
         info!("{} post(s) found on page {}", posts.len(), i);
-
         db::save_posts(&posts, account.id).map_err(|e| format!("Failed to save posts: {e}"))?;
-
         db::save_posts_tags_batch(&posts, &blacklist)
             .map_err(|e| format!("Failed to save tags for page {i}: {e}"))?;
-        mark_idf_dirty();
+        jobs::record_page_done(account_id);
     }
+    mark_idf_dirty();
 
     refresh_account_profiles(account_id)
         .map_err(|e| format!("Failed to refresh account profiles: {e}"))?;
-    Ok(json::to_string(&"okay :3").unwrap())
+    Ok(())
 }
 
 fn strip_blacklisted_tags(mut p: Post, blacklist: &HashSet<String>) -> Post {
@@ -231,15 +291,14 @@ async fn get_recommendations(
     upsert_catalog_posts(&posts).map_err(|e| {
         std::io::Error::other(format!("Failed to store recommendation catalog posts: {e}"))
     })?;
-    db::save_posts_tags_batch(&posts, &HashSet::new())
+    // Skip the per-pair cooccurrence upsert here: candidate browse posts are
+    // not part of the user's truth set, and the heavy O(T²) work would land
+    // on the request path. /process is the only place that drives the graph.
+    db::save_posts_tags_batch_no_cooc(&posts, &HashSet::new())
         .map_err(|e| std::io::Error::other(format!("Failed to store recommendation tags: {e}")))?;
     mark_idf_dirty();
-    let idf = current_idf()
-        .map_err(|e| std::io::Error::other(format!("Failed to build IDF index: {e}")))?;
-
-    let global_relation = current_global_relation().map_err(|e| {
-        std::io::Error::other(format!("Failed to build global tag relation graph: {e}"))
-    })?;
+    let idf = current_idf();
+    let global_relation = current_global_relation();
     let user_relation = db::load_account_tag_relation(account_id, &tags).map_err(|e| {
         std::io::Error::other(format!("Failed to load user tag relation graph: {e}"))
     })?;
@@ -264,10 +323,10 @@ async fn get_recommendations(
         });
     }
 
-    let mut scored = diversify_scored_posts(scored, &priors);
     if let Some(threshold) = affinity_threshold {
         scored.retain(|sp| sp.score >= threshold);
     }
+    let scored = diversify_scored_posts(scored, &priors);
 
     Ok(Json(scored))
 }
@@ -301,6 +360,7 @@ async fn rocket() -> _ {
     let (api_routes, spec) = openapi_get_routes_spec![
         settings:
         process_posts,
+        process_status,
         log_feed_interaction,
         list_accounts,
         get_account_tag_counts,

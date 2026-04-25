@@ -4,13 +4,16 @@ use crate::models::{
     TagCount, TagRelationEdge, TagRelationGraphPayload, TagRelationNode, TruncatedAccount,
 };
 use chrono::{DateTime, Utc};
+use r2d2::Pool;
+use r2d2_sqlite::SqliteConnectionManager;
 use rocket::{
     Build, Rocket,
     fairing::{Fairing, Info, Kind},
 };
 use rusqlite::{params, Connection};
 use std::collections::HashMap;
-use std::{collections::HashSet, fs};
+use std::collections::HashSet;
+use std::sync::OnceLock;
 
 mod embedded {
     use refinery::embed_migrations;
@@ -43,28 +46,35 @@ impl Fairing for DbInit {
     }
 }
 
-fn open_db() -> Result<Connection, String> {
-    if fs::exists("database.db").is_err() {
-        if let Err(e) = fs::File::create("database.db") {
-            eprintln!("{e}")
-        }
-    }
+pub type DbPool = Pool<SqliteConnectionManager>;
+pub type DbConn = r2d2::PooledConnection<SqliteConnectionManager>;
 
-    let connection =
-        Connection::open("database.db").map_err(|e| format!("Failed to get connection: {e}"))?;
+static POOL: OnceLock<DbPool> = OnceLock::new();
 
-    connection
-        .execute_batch(
-            "
-            PRAGMA foreign_keys = ON;
-            PRAGMA journal_mode=WAL;
-            PRAGMA synchronous=NORMAL;
-            PRAGMA busy_timeout=5000;
-            ",
-        )
-        .map_err(|e| format!("Failed to assert pragma: {e}"))?;
+fn pool() -> &'static DbPool {
+    POOL.get_or_init(|| {
+        let manager = SqliteConnectionManager::file("database.db").with_init(|conn| {
+            conn.execute_batch(
+                "
+                PRAGMA foreign_keys = ON;
+                PRAGMA journal_mode = WAL;
+                PRAGMA synchronous  = NORMAL;
+                PRAGMA busy_timeout = 5000;
+                PRAGMA temp_store   = MEMORY;
+                ",
+            )
+        });
+        Pool::builder()
+            .max_size(8)
+            .build(manager)
+            .expect("build sqlite pool")
+    })
+}
 
-    Ok(connection)
+fn open_db() -> Result<DbConn, String> {
+    pool()
+        .get()
+        .map_err(|e| format!("Failed to acquire sqlite connection: {e}"))
 }
 
 fn parse_db_datetime(raw: &str) -> Result<DateTime<Utc>, String> {
@@ -82,14 +92,10 @@ fn parse_db_datetime(raw: &str) -> Result<DateTime<Utc>, String> {
 }
 
 pub fn ensure_sqlite() -> Result<(), String> {
-    if fs::exists("database.db").is_err() {
-        fs::File::create("database.db").map_err(|e| format!("Failed to create file: {e}"))?;
-    }
-
     let mut conn = open_db().map_err(|e| e.to_string())?;
 
     embedded::migrations::runner()
-        .run(&mut conn)
+        .run(&mut *conn)
         .map_err(|e| format!("Failed to run migrations: {e}"))?;
 
     Ok(())
@@ -958,6 +964,25 @@ pub fn record_feed_interaction(interaction: &FeedInteractionRequest) -> Result<(
 }
 
 pub fn save_posts_tags_batch(posts: &[Post], blacklist: &HashSet<String>) -> Result<(), String> {
+    save_posts_tags_batch_inner(posts, blacklist, true)
+}
+
+/// Same as `save_posts_tags_batch` but skips the global tag-cooccurrence
+/// upsert. Used by the recommendations path: the candidate posts there are
+/// catalog browse hits, not user favourites, so we don't want them to drive
+/// the per-tag pair counts on the hot request path.
+pub fn save_posts_tags_batch_no_cooc(
+    posts: &[Post],
+    blacklist: &HashSet<String>,
+) -> Result<(), String> {
+    save_posts_tags_batch_inner(posts, blacklist, false)
+}
+
+fn save_posts_tags_batch_inner(
+    posts: &[Post],
+    blacklist: &HashSet<String>,
+    track_cooccurrence: bool,
+) -> Result<(), String> {
     if posts.is_empty() {
         return Ok(());
     }
@@ -966,6 +991,7 @@ pub fn save_posts_tags_batch(posts: &[Post], blacklist: &HashSet<String>) -> Res
     let tx = connection.transaction().map_err(|e| format!("tx: {e}"))?;
 
     let mut cooc_dirty = false;
+    let mut touched_tag_ids: HashSet<i64> = HashSet::new();
     {
         let mut insert_tag = tx
             .prepare_cached("INSERT OR IGNORE INTO tags (name, group_type) VALUES (?1, ?2)")
@@ -976,26 +1002,19 @@ pub fn save_posts_tags_batch(posts: &[Post], blacklist: &HashSet<String>) -> Res
         let mut link = tx
             .prepare_cached("INSERT OR IGNORE INTO tags_posts(tag_id, post_id) VALUES (?1, ?2)")
             .map_err(|e| format!("prep link: {e}"))?;
-        let mut df = tx
-            .prepare_cached("UPDATE tags SET df = (SELECT count(*) FROM tags_posts WHERE tag_id = ?1) WHERE id = ?1;")
-            .map_err(|e| format!("prep df: {e}"))?;
         let mut post_has_tags = tx
             .prepare_cached("SELECT EXISTS(SELECT 1 FROM tags_posts WHERE post_id = ?1)")
             .map_err(|e| format!("prep post_has_tags: {e}"))?;
-        let mut insert_cooc = tx
-            .prepare_cached(
-                "
-                INSERT INTO tag_cooccurrence (tag1_id, tag2_id, cooc_count) VALUES (?1, ?2, 1)
-                ON CONFLICT(tag1_id, tag2_id) DO UPDATE SET cooc_count = cooc_count + 1
-                ",
-            )
-            .map_err(|e| format!("prep insert_cooc: {e}"))?;
 
         for post in posts {
             let pid = post.id;
-            let had_tags: bool = post_has_tags
-                .query_row(params![pid], |r| r.get(0))
-                .map_err(|e| format!("post_has_tags lookup: {e}"))?;
+            let had_tags: bool = if track_cooccurrence {
+                post_has_tags
+                    .query_row(params![pid], |r| r.get(0))
+                    .map_err(|e| format!("post_has_tags lookup: {e}"))?
+            } else {
+                true
+            };
 
             let mut post_tag_ids: Vec<i64> = Vec::new();
 
@@ -1023,27 +1042,21 @@ pub fn save_posts_tags_batch(posts: &[Post], blacklist: &HashSet<String>) -> Res
                     link.execute(params![tag_id, pid])
                         .map_err(|e| format!("link tag_id={tag_id} post_id={pid}: {e}"))?;
 
-                    df.execute(params![tag_id])
-                        .map_err(|e| format!("insert tag df: {e}"))?;
-
+                    touched_tag_ids.insert(tag_id);
                     post_tag_ids.push(tag_id);
                 }
             }
 
-            if !had_tags && post_tag_ids.len() >= 2 {
+            if track_cooccurrence && !had_tags && post_tag_ids.len() >= 2 {
                 post_tag_ids.sort_unstable();
                 post_tag_ids.dedup();
-                let n = post_tag_ids.len();
-                for i in 0..n {
-                    let a = post_tag_ids[i];
-                    for &b in &post_tag_ids[i + 1..] {
-                        insert_cooc
-                            .execute(params![a, b])
-                            .map_err(|e| format!("insert tag cooc: {e}"))?;
-                    }
-                }
+                upsert_cooccurrence_pairs(&tx, &post_tag_ids)?;
                 cooc_dirty = true;
             }
+        }
+
+        if !touched_tag_ids.is_empty() {
+            recompute_df_for_tags(&tx, &touched_tag_ids)?;
         }
     }
 
@@ -1052,6 +1065,85 @@ pub fn save_posts_tags_batch(posts: &[Post], blacklist: &HashSet<String>) -> Res
 
     if cooc_dirty {
         crate::utils::mark_global_relation_dirty();
+    }
+    Ok(())
+}
+
+/// SQLite default SQLITE_MAX_VARIABLE_NUMBER is 999. Each pair contributes 2
+/// parameters, plus we want headroom — cap at 200 pairs (400 params) per
+/// statement.
+const COOC_PAIRS_PER_STATEMENT: usize = 200;
+
+fn upsert_cooccurrence_pairs(tx: &rusqlite::Transaction, tag_ids: &[i64]) -> Result<(), String> {
+    if tag_ids.len() < 2 {
+        return Ok(());
+    }
+    let n = tag_ids.len();
+    let mut pairs: Vec<(i64, i64)> = Vec::with_capacity(n * (n - 1) / 2);
+    for i in 0..n {
+        let a = tag_ids[i];
+        for &b in &tag_ids[i + 1..] {
+            // Canonical ordering enforced by CHECK (tag1_id < tag2_id).
+            // tag_ids is sorted+deduped before this call, so a < b is implied,
+            // but defend against bad inputs anyway.
+            if a < b {
+                pairs.push((a, b));
+            } else {
+                pairs.push((b, a));
+            }
+        }
+    }
+
+    for chunk in pairs.chunks(COOC_PAIRS_PER_STATEMENT) {
+        let mut sql = String::from(
+            "INSERT INTO tag_cooccurrence (tag1_id, tag2_id, cooc_count) VALUES ",
+        );
+        for i in 0..chunk.len() {
+            if i > 0 {
+                sql.push(',');
+            }
+            sql.push_str("(?,?,1)");
+        }
+        sql.push_str(
+            " ON CONFLICT(tag1_id, tag2_id) DO UPDATE SET cooc_count = cooc_count + 1",
+        );
+
+        let mut stmt = tx
+            .prepare(&sql)
+            .map_err(|e| format!("prepare cooc batch: {e}"))?;
+        let mut params_vec: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(chunk.len() * 2);
+        for (a, b) in chunk {
+            params_vec.push(a);
+            params_vec.push(b);
+        }
+        stmt.execute(rusqlite::params_from_iter(params_vec))
+            .map_err(|e| format!("exec cooc batch: {e}"))?;
+    }
+    Ok(())
+}
+
+fn recompute_df_for_tags(
+    tx: &rusqlite::Transaction,
+    tag_ids: &HashSet<i64>,
+) -> Result<(), String> {
+    if tag_ids.is_empty() {
+        return Ok(());
+    }
+    // Single set-based UPDATE per chunk of tag ids — much cheaper than the
+    // previous per-tag UPDATE issuing a fresh COUNT(*) per row.
+    let ids: Vec<i64> = tag_ids.iter().copied().collect();
+    for chunk in ids.chunks(500) {
+        let placeholders = vec!["?"; chunk.len()].join(",");
+        let sql = format!(
+            "UPDATE tags
+                SET df = (SELECT COUNT(*) FROM tags_posts WHERE tag_id = tags.id)
+              WHERE id IN ({placeholders})"
+        );
+        let mut stmt = tx.prepare(&sql).map_err(|e| format!("prep df: {e}"))?;
+        let params_vec: Vec<&dyn rusqlite::ToSql> =
+            chunk.iter().map(|v| v as &dyn rusqlite::ToSql).collect();
+        stmt.execute(rusqlite::params_from_iter(params_vec))
+            .map_err(|e| format!("exec df: {e}"))?;
     }
     Ok(())
 }

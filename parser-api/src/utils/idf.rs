@@ -1,7 +1,7 @@
 use arc_swap::ArcSwap;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::{Arc, LazyLock};
 
 use crate::models::cfg;
 
@@ -33,12 +33,9 @@ impl IdfIndex {
         Self { idf }
     }
 
-    pub fn from_db(
-        get_df: impl Fn() -> rusqlite::Result<HashMap<String, i64>>,
-        get_post_count: impl Fn() -> i64,
-    ) -> rusqlite::Result<Self> {
-        let df = get_df()?;
-        let n_posts = get_post_count();
+    pub fn from_db() -> rusqlite::Result<Self> {
+        let df = crate::db::get_tags_df()?;
+        let n_posts = crate::db::post_count();
         Ok(Self::from_df(&df, n_posts))
     }
 
@@ -62,24 +59,50 @@ impl IdfIndex {
 static IDF_CACHE: LazyLock<ArcSwap<IdfIndex>> =
     LazyLock::new(|| ArcSwap::from_pointee(IdfIndex::empty()));
 static IDF_DIRTY: AtomicBool = AtomicBool::new(true);
-static IDF_REBUILD_LOCK: Mutex<()> = Mutex::new(());
+static IDF_REBUILDING: AtomicBool = AtomicBool::new(false);
 
 pub fn mark_idf_dirty() {
     IDF_DIRTY.store(true, Ordering::Release);
+    spawn_rebuild_if_needed();
 }
 
-pub fn current_idf() -> rusqlite::Result<Arc<IdfIndex>> {
-    if IDF_DIRTY.load(Ordering::Acquire) {
-        let _guard = IDF_REBUILD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        if IDF_DIRTY.swap(false, Ordering::AcqRel) {
-            match IdfIndex::from_db(crate::db::get_tags_df, crate::db::post_count) {
-                Ok(new) => IDF_CACHE.store(Arc::new(new)),
-                Err(e) => {
-                    IDF_DIRTY.store(true, Ordering::Release);
-                    return Err(e);
+fn spawn_rebuild_if_needed() {
+    if IDF_REBUILDING.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    std::thread::Builder::new()
+        .name("idf-rebuild".to_string())
+        .spawn(|| {
+            // Drain dirty flags. If another mark arrives during the build we
+            // loop and rebuild again — but only one rebuild runs at a time.
+            loop {
+                IDF_DIRTY.store(false, Ordering::Release);
+                match IdfIndex::from_db() {
+                    Ok(new) => IDF_CACHE.store(Arc::new(new)),
+                    Err(e) => {
+                        // Leave dirty set so the next caller re-triggers a
+                        // rebuild, then exit so we don't hot-spin on persistent
+                        // failures.
+                        eprintln!("[idf] rebuild failed: {e}");
+                        IDF_DIRTY.store(true, Ordering::Release);
+                        break;
+                    }
+                }
+                if !IDF_DIRTY.load(Ordering::Acquire) {
+                    break;
                 }
             }
-        }
+            IDF_REBUILDING.store(false, Ordering::Release);
+        })
+        .expect("spawn idf-rebuild thread");
+}
+
+/// Returns the current IDF cache. Never blocks; if the cache is dirty a
+/// rebuild is started in the background and this call returns the previous
+/// (possibly stale) snapshot.
+pub fn current_idf() -> Arc<IdfIndex> {
+    if IDF_DIRTY.load(Ordering::Acquire) {
+        spawn_rebuild_if_needed();
     }
-    Ok(IDF_CACHE.load_full())
+    IDF_CACHE.load_full()
 }
