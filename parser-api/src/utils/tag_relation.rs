@@ -4,28 +4,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock};
 
 pub type GroupKey = u8;
-
-pub const GROUP_ARTIST: GroupKey = 0;
-pub const GROUP_CHARACTER: GroupKey = 1;
-pub const GROUP_COPYRIGHT: GroupKey = 2;
-pub const GROUP_SPECIES: GroupKey = 3;
-pub const GROUP_GENERAL: GroupKey = 4;
-pub const GROUP_LORE: GroupKey = 5;
-pub const GROUP_META: GroupKey = 6;
-
-pub fn group_key_from_str(s: &str) -> Option<GroupKey> {
-    Some(match s {
-        "artist" => GROUP_ARTIST,
-        "character" => GROUP_CHARACTER,
-        "copyright" => GROUP_COPYRIGHT,
-        "species" => GROUP_SPECIES,
-        "general" => GROUP_GENERAL,
-        "lore" => GROUP_LORE,
-        "meta" => GROUP_META,
-        _ => return None,
-    })
-}
-
 pub type TagId = u32;
 
 /// PMI co-occurrence graph keyed by interned u32 tag-ids. The hot path

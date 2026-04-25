@@ -32,6 +32,7 @@ pub fn post_card(props: &PostCardProps) -> Html {
 
     let root_ref = use_node_ref();
     let impression_logged = use_state(|| false);
+    let hidden = use_state(|| false);
     let card_width = use_state(|| 0.0f64);
     let current_img_url = {
         let url = fallback_image_url(post);
@@ -287,6 +288,40 @@ pub fn post_card(props: &PostCardProps) -> Html {
     let score_summary = post.score.total;
     let score_detail = AttrValue::from(format!("↑ {}   ↓ {}", post.score.up, post.score.down));
 
+    let on_hide = {
+        let backend_url = props.backend_url.to_string();
+        let session_id = props.session_id.to_string();
+        let account_id = props.account_id;
+        let position = props.position;
+        let post_id = post.id;
+        let hidden = hidden.clone();
+        Callback::from(move |e: MouseEvent| {
+            e.stop_propagation();
+            e.prevent_default();
+            hidden.set(true);
+            send_interaction(
+                backend_url.clone(),
+                FeedInteractionRequest {
+                    owner_token: get_or_create_owner_token().unwrap_or_default(),
+                    account_id,
+                    post_id,
+                    event_type: FeedInteractionType::Hide,
+                    position,
+                    session_id: session_id.clone(),
+                },
+            );
+        })
+    };
+
+    let on_unhide = {
+        let hidden = hidden.clone();
+        Callback::from(move |e: MouseEvent| {
+            e.stop_propagation();
+            e.prevent_default();
+            hidden.set(false);
+        })
+    };
+
     let onclick = {
         let cfg = read_config_from_head().unwrap();
         let id = post.id;
@@ -323,13 +358,16 @@ pub fn post_card(props: &PostCardProps) -> Html {
         })
     };
 
-    let root_classes = classes!(
+    let mut root_classes = classes!(
         "card",
         "h-100",
         "overflow-hidden",
         "cursor-pointer",
         "w-100"
     );
+    if *hidden {
+        root_classes.push("post-card-hidden");
+    }
 
     let inner: Html = html! {
         <>
@@ -365,6 +403,21 @@ pub fn post_card(props: &PostCardProps) -> Html {
                 >
                     { rating_label }
                 </span>
+
+                <button
+                    type="button"
+                    class={classes!(
+                        "post-card-hide-btn", "btn", "btn-sm", "btn-dark",
+                        "rounded-circle", "position-absolute", "top-0", "start-50",
+                        "translate-middle-x", "mt-2"
+                    )}
+                    onmousedown={Callback::from(|e: MouseEvent| e.stop_propagation())}
+                    onclick={on_hide}
+                    title="Not interested"
+                    aria-label="Hide this post"
+                >
+                    { "×" }
+                </button>
 
                 <span
                     class={classes!("badge", "rounded","bg-secondary","position-absolute", "top-0", "end-0", "m-2")} >
@@ -404,7 +457,7 @@ pub fn post_card(props: &PostCardProps) -> Html {
                                 <span class="badge text-muted text-truncate mw-100" title="How this post's favourite count and duration compare to the norm in your profile.">
                                     { format!("Popular {:.2}", breakdown.popularity_fit) }
                                 </span>
-                                <span class="badge text-muted text-truncate mw-100" title="Signal from your recent feed behaviour on this post's tags (views, opens, hides).">
+                                <span class="badge text-muted text-truncate mw-100" title="Signal from your recent feed behaviour on this post's tags — impressions, opens, and hides.">
                                     { format!("Interact {:.2}", breakdown.interaction_fit) }
                                 </span>
                                 <span class="badge text-muted text-truncate mw-100" title="How coherently this post's tags relate to each other — globally (PMI lift) and inside your own favourites (pair co-occurrence).">
@@ -433,6 +486,26 @@ pub fn post_card(props: &PostCardProps) -> Html {
             </div>
         </>
     };
+
+    if *hidden {
+        return html! {
+            <div
+                class={classes!("card", "h-100", "post-card-hidden", "w-100", "p-3", "d-flex", "flex-column", "align-items-center", "justify-content-center", "text-center")}
+                ref={root_ref}
+                aria-label={format!("Post {} hidden", post.id)}
+            >
+                <span class="text-muted small mb-2">{ format!("Hidden #{}", post.id) }</span>
+                <button
+                    type="button"
+                    class="btn btn-sm btn-outline-secondary"
+                    onclick={on_unhide}
+                    aria-label="Undo hide"
+                >
+                    { "Undo" }
+                </button>
+            </div>
+        };
+    }
 
     html! {
         <button

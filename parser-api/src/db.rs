@@ -586,11 +586,8 @@ pub fn set_quality_profile(account_id: i32) -> Result<(), String> {
 pub fn set_recency_profile(account_id: i32) -> Result<(), String> {
     let connection = open_db()?;
 
-    // Compute mean age and mean-absolute-deviation directly in SQL using
-    // julianday(). Two-pass via CTE: first the per-row age (clamped to >= 0
-    // for clock-skew safety), then the mean and the abs-dev around it.
-    // WITH must precede INSERT — `INSERT ... WITH ... ON CONFLICT` won't
-    // parse in SQLite.
+    // Mean and mean-abs-dev computed in SQL via julianday(). The `WHERE true`
+    // disambiguates ON CONFLICT from a join clause (SQLite UPSERT-with-SELECT quirk).
     connection
         .execute(
             "
@@ -630,21 +627,10 @@ pub fn refresh_account_profiles(account_id: i32) -> Result<(), String> {
     Ok(())
 }
 
-/// Apply exponential decay to per-tag feedback counts. Each row's counts are
-/// multiplied by `0.5 ^ (elapsed_days / half_life)` where elapsed is measured
-/// from `last_decayed_at`. Rows that decay to zero are deleted so the table
-/// doesn't accumulate dead entries.
-///
-/// Notes on correctness:
-/// - Skips rows with elapsed < 1 day so frequent /process calls don't bleed
-///   counts away through repeated tiny decays. Sub-day work accumulates
-///   silently against `last_decayed_at` and gets applied on the first call
-///   that crosses the day boundary.
-/// - Uses banker's-style `round` (not `floor`) so per-call bias is symmetric
-///   around the true real-valued count.
-/// - SELECT and UPDATEs run inside a single `BEGIN IMMEDIATE` transaction so a
-///   concurrent `record_feed_interaction` can't squeeze an increment between
-///   our snapshot read and our write-back.
+/// Multiplies per-tag feedback counts by `0.5 ^ (elapsed / half_life)` and
+/// deletes rows that hit zero. 1-day gate + `round` (not `floor`) keep
+/// frequent calls from bleeding counts. SELECT + UPDATEs in one IMMEDIATE
+/// tx so concurrent `record_feed_interaction` can't race the snapshot.
 pub fn decay_account_tag_feedback(account_id: i32) -> Result<(), String> {
     let cfg = crate::models::cfg();
     let half_life = cfg.priors.feedback_decay_half_life_days.max(1.0);
@@ -1048,22 +1034,9 @@ pub fn record_feed_interaction(interaction: &FeedInteractionRequest) -> Result<(
     Ok(())
 }
 
-pub fn save_posts_tags_batch(posts: &[Post], blacklist: &HashSet<String>) -> Result<(), String> {
-    save_posts_tags_batch_inner(posts, blacklist, true)
-}
-
-/// Same as `save_posts_tags_batch` but skips the global tag-cooccurrence
-/// upsert. Used by the recommendations path: the candidate posts there are
-/// catalog browse hits, not user favourites, so we don't want them to drive
-/// the per-tag pair counts on the hot request path.
-pub fn save_posts_tags_batch_no_cooc(
-    posts: &[Post],
-    blacklist: &HashSet<String>,
-) -> Result<(), String> {
-    save_posts_tags_batch_inner(posts, blacklist, false)
-}
-
-fn save_posts_tags_batch_inner(
+/// Set `track_cooccurrence = false` on the recommendations path: candidate
+/// browse hits aren't user favourites and shouldn't drive per-tag pair counts.
+pub fn save_posts_tags_batch(
     posts: &[Post],
     blacklist: &HashSet<String>,
     track_cooccurrence: bool,
@@ -1103,12 +1076,8 @@ fn save_posts_tags_batch_inner(
 
             let mut post_tag_ids: Vec<i64> = Vec::new();
 
-            // Meta is stored so per-tag feedback (interaction channel) can
-            // pick it up later. Downstream scorers that don't want meta
-            // (tag_similarity, tag_relation, account_tag_counts as a vector)
-            // already filter via `group_wts[Meta] = 0`, so adding meta rows
-            // here doesn't pollute those signals — it just makes meta
-            // available to the interaction loop.
+            // Meta is stored so the interaction channel can read it; the other
+            // scorers filter meta out via `group_wts[Meta] = 0`.
             for (group, tags) in [
                 ("artist", &post.tags.artist),
                 ("character", &post.tags.character),
@@ -1321,8 +1290,8 @@ pub fn load_global_tag_relation() -> rusqlite::Result<crate::utils::TagRelationG
         for r in rows {
             let (t1, g1, t2, g2, c) = r?;
             if let (Some(gk1), Some(gk2)) = (
-                crate::utils::group_key_from_str(&g1),
-                crate::utils::group_key_from_str(&g2),
+                crate::utils::Group::from_str(&g1).map(|g| g as u8),
+                crate::utils::Group::from_str(&g2).map(|g| g as u8),
             ) {
                 graph.insert_pair(gk1, &t1.to_lowercase(), gk2, &t2.to_lowercase(), c);
             }
@@ -1340,8 +1309,8 @@ pub fn load_global_tag_relation() -> rusqlite::Result<crate::utils::TagRelationG
         })?;
         for r in rows {
             let (name, g, df) = r?;
-            if let Some(gk) = crate::utils::group_key_from_str(&g) {
-                graph.set_marginal(gk, &name.to_lowercase(), df);
+            if let Some(g) = crate::utils::Group::from_str(&g) {
+                graph.set_marginal(g as u8, &name.to_lowercase(), df);
             }
         }
     }
@@ -1507,8 +1476,8 @@ pub fn load_account_tag_relation(
     let mut graph = crate::utils::TagRelationGraph::with_posts(total_posts);
 
     for tc in user_tag_counts {
-        if let Some(gk) = crate::utils::group_key_from_str(&tc.group_type) {
-            graph.set_marginal(gk, &tc.name.to_lowercase(), tc.count);
+        if let Some(g) = crate::utils::Group::from_str(&tc.group_type) {
+            graph.set_marginal(g as u8, &tc.name.to_lowercase(), tc.count);
         }
     }
 
@@ -1537,8 +1506,8 @@ pub fn load_account_tag_relation(
     for r in rows {
         let (t1, g1, t2, g2, c) = r.map_err(|e| format!("Failed to read account cooc row: {e}"))?;
         if let (Some(gk1), Some(gk2)) = (
-            crate::utils::group_key_from_str(&g1),
-            crate::utils::group_key_from_str(&g2),
+            crate::utils::Group::from_str(&g1).map(|g| g as u8),
+            crate::utils::Group::from_str(&g2).map(|g| g as u8),
         ) {
             graph.insert_pair(gk1, &t1.to_lowercase(), gk2, &t2.to_lowercase(), c);
         }

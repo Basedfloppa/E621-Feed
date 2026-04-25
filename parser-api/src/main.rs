@@ -123,7 +123,7 @@ async fn run_process(account_id: i32, owner_token: String) -> Result<(), String>
     while let Some((i, posts)) = stream.next().await {
         info!("{} post(s) found on page {}", posts.len(), i);
         db::save_posts(&posts, account.id).map_err(|e| format!("Failed to save posts: {e}"))?;
-        db::save_posts_tags_batch(&posts, &blacklist)
+        db::save_posts_tags_batch(&posts, &blacklist, true)
             .map_err(|e| format!("Failed to save tags for page {i}: {e}"))?;
         jobs::record_page_done(account_id);
     }
@@ -372,7 +372,7 @@ async fn get_recommendations(
     // Skip the per-pair cooccurrence upsert here: candidate browse posts are
     // not part of the user's truth set, and the heavy O(T²) work would land
     // on the request path. /process is the only place that drives the graph.
-    db::save_posts_tags_batch_no_cooc(&posts, &HashSet::new())
+    db::save_posts_tags_batch(&posts, &HashSet::new(), false)
         .map_err(|e| std::io::Error::other(format!("Failed to store recommendation tags: {e}")))?;
     mark_idf_dirty();
     let idf = current_idf();

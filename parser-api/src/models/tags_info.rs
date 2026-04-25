@@ -29,31 +29,6 @@ pub struct AccountTagFeedback {
     pub negative_count: i64,
 }
 
-impl AccountTagFeedback {
-    /// Legacy aggregator. Retained for any external consumers; the scorer no
-    /// longer uses it (CTR-style scoring computes from raw counts directly).
-    #[allow(dead_code)]
-    pub fn interaction_score(&self) -> f32 {
-        let impressions = self.impression_count.max(0) as f32;
-        let positives = self.positive_count.max(0) as f32;
-        let negatives = self.negative_count.max(0) as f32;
-
-        let strong_total = positives + negatives;
-        if impressions == 0.0 && strong_total == 0.0 {
-            return 0.5;
-        }
-
-        let positive_rate = (positives + 1.0) / (strong_total + 2.0);
-        let exposure_penalty = if impressions > 0.0 {
-            ((impressions - positives).max(0.0) / (impressions + 1.0)).min(1.0)
-        } else {
-            0.0
-        };
-
-        (positive_rate * (1.0 - 0.35 * exposure_penalty)).clamp(0.0, 1.0)
-    }
-}
-
 #[derive(Debug, Serialize, Deserialize, Clone, JsonSchema, Default)]
 pub struct AccountQualityProfile {
     pub avg_score_total: f32,

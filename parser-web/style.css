@@ -41,6 +41,26 @@ body {
     overflow-wrap: anywhere;
 }
 
+.post-card-hide-btn {
+    opacity: 0;
+    transition: opacity 0.15s ease-in-out;
+    line-height: 1;
+    padding: 0.15rem 0.4rem;
+    border: none;
+    cursor: pointer;
+}
+
+.card:hover .post-card-hide-btn,
+.post-card-hide-btn:focus,
+.post-card-hide-btn:focus-visible {
+    opacity: 1;
+}
+
+.post-card-hidden {
+    border-style: dashed !important;
+    opacity: 0.55;
+}
+
 @media (max-width: 991.98px) {
     #header {
         padding-inline: 0.25rem;
