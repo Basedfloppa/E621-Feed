@@ -73,6 +73,12 @@ pub fn home_page() -> Html {
                 canvas_ref={canvas_ref.clone()}
                 tag_counts={tag_counts.clone()}
             />
+            <div class="container">
+                <TagRelationGraphCard
+                    found_user={selected_user.clone()}
+                    api_base={cfg.backend_domain.clone()}
+                />
+            </div>
         </div>
     }
 }

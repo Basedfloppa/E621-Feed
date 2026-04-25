@@ -9,8 +9,9 @@ use rusqlite::Result;
 use std::collections::HashSet;
 
 use crate::models::{
-    BlacklistPayload, DeviceScopedAccount, FeedInteractionRequest, ScoredPost, TruncatedAccount,
-    UserApiResponse, cfg, default_path, reload_from, start_config_watcher,
+    BlacklistPayload, DeviceScopedAccount, FeedInteractionRequest, ScoredPost,
+    TagRelationGraphPayload, TruncatedAccount, UserApiResponse, cfg, default_path, reload_from,
+    start_config_watcher,
 };
 use crate::utils::{
     ScoringContext, current_global_relation, current_idf, diversify_scored_posts, mark_idf_dirty,
@@ -18,8 +19,9 @@ use crate::utils::{
 use crate::{
     db::{
         DbInit, get_account_by_id, get_account_by_name, get_account_preference_profile,
-        get_accounts_for_owner, get_tag_counts, record_feed_interaction, refresh_account_profiles,
-        set_account, update_device_blacklist, upsert_catalog_posts,
+        get_account_tag_relation_graph, get_accounts_for_owner, get_tag_counts,
+        record_feed_interaction, refresh_account_profiles, set_account, update_device_blacklist,
+        upsert_catalog_posts,
     },
     models::{Post, TagCount},
     rocket::serde::json,
@@ -149,6 +151,21 @@ async fn create_account(
             Err(error_msg)
         }
     }
+}
+
+#[openapi(tag = "Accounts")]
+#[get("/account/<account_id>/tag_relations?<owner_token>&<top>&<min_cooc>")]
+async fn get_account_tag_relations(
+    account_id: i32,
+    owner_token: &str,
+    top: Option<usize>,
+    min_cooc: Option<i64>,
+) -> Result<Json<TagRelationGraphPayload>, String> {
+    get_account_by_id(owner_token, account_id)
+        .map_err(|e| format!("Failed to validate account access: {e}"))?;
+    let top = top.unwrap_or(60).clamp(2, 250);
+    let min_cooc = min_cooc.unwrap_or(2).max(1);
+    get_account_tag_relation_graph(account_id, top, min_cooc).map(Json)
 }
 
 #[openapi(tag = "Accounts")]
@@ -292,6 +309,7 @@ async fn rocket() -> _ {
         create_account,
         get_account_blacklist,
         update_account_blacklist,
+        get_account_tag_relations,
         get_recommendations
     ];
 

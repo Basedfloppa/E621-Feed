@@ -73,3 +73,28 @@ pub struct AccountPreferenceProfile {
     pub quality: AccountQualityProfile,
     pub recency: AccountRecencyProfile,
 }
+
+#[derive(Debug, Serialize, Deserialize, Clone, JsonSchema)]
+pub struct TagRelationNode {
+    pub name: String,
+    pub group_type: String,
+    pub count: i64,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, JsonSchema)]
+pub struct TagRelationEdge {
+    pub source: usize,
+    pub target: usize,
+    pub user_cooc: i64,
+    pub global_cooc: i64,
+    /// PMI-style global lift: cooc * N / (df1 * df2). Zero when global signal is missing.
+    pub global_lift: f32,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, JsonSchema)]
+pub struct TagRelationGraphPayload {
+    pub nodes: Vec<TagRelationNode>,
+    pub edges: Vec<TagRelationEdge>,
+    pub catalog_post_count: i64,
+    pub account_post_count: i64,
+}

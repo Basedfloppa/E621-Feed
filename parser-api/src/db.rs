@@ -1,7 +1,7 @@
 use crate::models::{
     AccountMediaStat, AccountPreferenceProfile, AccountQualityProfile, AccountRatingStat,
     AccountRecencyProfile, AccountTagFeedback, FeedInteractionRequest, FeedInteractionType, Post,
-    TagCount, TruncatedAccount,
+    TagCount, TagRelationEdge, TagRelationGraphPayload, TagRelationNode, TruncatedAccount,
 };
 use chrono::{DateTime, Utc};
 use rocket::{
@@ -1150,6 +1150,147 @@ pub fn load_global_tag_relation() -> rusqlite::Result<crate::utils::TagRelationG
     }
 
     Ok(graph)
+}
+
+pub fn get_account_tag_relation_graph(
+    account_id: i32,
+    top: usize,
+    min_user_cooc: i64,
+) -> Result<TagRelationGraphPayload, String> {
+    let conn = open_db()?;
+
+    let catalog_post_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM posts", [], |row| row.get(0))
+        .map_err(|e| format!("Failed to count posts: {e}"))?;
+    let account_post_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM accounts_post WHERE account_id = ?1",
+            params![account_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("Failed to count account posts: {e}"))?;
+
+    let nodes: Vec<TagRelationNode> = {
+        let mut stmt = conn
+            .prepare(
+                "
+                SELECT tag_name, group_type, count
+                FROM account_tag_counts
+                WHERE account_id = ?1
+                ORDER BY count DESC, tag_name ASC
+                LIMIT ?2
+                ",
+            )
+            .map_err(|e| format!("Failed to prepare top-tags query: {e}"))?;
+        stmt.query_map(params![account_id, top as i64], |row| {
+            Ok(TagRelationNode {
+                name: row.get::<_, String>(0)?,
+                group_type: row.get::<_, String>(1)?,
+                count: row.get::<_, i64>(2)?,
+            })
+        })
+        .map_err(|e| format!("Failed to fetch top tags: {e}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("Failed to enumerate top tags: {e}"))?
+    };
+
+    if nodes.is_empty() {
+        return Ok(TagRelationGraphPayload {
+            nodes,
+            edges: Vec::new(),
+            catalog_post_count,
+            account_post_count,
+        });
+    }
+
+    let mut node_index: HashMap<(String, String), usize> = HashMap::with_capacity(nodes.len());
+    for (i, n) in nodes.iter().enumerate() {
+        node_index.insert((n.name.clone(), n.group_type.clone()), i);
+    }
+
+    let pair_min = min_user_cooc.max(1);
+
+    let mut stmt = conn
+        .prepare(
+            "
+            SELECT
+                atc.tag1_name, atc.tag1_group,
+                atc.tag2_name, atc.tag2_group,
+                atc.cooc_count,
+                COALESCE(c.cooc_count, 0)               AS global_cooc,
+                COALESCE(t1.df, 0)                      AS df1,
+                COALESCE(t2.df, 0)                      AS df2
+            FROM account_tag_cooccurrence atc
+            LEFT JOIN tags t1
+                   ON t1.name = atc.tag1_name AND t1.group_type = atc.tag1_group
+            LEFT JOIN tags t2
+                   ON t2.name = atc.tag2_name AND t2.group_type = atc.tag2_group
+            LEFT JOIN tag_cooccurrence c
+                   ON c.tag1_id = CASE WHEN t1.id < t2.id THEN t1.id ELSE t2.id END
+                  AND c.tag2_id = CASE WHEN t1.id < t2.id THEN t2.id ELSE t1.id END
+            WHERE atc.account_id = ?1
+              AND atc.cooc_count >= ?2
+            ",
+        )
+        .map_err(|e| format!("Failed to prepare relation graph query: {e}"))?;
+
+    let rows = stmt
+        .query_map(params![account_id, pair_min], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, i64>(4)?,
+                row.get::<_, i64>(5)?,
+                row.get::<_, i64>(6)?,
+                row.get::<_, i64>(7)?,
+            ))
+        })
+        .map_err(|e| format!("Failed to fetch relation rows: {e}"))?;
+
+    let n_global = catalog_post_count.max(1) as f32;
+    let mut edges: Vec<TagRelationEdge> = Vec::new();
+
+    for row in rows {
+        let (t1, g1, t2, g2, user_cooc, global_cooc, df1, df2) =
+            row.map_err(|e| format!("Failed to read relation row: {e}"))?;
+        let (Some(&i), Some(&j)) = (
+            node_index.get(&(t1, g1)),
+            node_index.get(&(t2, g2)),
+        ) else {
+            continue;
+        };
+        if i == j {
+            continue;
+        }
+        let lift = if global_cooc > 0 && df1 > 0 && df2 > 0 {
+            (global_cooc as f32 * n_global) / (df1 as f32 * df2 as f32)
+        } else {
+            0.0
+        };
+        edges.push(TagRelationEdge {
+            source: i.min(j),
+            target: i.max(j),
+            user_cooc,
+            global_cooc,
+            global_lift: lift,
+        });
+    }
+
+    edges.sort_by(|a, b| {
+        b.user_cooc
+            .cmp(&a.user_cooc)
+            .then_with(|| a.source.cmp(&b.source))
+            .then_with(|| a.target.cmp(&b.target))
+    });
+
+    Ok(TagRelationGraphPayload {
+        nodes,
+        edges,
+        catalog_post_count,
+        account_post_count,
+    })
 }
 
 pub fn load_account_tag_relation(

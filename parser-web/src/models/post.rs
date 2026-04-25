@@ -169,3 +169,27 @@ pub struct ScoredPost {
     pub score: f32,
     pub breakdown: Option<ScoreBreakdown>,
 }
+
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+pub struct TagRelationNode {
+    pub name: String,
+    pub group_type: String,
+    pub count: i64,
+}
+
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+pub struct TagRelationEdge {
+    pub source: usize,
+    pub target: usize,
+    pub user_cooc: i64,
+    pub global_cooc: i64,
+    pub global_lift: f32,
+}
+
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug, Default)]
+pub struct TagRelationGraphPayload {
+    pub nodes: Vec<TagRelationNode>,
+    pub edges: Vec<TagRelationEdge>,
+    pub catalog_post_count: i64,
+    pub account_post_count: i64,
+}
