@@ -14,6 +14,9 @@ use crate::models::*;
 use crate::pages::UserInfo;
 
 const PIXELS_BEFORE_REFETCH: f64 = 1000.0;
+/// Stop auto-fetching after this many consecutive empty/all-duplicate pages,
+/// so an exhausted catalog or a strict affinity filter can't loop forever.
+const MAX_CONSECUTIVE_EMPTY_PAGES: u32 = 10;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum GridType {
@@ -58,6 +61,8 @@ pub fn feed_page() -> Html {
     let page = use_state(|| 1usize);
     let is_loading = use_state(|| false);
     let inflight = use_mut_ref(|| Cell::new(false));
+    let exhausted = use_state(|| false);
+    let consecutive_empty = use_mut_ref(|| Cell::new(0u32));
     let error = use_state(|| Option::<String>::None);
     let selected_user = use_state(|| Option::<UserInfo>::None);
     let session_id = use_state(|| {
@@ -109,12 +114,14 @@ pub fn feed_page() -> Html {
         let selected_user = selected_user.clone();
         let affinity = affinity.clone();
         let inflight = inflight.clone();
+        let exhausted = exhausted.clone();
+        let consecutive_empty = consecutive_empty.clone();
 
         Callback::from(move |_| {
             if inflight.borrow().get() {
                 return;
             }
-            if *is_loading {
+            if *is_loading || *exhausted {
                 return;
             }
 
@@ -151,6 +158,8 @@ pub fn feed_page() -> Html {
             let is_loading = is_loading.clone();
             let inflight_done = inflight.clone();
             let error = error.clone();
+            let exhausted = exhausted.clone();
+            let consecutive_empty = consecutive_empty.clone();
 
             spawn_local(async move {
                 let done = || {
@@ -173,8 +182,18 @@ pub fn feed_page() -> Html {
                         if added > 0 {
                             merged.extend(new_items);
                             posts.set(merged);
-                            page.set(*page + 1);
+                            consecutive_empty.borrow().set(0);
+                        } else {
+                            // Empty/all-duplicates: count it but still advance
+                            // the cursor so the next scroll-trigger doesn't
+                            // refetch the same page forever.
+                            let next = consecutive_empty.borrow().get() + 1;
+                            consecutive_empty.borrow().set(next);
+                            if next >= MAX_CONSECUTIVE_EMPTY_PAGES {
+                                exhausted.set(true);
+                            }
                         }
+                        page.set(*page + 1);
 
                         done();
                     }
@@ -193,6 +212,8 @@ pub fn feed_page() -> Html {
         let page = page.clone();
         let error = error.clone();
         let is_loading = is_loading.clone();
+        let exhausted = exhausted.clone();
+        let consecutive_empty = consecutive_empty.clone();
         let fetch_page = fetch_page.clone();
 
         use_effect_with(
@@ -203,6 +224,8 @@ pub fn feed_page() -> Html {
                     page.set(1);
                     error.set(None);
                     is_loading.set(false);
+                    exhausted.set(false);
+                    consecutive_empty.borrow().set(0);
                     fetch_page.emit(());
                 }
                 || ()
@@ -210,9 +233,22 @@ pub fn feed_page() -> Html {
         );
     }
 
+    // Lowering the affinity threshold should let scrolling fetch again even
+    // if we previously hit the empty-page cap with a stricter filter.
+    {
+        let exhausted = exhausted.clone();
+        let consecutive_empty = consecutive_empty.clone();
+        use_effect_with(*affinity, move |_| {
+            exhausted.set(false);
+            consecutive_empty.borrow().set(0);
+            || ()
+        });
+    }
+
     {
         let is_loading = is_loading.clone();
         let selected_user = selected_user.clone();
+        let exhausted = exhausted.clone();
         let fetch_page = fetch_page.clone();
 
         use_effect(move || {
@@ -221,11 +257,12 @@ pub fn feed_page() -> Html {
             if let Some(win) = window() {
                 let is_loading_cb = is_loading.clone();
                 let selected_user_cb = selected_user.clone();
+                let exhausted_cb = exhausted.clone();
                 let fetch_page_cb = fetch_page.clone();
 
                 let win_for_cb = win.clone();
                 let on_scroll = Closure::<dyn FnMut(Event)>::wrap(Box::new(move |_e: Event| {
-                    if (*selected_user_cb).is_some() && !*is_loading_cb {
+                    if (*selected_user_cb).is_some() && !*is_loading_cb && !*exhausted_cb {
                         let scroll_y = win_for_cb.scroll_y().unwrap_or(0.0);
                         let inner_h = win_for_cb
                             .inner_height()
@@ -275,6 +312,7 @@ pub fn feed_page() -> Html {
 
                 if (*selected_user).is_some()
                     && !*is_loading
+                    && !*exhausted
                     && (scroll_y + inner_h + PIXELS_BEFORE_REFETCH >= scroll_h)
                 {
                     fetch_page.emit(());
@@ -421,7 +459,12 @@ pub fn feed_page() -> Html {
                 }
                 {
                     if !(*is_loading) && (*error).is_none() {
-                        html! { <span class="text-muted small m-3 bg-dark bg-opacity-50 rounded-pill badge" aria-live="polite">{ format!("Loaded {} posts", posts.len()) }</span> }
+                        let label = if *exhausted {
+                            format!("Loaded {} posts — no more matches above the affinity threshold", posts.len())
+                        } else {
+                            format!("Loaded {} posts", posts.len())
+                        };
+                        html! { <span class="text-muted small m-3 bg-dark bg-opacity-50 rounded-pill badge" aria-live="polite">{ label }</span> }
                     } else { html!{ <span class="text-muted small m-3 bg-dark bg-opacity-50 rounded-pill badge" aria-live="polite">{"Loading..."}</span>} }
                 }
             </div>
