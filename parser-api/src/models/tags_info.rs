@@ -30,6 +30,9 @@ pub struct AccountTagFeedback {
 }
 
 impl AccountTagFeedback {
+    /// Legacy aggregator. Retained for any external consumers; the scorer no
+    /// longer uses it (CTR-style scoring computes from raw counts directly).
+    #[allow(dead_code)]
     pub fn interaction_score(&self) -> f32 {
         let impressions = self.impression_count.max(0) as f32;
         let positives = self.positive_count.max(0) as f32;

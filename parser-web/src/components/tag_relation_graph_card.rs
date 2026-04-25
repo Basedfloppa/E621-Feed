@@ -1,4 +1,5 @@
 use std::cell::RefCell;
+use std::collections::{BTreeSet, HashMap};
 use std::rc::Rc;
 
 use reqwasm::http::Request;
@@ -35,6 +36,10 @@ struct LayoutState {
     /// the score that earned it the slot. Both layout and rendering use only
     /// these — full edge sets are visually opaque on dense graphs.
     edges: Vec<(usize, usize, usize, f64)>,
+    /// Per-node community label (compact, contiguous ints). Drives the halo
+    /// colour overlay so cluster structure is visible at a glance instead of
+    /// requiring the user to mentally trace edges.
+    communities: Vec<u32>,
     width: f64,
     height: f64,
 }
@@ -68,6 +73,10 @@ impl ViewTransform {
 const ZOOM_MIN: f64 = 0.4;
 const ZOOM_MAX: f64 = 6.0;
 const ZOOM_STEP: f64 = 1.2;
+
+/// Barnes-Hut θ. 0.9 is a good legibility/speed tradeoff for n ≤ 1000:
+/// distant clusters use centre-of-mass, nearby pairs are exact.
+const BH_THETA: f64 = 0.9;
 
 #[function_component(TagRelationGraphCard)]
 pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
@@ -215,7 +224,6 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
         let hover_idx_render = hover_idx.clone();
         let edges_per_tag_val = *edges_per_tag;
         let view_render = *view;
-        let view_handle = view.clone();
         use_effect_with(
             (
                 payload.clone(),
@@ -251,11 +259,11 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
                         );
                         run_simulation(&mut layout, simulation_iterations(graph.nodes.len()));
                         fit_to_viewport(&mut layout, 0.06);
-                        // New layout invalidates any pan/zoom the user had on
-                        // the previous shape — reset to identity.
-                        if *view_render != ViewTransform::default() {
-                            view_handle.set(ViewTransform::default());
-                        }
+                        // View transform is intentionally NOT reset here — a
+                        // user pan/zoom should survive parameter tweaks (top_n,
+                        // edges_per_tag, etc.), so they can iterate without
+                        // losing their place. Use double-click or the reset
+                        // button to recenter explicitly.
                     }
                     draw_graph(&canvas, &layout, graph, *hover_idx_val, *view_render);
                 } else {
@@ -613,7 +621,7 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
         <div class="card mt-4">
             <div class="card-header bg-primary text-white d-flex justify-content-between align-items-center">
                 <h5 class="mb-0">{"Tag Relation Graph"}</h5>
-                <small class="opacity-75">{"hover a node for details"}</small>
+                <small class="opacity-75">{"hover a node for details · halo colour = community"}</small>
             </div>
             <div class="card-body">
                 { body }
@@ -663,11 +671,13 @@ fn edge_score(edge: &TagRelationEdge, nodes: &[TagRelationNode], n_user: i64) ->
     user_term + 0.35 * global_term
 }
 
-/// Keep, for each node, its top-K incident edges by `edge_score`. Take the
-/// union of those decisions: a node only votes in its own edges out, but as
-/// long as either endpoint kept the edge it survives. Net effect: every node
-/// has at least 1 link if any exist, and the densest "popular pairs with
-/// popular" edges drop out unless they're also pair-specific.
+/// Backbone selection has two phases that union together:
+///   1. Maximum spanning tree by edge_score over the whole graph (Kruskal).
+///      Guarantees connectedness across all nodes that have any edge.
+///   2. Per-node top-K voting on top of the MST. An edge survives if the MST
+///      kept it OR if either endpoint included it among its strongest K.
+/// The MST guard prevents the per-node-top-K alone from leaving disconnected
+/// components or stranded "satellite" nodes when one tag dominates.
 fn select_backbone(graph: &TagRelationGraphPayload, k: usize) -> Vec<(usize, usize, usize, f64)> {
     let n = graph.nodes.len();
     if n == 0 || graph.edges.is_empty() {
@@ -676,21 +686,51 @@ fn select_backbone(graph: &TagRelationGraphPayload, k: usize) -> Vec<(usize, usi
     let k = k.max(1);
     let n_user = graph.account_post_count.max(1);
 
-    let mut per_node: Vec<Vec<(f64, usize)>> = vec![Vec::new(); n];
     let mut scored: Vec<f64> = Vec::with_capacity(graph.edges.len());
-
+    let mut valid: Vec<bool> = Vec::with_capacity(graph.edges.len());
+    let mut per_node: Vec<Vec<(f64, usize)>> = vec![Vec::new(); n];
     for (idx, e) in graph.edges.iter().enumerate() {
         if e.source >= n || e.target >= n || e.source == e.target {
             scored.push(f64::NEG_INFINITY);
+            valid.push(false);
             continue;
         }
         let s = edge_score(e, &graph.nodes, n_user);
         scored.push(s);
+        valid.push(true);
         per_node[e.source].push((s, idx));
         per_node[e.target].push((s, idx));
     }
 
     let mut keep = vec![false; graph.edges.len()];
+
+    // Phase 1: Kruskal MST over decreasing score (i.e., maximum spanning tree).
+    let mut order: Vec<usize> = (0..graph.edges.len()).filter(|&i| valid[i]).collect();
+    order.sort_by(|&a, &b| {
+        scored[b]
+            .partial_cmp(&scored[a])
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    let mut parent: Vec<usize> = (0..n).collect();
+    fn find(parent: &mut [usize], mut i: usize) -> usize {
+        while parent[i] != i {
+            parent[i] = parent[parent[i]];
+            i = parent[i];
+        }
+        i
+    }
+    for idx in order {
+        let e = &graph.edges[idx];
+        let ra = find(&mut parent, e.source);
+        let rb = find(&mut parent, e.target);
+        if ra != rb {
+            parent[ra] = rb;
+            keep[idx] = true;
+        }
+    }
+
+    // Phase 2: per-node top-K. Union with MST.
     for adj in per_node.iter_mut() {
         adj.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
         for (_, idx) in adj.iter().take(k) {
@@ -709,11 +749,17 @@ fn select_backbone(graph: &TagRelationGraphPayload, k: usize) -> Vec<(usize, usi
 
 /// Cheap upper bound used to detect "the user changed `edges_per_tag`" so the
 /// layout cache invalidates without us having to recompute the backbone twice.
+/// Includes an MST allowance (n-1 edges if connected) so the count matches the
+/// real backbone post-MST union.
 fn expected_backbone_len(graph: &TagRelationGraphPayload, k: usize) -> usize {
+    let n = graph.nodes.len();
+    if n == 0 {
+        return 0;
+    }
     let mut count = 0usize;
-    let mut per_node = vec![0usize; graph.nodes.len()];
+    let mut per_node = vec![0usize; n];
     for e in &graph.edges {
-        if e.source >= graph.nodes.len() || e.target >= graph.nodes.len() {
+        if e.source >= n || e.target >= n {
             continue;
         }
         if per_node[e.source] < k || per_node[e.target] < k {
@@ -722,11 +768,12 @@ fn expected_backbone_len(graph: &TagRelationGraphPayload, k: usize) -> usize {
             per_node[e.target] += 1;
         }
     }
-    count
+    count + (n.saturating_sub(1))
 }
 
 fn simulation_iterations(n: usize) -> usize {
-    // Big graphs need more iterations to settle; tiny graphs converge fast.
+    // Hard cap; convergence detection in `run_simulation` typically stops
+    // earlier on small graphs and runs longer on large ones.
     let base = 600;
     let extra = (n.saturating_sub(60) as f64 * 1.6).round() as usize;
     (base + extra).min(1500)
@@ -741,6 +788,7 @@ fn initial_layout(
     let mut state = LayoutState {
         nodes: Vec::with_capacity(nodes.len()),
         edges: backbone,
+        communities: Vec::new(),
         width,
         height,
     };
@@ -777,20 +825,317 @@ fn initial_layout(
         let y = off_y + row as f64 * dy + jy;
 
         let normalized = (node.count as f64).max(1.0).ln() / max_count.max(1.0).ln().max(1e-3);
-        // Shrink node radii a little when n is large so they fit.
-        let r_max = if n > 120 { 10.0 } else { 14.0 };
+        // Smooth radius scaling: 60-node graph → r_max ≈ 14, 200+ → r_max ≈ 10.
+        // No more visible jump when the user nudges top_n past 120.
+        let r_max = smooth_r_max(n);
         let r = 3.5 + (normalized * r_max).clamp(0.0, r_max);
         state.nodes.push(NodeState { x, y, radius: r });
     }
+
+    // Compute communities once layout is set up. Label propagation over the
+    // backbone — fast and good enough for the visual cue we're after.
+    state.communities = label_propagation(state.nodes.len(), &state.edges, 12);
+
     state
 }
 
-/// Fruchterman–Reingold over the backbone only. Repulsion `k²/d` between
-/// every node pair (still O(N²) but cheap for N≤300), attraction `d²/k` along
-/// each backbone edge weighted by score percentile. No mid-simulation bounds
-/// clamp — `fit_to_viewport` does the final framing, so freely-spreading
-/// nodes can't get stuck against an edge.
-fn run_simulation(layout: &mut LayoutState, iterations: usize) {
+#[inline]
+fn smooth_r_max(n: usize) -> f64 {
+    // Smoothstep from 14 (small graphs) down to 10 (dense), interpolated
+    // across n ∈ [60, 200]. No discontinuity at n = 120.
+    let t = ((n as f64 - 60.0) / (200.0 - 60.0)).clamp(0.0, 1.0);
+    let s = t * t * (3.0 - 2.0 * t);
+    14.0 + (10.0 - 14.0) * s
+}
+
+/// Label Propagation Algorithm: each node iteratively adopts the label of the
+/// neighbour community with the largest summed edge weight. Converges in <15
+/// iterations for typical tag graphs and produces compact, contiguous
+/// community ids ready for a color palette lookup.
+fn label_propagation(
+    n_nodes: usize,
+    edges: &[(usize, usize, usize, f64)],
+    iterations: usize,
+) -> Vec<u32> {
+    if n_nodes == 0 {
+        return Vec::new();
+    }
+    let mut labels: Vec<u32> = (0..n_nodes as u32).collect();
+    let mut adj: Vec<Vec<(usize, f64)>> = vec![Vec::new(); n_nodes];
+    // Edge weights enter the adjacency as a positive lift (PMI can be < 0
+    // for anti-correlated pairs; clamping keeps anti-correlation from voting
+    // *against* a community).
+    let min_score = edges
+        .iter()
+        .map(|(_, _, _, s)| *s)
+        .fold(f64::INFINITY, f64::min);
+    let shift = if min_score.is_finite() && min_score < 0.0 {
+        -min_score + 0.05
+    } else {
+        0.05
+    };
+    for &(a, b, _, score) in edges {
+        if a >= n_nodes || b >= n_nodes || a == b {
+            continue;
+        }
+        let w = (score + shift).max(0.05);
+        adj[a].push((b, w));
+        adj[b].push((a, w));
+    }
+
+    // Fixed deterministic visit order based on a hash spread of the index.
+    let mut order: Vec<usize> = (0..n_nodes).collect();
+    order.sort_by_key(|&i| (i.wrapping_mul(2_654_435_761usize)) as u32);
+
+    for _ in 0..iterations {
+        let mut changed = false;
+        for &i in &order {
+            if adj[i].is_empty() {
+                continue;
+            }
+            let mut weights: HashMap<u32, f64> = HashMap::new();
+            for &(j, w) in &adj[i] {
+                *weights.entry(labels[j]).or_insert(0.0) += w;
+            }
+            // Tie-break: prefer the smaller label id for determinism.
+            let new_label = weights
+                .into_iter()
+                .max_by(|a, b| {
+                    a.1.partial_cmp(&b.1)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                        .then_with(|| b.0.cmp(&a.0))
+                })
+                .map(|(l, _)| l)
+                .unwrap_or(labels[i]);
+            if new_label != labels[i] {
+                labels[i] = new_label;
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    // Compact labels to dense [0..k) range so the palette index is small.
+    let unique: BTreeSet<u32> = labels.iter().copied().collect();
+    let map: HashMap<u32, u32> = unique
+        .iter()
+        .enumerate()
+        .map(|(i, l)| (*l, i as u32))
+        .collect();
+    labels.iter_mut().for_each(|l| *l = *map.get(l).unwrap_or(l));
+    labels
+}
+
+// =============== Barnes-Hut quadtree =====================================
+// Flat-arena quadtree used for O(N log N) repulsion computation. Children are
+// referenced by index; index 0 is reserved for the root, and `QT_NIL` marks
+// "no child". The tree is rebuilt once per FR iteration.
+
+const QT_NIL: usize = usize::MAX;
+
+#[derive(Clone, Copy)]
+struct QtNode {
+    cx0: f64,
+    cy0: f64,
+    size: f64,
+    mass: f64,
+    com_x: f64,
+    com_y: f64,
+    children: [usize; 4],
+    body: usize,
+}
+
+impl QtNode {
+    fn empty(cx0: f64, cy0: f64, size: f64) -> Self {
+        Self {
+            cx0,
+            cy0,
+            size,
+            mass: 0.0,
+            com_x: 0.0,
+            com_y: 0.0,
+            children: [QT_NIL; 4],
+            body: QT_NIL,
+        }
+    }
+}
+
+struct QuadTree {
+    nodes: Vec<QtNode>,
+}
+
+impl QuadTree {
+    fn new(min_x: f64, min_y: f64, size: f64) -> Self {
+        Self {
+            nodes: vec![QtNode::empty(min_x, min_y, size)],
+        }
+    }
+
+    #[inline]
+    fn quadrant(&self, n: usize, x: f64, y: f64) -> usize {
+        let half = self.nodes[n].size * 0.5;
+        let mid_x = self.nodes[n].cx0 + half;
+        let mid_y = self.nodes[n].cy0 + half;
+        let east = (x >= mid_x) as usize;
+        let south = (y >= mid_y) as usize;
+        // 0=NW 1=NE 2=SW 3=SE
+        (south << 1) | east
+    }
+
+    fn ensure_child(&mut self, parent: usize, q: usize) -> usize {
+        let existing = self.nodes[parent].children[q];
+        if existing != QT_NIL {
+            return existing;
+        }
+        let half = self.nodes[parent].size * 0.5;
+        let cx0 = self.nodes[parent].cx0
+            + if q & 1 == 1 { half } else { 0.0 };
+        let cy0 = self.nodes[parent].cy0
+            + if q & 2 == 2 { half } else { 0.0 };
+        let new_idx = self.nodes.len();
+        self.nodes.push(QtNode::empty(cx0, cy0, half));
+        self.nodes[parent].children[q] = new_idx;
+        new_idx
+    }
+
+    /// Insert a body. Stops splitting at a minimum cell size to avoid infinite
+    /// recursion when two bodies coincide (which can happen on initial layout
+    /// before forces have separated them).
+    fn insert(&mut self, body_idx: usize, body_x: f64, body_y: f64, positions: &[(f64, f64)]) {
+        const MIN_CELL: f64 = 0.5;
+        let mut cur = 0usize;
+        loop {
+            let n = self.nodes[cur];
+            if n.mass == 0.0 {
+                let nm = &mut self.nodes[cur];
+                nm.com_x = body_x;
+                nm.com_y = body_y;
+                nm.mass = 1.0;
+                nm.body = body_idx;
+                return;
+            }
+
+            if n.body != QT_NIL {
+                // Leaf — split.
+                let existing = n.body;
+                let (ex, ey) = positions[existing];
+
+                if self.nodes[cur].size <= MIN_CELL {
+                    // Bottom of recursion: stack the new body's mass onto this
+                    // leaf without splitting further. Geometric centre is the
+                    // mean of the two — close enough for repulsion at this
+                    // resolution.
+                    let nm = &mut self.nodes[cur];
+                    nm.com_x = (nm.com_x * nm.mass + body_x) / (nm.mass + 1.0);
+                    nm.com_y = (nm.com_y * nm.mass + body_y) / (nm.mass + 1.0);
+                    nm.mass += 1.0;
+                    return;
+                }
+
+                // Mark as internal and migrate the existing body downward.
+                let q_existing = self.quadrant(cur, ex, ey);
+                let q_body = self.quadrant(cur, body_x, body_y);
+                {
+                    let nm = &mut self.nodes[cur];
+                    nm.body = QT_NIL;
+                    nm.com_x = (nm.com_x * nm.mass + body_x) / (nm.mass + 1.0);
+                    nm.com_y = (nm.com_y * nm.mass + body_y) / (nm.mass + 1.0);
+                    nm.mass += 1.0;
+                }
+
+                let c_e = self.ensure_child(cur, q_existing);
+                {
+                    let cn = &mut self.nodes[c_e];
+                    cn.com_x = ex;
+                    cn.com_y = ey;
+                    cn.mass = 1.0;
+                    cn.body = existing;
+                }
+
+                if q_existing == q_body {
+                    // Same quadrant — descend into it and split further.
+                    cur = c_e;
+                    continue;
+                } else {
+                    let c_b = self.ensure_child(cur, q_body);
+                    let cn = &mut self.nodes[c_b];
+                    cn.com_x = body_x;
+                    cn.com_y = body_y;
+                    cn.mass = 1.0;
+                    cn.body = body_idx;
+                    return;
+                }
+            }
+
+            // Internal: update COM and descend into appropriate quadrant.
+            {
+                let nm = &mut self.nodes[cur];
+                nm.com_x = (nm.com_x * nm.mass + body_x) / (nm.mass + 1.0);
+                nm.com_y = (nm.com_y * nm.mass + body_y) / (nm.mass + 1.0);
+                nm.mass += 1.0;
+            }
+            let q = self.quadrant(cur, body_x, body_y);
+            cur = self.ensure_child(cur, q);
+        }
+    }
+
+    /// Accumulate repulsive force on a body at (px, py) from all other masses
+    /// in the tree. Cells satisfying `s/d < theta` are treated as a single
+    /// point at the centre of mass (Barnes-Hut approximation).
+    fn repulse(&self, px: f64, py: f64, k_sq: f64, theta: f64, body_idx: usize) -> (f64, f64) {
+        let mut fx = 0.0f64;
+        let mut fy = 0.0f64;
+        // Iterative depth-first traversal. Stack is bounded by depth ≈ log4(N).
+        let mut stack: Vec<usize> = Vec::with_capacity(64);
+        stack.push(0);
+        while let Some(idx) = stack.pop() {
+            let n = self.nodes[idx];
+            if n.mass <= 0.0 {
+                continue;
+            }
+            let dx = px - n.com_x;
+            let dy = py - n.com_y;
+            let dist_sq = (dx * dx + dy * dy).max(0.25);
+            let dist = dist_sq.sqrt();
+
+            let is_leaf = n.body != QT_NIL && n.children.iter().all(|&c| c == QT_NIL);
+            if is_leaf {
+                // Skip self when this is the singleton leaf for body_idx.
+                // For stacked-body leaves (rare, only on bodies within 0.5px),
+                // the contribution from "self" is at most 1/mass — close
+                // enough; explicit core-overlap correction handles the rest.
+                if n.body == body_idx && n.mass <= 1.5 {
+                    continue;
+                }
+                let force = (k_sq * n.mass) / dist;
+                fx += (dx / dist) * force;
+                fy += (dy / dist) * force;
+                continue;
+            }
+
+            // Internal cell: apply BH approximation if far enough.
+            if n.size / dist < theta {
+                let force = (k_sq * n.mass) / dist;
+                fx += (dx / dist) * force;
+                fy += (dy / dist) * force;
+            } else {
+                for &c in &n.children {
+                    if c != QT_NIL {
+                        stack.push(c);
+                    }
+                }
+            }
+        }
+        (fx, fy)
+    }
+}
+
+/// Fruchterman–Reingold over the backbone with Barnes-Hut repulsion. Stops
+/// early when total node displacement falls below an epsilon (≈ 0.5 px per
+/// node on average), capped by the iteration budget.
+fn run_simulation(layout: &mut LayoutState, max_iterations: usize) {
     let n = layout.nodes.len();
     if n < 2 {
         return;
@@ -798,6 +1143,7 @@ fn run_simulation(layout: &mut LayoutState, iterations: usize) {
 
     let area = layout.width * layout.height;
     let k = ((area / n as f64).sqrt() * 1.35).max(36.0);
+    let k_sq = k * k;
 
     // Normalise edge scores into a (0.15..1.0) attraction multiplier so the
     // strongest pair-specific links pull harder than the weakest.
@@ -807,40 +1153,77 @@ fn run_simulation(layout: &mut LayoutState, iterations: usize) {
     let span = (s_max - s_min).max(1e-6);
 
     let initial_temp = layout.width.max(layout.height) * 0.20;
-    // 0.992^iterations ≈ 0.005 at 700, ≈ 0.0001 at 1200.
     let cooling = 0.992f64;
     let mut t = initial_temp;
+    // Convergence epsilon: stop when total motion is under ~0.5px per node.
+    let convergence_eps = (n as f64) * 0.5;
 
     let mut forces: Vec<(f64, f64)> = vec![(0.0, 0.0); n];
+    let mut positions: Vec<(f64, f64)> = layout
+        .nodes
+        .iter()
+        .map(|p| (p.x, p.y))
+        .collect();
     let pad = 4.0_f64;
 
-    for _ in 0..iterations {
+    for iter in 0..max_iterations {
         for f in forces.iter_mut() {
             *f = (0.0, 0.0);
         }
+        for (i, p) in layout.nodes.iter().enumerate() {
+            positions[i] = (p.x, p.y);
+        }
 
-        // Repulsion (every pair).
-        for i in 0..n {
-            for j in (i + 1)..n {
-                let dx = layout.nodes[i].x - layout.nodes[j].x;
-                let dy = layout.nodes[i].y - layout.nodes[j].y;
-                let dist_sq = (dx * dx + dy * dy).max(0.25);
-                let dist = dist_sq.sqrt();
-
-                let min_dist = layout.nodes[i].radius + layout.nodes[j].radius + pad;
-                let core_boost = if dist < min_dist {
-                    (min_dist - dist) * 8.0
-                } else {
-                    0.0
-                };
-                let force = (k * k) / dist + core_boost;
-                let fx = (dx / dist) * force;
-                let fy = (dy / dist) * force;
-                forces[i].0 += fx;
-                forces[i].1 += fy;
-                forces[j].0 -= fx;
-                forces[j].1 -= fy;
+        // Build quadtree over current positions. Pad bounds slightly so
+        // boundary nodes are inside the root cell.
+        let (mut min_x, mut min_y, mut max_x, mut max_y) =
+            (f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY);
+        for &(x, y) in &positions {
+            if x < min_x {
+                min_x = x;
             }
+            if y < min_y {
+                min_y = y;
+            }
+            if x > max_x {
+                max_x = x;
+            }
+            if y > max_y {
+                max_y = y;
+            }
+        }
+        let size = ((max_x - min_x).max(max_y - min_y)).max(1.0) + 8.0;
+        let mut tree = QuadTree::new(min_x - 4.0, min_y - 4.0, size);
+        for (i, &(x, y)) in positions.iter().enumerate() {
+            tree.insert(i, x, y, &positions);
+        }
+
+        // Repulsion via Barnes-Hut. Plus a near-field core overlap correction
+        // so nodes can't sit on top of each other regardless of theta.
+        for i in 0..n {
+            let (px, py) = positions[i];
+            let (mut fx, mut fy) = tree.repulse(px, py, k_sq, BH_THETA, i);
+
+            // Hard core overlap correction — quadratic in the overlap depth.
+            // Cheap because it only kicks in when distance < r_i + r_j + pad.
+            for j in 0..n {
+                if i == j {
+                    continue;
+                }
+                let dx = px - positions[j].0;
+                let dy = py - positions[j].1;
+                let dist_sq = dx * dx + dy * dy;
+                let min_dist = layout.nodes[i].radius + layout.nodes[j].radius + pad;
+                if dist_sq < min_dist * min_dist {
+                    let dist = dist_sq.sqrt().max(0.5);
+                    let core_boost = (min_dist - dist) * 8.0;
+                    fx += (dx / dist) * core_boost;
+                    fy += (dy / dist) * core_boost;
+                }
+            }
+
+            forces[i].0 += fx;
+            forces[i].1 += fy;
         }
 
         // Attraction (backbone edges only).
@@ -858,8 +1241,8 @@ fn run_simulation(layout: &mut LayoutState, iterations: usize) {
             forces[b].1 += fy;
         }
 
-        // Integrate, capped by the current temperature. No bounds clamp —
-        // post-simulation `fit_to_viewport` handles the canvas mapping.
+        // Integrate, capped by the current temperature, and tally motion.
+        let mut total_motion = 0.0f64;
         for i in 0..n {
             let (fx, fy) = forces[i];
             let mag = (fx * fx + fy * fy).sqrt();
@@ -869,9 +1252,17 @@ fn run_simulation(layout: &mut LayoutState, iterations: usize) {
             let mv = mag.min(t);
             layout.nodes[i].x += (fx / mag) * mv;
             layout.nodes[i].y += (fy / mag) * mv;
+            total_motion += mv;
         }
 
         t *= cooling;
+
+        // Convergence: if both motion is small and we've burned enough
+        // iterations to settle, exit early. The min-iter floor avoids
+        // bailing out on the first pass before any forces have been felt.
+        if iter > 60 && total_motion < convergence_eps {
+            break;
+        }
     }
 }
 
@@ -997,6 +1388,26 @@ fn draw_graph(
     ctx.set_font("12px system-ui, -apple-system, Segoe UI, Roboto, sans-serif");
     ctx.set_text_baseline("middle");
 
+    // Community palette: distinct hues spread by the golden ratio so adjacent
+    // ids never collide visually. Singletons (community of size 1) inherit
+    // the muted colour so they don't add visual noise.
+    let max_community = layout.communities.iter().copied().max().unwrap_or(0);
+    let mut community_size = vec![0u32; (max_community as usize) + 1];
+    for &c in &layout.communities {
+        community_size[c as usize] += 1;
+    }
+    let community_color = |c: u32| -> String {
+        if (c as usize) < community_size.len() && community_size[c as usize] <= 1 {
+            return muted.clone();
+        }
+        // Golden ratio conjugate spreads hues evenly around the wheel.
+        let hue = ((c as f64) * 137.508_f64) % 360.0;
+        format!("hsl({:.0}, 60%, 55%)", hue)
+    };
+
+    // Pass 1: nodes (halo + fill). Halo = community ring drawn slightly
+    // larger than the fill — gives a visible cluster cue without obscuring
+    // group_type colour.
     for (i, node) in graph.nodes.iter().enumerate() {
         let pos = layout.nodes[i];
         let is_hover = hover == Some(i);
@@ -1006,27 +1417,78 @@ fn draw_graph(
             .map(|(_, c)| c.clone())
             .unwrap_or_else(|| muted.clone());
 
+        // Halo (community ring).
+        if let Some(&community) = layout.communities.get(i) {
+            let halo_color = community_color(community);
+            ctx.begin_path();
+            ctx.arc(pos.x, pos.y, pos.radius + 3.5, 0.0, std::f64::consts::TAU)
+                .ok();
+            ctx.set_stroke_style_str(&halo_color);
+            ctx.set_line_width(if is_hover { 3.5 } else { 2.5 });
+            ctx.stroke();
+        }
+
+        // Fill.
         ctx.begin_path();
-        ctx.arc(
-            pos.x,
-            pos.y,
-            pos.radius,
-            0.0,
-            std::f64::consts::TAU,
-        )
-        .ok();
+        ctx.arc(pos.x, pos.y, pos.radius, 0.0, std::f64::consts::TAU)
+            .ok();
         ctx.set_fill_style_str(&fill);
         ctx.fill();
 
         ctx.set_line_width(if is_hover { 2.0 } else { 0.8 });
         ctx.set_stroke_style_str(&body_color);
         ctx.stroke();
+    }
 
-        if is_hover || pos.radius >= 8.0 {
-            ctx.set_text_align("left");
-            ctx.set_fill_style_str(&body_color);
-            let _ = ctx.fill_text(&node.name, pos.x + pos.radius + 4.0, pos.y);
+    // Pass 2: labels with greedy collision avoidance. Sort by importance
+    // (radius first, then count) so top-N tags claim screen real estate
+    // before the long tail. Hovered node is forced on top regardless.
+    let mut placed: Vec<(f64, f64, f64, f64)> = Vec::new();
+    let approx_label_w = |name: &str| (name.chars().count() as f64) * 6.6 + 6.0;
+    let label_h = 14.0;
+
+    let mut order: Vec<usize> = (0..graph.nodes.len()).collect();
+    order.sort_by(|&a, &b| {
+        let ra = layout.nodes[a].radius;
+        let rb = layout.nodes[b].radius;
+        rb.partial_cmp(&ra)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| graph.nodes[b].count.cmp(&graph.nodes[a].count))
+    });
+    if let Some(h) = hover {
+        if let Some(p) = order.iter().position(|&i| i == h) {
+            order.remove(p);
+            order.insert(0, h);
         }
+    }
+
+    ctx.set_text_align("left");
+    ctx.set_fill_style_str(&body_color);
+    for i in order {
+        let pos = layout.nodes[i];
+        let is_hover = hover == Some(i);
+        let name = &graph.nodes[i].name;
+        let lx = pos.x + pos.radius + 4.0;
+        let ly = pos.y;
+        let lw = approx_label_w(name);
+        let lh = label_h;
+        let bbox = (lx, ly - lh * 0.5, lx + lw, ly + lh * 0.5);
+
+        // Always render the hovered label (and big-enough nodes), even if it
+        // overlaps — visibility on hover is non-negotiable. For everyone else,
+        // skip when the bbox collides with anything already placed.
+        let force = is_hover || pos.radius >= 9.0;
+        if !force {
+            let collides = placed.iter().any(|&(ax0, ay0, ax1, ay1)| {
+                bbox.0 < ax1 && bbox.2 > ax0 && bbox.1 < ay1 && bbox.3 > ay0
+            });
+            if collides {
+                continue;
+            }
+        }
+
+        let _ = ctx.fill_text(name, lx, ly);
+        placed.push(bbox);
     }
 }
 
