@@ -124,27 +124,36 @@ fn spawn_rebuild_if_needed() {
     std::thread::Builder::new()
         .name("tag-relation-rebuild".to_string())
         .spawn(|| {
-            loop {
-                GLOBAL_DIRTY.store(false, Ordering::Release);
-                match crate::db::load_global_tag_relation() {
-                    Ok(new) => GLOBAL_CACHE.store(Arc::new(new)),
-                    Err(e) => {
-                        eprintln!("[tag-relation] rebuild failed: {e}");
-                        GLOBAL_DIRTY.store(true, Ordering::Release);
-                        break;
+            'outer: loop {
+                'work: loop {
+                    if !GLOBAL_DIRTY.swap(false, Ordering::AcqRel) {
+                        break 'work;
+                    }
+                    match crate::db::load_global_tag_relation() {
+                        Ok(new) => GLOBAL_CACHE.store(Arc::new(new)),
+                        Err(e) => {
+                            eprintln!("[tag-relation] rebuild failed: {e}");
+                            GLOBAL_DIRTY.store(true, Ordering::Release);
+                            break 'outer;
+                        }
                     }
                 }
+
+                GLOBAL_REBUILDING.store(false, Ordering::Release);
+
                 if !GLOBAL_DIRTY.load(Ordering::Acquire) {
-                    break;
+                    return; // truly idle
+                }
+                if GLOBAL_REBUILDING.swap(true, Ordering::AcqRel) {
+                    return; // marker already spawned a fresh worker
                 }
             }
+
             GLOBAL_REBUILDING.store(false, Ordering::Release);
         })
         .expect("spawn tag-relation-rebuild thread");
 }
 
-/// Returns the current tag-relation cache. Never blocks; rebuilds happen in
-/// the background and the call returns the previous snapshot in the meantime.
 pub fn current_global_relation() -> Arc<TagRelationGraph> {
     if GLOBAL_DIRTY.load(Ordering::Acquire) {
         spawn_rebuild_if_needed();

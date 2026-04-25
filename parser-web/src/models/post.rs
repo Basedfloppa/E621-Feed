@@ -187,11 +187,24 @@ pub struct TagRelationEdge {
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug, Default)]
+pub struct TagRelationScoring {
+    pub w_global: f32,
+    pub w_personal: f32,
+    pub pmi_scale: f32,
+    pub cooc_ref: f32,
+    pub user_cooc_ref: f32,
+    pub min_cooc_global: i64,
+    pub min_cooc_user: i64,
+}
+
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug, Default)]
 pub struct TagRelationGraphPayload {
     pub nodes: Vec<TagRelationNode>,
     pub edges: Vec<TagRelationEdge>,
     pub catalog_post_count: i64,
     pub account_post_count: i64,
+    #[serde(default)]
+    pub scoring: TagRelationScoring,
 }
 
 #[derive(Deserialize, Serialize, Clone, PartialEq, Debug)]

@@ -603,6 +603,13 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
                             { format!(" · {} · {}×", node.group_type, node.count) }
                         </div>
                     }
+                    if matches!(payload.as_ref(), Some(g) if !g.nodes.is_empty() && g.edges.is_empty()) {
+                        <div class="position-absolute top-50 start-50 translate-middle text-center text-muted small px-3 py-2 rounded bg-body-tertiary" style="pointer-events: none; max-width: 280px;">
+                            {"No tag pairs co-occur often enough yet. Add more favourites or lower the "}
+                            <em>{"min co-occurrence"}</em>
+                            {" threshold above to see relationships."}
+                        </div>
+                    }
                 </div>
                 <p class="small text-muted mt-2 mb-0">
                     {
@@ -633,48 +640,93 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
     }
 }
 
-/// Personalized lift / pointwise mutual information for a tag pair, computed
-/// from the user's own data: `user_cooc · N_user / (count_a · count_b)`.
-/// Larger means "this pair appears together more than what either tag's
-/// marginal frequency would predict" — exactly what we want to surface and
-/// what dense raw co-occurrence counts hide.
-fn user_pmi(edge: &TagRelationEdge, nodes: &[TagRelationNode], n_user: i64) -> f64 {
-    if edge.source >= nodes.len() || edge.target >= nodes.len() {
-        return f64::NEG_INFINITY;
+fn default_scoring() -> crate::models::TagRelationScoring {
+    crate::models::TagRelationScoring {
+        w_global: 0.4,
+        w_personal: 0.6,
+        pmi_scale: 5.0,
+        cooc_ref: 20.0,
+        user_cooc_ref: 5.0,
+        min_cooc_global: 2,
+        min_cooc_user: 1,
     }
-    let count_a = nodes[edge.source].count.max(1) as f64;
-    let count_b = nodes[edge.target].count.max(1) as f64;
-    let n_u = n_user.max(1) as f64;
-    let lift = (edge.user_cooc.max(1) as f64) * n_u / (count_a * count_b);
-    lift.max(1e-3).ln()
 }
 
-fn edge_score(edge: &TagRelationEdge, nodes: &[TagRelationNode], n_user: i64) -> f64 {
-    let user_term = user_pmi(edge, nodes, n_user);
-    // Blend a smaller global PMI so semantically coherent pairs (well-known
-    // in the catalog) get a small lift even when the user's sample is thin.
-    let global_term = if edge.global_lift > 0.0 {
-        (edge.global_lift as f64).max(1e-3).ln()
+fn resolve_scoring(graph: &TagRelationGraphPayload) -> crate::models::TagRelationScoring {
+    let s = &graph.scoring;
+    if s.pmi_scale <= 0.0 || (s.w_global <= 0.0 && s.w_personal <= 0.0) {
+        default_scoring()
+    } else {
+        s.clone()
+    }
+}
+
+fn pair_pmi_score(c: i64, m_a: f64, m_b: f64, n: f64, min_cooc: i64, scale: f64, cooc_ref: f64) -> f64 {
+    if c < min_cooc || m_a <= 0.0 || m_b <= 0.0 || n <= 0.0 {
+        return 0.0;
+    }
+    let denom = m_a * m_b / n;
+    if denom <= 0.0 {
+        return 0.0;
+    }
+    let lift = (c as f64) / denom;
+    let raw_pmi = (lift.max(1e-6).ln() / scale.max(1e-3)).clamp(0.0, 1.0);
+    let cooc_ref_log = ((cooc_ref + 1.0).ln()).max(1e-3);
+    let conf = (((c as f64) + 1.0).ln() / cooc_ref_log).clamp(0.0, 1.0);
+    raw_pmi * conf
+}
+
+fn edge_score(
+    edge: &TagRelationEdge,
+    nodes: &[TagRelationNode],
+    n_user: i64,
+    n_catalog: i64,
+    scoring: &crate::models::TagRelationScoring,
+) -> f64 {
+    if edge.source >= nodes.len() || edge.target >= nodes.len() || edge.source == edge.target {
+        return 0.0;
+    }
+    let m_a = nodes[edge.source].count.max(0) as f64;
+    let m_b = nodes[edge.target].count.max(0) as f64;
+    let nu = n_user.max(0) as f64;
+    let nc = n_catalog.max(0) as f64;
+
+    let user_score = pair_pmi_score(
+        edge.user_cooc,
+        m_a,
+        m_b,
+        nu,
+        scoring.min_cooc_user,
+        scoring.pmi_scale as f64,
+        scoring.user_cooc_ref as f64,
+    );
+
+    let global_score = if edge.global_lift > 0.0 && edge.global_cooc >= scoring.min_cooc_global {
+        let raw_pmi = ((edge.global_lift as f64).max(1e-6).ln() / (scoring.pmi_scale as f64).max(1e-3))
+            .clamp(0.0, 1.0);
+        let cooc_ref_log = ((scoring.cooc_ref as f64 + 1.0).ln()).max(1e-3);
+        let conf = ((edge.global_cooc.max(0) as f64 + 1.0).ln() / cooc_ref_log).clamp(0.0, 1.0);
+        let _ = nc; // n_catalog is captured via global_lift; keep param for parity.
+        raw_pmi * conf
     } else {
         0.0
     };
-    user_term + 0.35 * global_term
+
+    let w_g = scoring.w_global.max(0.0) as f64;
+    let w_u = scoring.w_personal.max(0.0) as f64;
+    let sum = (w_g + w_u).max(1e-6);
+    (w_g * global_score + w_u * user_score) / sum
 }
 
-/// Backbone selection has two phases that union together:
-///   1. Maximum spanning tree by edge_score over the whole graph (Kruskal).
-///      Guarantees connectedness across all nodes that have any edge.
-///   2. Per-node top-K voting on top of the MST. An edge survives if the MST
-///      kept it OR if either endpoint included it among its strongest K.
-/// The MST guard prevents the per-node-top-K alone from leaving disconnected
-/// components or stranded "satellite" nodes when one tag dominates.
 fn select_backbone(graph: &TagRelationGraphPayload, k: usize) -> Vec<(usize, usize, usize, f64)> {
     let n = graph.nodes.len();
     if n == 0 || graph.edges.is_empty() {
         return Vec::new();
     }
     let k = k.max(1);
-    let n_user = graph.account_post_count.max(1);
+    let n_user = graph.account_post_count;
+    let n_catalog = graph.catalog_post_count;
+    let scoring = resolve_scoring(graph);
 
     let mut scored: Vec<f64> = Vec::with_capacity(graph.edges.len());
     let mut valid: Vec<bool> = Vec::with_capacity(graph.edges.len());
@@ -685,7 +737,7 @@ fn select_backbone(graph: &TagRelationGraphPayload, k: usize) -> Vec<(usize, usi
             valid.push(false);
             continue;
         }
-        let s = edge_score(e, &graph.nodes, n_user);
+        let s = edge_score(e, &graph.nodes, n_user, n_catalog, &scoring);
         scored.push(s);
         valid.push(true);
         per_node[e.source].push((s, idx));
@@ -854,25 +906,15 @@ fn label_propagation(
     }
     let mut labels: Vec<u32> = (0..n_nodes as u32).collect();
     let mut adj: Vec<Vec<(usize, f64)>> = vec![Vec::new(); n_nodes];
-    // Edge weights enter the adjacency as a positive lift (PMI can be < 0
-    // for anti-correlated pairs; clamping keeps anti-correlation from voting
-    // *against* a community).
-    let min_score = edges
-        .iter()
-        .map(|(_, _, _, s)| *s)
-        .fold(f64::INFINITY, f64::min);
-    let shift = if min_score.is_finite() && min_score < 0.0 {
-        -min_score + 0.05
-    } else {
-        0.05
-    };
     for &(a, b, _, score) in edges {
         if a >= n_nodes || b >= n_nodes || a == b {
             continue;
         }
-        let w = (score + shift).max(0.05);
-        adj[a].push((b, w));
-        adj[b].push((a, w));
+        if !score.is_finite() || score <= 0.0 {
+            continue;
+        }
+        adj[a].push((b, score));
+        adj[b].push((a, score));
     }
 
     // Fixed deterministic visit order based on a hash spread of the index.

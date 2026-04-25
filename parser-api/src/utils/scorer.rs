@@ -66,6 +66,18 @@ impl Group {
         Group::Lore,
         Group::Meta,
     ];
+
+    pub const fn is_scoring(self) -> bool {
+        match self {
+            Group::Artist
+            | Group::Character
+            | Group::Copyright
+            | Group::Species
+            | Group::General
+            | Group::Lore => true,
+            Group::Meta => false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -126,6 +138,15 @@ pub struct Priors {
     pub tag_relation_pmi_scale: f32,
     #[serde(default = "default_tag_relation_min_cooc")]
     pub tag_relation_min_cooc: i64,
+    /// Minimum user co-occurrence required before a pair contributes to the
+    /// personal score. Defaults to 1 (any pair seen at least once in user
+    /// data) — user samples are sparser than catalog samples, so the global
+    /// `min_cooc` is too strict to apply unmodified here.
+    #[serde(default = "default_tag_relation_user_min_cooc")]
+    pub tag_relation_user_min_cooc: i64,
+    /// Legacy smoothing parameter, retained for parse compat with older
+    /// configs. The new true-PMI user formula doesn't need it.
+    #[allow(dead_code)]
     #[serde(default = "default_tag_relation_user_smooth")]
     pub tag_relation_user_smooth: f32,
     /// Reference cooc for confidence shrinkage on global PMI. Pairs with
@@ -178,6 +199,9 @@ fn default_tag_relation_pmi_scale() -> f32 {
 }
 fn default_tag_relation_min_cooc() -> i64 {
     2
+}
+fn default_tag_relation_user_min_cooc() -> i64 {
+    1
 }
 fn default_tag_relation_user_smooth() -> f32 {
     1.0
@@ -371,6 +395,11 @@ impl<'a> ScoringContext<'a> {
         for &g in &Group::ALL {
             if let Some(&w) = group_weights.get(g.name()) {
                 group_wts[g as usize] = w;
+            }
+        }
+        for &g in &Group::ALL {
+            if !g.is_scoring() {
+                group_wts[g as usize] = 0.0;
             }
         }
 
@@ -724,9 +753,10 @@ impl<'a> ScoringContext<'a> {
             .collect();
 
         let ng = self.global_relation.n_posts().max(1) as f32;
+        let nu = self.user_relation.n_posts().max(0) as f32;
         let pmi_scale = self.priors.tag_relation_pmi_scale.max(1e-3);
         let min_cooc_global = self.priors.tag_relation_min_cooc.max(1);
-        let user_smooth = self.priors.tag_relation_user_smooth.max(0.0);
+        let min_cooc_user = self.priors.tag_relation_user_min_cooc.max(1);
         let cooc_ref = self.priors.tag_relation_cooc_ref.max(1.0);
         let user_cooc_ref = self.priors.tag_relation_user_cooc_ref.max(1.0);
         let cooc_ref_log = (cooc_ref + 1.0).ln().max(1e-3);
@@ -774,15 +804,17 @@ impl<'a> ScoringContext<'a> {
                 };
 
                 let user_score = {
-                    let c = self.user_relation.cooc(*gi, ti, *gj, tj) as f32;
+                    let c = self.user_relation.cooc(*gi, ti, *gj, tj);
                     let gj_um = user_marg[j].max(0) as f32;
-                    if gi_um + gj_um > 0.0 {
-                        let denom = gi_um.min(gj_um).max(0.0) + user_smooth;
+                    if c >= min_cooc_user && gi_um > 0.0 && gj_um > 0.0 && nu > 0.0 {
+                        let denom = gi_um * gj_um / nu;
                         if denom > 0.0 {
-                            let raw = (c / denom).clamp(0.0, 1.0);
-                            let conf_user =
-                                ((c + 1.0).ln() / user_cooc_ref_log).clamp(0.0, 1.0);
-                            raw * conf_user
+                            let lift = (c as f32) / denom;
+                            let raw_pmi =
+                                (lift.max(1e-6).ln() / pmi_scale).clamp(0.0, 1.0);
+                            let conf_user = ((c as f32 + 1.0).ln() / user_cooc_ref_log)
+                                .clamp(0.0, 1.0);
+                            raw_pmi * conf_user
                         } else {
                             0.0
                         }

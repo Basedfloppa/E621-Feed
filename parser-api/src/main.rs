@@ -2,19 +2,24 @@
 extern crate rocket;
 
 use chrono::Utc;
+use rocket::http::{ContentType, Header, Status};
+use rocket::request::{self, FromRequest, Request};
+use rocket::response::{self, Responder, Response};
 use rocket::{State, get};
 use rocket::{
     futures::{lock::Mutex, stream::StreamExt},
-    serde::json::Json,
+    serde::json::{Json, serde_json},
 };
 use rocket_cors::AllowedOrigins;
 use rusqlite::Result;
 use std::collections::HashSet;
+use std::hash::{DefaultHasher, Hasher};
+use std::io::Cursor;
 
 use crate::models::{
     BlacklistPayload, DeviceScopedAccount, FeedInteractionRequest, ScoredPost,
-    TagRelationGraphPayload, TruncatedAccount, UserApiResponse, cfg, default_path, reload_from,
-    start_config_watcher,
+    TagRelationScoring, TruncatedAccount, UserApiResponse, cfg,
+    default_path, reload_from, start_config_watcher,
 };
 use crate::utils::{
     ScoringContext, current_global_relation, current_idf, diversify_scored_posts, mark_idf_dirty,
@@ -213,19 +218,92 @@ async fn create_account(
     }
 }
 
-#[openapi(tag = "Accounts")]
+struct IfNoneMatch(Option<String>);
+
+#[rocket::async_trait]
+impl<'r> FromRequest<'r> for IfNoneMatch {
+    type Error = std::convert::Infallible;
+    async fn from_request(req: &'r Request<'_>) -> request::Outcome<Self, Self::Error> {
+        request::Outcome::Success(IfNoneMatch(
+            req.headers().get_one("If-None-Match").map(|s| s.to_string()),
+        ))
+    }
+}
+
+struct EtagJson {
+    body: Vec<u8>,
+    etag: String,
+    not_modified: bool,
+}
+
+impl EtagJson {
+    fn new<T: serde::Serialize>(payload: &T, if_none_match: &IfNoneMatch) -> Result<Self, String> {
+        let body = serde_json::to_vec(payload).map_err(|e| format!("serialize: {e}"))?;
+        let mut h = DefaultHasher::new();
+        h.write(&body);
+        let etag = format!("\"{:x}\"", h.finish());
+        let not_modified = if_none_match
+            .0
+            .as_deref()
+            .map(|tag| {
+                tag.split(',').any(|t| t.trim() == "*" || t.trim() == etag)
+            })
+            .unwrap_or(false);
+        Ok(Self {
+            body,
+            etag,
+            not_modified,
+        })
+    }
+}
+
+impl<'r> Responder<'r, 'static> for EtagJson {
+    fn respond_to(self, _: &'r Request<'_>) -> response::Result<'static> {
+        let mut build = Response::build();
+        build
+            .header(Header::new("ETag", self.etag))
+            .header(Header::new("Cache-Control", "private, max-age=60"));
+        if self.not_modified {
+            build.status(Status::NotModified);
+        } else {
+            build
+                .header(ContentType::JSON)
+                .sized_body(self.body.len(), Cursor::new(self.body));
+        }
+        build.ok()
+    }
+}
+
 #[get("/account/<account_id>/tag_relations?<owner_token>&<top>&<min_cooc>")]
 async fn get_account_tag_relations(
     account_id: i32,
     owner_token: &str,
     top: Option<usize>,
     min_cooc: Option<i64>,
-) -> Result<Json<TagRelationGraphPayload>, String> {
+    if_none_match: IfNoneMatch,
+) -> Result<EtagJson, String> {
     get_account_by_id(owner_token, account_id)
         .map_err(|e| format!("Failed to validate account access: {e}"))?;
     let top = top.unwrap_or(60).clamp(2, 250);
     let min_cooc = min_cooc.unwrap_or(2).max(1);
-    get_account_tag_relation_graph(account_id, top, min_cooc).map(Json)
+    let mut payload = get_account_tag_relation_graph(account_id, top, min_cooc)?;
+
+    let priors = &cfg().priors;
+    let n_fav = payload.account_post_count.max(0) as f32;
+    let conf = n_fav / (n_fav + 50.0);
+    let w_personal = priors.tag_relation_w_personal.max(0.0) * conf;
+    let w_global =
+        priors.tag_relation_w_global.max(0.0) + priors.tag_relation_w_personal.max(0.0) * (1.0 - conf);
+    payload.scoring = TagRelationScoring {
+        w_global,
+        w_personal,
+        pmi_scale: priors.tag_relation_pmi_scale.max(1e-3),
+        cooc_ref: priors.tag_relation_cooc_ref.max(1.0),
+        user_cooc_ref: priors.tag_relation_user_cooc_ref.max(1.0),
+        min_cooc_global: priors.tag_relation_min_cooc.max(1),
+        min_cooc_user: priors.tag_relation_user_min_cooc.max(1),
+    };
+    EtagJson::new(&payload, &if_none_match)
 }
 
 #[openapi(tag = "Accounts")]
@@ -369,7 +447,6 @@ async fn rocket() -> _ {
         create_account,
         get_account_blacklist,
         update_account_blacklist,
-        get_account_tag_relations,
         get_recommendations
     ];
 
@@ -377,6 +454,7 @@ async fn rocket() -> _ {
         .manage(Mutex::new(watcher))
         .manage(spec)
         .mount("/api", api_routes)
+        .mount("/api", rocket::routes![get_account_tag_relations])
         .mount("/api", routes![openapi_json])
         .mount(
             "/api/swagger-ui",

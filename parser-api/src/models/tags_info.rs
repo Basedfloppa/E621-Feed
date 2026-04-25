@@ -94,10 +94,36 @@ pub struct TagRelationEdge {
     pub global_lift: f32,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone, JsonSchema, Default)]
+pub struct TagRelationScoring {
+    /// Weight for the global PMI component (mirrors `tag_relation_w_global`).
+    pub w_global: f32,
+    /// Weight for the personal PMI component (mirrors
+    /// `tag_relation_w_personal`). Cold-start aware — for users with few
+    /// favourites, the backend re-routes some of this to `w_global` before
+    /// emitting the payload.
+    pub w_personal: f32,
+    /// PMI normalisation scale (mirrors `tag_relation_pmi_scale`). Both PMI
+    /// terms divide by this before clamping to [0, 1].
+    pub pmi_scale: f32,
+    /// log1p(cooc_ref) reference for global confidence shrinkage.
+    pub cooc_ref: f32,
+    /// log1p(cooc_ref) reference for user confidence shrinkage.
+    pub user_cooc_ref: f32,
+    /// Minimum global co-occurrence required for a pair to contribute to the
+    /// global PMI component.
+    pub min_cooc_global: i64,
+    /// Minimum user co-occurrence required for a pair to contribute to the
+    /// personal PMI component.
+    pub min_cooc_user: i64,
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone, JsonSchema)]
 pub struct TagRelationGraphPayload {
     pub nodes: Vec<TagRelationNode>,
     pub edges: Vec<TagRelationEdge>,
     pub catalog_post_count: i64,
     pub account_post_count: i64,
+    #[serde(default)]
+    pub scoring: TagRelationScoring,
 }

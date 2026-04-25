@@ -1027,17 +1027,26 @@ fn save_posts_tags_batch_inner(
                 ("species", &post.tags.species),
             ] {
                 for tag in tags {
-                    if tag.is_empty() || blacklist.contains(tag) {
+                    if tag.is_empty() {
+                        continue;
+                    }
+                    let tag_lc = if tag.bytes().any(|b| b.is_ascii_uppercase()) {
+                        tag.to_ascii_lowercase()
+                    } else {
+                        tag.clone()
+                    };
+                    // Blacklist is lowercased at config load (see main.rs).
+                    if blacklist.contains(&tag_lc) {
                         continue;
                     }
 
                     insert_tag
-                        .execute(params![&tag, group])
+                        .execute(params![&tag_lc, group])
                         .map_err(|e| format!("ins tag: {e}"))?;
 
                     let tag_id: i64 = select_id
-                        .query_row(params![&tag, group], |r| r.get(0))
-                        .map_err(|e| format!("get id {tag}:{group}: {e}"))?;
+                        .query_row(params![&tag_lc, group], |r| r.get(0))
+                        .map_err(|e| format!("get id {tag_lc}:{group}: {e}"))?;
 
                     link.execute(params![tag_id, pid])
                         .map_err(|e| format!("link tag_id={tag_id} post_id={pid}: {e}"))?;
@@ -1196,6 +1205,8 @@ pub fn load_global_tag_relation() -> rusqlite::Result<crate::utils::TagRelationG
 
     let mut graph = crate::utils::TagRelationGraph::with_posts(n_posts);
 
+    let min_cooc = crate::models::cfg().priors.tag_relation_min_cooc.max(1);
+
     {
         let mut stmt = conn.prepare(
             "
@@ -1203,9 +1214,10 @@ pub fn load_global_tag_relation() -> rusqlite::Result<crate::utils::TagRelationG
             FROM tag_cooccurrence c
             INNER JOIN tags t1 ON t1.id = c.tag1_id
             INNER JOIN tags t2 ON t2.id = c.tag2_id
+            WHERE c.cooc_count >= ?1
             ",
         )?;
-        let rows = stmt.query_map([], |row| {
+        let rows = stmt.query_map(params![min_cooc], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
@@ -1293,6 +1305,7 @@ pub fn get_account_tag_relation_graph(
             edges: Vec::new(),
             catalog_post_count,
             account_post_count,
+            scoring: Default::default(),
         });
     }
 
@@ -1319,8 +1332,7 @@ pub fn get_account_tag_relation_graph(
             LEFT JOIN tags t2
                    ON t2.name = atc.tag2_name AND t2.group_type = atc.tag2_group
             LEFT JOIN tag_cooccurrence c
-                   ON c.tag1_id = CASE WHEN t1.id < t2.id THEN t1.id ELSE t2.id END
-                  AND c.tag2_id = CASE WHEN t1.id < t2.id THEN t2.id ELSE t1.id END
+                   ON c.tag1_id = t1.id AND c.tag2_id = t2.id
             WHERE atc.account_id = ?1
               AND atc.cooc_count >= ?2
             ",
@@ -1383,6 +1395,7 @@ pub fn get_account_tag_relation_graph(
         edges,
         catalog_post_count,
         account_post_count,
+        scoring: Default::default(),
     })
 }
 

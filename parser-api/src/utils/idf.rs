@@ -73,33 +73,36 @@ fn spawn_rebuild_if_needed() {
     std::thread::Builder::new()
         .name("idf-rebuild".to_string())
         .spawn(|| {
-            // Drain dirty flags. If another mark arrives during the build we
-            // loop and rebuild again — but only one rebuild runs at a time.
-            loop {
-                IDF_DIRTY.store(false, Ordering::Release);
-                match IdfIndex::from_db() {
-                    Ok(new) => IDF_CACHE.store(Arc::new(new)),
-                    Err(e) => {
-                        // Leave dirty set so the next caller re-triggers a
-                        // rebuild, then exit so we don't hot-spin on persistent
-                        // failures.
-                        eprintln!("[idf] rebuild failed: {e}");
-                        IDF_DIRTY.store(true, Ordering::Release);
-                        break;
+            'outer: loop {
+                'work: loop {
+                    if !IDF_DIRTY.swap(false, Ordering::AcqRel) {
+                        break 'work;
+                    }
+                    match IdfIndex::from_db() {
+                        Ok(new) => IDF_CACHE.store(Arc::new(new)),
+                        Err(e) => {
+                            eprintln!("[idf] rebuild failed: {e}");
+                            IDF_DIRTY.store(true, Ordering::Release);
+                            break 'outer;
+                        }
                     }
                 }
+
+                IDF_REBUILDING.store(false, Ordering::Release);
+
                 if !IDF_DIRTY.load(Ordering::Acquire) {
-                    break;
+                    return; // truly idle
+                }
+                if IDF_REBUILDING.swap(true, Ordering::AcqRel) {
+                    return; // marker already spawned a fresh worker
                 }
             }
+
             IDF_REBUILDING.store(false, Ordering::Release);
         })
         .expect("spawn idf-rebuild thread");
 }
 
-/// Returns the current IDF cache. Never blocks; if the cache is dirty a
-/// rebuild is started in the background and this call returns the previous
-/// (possibly stale) snapshot.
 pub fn current_idf() -> Arc<IdfIndex> {
     if IDF_DIRTY.load(Ordering::Acquire) {
         spawn_rebuild_if_needed();
