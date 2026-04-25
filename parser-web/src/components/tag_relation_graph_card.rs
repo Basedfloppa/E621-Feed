@@ -36,10 +36,13 @@ struct LayoutState {
     /// the score that earned it the slot. Both layout and rendering use only
     /// these — full edge sets are visually opaque on dense graphs.
     edges: Vec<(usize, usize, usize, f64)>,
-    /// Per-node community label (compact, contiguous ints). Drives the halo
-    /// colour overlay so cluster structure is visible at a glance instead of
-    /// requiring the user to mentally trace edges.
+    /// Per-node community label (compact, contiguous ints). Drives the node
+    /// fill colour so cluster structure is visible at a glance.
     communities: Vec<u32>,
+    /// Cached edge score min/max so `draw_graph` doesn't recompute on every
+    /// paint (drawn 60+ times/sec while panning).
+    score_min: f64,
+    score_max: f64,
     width: f64,
     height: f64,
 }
@@ -245,11 +248,12 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
                     let logical_height = (logical_width * 0.85).clamp(480.0, 900.0);
 
                     let mut layout = layout_ref.borrow_mut();
-                    let layout_dirty = layout.nodes.len() != graph.nodes.len()
-                        || (layout.width - logical_width).abs() > 0.5
-                        || (layout.height - logical_height).abs() > 0.5
+                    let nodes_changed = layout.nodes.len() != graph.nodes.len()
                         || layout.edges.len() != expected_backbone_len(graph, *k_val);
-                    if layout_dirty {
+                    let size_changed = (layout.width - logical_width).abs() > 0.5
+                        || (layout.height - logical_height).abs() > 0.5;
+                    if nodes_changed {
+                        // Full path: backbone + topology changed → re-simulate.
                         let backbone = select_backbone(graph, *k_val);
                         *layout = initial_layout(
                             &graph.nodes,
@@ -264,6 +268,12 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
                         // edges_per_tag, etc.), so they can iterate without
                         // losing their place. Use double-click or the reset
                         // button to recenter explicitly.
+                    } else if size_changed {
+                        // Resize-only: keep the simulated topology, just
+                        // rescale node positions into the new canvas. Avoids a
+                        // multi-hundred-millisecond re-simulation on every
+                        // window resize event.
+                        rescale_layout(&mut layout, logical_width, logical_height);
                     }
                     draw_graph(&canvas, &layout, graph, *hover_idx_val, *view_render);
                 } else {
@@ -605,14 +615,7 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
                         }
                     }
                 </p>
-                <div class="d-flex flex-wrap gap-2 mt-2 small">
-                    <span class="badge text-bg-light">{ legend_chip("artist") }</span>
-                    <span class="badge text-bg-light">{ legend_chip("character") }</span>
-                    <span class="badge text-bg-light">{ legend_chip("copyright") }</span>
-                    <span class="badge text-bg-light">{ legend_chip("species") }</span>
-                    <span class="badge text-bg-light">{ legend_chip("general") }</span>
-                    <span class="badge text-bg-light">{ legend_chip("lore") }</span>
-                </div>
+                <p class="small text-muted mt-1 mb-0">{"Node colour = detected community (cluster of strongly co-occurring tags). Hover for tag type and counts."}</p>
             </>
         }
     };
@@ -621,26 +624,13 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
         <div class="card mt-4">
             <div class="card-header bg-primary text-white d-flex justify-content-between align-items-center">
                 <h5 class="mb-0">{"Tag Relation Graph"}</h5>
-                <small class="opacity-75">{"hover a node for details · halo colour = community"}</small>
+                <small class="opacity-75">{"hover a node for details · colour = community"}</small>
             </div>
             <div class="card-body">
                 { body }
             </div>
         </div>
     }
-}
-
-fn legend_chip(group: &str) -> String {
-    let dot = match group {
-        "artist" => "● artist",
-        "character" => "● character",
-        "copyright" => "● copyright",
-        "species" => "● species",
-        "general" => "● general",
-        "lore" => "● lore",
-        _ => "●",
-    };
-    dot.to_string()
 }
 
 /// Personalized lift / pointwise mutual information for a tag pair, computed
@@ -789,6 +779,8 @@ fn initial_layout(
         nodes: Vec::with_capacity(nodes.len()),
         edges: backbone,
         communities: Vec::new(),
+        score_min: 0.0,
+        score_max: 1.0,
         width,
         height,
     };
@@ -1081,6 +1073,53 @@ impl QuadTree {
         }
     }
 
+    /// Visit every body that lies within `radius` of (px, py), passing each
+    /// one's index and `(x, y)` to `f`. Used for the near-field core-overlap
+    /// correction without paying the O(N²) all-pairs cost. Cells whose AABB
+    /// can't intersect the query disc are skipped wholesale.
+    fn query_neighbours<F: FnMut(usize, f64, f64)>(
+        &self,
+        px: f64,
+        py: f64,
+        radius: f64,
+        positions: &[(f64, f64)],
+        mut f: F,
+    ) {
+        let r_sq = radius * radius;
+        let mut stack: Vec<usize> = Vec::with_capacity(64);
+        stack.push(0);
+        while let Some(idx) = stack.pop() {
+            let n = self.nodes[idx];
+            if n.mass <= 0.0 {
+                continue;
+            }
+            // AABB-vs-disc rejection: nearest point on cell to (px, py).
+            let nx = px.clamp(n.cx0, n.cx0 + n.size);
+            let ny = py.clamp(n.cy0, n.cy0 + n.size);
+            let dx = px - nx;
+            let dy = py - ny;
+            if dx * dx + dy * dy > r_sq {
+                continue;
+            }
+
+            let is_leaf = n.body != QT_NIL && n.children.iter().all(|&c| c == QT_NIL);
+            if is_leaf {
+                let (bx, by) = positions[n.body];
+                let ddx = bx - px;
+                let ddy = by - py;
+                if ddx * ddx + ddy * ddy <= r_sq {
+                    f(n.body, bx, by);
+                }
+                continue;
+            }
+            for &c in &n.children {
+                if c != QT_NIL {
+                    stack.push(c);
+                }
+            }
+        }
+    }
+
     /// Accumulate repulsive force on a body at (px, py) from all other masses
     /// in the tree. Cells satisfying `s/d < theta` are treated as a single
     /// point at the centre of mass (Barnes-Hut approximation).
@@ -1199,28 +1238,37 @@ fn run_simulation(layout: &mut LayoutState, max_iterations: usize) {
         }
 
         // Repulsion via Barnes-Hut. Plus a near-field core overlap correction
-        // so nodes can't sit on top of each other regardless of theta.
+        // so nodes can't sit on top of each other regardless of theta. The
+        // overlap query uses the quadtree to visit only nodes inside the
+        // candidate radius — O(log N) per body in the typical case versus the
+        // O(N) all-pairs sweep this used to do.
+        let max_radius = layout
+            .nodes
+            .iter()
+            .map(|m| m.radius)
+            .fold(0.0_f64, f64::max);
         for i in 0..n {
             let (px, py) = positions[i];
             let (mut fx, mut fy) = tree.repulse(px, py, k_sq, BH_THETA, i);
 
-            // Hard core overlap correction — quadratic in the overlap depth.
-            // Cheap because it only kicks in when distance < r_i + r_j + pad.
-            for j in 0..n {
+            let r_i = layout.nodes[i].radius;
+            // Anything closer than r_i + r_max + pad could overlap.
+            let query_r = r_i + max_radius + pad;
+            tree.query_neighbours(px, py, query_r, &positions, |j, jx, jy| {
                 if i == j {
-                    continue;
+                    return;
                 }
-                let dx = px - positions[j].0;
-                let dy = py - positions[j].1;
+                let dx = px - jx;
+                let dy = py - jy;
                 let dist_sq = dx * dx + dy * dy;
-                let min_dist = layout.nodes[i].radius + layout.nodes[j].radius + pad;
+                let min_dist = r_i + layout.nodes[j].radius + pad;
                 if dist_sq < min_dist * min_dist {
                     let dist = dist_sq.sqrt().max(0.5);
                     let core_boost = (min_dist - dist) * 8.0;
                     fx += (dx / dist) * core_boost;
                     fy += (dy / dist) * core_boost;
                 }
-            }
+            });
 
             forces[i].0 += fx;
             forces[i].1 += fy;
@@ -1264,6 +1312,32 @@ fn run_simulation(layout: &mut LayoutState, max_iterations: usize) {
             break;
         }
     }
+
+    // Cache the edge-score range so `draw_graph` doesn't recompute on every
+    // paint (60+ paints/sec while panning).
+    layout.score_min = if s_min.is_finite() { s_min } else { 0.0 };
+    layout.score_max = if s_max.is_finite() { s_max } else { 1.0 };
+}
+
+/// Rescale already-simulated positions to a new canvas size — used when the
+/// browser resizes but the topology hasn't changed. Avoids the full re-sim
+/// (hundreds of ms for n>100) and just maps the existing aspect into the new
+/// frame. Calls `fit_to_viewport` to re-centre.
+fn rescale_layout(layout: &mut LayoutState, new_width: f64, new_height: f64) {
+    if layout.width <= 0.0 || layout.height <= 0.0 {
+        layout.width = new_width;
+        layout.height = new_height;
+        return;
+    }
+    let sx = new_width / layout.width;
+    let sy = new_height / layout.height;
+    for node in layout.nodes.iter_mut() {
+        node.x *= sx;
+        node.y *= sy;
+    }
+    layout.width = new_width;
+    layout.height = new_height;
+    fit_to_viewport(layout, 0.06);
 }
 
 /// Re-centres and uniformly scales the laid-out nodes so the bounding box
@@ -1351,46 +1425,78 @@ fn draw_graph(
     let body_color = css_var(el, "--bs-body-color").unwrap_or_else(|| "#212529".into());
     let muted = css_var(el, "--bs-secondary").unwrap_or_else(|| "#6c757d".into());
 
-    let palette = group_palette(el);
+    // Cached score range from simulation — recomputing min/max on every paint
+    // (60+/sec while panning) was a measurable cost.
+    let s_min = layout.score_min;
+    let span = (layout.score_max - layout.score_min).max(1e-6);
 
-    // Render only backbone edges. Thickness/alpha are tied to the backbone
-    // score (PMI-flavoured), not raw co-occurrence count, so two pairs with
-    // identical raw counts render differently when one is meaningful and the
-    // other is "both tags are popular".
-    let scores: Vec<f64> = layout.edges.iter().map(|(_, _, _, s)| *s).collect();
-    let s_min = scores.iter().cloned().fold(f64::INFINITY, f64::min);
-    let s_max = scores.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-    let span = (s_max - s_min).max(1e-6);
-
-    for &(src, tgt, _, score) in &layout.edges {
+    // ---- Pass 1: backbone edges ------------------------------------------
+    // Quantise (alpha, line_width) into a small grid and stroke each bucket
+    // as a single path. Cuts the number of cross-language canvas calls from
+    // ~6 per edge down to ~2 per edge plus ~3 per occupied bucket.
+    const ALPHA_BANDS: usize = 8;
+    const WIDTH_BANDS: usize = 4;
+    let total_buckets = ALPHA_BANDS * WIDTH_BANDS;
+    let mut buckets: Vec<Vec<usize>> = vec![Vec::new(); total_buckets];
+    let mut highlight_edges: Vec<usize> = Vec::new();
+    for (idx, &(src, tgt, _, score)) in layout.edges.iter().enumerate() {
         if src >= layout.nodes.len() || tgt >= layout.nodes.len() {
             continue;
         }
-        let a = layout.nodes[src];
-        let b = layout.nodes[tgt];
-        let strength = ((score - s_min) / span).clamp(0.0, 1.0);
-        let line_w = (0.6 + strength * 3.0).clamp(0.6, 4.0);
-        let alpha = (0.12 + strength * 0.55).clamp(0.12, 0.78);
         let highlight = matches!(hover, Some(h) if h == src || h == tgt);
-        let stroke = if highlight {
-            with_alpha(&body_color, 0.95)
-        } else {
-            with_alpha(&muted, alpha as f32)
-        };
-        ctx.set_stroke_style_str(&stroke);
-        ctx.set_line_width(if highlight { line_w + 0.7 } else { line_w });
+        if highlight {
+            highlight_edges.push(idx);
+            continue;
+        }
+        let strength = ((score - s_min) / span).clamp(0.0, 1.0);
+        let alpha_b = ((strength * (ALPHA_BANDS as f64 - 1.0)).round() as usize)
+            .min(ALPHA_BANDS - 1);
+        let width_b = ((strength * (WIDTH_BANDS as f64 - 1.0)).round() as usize)
+            .min(WIDTH_BANDS - 1);
+        buckets[alpha_b * WIDTH_BANDS + width_b].push(idx);
+    }
+    for bucket_idx in 0..total_buckets {
+        if buckets[bucket_idx].is_empty() {
+            continue;
+        }
+        let alpha_b = bucket_idx / WIDTH_BANDS;
+        let width_b = bucket_idx % WIDTH_BANDS;
+        let alpha_norm = alpha_b as f64 / (ALPHA_BANDS as f64 - 1.0).max(1.0);
+        let width_norm = width_b as f64 / (WIDTH_BANDS as f64 - 1.0).max(1.0);
+        let alpha = (0.12 + alpha_norm * 0.55).clamp(0.12, 0.78);
+        let line_w = (0.6 + width_norm * 3.0).clamp(0.6, 4.0);
+        ctx.set_stroke_style_str(&with_alpha(&muted, alpha as f32));
+        ctx.set_line_width(line_w);
         ctx.begin_path();
-        ctx.move_to(a.x, a.y);
-        ctx.line_to(b.x, b.y);
+        for &idx in &buckets[bucket_idx] {
+            let (src, tgt, _, _) = layout.edges[idx];
+            let a = layout.nodes[src];
+            let b = layout.nodes[tgt];
+            ctx.move_to(a.x, a.y);
+            ctx.line_to(b.x, b.y);
+        }
         ctx.stroke();
     }
 
-    ctx.set_font("12px system-ui, -apple-system, Segoe UI, Roboto, sans-serif");
-    ctx.set_text_baseline("middle");
+    // Highlighted edges drawn last (one path) so they always sit on top.
+    if !highlight_edges.is_empty() {
+        ctx.set_stroke_style_str(&with_alpha(&body_color, 0.95));
+        ctx.set_line_width(2.6);
+        ctx.begin_path();
+        for &idx in &highlight_edges {
+            let (src, tgt, _, _) = layout.edges[idx];
+            let a = layout.nodes[src];
+            let b = layout.nodes[tgt];
+            ctx.move_to(a.x, a.y);
+            ctx.line_to(b.x, b.y);
+        }
+        ctx.stroke();
+    }
 
-    // Community palette: distinct hues spread by the golden ratio so adjacent
-    // ids never collide visually. Singletons (community of size 1) inherit
-    // the muted colour so they don't add visual noise.
+    // ---- Pass 2: nodes (community fill, batched per community) ------------
+    // Coloured purely by community now — tag-type fill removed per UX request.
+    // Singleton communities fall back to the muted colour so isolated nodes
+    // don't add saturated noise.
     let max_community = layout.communities.iter().copied().max().unwrap_or(0);
     let mut community_size = vec![0u32; (max_community as usize) + 1];
     for &c in &layout.communities {
@@ -1400,49 +1506,76 @@ fn draw_graph(
         if (c as usize) < community_size.len() && community_size[c as usize] <= 1 {
             return muted.clone();
         }
-        // Golden ratio conjugate spreads hues evenly around the wheel.
         let hue = ((c as f64) * 137.508_f64) % 360.0;
         format!("hsl({:.0}, 60%, 55%)", hue)
     };
 
-    // Pass 1: nodes (halo + fill). Halo = community ring drawn slightly
-    // larger than the fill — gives a visible cluster cue without obscuring
-    // group_type colour.
-    for (i, node) in graph.nodes.iter().enumerate() {
-        let pos = layout.nodes[i];
-        let is_hover = hover == Some(i);
-        let fill = palette
-            .iter()
-            .find(|(k, _)| *k == node.group_type.as_str())
-            .map(|(_, c)| c.clone())
-            .unwrap_or_else(|| muted.clone());
-
-        // Halo (community ring).
-        if let Some(&community) = layout.communities.get(i) {
-            let halo_color = community_color(community);
-            ctx.begin_path();
-            ctx.arc(pos.x, pos.y, pos.radius + 3.5, 0.0, std::f64::consts::TAU)
-                .ok();
-            ctx.set_stroke_style_str(&halo_color);
-            ctx.set_line_width(if is_hover { 3.5 } else { 2.5 });
-            ctx.stroke();
+    // Bucket nodes by community so we stroke/fill each colour as one path.
+    let bucket_count = (max_community as usize) + 1;
+    let mut node_buckets: Vec<Vec<usize>> = vec![Vec::new(); bucket_count];
+    for (i, &c) in layout.communities.iter().enumerate() {
+        if i >= layout.nodes.len() {
+            continue;
         }
-
-        // Fill.
-        ctx.begin_path();
-        ctx.arc(pos.x, pos.y, pos.radius, 0.0, std::f64::consts::TAU)
-            .ok();
-        ctx.set_fill_style_str(&fill);
-        ctx.fill();
-
-        ctx.set_line_width(if is_hover { 2.0 } else { 0.8 });
-        ctx.set_stroke_style_str(&body_color);
-        ctx.stroke();
+        if hover == Some(i) {
+            // Hover handled separately so the outline width is right.
+            continue;
+        }
+        node_buckets[c as usize].push(i);
     }
 
-    // Pass 2: labels with greedy collision avoidance. Sort by importance
-    // (radius first, then count) so top-N tags claim screen real estate
-    // before the long tail. Hovered node is forced on top regardless.
+    for (c_idx, ids) in node_buckets.iter().enumerate() {
+        if ids.is_empty() {
+            continue;
+        }
+        let color = community_color(c_idx as u32);
+        ctx.set_fill_style_str(&color);
+        ctx.begin_path();
+        for &i in ids {
+            let pos = layout.nodes[i];
+            ctx.move_to(pos.x + pos.radius, pos.y);
+            ctx.arc(pos.x, pos.y, pos.radius, 0.0, std::f64::consts::TAU)
+                .ok();
+        }
+        ctx.fill();
+    }
+
+    // Outlines as one path per width tier (here: just the standard tier;
+    // hovered node drawn last as a one-off below).
+    ctx.set_line_width(0.8);
+    ctx.set_stroke_style_str(&body_color);
+    ctx.begin_path();
+    for (i, _) in graph.nodes.iter().enumerate() {
+        if hover == Some(i) || i >= layout.nodes.len() {
+            continue;
+        }
+        let pos = layout.nodes[i];
+        ctx.move_to(pos.x + pos.radius, pos.y);
+        ctx.arc(pos.x, pos.y, pos.radius, 0.0, std::f64::consts::TAU)
+            .ok();
+    }
+    ctx.stroke();
+
+    // Hovered node: drawn last with a thicker outline.
+    if let Some(h) = hover {
+        if h < layout.nodes.len() {
+            let pos = layout.nodes[h];
+            let community = layout.communities.get(h).copied().unwrap_or(0);
+            let color = community_color(community);
+            ctx.set_fill_style_str(&color);
+            ctx.begin_path();
+            ctx.arc(pos.x, pos.y, pos.radius, 0.0, std::f64::consts::TAU)
+                .ok();
+            ctx.fill();
+            ctx.set_line_width(2.0);
+            ctx.set_stroke_style_str(&body_color);
+            ctx.stroke();
+        }
+    }
+
+    // ---- Pass 3: labels with greedy collision avoidance --------------------
+    ctx.set_font("12px system-ui, -apple-system, Segoe UI, Roboto, sans-serif");
+    ctx.set_text_baseline("middle");
     let mut placed: Vec<(f64, f64, f64, f64)> = Vec::new();
     let approx_label_w = |name: &str| (name.chars().count() as f64) * 6.6 + 6.0;
     let label_h = 14.0;
@@ -1474,9 +1607,6 @@ fn draw_graph(
         let lh = label_h;
         let bbox = (lx, ly - lh * 0.5, lx + lw, ly + lh * 0.5);
 
-        // Always render the hovered label (and big-enough nodes), even if it
-        // overlaps — visibility on hover is non-negotiable. For everyone else,
-        // skip when the bbox collides with anything already placed.
         let force = is_hover || pos.radius >= 9.0;
         if !force {
             let collides = placed.iter().any(|&(ax0, ay0, ax1, ay1)| {
@@ -1490,35 +1620,6 @@ fn draw_graph(
         let _ = ctx.fill_text(name, lx, ly);
         placed.push(bbox);
     }
-}
-
-fn group_palette(el: &web_sys::Element) -> Vec<(&'static str, String)> {
-    vec![
-        (
-            "artist",
-            css_var(el, "--bs-danger").unwrap_or_else(|| "#dc3545".into()),
-        ),
-        (
-            "character",
-            css_var(el, "--bs-warning").unwrap_or_else(|| "#ffc107".into()),
-        ),
-        (
-            "copyright",
-            css_var(el, "--bs-info").unwrap_or_else(|| "#0dcaf0".into()),
-        ),
-        (
-            "species",
-            css_var(el, "--bs-success").unwrap_or_else(|| "#198754".into()),
-        ),
-        (
-            "general",
-            css_var(el, "--bs-primary").unwrap_or_else(|| "#0d6efd".into()),
-        ),
-        (
-            "lore",
-            css_var(el, "--bs-secondary").unwrap_or_else(|| "#6c757d".into()),
-        ),
-    ]
 }
 
 fn css_var(el: &web_sys::Element, name: &str) -> Option<String> {
