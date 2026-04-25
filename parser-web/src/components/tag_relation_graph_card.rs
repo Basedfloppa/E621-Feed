@@ -31,6 +31,10 @@ struct NodeState {
 #[derive(Default, Clone)]
 struct LayoutState {
     nodes: Vec<NodeState>,
+    /// Backbone: for each kept edge, the original index in `payload.edges` plus
+    /// the score that earned it the slot. Both layout and rendering use only
+    /// these — full edge sets are visually opaque on dense graphs.
+    edges: Vec<(usize, usize, usize, f64)>,
     width: f64,
     height: f64,
 }
@@ -42,6 +46,7 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
     let error: UseStateHandle<Option<String>> = use_state(|| None);
     let top_n = use_state(|| 60usize);
     let min_cooc = use_state(|| 3i64);
+    let edges_per_tag = use_state(|| 6usize);
     let theme_trigger = use_state(|| 0u32);
     let resize_trigger = use_state(|| 0u32);
     let hover_idx: UseStateHandle<Option<usize>> = use_state(|| None);
@@ -174,14 +179,16 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
         let payload = payload.clone();
         let layout_ref = layout_ref.clone();
         let hover_idx_render = hover_idx.clone();
+        let edges_per_tag_val = *edges_per_tag;
         use_effect_with(
             (
                 payload.clone(),
                 *theme_trigger,
                 *resize_trigger,
                 *hover_idx_render,
+                edges_per_tag_val,
             ),
-            move |(payload, _, _, hover_idx_val)| {
+            move |(payload, _, _, hover_idx_val, k_val)| {
                 let Some(canvas) = canvas_ref.cast::<HtmlCanvasElement>() else {
                     return;
                 };
@@ -195,11 +202,17 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
                     let mut layout = layout_ref.borrow_mut();
                     let layout_dirty = layout.nodes.len() != graph.nodes.len()
                         || (layout.width - logical_width).abs() > 0.5
-                        || (layout.height - logical_height).abs() > 0.5;
+                        || (layout.height - logical_height).abs() > 0.5
+                        || layout.edges.len() != expected_backbone_len(graph, *k_val);
                     if layout_dirty {
-                        *layout =
-                            initial_layout(&graph.nodes, logical_width, logical_height);
-                        run_simulation(&mut layout, &graph.edges, 700);
+                        let backbone = select_backbone(graph, *k_val);
+                        *layout = initial_layout(
+                            &graph.nodes,
+                            logical_width,
+                            logical_height,
+                            backbone,
+                        );
+                        run_simulation(&mut layout, simulation_iterations(graph.nodes.len()));
                         fit_to_viewport(&mut layout, 0.06);
                     }
                     draw_graph(&canvas, &layout, graph, *hover_idx_val);
@@ -271,6 +284,16 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
         })
     };
 
+    let on_edges_per_tag_change = {
+        let edges_per_tag = edges_per_tag.clone();
+        Callback::from(move |e: Event| {
+            let target: web_sys::HtmlInputElement = e.target_unchecked_into();
+            if let Ok(v) = target.value().parse::<usize>() {
+                edges_per_tag.set(v.clamp(2, 20));
+            }
+        })
+    };
+
     let hover_summary = (*hover_idx).and_then(|idx| {
         payload.as_ref().and_then(|graph| graph.nodes.get(idx).map(|n| (idx, n.clone())))
     });
@@ -310,7 +333,7 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
                     <div class="col-auto">
                         <label class="form-label small mb-0">{"Min co-occurrence"}</label>
                     </div>
-                    <div class="col-12 col-sm-3">
+                    <div class="col-12 col-sm-2">
                         <input
                             type="number"
                             class="form-control form-control-sm"
@@ -318,6 +341,20 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
                             step="1"
                             value={min_cooc.to_string()}
                             onchange={on_min_cooc_change}
+                        />
+                    </div>
+                    <div class="col-auto">
+                        <label class="form-label small mb-0" title="Each tag keeps only its strongest links to other tags. Lower = clearer backbone, higher = denser graph.">{"Edges per tag"}</label>
+                    </div>
+                    <div class="col-12 col-sm-2">
+                        <input
+                            type="number"
+                            class="form-control form-control-sm"
+                            min="2"
+                            max="20"
+                            step="1"
+                            value={edges_per_tag.to_string()}
+                            onchange={on_edges_per_tag_change}
                         />
                     </div>
                     if *loading {
@@ -389,9 +426,112 @@ fn legend_chip(group: &str) -> String {
     dot.to_string()
 }
 
-fn initial_layout(nodes: &[TagRelationNode], width: f64, height: f64) -> LayoutState {
+/// Personalized lift / pointwise mutual information for a tag pair, computed
+/// from the user's own data: `user_cooc · N_user / (count_a · count_b)`.
+/// Larger means "this pair appears together more than what either tag's
+/// marginal frequency would predict" — exactly what we want to surface and
+/// what dense raw co-occurrence counts hide.
+fn user_pmi(edge: &TagRelationEdge, nodes: &[TagRelationNode], n_user: i64) -> f64 {
+    if edge.source >= nodes.len() || edge.target >= nodes.len() {
+        return f64::NEG_INFINITY;
+    }
+    let count_a = nodes[edge.source].count.max(1) as f64;
+    let count_b = nodes[edge.target].count.max(1) as f64;
+    let n_u = n_user.max(1) as f64;
+    let lift = (edge.user_cooc.max(1) as f64) * n_u / (count_a * count_b);
+    lift.max(1e-3).ln()
+}
+
+fn edge_score(edge: &TagRelationEdge, nodes: &[TagRelationNode], n_user: i64) -> f64 {
+    let user_term = user_pmi(edge, nodes, n_user);
+    // Blend a smaller global PMI so semantically coherent pairs (well-known
+    // in the catalog) get a small lift even when the user's sample is thin.
+    let global_term = if edge.global_lift > 0.0 {
+        (edge.global_lift as f64).max(1e-3).ln()
+    } else {
+        0.0
+    };
+    user_term + 0.35 * global_term
+}
+
+/// Keep, for each node, its top-K incident edges by `edge_score`. Take the
+/// union of those decisions: a node only votes in its own edges out, but as
+/// long as either endpoint kept the edge it survives. Net effect: every node
+/// has at least 1 link if any exist, and the densest "popular pairs with
+/// popular" edges drop out unless they're also pair-specific.
+fn select_backbone(graph: &TagRelationGraphPayload, k: usize) -> Vec<(usize, usize, usize, f64)> {
+    let n = graph.nodes.len();
+    if n == 0 || graph.edges.is_empty() {
+        return Vec::new();
+    }
+    let k = k.max(1);
+    let n_user = graph.account_post_count.max(1);
+
+    let mut per_node: Vec<Vec<(f64, usize)>> = vec![Vec::new(); n];
+    let mut scored: Vec<f64> = Vec::with_capacity(graph.edges.len());
+
+    for (idx, e) in graph.edges.iter().enumerate() {
+        if e.source >= n || e.target >= n || e.source == e.target {
+            scored.push(f64::NEG_INFINITY);
+            continue;
+        }
+        let s = edge_score(e, &graph.nodes, n_user);
+        scored.push(s);
+        per_node[e.source].push((s, idx));
+        per_node[e.target].push((s, idx));
+    }
+
+    let mut keep = vec![false; graph.edges.len()];
+    for adj in per_node.iter_mut() {
+        adj.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        for (_, idx) in adj.iter().take(k) {
+            keep[*idx] = true;
+        }
+    }
+
+    let mut out = Vec::new();
+    for (idx, e) in graph.edges.iter().enumerate() {
+        if keep[idx] {
+            out.push((e.source, e.target, idx, scored[idx]));
+        }
+    }
+    out
+}
+
+/// Cheap upper bound used to detect "the user changed `edges_per_tag`" so the
+/// layout cache invalidates without us having to recompute the backbone twice.
+fn expected_backbone_len(graph: &TagRelationGraphPayload, k: usize) -> usize {
+    let mut count = 0usize;
+    let mut per_node = vec![0usize; graph.nodes.len()];
+    for e in &graph.edges {
+        if e.source >= graph.nodes.len() || e.target >= graph.nodes.len() {
+            continue;
+        }
+        if per_node[e.source] < k || per_node[e.target] < k {
+            count += 1;
+            per_node[e.source] += 1;
+            per_node[e.target] += 1;
+        }
+    }
+    count
+}
+
+fn simulation_iterations(n: usize) -> usize {
+    // Big graphs need more iterations to settle; tiny graphs converge fast.
+    let base = 600;
+    let extra = (n.saturating_sub(60) as f64 * 1.6).round() as usize;
+    (base + extra).min(1500)
+}
+
+fn initial_layout(
+    nodes: &[TagRelationNode],
+    width: f64,
+    height: f64,
+    backbone: Vec<(usize, usize, usize, f64)>,
+) -> LayoutState {
     let mut state = LayoutState {
         nodes: Vec::with_capacity(nodes.len()),
+        edges: backbone,
         width,
         height,
     };
@@ -400,82 +540,87 @@ fn initial_layout(nodes: &[TagRelationNode], width: f64, height: f64) -> LayoutS
     }
 
     let max_count = nodes.iter().map(|n| n.count).max().unwrap_or(1).max(1) as f64;
-    let cx = width / 2.0;
-    let cy = height / 2.0;
-    let outer = (width.min(height) * 0.42).max(80.0);
-    let len = nodes.len() as f64;
+    let n = nodes.len();
 
-    for (i, n) in nodes.iter().enumerate() {
-        let theta = (i as f64) * std::f64::consts::TAU / len.max(1.0);
-        // Slightly varying initial radius helps FR break the symmetric stable
-        // point that a perfectly equidistant ring lands on.
-        let jitter = 0.85 + 0.15 * (((i as f64) * 1.6180339).sin() * 0.5 + 0.5);
-        let normalized = (n.count as f64).max(1.0).ln() / max_count.max(1.0).ln().max(1e-3);
-        let r = 4.0 + (normalized * 14.0).clamp(0.0, 14.0);
-        state.nodes.push(NodeState {
-            x: cx + outer * jitter * theta.cos(),
-            y: cy + outer * jitter * theta.sin(),
-            radius: r,
-        });
+    // Grid + per-cell pseudo-random jitter. Scales cleanly to hundreds of
+    // nodes — a single circle ran out of circumference around N≈80 and
+    // stuffed every node on top of its neighbour.
+    let aspect = width / height.max(1.0);
+    let cols = ((n as f64 * aspect).sqrt().ceil() as usize).max(2);
+    let rows = ((n + cols - 1) / cols).max(1);
+    let inner_w = width * 0.86;
+    let inner_h = height * 0.86;
+    let dx = inner_w / cols as f64;
+    let dy = inner_h / rows as f64;
+    let off_x = (width - inner_w) * 0.5 + dx * 0.5;
+    let off_y = (height - inner_h) * 0.5 + dy * 0.5;
+
+    for (i, node) in nodes.iter().enumerate() {
+        let col = i % cols;
+        let row = i / cols;
+        // Two independent hash-ish jitter axes — keeps the seed deterministic
+        // (so re-renders don't reflow) without correlating x and y.
+        let h1 = ((i as f64) * 12.9898).sin().fract().abs();
+        let h2 = ((i as f64) * 78.233).sin().fract().abs();
+        let jx = (h1 - 0.5) * dx * 0.6;
+        let jy = (h2 - 0.5) * dy * 0.6;
+        let x = off_x + col as f64 * dx + jx;
+        let y = off_y + row as f64 * dy + jy;
+
+        let normalized = (node.count as f64).max(1.0).ln() / max_count.max(1.0).ln().max(1e-3);
+        // Shrink node radii a little when n is large so they fit.
+        let r_max = if n > 120 { 10.0 } else { 14.0 };
+        let r = 3.5 + (normalized * r_max).clamp(0.0, r_max);
+        state.nodes.push(NodeState { x, y, radius: r });
     }
     state
 }
 
-/// Fruchterman–Reingold layout. Repulsion `k²/d` between every pair, attraction
-/// `d²/k` along each edge weighted by `user_cooc`. Per-iteration displacement is
-/// capped by a temperature `t` that cools geometrically — that's what stops the
-/// simulation from blowing up early and keeps the final layout still.
-fn run_simulation(layout: &mut LayoutState, edges: &[TagRelationEdge], iterations: usize) {
+/// Fruchterman–Reingold over the backbone only. Repulsion `k²/d` between
+/// every node pair (still O(N²) but cheap for N≤300), attraction `d²/k` along
+/// each backbone edge weighted by score percentile. No mid-simulation bounds
+/// clamp — `fit_to_viewport` does the final framing, so freely-spreading
+/// nodes can't get stuck against an edge.
+fn run_simulation(layout: &mut LayoutState, iterations: usize) {
     let n = layout.nodes.len();
     if n < 2 {
         return;
     }
 
-    // Tune the ideal node spacing to fill the canvas. The 1.4× nudge keeps the
-    // layout from collapsing when the graph is small relative to the area.
     let area = layout.width * layout.height;
-    let k = ((area / n as f64).sqrt() * 1.4).max(40.0);
+    let k = ((area / n as f64).sqrt() * 1.35).max(36.0);
 
-    let edge_max = edges
-        .iter()
-        .map(|e| e.user_cooc)
-        .max()
-        .unwrap_or(1)
-        .max(1) as f64;
-    let mut weighted_edges: Vec<(usize, usize, f64)> = Vec::with_capacity(edges.len());
-    for e in edges {
-        if e.source < n && e.target < n && e.source != e.target {
-            let strength = ((e.user_cooc as f64).max(1.0).ln() + 1.0)
-                / ((edge_max).max(1.0).ln() + 1.0);
-            weighted_edges.push((e.source, e.target, strength.clamp(0.1, 1.0)));
-        }
-    }
+    // Normalise edge scores into a (0.15..1.0) attraction multiplier so the
+    // strongest pair-specific links pull harder than the weakest.
+    let scores: Vec<f64> = layout.edges.iter().map(|(_, _, _, s)| *s).collect();
+    let s_min = scores.iter().cloned().fold(f64::INFINITY, f64::min);
+    let s_max = scores.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    let span = (s_max - s_min).max(1e-6);
 
-    let initial_temp = layout.width.max(layout.height) * 0.22;
-    // cooling^iterations ≈ 0.001 once iterations≈700 — guarantees convergence.
-    let cooling = 0.99f64;
+    let initial_temp = layout.width.max(layout.height) * 0.20;
+    // 0.992^iterations ≈ 0.005 at 700, ≈ 0.0001 at 1200.
+    let cooling = 0.992f64;
     let mut t = initial_temp;
 
     let mut forces: Vec<(f64, f64)> = vec![(0.0, 0.0); n];
-    let pad = 6.0_f64;
+    let pad = 4.0_f64;
 
     for _ in 0..iterations {
         for f in forces.iter_mut() {
             *f = (0.0, 0.0);
         }
 
-        // Repulsion (all pairs)
+        // Repulsion (every pair).
         for i in 0..n {
             for j in (i + 1)..n {
                 let dx = layout.nodes[i].x - layout.nodes[j].x;
                 let dy = layout.nodes[i].y - layout.nodes[j].y;
-                let dist_sq = (dx * dx + dy * dy).max(0.5);
+                let dist_sq = (dx * dx + dy * dy).max(0.25);
                 let dist = dist_sq.sqrt();
 
-                // Hard core: extra push when nodes overlap their drawn radii.
                 let min_dist = layout.nodes[i].radius + layout.nodes[j].radius + pad;
                 let core_boost = if dist < min_dist {
-                    (min_dist - dist).max(0.0) * 6.0
+                    (min_dist - dist) * 8.0
                 } else {
                     0.0
                 };
@@ -489,8 +634,9 @@ fn run_simulation(layout: &mut LayoutState, edges: &[TagRelationEdge], iteration
             }
         }
 
-        // Attraction (per edge, weighted by log(cooc))
-        for &(a, b, w) in &weighted_edges {
+        // Attraction (backbone edges only).
+        for &(a, b, _, score) in &layout.edges {
+            let w = (0.15 + 0.85 * ((score - s_min) / span)).clamp(0.15, 1.0);
             let dx = layout.nodes[a].x - layout.nodes[b].x;
             let dy = layout.nodes[a].y - layout.nodes[b].y;
             let dist = (dx * dx + dy * dy).sqrt().max(0.5);
@@ -503,7 +649,8 @@ fn run_simulation(layout: &mut LayoutState, edges: &[TagRelationEdge], iteration
             forces[b].1 += fy;
         }
 
-        // Apply forces, capped by the current temperature.
+        // Integrate, capped by the current temperature. No bounds clamp —
+        // post-simulation `fit_to_viewport` handles the canvas mapping.
         for i in 0..n {
             let (fx, fy) = forces[i];
             let mag = (fx * fx + fy * fy).sqrt();
@@ -511,14 +658,8 @@ fn run_simulation(layout: &mut LayoutState, edges: &[TagRelationEdge], iteration
                 continue;
             }
             let mv = mag.min(t);
-            let dx = (fx / mag) * mv;
-            let dy = (fy / mag) * mv;
-            layout.nodes[i].x += dx;
-            layout.nodes[i].y += dy;
-            // Soft bounds during simulation; the post-fit step handles
-            // viewport sizing precisely.
-            layout.nodes[i].x = layout.nodes[i].x.clamp(0.0, layout.width);
-            layout.nodes[i].y = layout.nodes[i].y.clamp(0.0, layout.height);
+            layout.nodes[i].x += (fx / mag) * mv;
+            layout.nodes[i].y += (fy / mag) * mv;
         }
 
         t *= cooling;
@@ -605,28 +746,25 @@ fn draw_graph(
 
     let palette = group_palette(el);
 
-    let max_user_cooc = graph
-        .edges
-        .iter()
-        .map(|e| e.user_cooc)
-        .max()
-        .unwrap_or(1)
-        .max(1) as f64;
+    // Render only backbone edges. Thickness/alpha are tied to the backbone
+    // score (PMI-flavoured), not raw co-occurrence count, so two pairs with
+    // identical raw counts render differently when one is meaningful and the
+    // other is "both tags are popular".
+    let scores: Vec<f64> = layout.edges.iter().map(|(_, _, _, s)| *s).collect();
+    let s_min = scores.iter().cloned().fold(f64::INFINITY, f64::min);
+    let s_max = scores.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    let span = (s_max - s_min).max(1e-6);
 
-    for edge in &graph.edges {
-        if edge.source >= layout.nodes.len() || edge.target >= layout.nodes.len() {
+    for &(src, tgt, _, score) in &layout.edges {
+        if src >= layout.nodes.len() || tgt >= layout.nodes.len() {
             continue;
         }
-        let a = layout.nodes[edge.source];
-        let b = layout.nodes[edge.target];
-        let strength = ((edge.user_cooc as f64).max(1.0).ln() + 1.0)
-            / (max_user_cooc.max(1.0).ln() + 1.0);
-        let line_w = (0.5 + strength * 3.5).clamp(0.5, 4.5);
-        let alpha = (0.18 + strength * 0.55).clamp(0.18, 0.85);
-        let highlight = match hover {
-            Some(h) if h == edge.source || h == edge.target => true,
-            _ => false,
-        };
+        let a = layout.nodes[src];
+        let b = layout.nodes[tgt];
+        let strength = ((score - s_min) / span).clamp(0.0, 1.0);
+        let line_w = (0.6 + strength * 3.0).clamp(0.6, 4.0);
+        let alpha = (0.12 + strength * 0.55).clamp(0.12, 0.78);
+        let highlight = matches!(hover, Some(h) if h == src || h == tgt);
         let stroke = if highlight {
             with_alpha(&body_color, 0.95)
         } else {
