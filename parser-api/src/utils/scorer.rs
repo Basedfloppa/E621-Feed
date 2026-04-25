@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::models::{AccountPreferenceProfile, Post, ScoreBreakdown, ScoredPost, TagCount};
 use crate::utils::idf::IdfIndex;
-use crate::utils::tag_relation::TagRelationGraph;
+use crate::utils::tag_relation::{TagId, TagRelationGraph};
 
 const GROUP_COUNT: usize = 7;
 const DIVERSITY_INTERACTION_DAMP: f32 = 0.35;
@@ -165,6 +165,18 @@ pub struct Priors {
     /// log1p before measuring distance, which compresses long tails.
     #[serde(default = "default_recency_log_personal")]
     pub recency_log_personal: bool,
+    /// Half-life (in days) applied to `account_tag_feedback` counts during
+    /// profile refresh. Counts are multiplied by `0.5 ^ (elapsed / half_life)`
+    /// so old preferences fade and new ones can dominate.
+    #[serde(default = "default_feedback_decay_half_life_days")]
+    pub feedback_decay_half_life_days: f32,
+    /// Group weight for meta tags inside the interaction channel only. Meta
+    /// is excluded from tag_similarity / tag_relation (where it would swamp
+    /// content tags), but users do have real preferences over meta tags
+    /// (`monochrome`, `absurd_res`, `english_text`, etc.). Set to 0 to keep
+    /// meta fully out of scoring.
+    #[serde(default = "default_meta_interaction_weight")]
+    pub meta_interaction_weight: f32,
 }
 
 fn default_quality_log_bias() -> f32 {
@@ -217,6 +229,12 @@ fn default_strong_negative_wilson_threshold() -> f32 {
 }
 fn default_recency_log_personal() -> bool {
     true
+}
+fn default_feedback_decay_half_life_days() -> f32 {
+    90.0
+}
+fn default_meta_interaction_weight() -> f32 {
+    0.3
 }
 
 #[inline]
@@ -655,16 +673,23 @@ impl<'a> ScoringContext<'a> {
         let strong_min = self.priors.strong_negative_count.max(1) as f32;
         let wilson_threshold = self.priors.strong_negative_wilson_threshold.clamp(0.05, 0.99);
         let p0 = self.user_base_positive_rate;
+        let meta_w = self.priors.meta_interaction_weight.max(0.0);
 
-        for (group, tags) in [
-            (Group::Artist, &post.tags.artist),
-            (Group::Character, &post.tags.character),
-            (Group::Copyright, &post.tags.copyright),
-            (Group::Species, &post.tags.species),
-            (Group::General, &post.tags.general),
-            (Group::Lore, &post.tags.lore),
-        ] {
-            let group_weight = self.group_wts[group as usize];
+        // Meta is excluded from tag_similarity / tag_relation (it would swamp
+        // content tags), but still contributes here under its own weight —
+        // users have real preferences over meta tags like `monochrome`,
+        // `absurd_res`, `english_text`.
+        let groups: [(Group, &Vec<String>, f32); 7] = [
+            (Group::Artist, &post.tags.artist, self.group_wts[Group::Artist as usize]),
+            (Group::Character, &post.tags.character, self.group_wts[Group::Character as usize]),
+            (Group::Copyright, &post.tags.copyright, self.group_wts[Group::Copyright as usize]),
+            (Group::Species, &post.tags.species, self.group_wts[Group::Species as usize]),
+            (Group::General, &post.tags.general, self.group_wts[Group::General as usize]),
+            (Group::Lore, &post.tags.lore, self.group_wts[Group::Lore as usize]),
+            (Group::Meta, &post.tags.meta, meta_w),
+        ];
+
+        for (group, tags, group_weight) in groups {
             if group_weight <= 0.0 {
                 continue;
             }
@@ -674,15 +699,25 @@ impl<'a> ScoringContext<'a> {
                 }
                 let key = (group as u8, normalize_tag(tag));
                 if let Some(fb) = self.feedback.get(&key) {
-                    total_weight += group_weight;
                     let pos = fb.positive.max(0) as f32;
                     let neg = fb.negative.max(0) as f32;
                     let imp = fb.impressions.max(0) as f32;
+                    // Confidence weighting (#2): a tag with 100 interactions
+                    // shouldn't count the same as one with 2. log1p of the
+                    // sample size is a smooth, bounded confidence proxy —
+                    // doubling samples adds a fixed (~0.69) increment, so
+                    // strong signals dominate without runaway scaling.
+                    let confidence = (pos + neg + imp).ln_1p();
+                    if confidence <= 0.0 {
+                        continue;
+                    }
+                    let w = group_weight * confidence;
+                    total_weight += w;
                     // CTR-style positivity with Bayesian prior toward the
                     // user's own base rate. Tags with few interactions decay
                     // to "what the user usually does", not neutral 0.5.
                     let ctr = ctr_score(pos, neg, imp, p0, 4.0);
-                    weighted += group_weight * ctr;
+                    weighted += w * ctr;
 
                     // Veto: Wilson lower bound that the negative rate exceeds
                     // the threshold. Requires both a meaningful sample and a
@@ -719,7 +754,10 @@ impl<'a> ScoringContext<'a> {
         let w_u = w_u_cfg * conf;
         let w_g = w_g_cfg + w_u_cfg * (1.0 - conf);
 
-        let mut tags: Vec<(u8, String)> = Vec::with_capacity(24);
+        // Resolve every post tag into interned ids once (one allocation per
+        // tag for the HashMap lookup), then walk the T*(T-1)/2 pair loop on
+        // ids only — no per-pair string allocs.
+        let mut entries: Vec<(f32, Option<TagId>, Option<TagId>)> = Vec::with_capacity(24);
         for (group, group_tags) in [
             (Group::Artist, &post.tags.artist),
             (Group::Character, &post.tags.character),
@@ -736,21 +774,15 @@ impl<'a> ScoringContext<'a> {
                 if t.is_empty() {
                     continue;
                 }
-                tags.push((group as u8, normalize_tag(t)));
+                let tlc = normalize_tag(t);
+                let g_id = self.global_relation.tag_id(group as u8, &tlc);
+                let u_id = self.user_relation.tag_id(group as u8, &tlc);
+                entries.push((gw, g_id, u_id));
             }
         }
-        if tags.len() < 2 {
+        if entries.len() < 2 {
             return FEEDBACK_NEUTRAL;
         }
-
-        let global_marg: Vec<i64> = tags
-            .iter()
-            .map(|(g, t)| self.global_relation.marginal(*g, t))
-            .collect();
-        let user_marg: Vec<i64> = tags
-            .iter()
-            .map(|(g, t)| self.user_relation.marginal(*g, t))
-            .collect();
 
         let ng = self.global_relation.n_posts().max(1) as f32;
         let nu = self.user_relation.n_posts().max(0) as f32;
@@ -761,69 +793,90 @@ impl<'a> ScoringContext<'a> {
         let user_cooc_ref = self.priors.tag_relation_user_cooc_ref.max(1.0);
         let cooc_ref_log = (cooc_ref + 1.0).ln().max(1e-3);
         let user_cooc_ref_log = (user_cooc_ref + 1.0).ln().max(1e-3);
-        let pair_wsum = (w_g + w_u).max(1e-6);
 
         let mut num = 0.0f32;
         let mut den = 0.0f32;
 
-        for i in 0..tags.len() {
-            let (gi, ti) = &tags[i];
-            let gi_w = self.group_wts[*gi as usize];
-            let gi_df = global_marg[i].max(0) as f32;
-            let gi_um = user_marg[i].max(0) as f32;
-            for j in (i + 1)..tags.len() {
-                let (gj, tj) = &tags[j];
-                let gj_w = self.group_wts[*gj as usize];
+        for (i, entry_i) in entries.iter().enumerate() {
+            let (gi_w, gi_global, gi_user) = *entry_i;
+            let gi_df = gi_global
+                .map(|id| self.global_relation.marginal_by_id(id).max(0) as f32)
+                .unwrap_or(0.0);
+            let gi_um = gi_user
+                .map(|id| self.user_relation.marginal_by_id(id).max(0) as f32)
+                .unwrap_or(0.0);
 
+            for entry_j in &entries[i + 1..] {
+                let (gj_w, gj_global, gj_user) = *entry_j;
                 let pair_w = (gi_w * gj_w).sqrt();
                 if pair_w <= 0.0 {
                     continue;
                 }
 
-                let global_score = {
-                    let c = self.global_relation.cooc(*gi, ti, *gj, tj);
-                    let gj_df = global_marg[j].max(0) as f32;
-                    if c >= min_cooc_global && gi_df > 0.0 && gj_df > 0.0 {
-                        let denom = gi_df * gj_df / ng;
-                        if denom > 0.0 {
-                            let lift = (c as f32) / denom;
-                            let raw_pmi =
-                                (lift.max(1e-6).ln() / pmi_scale).clamp(0.0, 1.0);
-                            // Confidence shrinkage: low-cooc pairs are
-                            // statistically unreliable. log1p(c)/log1p(ref)
-                            // grows from 0 → 1 as c approaches ref.
-                            let conf_pmi =
-                                ((c as f32 + 1.0).ln() / cooc_ref_log).clamp(0.0, 1.0);
-                            raw_pmi * conf_pmi
+                // Global channel: PMI in [0, 1]. Boost-only — anti-association
+                // at the catalog level isn't a personal preference statement.
+                let (global_score, global_has_signal) = match (gi_global, gj_global) {
+                    (Some(a), Some(b)) => {
+                        let c = self.global_relation.cooc_by_id(a, b);
+                        let gj_df = self.global_relation.marginal_by_id(b).max(0) as f32;
+                        if c >= min_cooc_global && gi_df > 0.0 && gj_df > 0.0 {
+                            let denom = gi_df * gj_df / ng;
+                            if denom > 0.0 {
+                                let lift = (c as f32) / denom;
+                                let raw_pmi =
+                                    (lift.max(1e-6).ln() / pmi_scale).clamp(0.0, 1.0);
+                                let conf_pmi =
+                                    ((c as f32 + 1.0).ln() / cooc_ref_log).clamp(0.0, 1.0);
+                                (raw_pmi * conf_pmi, true)
+                            } else {
+                                (0.0, false)
+                            }
                         } else {
-                            0.0
+                            (0.0, false)
                         }
-                    } else {
-                        0.0
                     }
+                    _ => (0.0, false),
                 };
 
-                let user_score = {
-                    let c = self.user_relation.cooc(*gi, ti, *gj, tj);
-                    let gj_um = user_marg[j].max(0) as f32;
-                    if c >= min_cooc_user && gi_um > 0.0 && gj_um > 0.0 && nu > 0.0 {
-                        let denom = gi_um * gj_um / nu;
-                        if denom > 0.0 {
-                            let lift = (c as f32) / denom;
-                            let raw_pmi =
-                                (lift.max(1e-6).ln() / pmi_scale).clamp(0.0, 1.0);
-                            let conf_user = ((c as f32 + 1.0).ln() / user_cooc_ref_log)
-                                .clamp(0.0, 1.0);
-                            raw_pmi * conf_user
+                // Personal channel: signed PMI in [-1, +1] mapped to [0, 1]
+                // via (x + 1) / 2 (#7). A user who favours `feral` and avoids
+                // `anthro` produces an anti-correlated pair — we want that to
+                // push the score below neutral, not just be invisible like
+                // before. Confidence-shrunk by user-cooc just like global.
+                let (user_score, user_has_signal) = match (gi_user, gj_user) {
+                    (Some(a), Some(b)) if nu > 0.0 => {
+                        let c = self.user_relation.cooc_by_id(a, b);
+                        let gj_um = self.user_relation.marginal_by_id(b).max(0) as f32;
+                        if c >= min_cooc_user && gi_um > 0.0 && gj_um > 0.0 {
+                            let denom = gi_um * gj_um / nu;
+                            if denom > 0.0 {
+                                let lift = (c as f32) / denom;
+                                let signed_pmi =
+                                    (lift.max(1e-6).ln() / pmi_scale).clamp(-1.0, 1.0);
+                                let conf_user = ((c as f32 + 1.0).ln() / user_cooc_ref_log)
+                                    .clamp(0.0, 1.0);
+                                let mapped = (signed_pmi * conf_user + 1.0) * 0.5;
+                                (mapped.clamp(0.0, 1.0), true)
+                            } else {
+                                (0.0, false)
+                            }
                         } else {
-                            0.0
+                            (0.0, false)
                         }
-                    } else {
-                        0.0
                     }
+                    _ => (0.0, false),
                 };
 
-                let pair_score = (w_g * global_score + w_u * user_score) / pair_wsum;
+                // Drop weight from channels that produced no signal so the
+                // present-channels aren't diluted toward zero. If neither
+                // channel has data, this pair contributes nothing.
+                let active_g = if global_has_signal { w_g } else { 0.0 };
+                let active_u = if user_has_signal { w_u } else { 0.0 };
+                let active_sum = active_g + active_u;
+                if active_sum <= 0.0 {
+                    continue;
+                }
+                let pair_score = (active_g * global_score + active_u * user_score) / active_sum;
 
                 num += pair_w * pair_score;
                 den += pair_w;

@@ -26,10 +26,16 @@ pub fn group_key_from_str(s: &str) -> Option<GroupKey> {
     })
 }
 
+pub type TagId = u32;
+
+/// PMI co-occurrence graph keyed by interned u32 tag-ids. The hot path
+/// (`tag_relation_fit`) resolves each post's tags once into ids, then walks
+/// `T*(T-1)/2` pairs without any string allocation.
 #[derive(Debug, Clone, Default)]
 pub struct TagRelationGraph {
-    pairs: HashMap<(GroupKey, String, GroupKey, String), i64>,
-    marginals: HashMap<(GroupKey, String), i64>,
+    tag_to_id: HashMap<(GroupKey, String), TagId>,
+    pairs: HashMap<(TagId, TagId), i64>,
+    marginals: Vec<i64>,
     n_posts: i64,
 }
 
@@ -40,35 +46,47 @@ impl TagRelationGraph {
 
     pub fn with_posts(n_posts: i64) -> Self {
         Self {
+            tag_to_id: HashMap::new(),
             pairs: HashMap::new(),
-            marginals: HashMap::new(),
+            marginals: Vec::new(),
             n_posts: n_posts.max(0),
         }
     }
 
-    #[inline]
-    fn canonical<'a>(
-        g1: GroupKey,
-        t1: &'a str,
-        g2: GroupKey,
-        t2: &'a str,
-    ) -> ((GroupKey, &'a str), (GroupKey, &'a str)) {
-        if (g1, t1) <= (g2, t2) {
-            ((g1, t1), (g2, t2))
-        } else {
-            ((g2, t2), (g1, t1))
+    /// Intern a (group, tag) pair, returning a stable id for the lifetime of
+    /// this graph. Allocates the key string once; on cache hit the allocation
+    /// is wasted, but `intern` only runs at graph-load time, not per request.
+    fn intern(&mut self, g: GroupKey, t: &str) -> TagId {
+        let key = (g, t.to_owned());
+        if let Some(&id) = self.tag_to_id.get(&key) {
+            return id;
         }
+        let id = self.marginals.len() as TagId;
+        self.tag_to_id.insert(key, id);
+        self.marginals.push(0);
+        id
+    }
+
+    /// Look up the id for a (group, tag) without inserting. Allocates one
+    /// String per call (HashMap key); used at the start of `tag_relation_fit`
+    /// once per post tag, then ids are reused in the inner pair loop.
+    pub fn tag_id(&self, g: GroupKey, t: &str) -> Option<TagId> {
+        if t.is_empty() {
+            return None;
+        }
+        self.tag_to_id.get(&(g, t.to_owned())).copied()
     }
 
     pub fn insert_pair(&mut self, g1: GroupKey, t1: &str, g2: GroupKey, t2: &str, count: i64) {
         if count <= 0 || t1.is_empty() || t2.is_empty() {
             return;
         }
-        let ((a_g, a_t), (b_g, b_t)) = Self::canonical(g1, t1, g2, t2);
-        if a_g == b_g && a_t == b_t {
+        let a = self.intern(g1, t1);
+        let b = self.intern(g2, t2);
+        if a == b {
             return;
         }
-        let key = (a_g, a_t.to_owned(), b_g, b_t.to_owned());
+        let key = if a < b { (a, b) } else { (b, a) };
         *self.pairs.entry(key).or_insert(0) += count;
     }
 
@@ -76,29 +94,22 @@ impl TagRelationGraph {
         if t.is_empty() {
             return;
         }
-        self.marginals.insert((g, t.to_owned()), count.max(0));
+        let id = self.intern(g, t);
+        self.marginals[id as usize] = count.max(0);
     }
 
     #[inline]
-    pub fn cooc(&self, g1: GroupKey, t1: &str, g2: GroupKey, t2: &str) -> i64 {
-        if t1.is_empty() || t2.is_empty() {
-            return 0;
+    pub fn cooc_by_id(&self, a: TagId, b: TagId) -> i64 {
+        if a == b {
+            return self.marginal_by_id(a);
         }
-        if g1 == g2 && t1 == t2 {
-            return self.marginal(g1, t1);
-        }
-        let ((a_g, a_t), (b_g, b_t)) = Self::canonical(g1, t1, g2, t2);
-        let key_owned = (a_g, a_t.to_owned(), b_g, b_t.to_owned());
-        *self.pairs.get(&key_owned).unwrap_or(&0)
+        let key = if a < b { (a, b) } else { (b, a) };
+        *self.pairs.get(&key).unwrap_or(&0)
     }
 
     #[inline]
-    pub fn marginal(&self, g: GroupKey, t: &str) -> i64 {
-        if t.is_empty() {
-            return 0;
-        }
-        let key = (g, t.to_owned());
-        *self.marginals.get(&key).unwrap_or(&0)
+    pub fn marginal_by_id(&self, id: TagId) -> i64 {
+        self.marginals.get(id as usize).copied().unwrap_or(0)
     }
 
     #[inline]

@@ -585,57 +585,34 @@ pub fn set_quality_profile(account_id: i32) -> Result<(), String> {
 
 pub fn set_recency_profile(account_id: i32) -> Result<(), String> {
     let connection = open_db()?;
-    let mut stmt = connection
-        .prepare(
-            "
-            SELECT p.created_at
-            FROM posts p
-            INNER JOIN accounts_post ap ON ap.post_id = p.id
-            WHERE ap.account_id = ?1
-            ",
-        )
-        .map_err(|e| format!("Failed to prepare recency profile query: {e}"))?;
 
-    let now = Utc::now();
-    let created_raw = stmt
-        .query_map([account_id], |row| row.get::<_, String>(0))
-        .map_err(|e| format!("Failed to fetch recency profile rows: {e}"))?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| format!("Failed to enumerate recency rows: {e}"))?;
-
-    let mut ages: Vec<f32> = Vec::with_capacity(created_raw.len());
-    for raw in created_raw {
-        let created_at = parse_db_datetime(&raw)?;
-        let age_days = (now - created_at).num_seconds() as f32 / 86_400.0;
-        ages.push(age_days.max(0.0));
-    }
-
-    drop(stmt);
-
-    let avg_age_days = if ages.is_empty() {
-        0.0
-    } else {
-        ages.iter().sum::<f32>() / ages.len() as f32
-    };
-    let avg_abs_dev_days = if ages.is_empty() {
-        0.0
-    } else {
-        ages.iter()
-            .map(|age| (age - avg_age_days).abs())
-            .sum::<f32>()
-            / ages.len() as f32
-    };
-
+    // Compute mean age and mean-absolute-deviation directly in SQL using
+    // julianday(). Two-pass via CTE: first the per-row age (clamped to >= 0
+    // for clock-skew safety), then the mean and the abs-dev around it.
+    // WITH must precede INSERT — `INSERT ... WITH ... ON CONFLICT` won't
+    // parse in SQLite.
     connection
         .execute(
             "
+            WITH ages AS (
+                SELECT max(0.0, julianday('now') - julianday(p.created_at)) AS age
+                FROM posts p
+                INNER JOIN accounts_post ap ON ap.post_id = p.id
+                WHERE ap.account_id = ?1
+            ),
+            m AS (SELECT COALESCE(AVG(age), 0.0) AS mean FROM ages)
             INSERT INTO account_recency_profile (account_id, avg_age_days, avg_abs_dev_days)
-            VALUES (?1, ?2, ?3)
+            SELECT
+                ?1,
+                m.mean,
+                COALESCE((SELECT AVG(ABS(age - m.mean)) FROM ages), 0.0)
+            FROM m
+            WHERE true
             ON CONFLICT(account_id) DO UPDATE SET
                 avg_age_days = excluded.avg_age_days,
                 avg_abs_dev_days = excluded.avg_abs_dev_days
             ",
-            params![account_id, avg_age_days, avg_abs_dev_days],
+            params![account_id],
         )
         .map_err(|e| format!("Failed to upsert recency profile: {e}"))?;
 
@@ -649,6 +626,110 @@ pub fn refresh_account_profiles(account_id: i32) -> Result<(), String> {
     set_quality_profile(account_id)?;
     set_recency_profile(account_id)?;
     set_account_tag_cooccurrence(account_id)?;
+    decay_account_tag_feedback(account_id)?;
+    Ok(())
+}
+
+/// Apply exponential decay to per-tag feedback counts. Each row's counts are
+/// multiplied by `0.5 ^ (elapsed_days / half_life)` where elapsed is measured
+/// from `last_decayed_at`. Rows that decay to zero are deleted so the table
+/// doesn't accumulate dead entries.
+///
+/// Notes on correctness:
+/// - Skips rows with elapsed < 1 day so frequent /process calls don't bleed
+///   counts away through repeated tiny decays. Sub-day work accumulates
+///   silently against `last_decayed_at` and gets applied on the first call
+///   that crosses the day boundary.
+/// - Uses banker's-style `round` (not `floor`) so per-call bias is symmetric
+///   around the true real-valued count.
+/// - SELECT and UPDATEs run inside a single `BEGIN IMMEDIATE` transaction so a
+///   concurrent `record_feed_interaction` can't squeeze an increment between
+///   our snapshot read and our write-back.
+pub fn decay_account_tag_feedback(account_id: i32) -> Result<(), String> {
+    let cfg = crate::models::cfg();
+    let half_life = cfg.priors.feedback_decay_half_life_days.max(1.0);
+
+    let mut connection = open_db()?;
+    let now = Utc::now();
+    let now_iso = now.to_rfc3339();
+
+    let tx = connection
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| format!("Failed to start decay tx: {e}"))?;
+
+    let rows: Vec<(String, String, String, i64, i64, i64)> = {
+        let mut stmt = tx
+            .prepare(
+                "SELECT tag_name, group_type, last_decayed_at,
+                        impression_count, positive_count, negative_count
+                 FROM account_tag_feedback
+                 WHERE account_id = ?1",
+            )
+            .map_err(|e| format!("Failed to prepare decay query: {e}"))?;
+
+        stmt.query_map(params![account_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, i64>(4)?,
+                row.get::<_, i64>(5)?,
+            ))
+        })
+        .map_err(|e| format!("Failed to fetch decay rows: {e}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("Failed to enumerate decay rows: {e}"))?
+    };
+
+    {
+        let mut update = tx
+            .prepare_cached(
+                "UPDATE account_tag_feedback
+                 SET impression_count = ?1,
+                     positive_count   = ?2,
+                     negative_count   = ?3,
+                     last_decayed_at  = ?4
+                 WHERE account_id = ?5 AND tag_name = ?6 AND group_type = ?7",
+            )
+            .map_err(|e| format!("Failed to prepare decay update: {e}"))?;
+        let mut delete = tx
+            .prepare_cached(
+                "DELETE FROM account_tag_feedback
+                 WHERE account_id = ?1 AND tag_name = ?2 AND group_type = ?3",
+            )
+            .map_err(|e| format!("Failed to prepare decay delete: {e}"))?;
+
+        for (tag_name, group_type, last_decayed_raw, imp, pos, neg) in rows {
+            let last_decayed = if last_decayed_raw.is_empty() {
+                now
+            } else {
+                parse_db_datetime(&last_decayed_raw).unwrap_or(now)
+            };
+            let elapsed_days = (now - last_decayed).num_seconds() as f32 / 86_400.0;
+            if elapsed_days < 1.0 {
+                continue;
+            }
+            let factor = (-std::f32::consts::LN_2 * elapsed_days / half_life).exp();
+            let new_imp = (imp as f32 * factor).round() as i64;
+            let new_pos = (pos as f32 * factor).round() as i64;
+            let new_neg = (neg as f32 * factor).round() as i64;
+
+            if new_imp == 0 && new_pos == 0 && new_neg == 0 {
+                delete
+                    .execute(params![account_id, tag_name, group_type])
+                    .map_err(|e| format!("Failed to delete decayed row: {e}"))?;
+            } else {
+                update
+                    .execute(params![
+                        new_imp, new_pos, new_neg, now_iso, account_id, tag_name, group_type
+                    ])
+                    .map_err(|e| format!("Failed to update decayed row: {e}"))?;
+            }
+        }
+    }
+    tx.commit()
+        .map_err(|e| format!("Failed to commit decay tx: {e}"))?;
     Ok(())
 }
 
@@ -923,11 +1004,13 @@ pub fn record_feed_interaction(interaction: &FeedInteractionRequest) -> Result<(
             FeedInteractionType::Hide => (0, 0, 1),
         };
 
+        let now_iso = Utc::now().to_rfc3339();
         tx.execute(
             "
             INSERT INTO account_tag_feedback (
                 account_id, tag_name, group_type,
-                impression_count, positive_count, negative_count, last_interaction_at
+                impression_count, positive_count, negative_count,
+                last_interaction_at, last_decayed_at
             )
             SELECT
                 ?1,
@@ -936,6 +1019,7 @@ pub fn record_feed_interaction(interaction: &FeedInteractionRequest) -> Result<(
                 ?2,
                 ?3,
                 ?4,
+                ?5,
                 ?5
             FROM tags t
             INNER JOIN tags_posts tp ON tp.tag_id = t.id
@@ -944,14 +1028,15 @@ pub fn record_feed_interaction(interaction: &FeedInteractionRequest) -> Result<(
                 impression_count = account_tag_feedback.impression_count + excluded.impression_count,
                 positive_count = account_tag_feedback.positive_count + excluded.positive_count,
                 negative_count = account_tag_feedback.negative_count + excluded.negative_count,
-                last_interaction_at = excluded.last_interaction_at
+                last_interaction_at = excluded.last_interaction_at,
+                last_decayed_at = excluded.last_decayed_at
             ",
             params![
                 interaction.account_id,
                 impression_delta,
                 positive_delta,
                 negative_delta,
-                Utc::now().to_rfc3339(),
+                now_iso,
                 interaction.post_id,
             ],
         )
@@ -1018,6 +1103,12 @@ fn save_posts_tags_batch_inner(
 
             let mut post_tag_ids: Vec<i64> = Vec::new();
 
+            // Meta is stored so per-tag feedback (interaction channel) can
+            // pick it up later. Downstream scorers that don't want meta
+            // (tag_similarity, tag_relation, account_tag_counts as a vector)
+            // already filter via `group_wts[Meta] = 0`, so adding meta rows
+            // here doesn't pollute those signals — it just makes meta
+            // available to the interaction loop.
             for (group, tags) in [
                 ("artist", &post.tags.artist),
                 ("character", &post.tags.character),
@@ -1025,6 +1116,7 @@ fn save_posts_tags_batch_inner(
                 ("general", &post.tags.general),
                 ("lore", &post.tags.lore),
                 ("species", &post.tags.species),
+                ("meta", &post.tags.meta),
             ] {
                 for tag in tags {
                     if tag.is_empty() {
