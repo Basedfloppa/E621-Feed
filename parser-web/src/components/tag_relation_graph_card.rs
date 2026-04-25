@@ -323,7 +323,10 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
         let hover_idx_render = hover_idx.clone();
         let view_ref_for_effect = view_ref.clone();
         let edges_per_tag_val = *edges_per_tag;
+        let view_render = *view;
         let iso_render = *isolated_community;
+        // `view` is back in deps so zoom (Yew state path) repaints the canvas.
+        // Drag pan still bypasses this effect via view_ref + rAF.
         use_effect_with(
             (
                 payload.clone(),
@@ -331,13 +334,16 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
                 *resize_trigger,
                 *hover_idx_render,
                 edges_per_tag_val,
+                view_render,
                 iso_render,
             ),
-            move |(payload, _, _, hover_idx_val, k_val, iso_val)| {
+            move |(payload, _, _, hover_idx_val, k_val, view_render, iso_val)| {
                 let Some(canvas) = canvas_ref.cast::<HtmlCanvasElement>() else {
                     return;
                 };
-                let view = *view_ref_for_effect.borrow();
+                // Mirror Yew view → view_ref so drag-pan (rAF) sees latest scale/offset.
+                *view_ref_for_effect.borrow_mut() = *view_render;
+                let view = *view_render;
 
                 if let Some(graph) = payload.as_ref() {
                     let logical_width = canvas.client_width().max(0) as f64;
@@ -540,12 +546,6 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
     {
         let canvas_ref_for_effect = canvas_ref.clone();
         let view = view.clone();
-        let view_ref_for_effect = view_ref.clone();
-        let layout_ref_for_effect = layout_ref.clone();
-        let payload_for_effect = payload.clone();
-        let hover_idx_for_effect = hover_idx.clone();
-        let isolated_for_effect = isolated_community.clone();
-        let raf_id_for_effect = raf_id.clone();
         let canvas_present = payload.is_some() || *loading;
         use_effect_with(canvas_present, move |_present| {
             let canvas_ref = canvas_ref_for_effect;
@@ -554,14 +554,7 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
 
             if let Some(canvas) = canvas_ref.cast::<HtmlCanvasElement>() {
                 let canvas_for_cb = canvas.clone();
-                let canvas_ref_for_cb = canvas_ref.clone();
                 let view = view.clone();
-                let view_ref = view_ref_for_effect.clone();
-                let layout_ref = layout_ref_for_effect.clone();
-                let payload = payload_for_effect.clone();
-                let hover_idx = hover_idx_for_effect.clone();
-                let isolated = isolated_for_effect.clone();
-                let raf_id = raf_id_for_effect.clone();
                 let cb = Closure::<dyn FnMut(WebWheelEvent)>::new(
                     move |evt: WebWheelEvent| {
                         evt.prevent_default();
@@ -569,7 +562,7 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
                         let rect = element.get_bounding_client_rect();
                         let x = evt.client_x() as f64 - rect.left();
                         let y = evt.client_y() as f64 - rect.top();
-                        let cur = *view_ref.borrow();
+                        let cur = *view;
                         let direction = if evt.delta_y() < 0.0 {
                             ZOOM_STEP
                         } else {
@@ -581,25 +574,11 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
                             return;
                         }
                         let real = new_scale / cur.scale;
-                        let new_view = ViewTransform {
+                        view.set(ViewTransform {
                             offset_x: x - (x - cur.offset_x) * real,
                             offset_y: y - (y - cur.offset_y) * real,
                             scale: new_scale,
-                        };
-                        *view_ref.borrow_mut() = new_view;
-                        // Push to Yew state so the toolbar % updates. The render
-                        // effect no longer depends on `view`, so this re-renders
-                        // only the toolbar JSX, not the canvas.
-                        view.set(new_view);
-                        schedule_redraw(
-                            &canvas_ref_for_cb,
-                            &layout_ref,
-                            &payload,
-                            &hover_idx,
-                            &isolated,
-                            &view_ref,
-                            &raf_id,
-                        );
+                        });
                     },
                 );
 
@@ -627,62 +606,34 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
         });
     }
 
-    let set_view: Rc<dyn Fn(ViewTransform)> = {
-        let view = view.clone();
-        let view_ref = view_ref.clone();
-        let canvas_ref = canvas_ref.clone();
-        let layout_ref = layout_ref.clone();
-        let payload = payload.clone();
-        let hover_idx = hover_idx.clone();
-        let isolated_community = isolated_community.clone();
-        let raf_id = raf_id.clone();
-        Rc::new(move |new_view: ViewTransform| {
-            *view_ref.borrow_mut() = new_view;
-            if *view != new_view {
-                view.set(new_view);
-            }
-            schedule_redraw(
-                &canvas_ref,
-                &layout_ref,
-                &payload,
-                &hover_idx,
-                &isolated_community,
-                &view_ref,
-                &raf_id,
-            );
-        })
-    };
-
     let on_dblclick = {
-        let set_view = set_view.clone();
-        Callback::from(move |_: WebMouseEvent| set_view(ViewTransform::default()))
+        let view = view.clone();
+        Callback::from(move |_: WebMouseEvent| {
+            view.set(ViewTransform::default());
+        })
     };
 
     let on_zoom_in = {
         let canvas_ref = canvas_ref.clone();
-        let view_ref = view_ref.clone();
-        let set_view = set_view.clone();
+        let view = view.clone();
         Callback::from(move |_: WebMouseEvent| {
-            if let Some(v) = scaled_around_centre(&canvas_ref, &view_ref, ZOOM_STEP) {
-                set_view(v);
-            }
+            zoom_around_centre(&canvas_ref, &view, ZOOM_STEP);
         })
     };
 
     let on_zoom_out = {
         let canvas_ref = canvas_ref.clone();
-        let view_ref = view_ref.clone();
-        let set_view = set_view.clone();
+        let view = view.clone();
         Callback::from(move |_: WebMouseEvent| {
-            if let Some(v) = scaled_around_centre(&canvas_ref, &view_ref, 1.0 / ZOOM_STEP) {
-                set_view(v);
-            }
+            zoom_around_centre(&canvas_ref, &view, 1.0 / ZOOM_STEP);
         })
     };
 
     let on_zoom_reset = {
-        let set_view = set_view.clone();
-        Callback::from(move |_: WebMouseEvent| set_view(ViewTransform::default()))
+        let view = view.clone();
+        Callback::from(move |_: WebMouseEvent| {
+            view.set(ViewTransform::default());
+        })
     };
 
     let on_top_change = {
@@ -2014,25 +1965,27 @@ fn with_alpha(color: &str, alpha: f32) -> String {
     trimmed.to_string()
 }
 
-fn scaled_around_centre(
+fn zoom_around_centre(
     canvas_ref: &NodeRef,
-    view_ref: &Rc<RefCell<ViewTransform>>,
+    view: &UseStateHandle<ViewTransform>,
     factor: f64,
-) -> Option<ViewTransform> {
-    let canvas = canvas_ref.cast::<HtmlCanvasElement>()?;
+) {
+    let Some(canvas) = canvas_ref.cast::<HtmlCanvasElement>() else {
+        return;
+    };
     let cx = (canvas.client_width().max(0) as f64) * 0.5;
     let cy = (canvas.client_height().max(0) as f64) * 0.5;
-    let cur = *view_ref.borrow();
+    let cur: ViewTransform = **view;
     let new_scale = (cur.scale * factor).clamp(ZOOM_MIN, ZOOM_MAX);
     if (new_scale - cur.scale).abs() < 1e-6 {
-        return None;
+        return;
     }
     let real = new_scale / cur.scale;
-    Some(ViewTransform {
+    view.set(ViewTransform {
         offset_x: cx - (cx - cur.offset_x) * real,
         offset_y: cy - (cy - cur.offset_y) * real,
         scale: new_scale,
-    })
+    });
 }
 
 /// Queue a single rAF redraw. If one is already pending, no-ops — the pending
