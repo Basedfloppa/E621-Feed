@@ -25,8 +25,6 @@ pub struct TagRelationGraphCardProps {
 struct NodeState {
     x: f64,
     y: f64,
-    vx: f64,
-    vy: f64,
     radius: f64,
 }
 
@@ -43,7 +41,7 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
     let loading = use_state(|| false);
     let error: UseStateHandle<Option<String>> = use_state(|| None);
     let top_n = use_state(|| 60usize);
-    let min_cooc = use_state(|| 2i64);
+    let min_cooc = use_state(|| 3i64);
     let theme_trigger = use_state(|| 0u32);
     let resize_trigger = use_state(|| 0u32);
     let hover_idx: UseStateHandle<Option<usize>> = use_state(|| None);
@@ -192,7 +190,7 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
                     if logical_width <= 0.0 {
                         return;
                     }
-                    let logical_height = (logical_width * 0.66).clamp(360.0, 720.0);
+                    let logical_height = (logical_width * 0.85).clamp(480.0, 900.0);
 
                     let mut layout = layout_ref.borrow_mut();
                     let layout_dirty = layout.nodes.len() != graph.nodes.len()
@@ -201,7 +199,8 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
                     if layout_dirty {
                         *layout =
                             initial_layout(&graph.nodes, logical_width, logical_height);
-                        run_simulation(&mut layout, &graph.edges, 350);
+                        run_simulation(&mut layout, &graph.edges, 700);
+                        fit_to_viewport(&mut layout, 0.06);
                     }
                     draw_graph(&canvas, &layout, graph, *hover_idx_val);
                 } else {
@@ -408,104 +407,159 @@ fn initial_layout(nodes: &[TagRelationNode], width: f64, height: f64) -> LayoutS
 
     for (i, n) in nodes.iter().enumerate() {
         let theta = (i as f64) * std::f64::consts::TAU / len.max(1.0);
+        // Slightly varying initial radius helps FR break the symmetric stable
+        // point that a perfectly equidistant ring lands on.
+        let jitter = 0.85 + 0.15 * (((i as f64) * 1.6180339).sin() * 0.5 + 0.5);
         let normalized = (n.count as f64).max(1.0).ln() / max_count.max(1.0).ln().max(1e-3);
         let r = 4.0 + (normalized * 14.0).clamp(0.0, 14.0);
         state.nodes.push(NodeState {
-            x: cx + outer * theta.cos(),
-            y: cy + outer * theta.sin(),
-            vx: 0.0,
-            vy: 0.0,
+            x: cx + outer * jitter * theta.cos(),
+            y: cy + outer * jitter * theta.sin(),
             radius: r,
         });
     }
     state
 }
 
+/// Fruchterman–Reingold layout. Repulsion `k²/d` between every pair, attraction
+/// `d²/k` along each edge weighted by `user_cooc`. Per-iteration displacement is
+/// capped by a temperature `t` that cools geometrically — that's what stops the
+/// simulation from blowing up early and keeps the final layout still.
 fn run_simulation(layout: &mut LayoutState, edges: &[TagRelationEdge], iterations: usize) {
-    if layout.nodes.len() < 2 {
+    let n = layout.nodes.len();
+    if n < 2 {
         return;
     }
 
-    let n = layout.nodes.len();
+    // Tune the ideal node spacing to fill the canvas. The 1.4× nudge keeps the
+    // layout from collapsing when the graph is small relative to the area.
+    let area = layout.width * layout.height;
+    let k = ((area / n as f64).sqrt() * 1.4).max(40.0);
+
     let edge_max = edges
         .iter()
         .map(|e| e.user_cooc)
         .max()
         .unwrap_or(1)
         .max(1) as f64;
-
-    let mut adjusted_edges: Vec<(usize, usize, f64)> = Vec::with_capacity(edges.len());
+    let mut weighted_edges: Vec<(usize, usize, f64)> = Vec::with_capacity(edges.len());
     for e in edges {
         if e.source < n && e.target < n && e.source != e.target {
             let strength = ((e.user_cooc as f64).max(1.0).ln() + 1.0)
                 / ((edge_max).max(1.0).ln() + 1.0);
-            adjusted_edges.push((e.source, e.target, strength.clamp(0.05, 1.0)));
+            weighted_edges.push((e.source, e.target, strength.clamp(0.1, 1.0)));
         }
     }
 
-    let cx = layout.width / 2.0;
-    let cy = layout.height / 2.0;
-    let ideal = (layout.width.min(layout.height) / (n as f64).sqrt()).clamp(45.0, 110.0);
-    let repulsion = 5500.0;
-    let spring_k = 0.045;
-    let center_pull = 0.0035;
-    let damping = 0.82;
-    let max_step = 18.0;
+    let initial_temp = layout.width.max(layout.height) * 0.22;
+    // cooling^iterations ≈ 0.001 once iterations≈700 — guarantees convergence.
+    let cooling = 0.99f64;
+    let mut t = initial_temp;
+
+    let mut forces: Vec<(f64, f64)> = vec![(0.0, 0.0); n];
+    let pad = 6.0_f64;
 
     for _ in 0..iterations {
-        for ni in 0..n {
-            let r1 = layout.nodes[ni].radius;
-            let mut fx = 0.0;
-            let mut fy = 0.0;
-            for nj in 0..n {
-                if ni == nj {
-                    continue;
-                }
-                let r2 = layout.nodes[nj].radius;
-                let dx = layout.nodes[ni].x - layout.nodes[nj].x;
-                let dy = layout.nodes[ni].y - layout.nodes[nj].y;
-                let dist_sq = (dx * dx + dy * dy).max(1.0);
-                let dist = dist_sq.sqrt();
-                let min_dist = r1 + r2 + 4.0;
-                let scale = if dist < min_dist {
-                    repulsion * 4.0 / dist_sq
-                } else {
-                    repulsion / dist_sq
-                };
-                fx += (dx / dist) * scale;
-                fy += (dy / dist) * scale;
-            }
-            layout.nodes[ni].vx += fx;
-            layout.nodes[ni].vy += fy;
+        for f in forces.iter_mut() {
+            *f = (0.0, 0.0);
         }
 
-        for &(a, b, strength) in &adjusted_edges {
-            let dx = layout.nodes[b].x - layout.nodes[a].x;
-            let dy = layout.nodes[b].y - layout.nodes[a].y;
-            let dist = (dx * dx + dy * dy).sqrt().max(1.0);
-            let target_len = ideal / (0.5 + strength);
-            let displacement = dist - target_len;
-            let force = spring_k * displacement * (0.4 + strength);
+        // Repulsion (all pairs)
+        for i in 0..n {
+            for j in (i + 1)..n {
+                let dx = layout.nodes[i].x - layout.nodes[j].x;
+                let dy = layout.nodes[i].y - layout.nodes[j].y;
+                let dist_sq = (dx * dx + dy * dy).max(0.5);
+                let dist = dist_sq.sqrt();
+
+                // Hard core: extra push when nodes overlap their drawn radii.
+                let min_dist = layout.nodes[i].radius + layout.nodes[j].radius + pad;
+                let core_boost = if dist < min_dist {
+                    (min_dist - dist).max(0.0) * 6.0
+                } else {
+                    0.0
+                };
+                let force = (k * k) / dist + core_boost;
+                let fx = (dx / dist) * force;
+                let fy = (dy / dist) * force;
+                forces[i].0 += fx;
+                forces[i].1 += fy;
+                forces[j].0 -= fx;
+                forces[j].1 -= fy;
+            }
+        }
+
+        // Attraction (per edge, weighted by log(cooc))
+        for &(a, b, w) in &weighted_edges {
+            let dx = layout.nodes[a].x - layout.nodes[b].x;
+            let dy = layout.nodes[a].y - layout.nodes[b].y;
+            let dist = (dx * dx + dy * dy).sqrt().max(0.5);
+            let force = (dist * dist / k) * w;
             let fx = (dx / dist) * force;
             let fy = (dy / dist) * force;
-            layout.nodes[a].vx += fx;
-            layout.nodes[a].vy += fy;
-            layout.nodes[b].vx -= fx;
-            layout.nodes[b].vy -= fy;
+            forces[a].0 -= fx;
+            forces[a].1 -= fy;
+            forces[b].0 += fx;
+            forces[b].1 += fy;
         }
 
-        for node in layout.nodes.iter_mut() {
-            node.vx += (cx - node.x) * center_pull;
-            node.vy += (cy - node.y) * center_pull;
-            node.vx *= damping;
-            node.vy *= damping;
-            node.vx = node.vx.clamp(-max_step, max_step);
-            node.vy = node.vy.clamp(-max_step, max_step);
-            node.x += node.vx;
-            node.y += node.vy;
-            node.x = node.x.clamp(node.radius + 4.0, layout.width - node.radius - 4.0);
-            node.y = node.y.clamp(node.radius + 4.0, layout.height - node.radius - 4.0);
+        // Apply forces, capped by the current temperature.
+        for i in 0..n {
+            let (fx, fy) = forces[i];
+            let mag = (fx * fx + fy * fy).sqrt();
+            if mag <= 1e-6 {
+                continue;
+            }
+            let mv = mag.min(t);
+            let dx = (fx / mag) * mv;
+            let dy = (fy / mag) * mv;
+            layout.nodes[i].x += dx;
+            layout.nodes[i].y += dy;
+            // Soft bounds during simulation; the post-fit step handles
+            // viewport sizing precisely.
+            layout.nodes[i].x = layout.nodes[i].x.clamp(0.0, layout.width);
+            layout.nodes[i].y = layout.nodes[i].y.clamp(0.0, layout.height);
         }
+
+        t *= cooling;
+    }
+}
+
+/// Re-centres and uniformly scales the laid-out nodes so the bounding box
+/// fills the canvas with a small margin. Without this, FR converges to
+/// whatever absolute size the forces happened to land on — usually a tight
+/// blob in the middle.
+fn fit_to_viewport(layout: &mut LayoutState, margin_frac: f64) {
+    if layout.nodes.is_empty() {
+        return;
+    }
+    let mut min_x = f64::INFINITY;
+    let mut max_x = f64::NEG_INFINITY;
+    let mut min_y = f64::INFINITY;
+    let mut max_y = f64::NEG_INFINITY;
+    for node in &layout.nodes {
+        let r = node.radius;
+        min_x = min_x.min(node.x - r);
+        max_x = max_x.max(node.x + r);
+        min_y = min_y.min(node.y - r);
+        max_y = max_y.max(node.y + r);
+    }
+    let bb_w = (max_x - min_x).max(1.0);
+    let bb_h = (max_y - min_y).max(1.0);
+
+    let m = (margin_frac * layout.width.min(layout.height)).max(16.0);
+    let target_w = (layout.width - 2.0 * m).max(1.0);
+    let target_h = (layout.height - 2.0 * m).max(1.0);
+    // Take the smaller scale so neither axis overflows.
+    let scale = (target_w / bb_w).min(target_h / bb_h);
+
+    let cx = (min_x + max_x) * 0.5;
+    let cy = (min_y + max_y) * 0.5;
+    let ncx = layout.width * 0.5;
+    let ncy = layout.height * 0.5;
+    for node in layout.nodes.iter_mut() {
+        node.x = ncx + (node.x - cx) * scale;
+        node.y = ncy + (node.y - cy) * scale;
     }
 }
 
