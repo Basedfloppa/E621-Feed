@@ -276,9 +276,19 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
         payload.as_ref().and_then(|graph| graph.nodes.get(idx).map(|n| (idx, n.clone())))
     });
 
-    let body = if (*payload).is_none() && !*loading && error.is_none() {
-        html! { <p class="text-muted mb-0">{"Pick or analyze an account to see the tag-relation graph."}</p> }
-    } else if let Some(err) = (*error).clone() {
+    let has_graph = payload
+        .as_ref()
+        .map(|g| !g.nodes.is_empty())
+        .unwrap_or(false);
+
+    if props.found_user.is_none() {
+        return html! {};
+    }
+    if !*loading && error.is_none() && !has_graph {
+        return html! {};
+    }
+
+    let body = if let Some(err) = (*error).clone() {
         html! { <p class="text-danger mb-0">{err}</p> }
     } else {
         html! {
