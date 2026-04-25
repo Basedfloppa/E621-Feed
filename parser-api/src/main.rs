@@ -12,7 +12,9 @@ use crate::models::{
     BlacklistPayload, DeviceScopedAccount, FeedInteractionRequest, ScoredPost, TruncatedAccount,
     UserApiResponse, cfg, default_path, reload_from, start_config_watcher,
 };
-use crate::utils::{ScoringContext, current_idf, diversify_scored_posts, mark_idf_dirty};
+use crate::utils::{
+    ScoringContext, current_global_relation, current_idf, diversify_scored_posts, mark_idf_dirty,
+};
 use crate::{
     db::{
         DbInit, get_account_by_id, get_account_by_name, get_account_preference_profile,
@@ -218,7 +220,22 @@ async fn get_recommendations(
     let idf = current_idf()
         .map_err(|e| std::io::Error::other(format!("Failed to build IDF index: {e}")))?;
 
-    let ctx = ScoringContext::new(&tags, &cfg.group_weights, &priors, &idf, &profile);
+    let global_relation = current_global_relation().map_err(|e| {
+        std::io::Error::other(format!("Failed to build global tag relation graph: {e}"))
+    })?;
+    let user_relation = db::load_account_tag_relation(account_id, &tags).map_err(|e| {
+        std::io::Error::other(format!("Failed to load user tag relation graph: {e}"))
+    })?;
+
+    let ctx = ScoringContext::new(
+        &tags,
+        &cfg.group_weights,
+        &priors,
+        &idf,
+        &profile,
+        &global_relation,
+        &user_relation,
+    );
 
     let mut scored: Vec<ScoredPost> = Vec::with_capacity(posts.len());
     for post in posts {

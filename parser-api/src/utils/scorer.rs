@@ -4,6 +4,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::models::{AccountPreferenceProfile, Post, ScoreBreakdown, ScoredPost, TagCount};
 use crate::utils::idf::IdfIndex;
+use crate::utils::tag_relation::TagRelationGraph;
 
 const GROUP_COUNT: usize = 7;
 const DIVERSITY_INTERACTION_DAMP: f32 = 0.35;
@@ -73,6 +74,8 @@ pub struct Priors {
     pub mix_media: f32,
     pub mix_popularity: f32,
     pub mix_interaction: f32,
+    #[serde(default = "default_mix_tag_relation")]
+    pub mix_tag_relation: f32,
     pub idf_lambda: f32,
     pub idf_alpha: f32,
     pub freq_alpha: f32,
@@ -104,6 +107,17 @@ pub struct Priors {
     pub strong_negative_penalty: f32,
     #[serde(default = "default_recency_personal_floor_frac")]
     pub recency_personal_floor_frac: f32,
+
+    #[serde(default = "default_tag_relation_w_global")]
+    pub tag_relation_w_global: f32,
+    #[serde(default = "default_tag_relation_w_personal")]
+    pub tag_relation_w_personal: f32,
+    #[serde(default = "default_tag_relation_pmi_scale")]
+    pub tag_relation_pmi_scale: f32,
+    #[serde(default = "default_tag_relation_min_cooc")]
+    pub tag_relation_min_cooc: i64,
+    #[serde(default = "default_tag_relation_user_smooth")]
+    pub tag_relation_user_smooth: f32,
 }
 
 fn default_quality_log_bias() -> f32 {
@@ -122,6 +136,24 @@ fn default_strong_negative_penalty() -> f32 {
     0.40
 }
 fn default_recency_personal_floor_frac() -> f32 {
+    1.0
+}
+fn default_mix_tag_relation() -> f32 {
+    0.0
+}
+fn default_tag_relation_w_global() -> f32 {
+    0.4
+}
+fn default_tag_relation_w_personal() -> f32 {
+    0.6
+}
+fn default_tag_relation_pmi_scale() -> f32 {
+    5.0
+}
+fn default_tag_relation_min_cooc() -> i64 {
+    2
+}
+fn default_tag_relation_user_smooth() -> f32 {
     1.0
 }
 
@@ -195,6 +227,7 @@ struct MixWeights {
     media: f32,
     popularity: f32,
     interaction: f32,
+    tag_relation: f32,
 }
 
 impl MixWeights {
@@ -205,7 +238,8 @@ impl MixWeights {
             + p.mix_rating
             + p.mix_media
             + p.mix_popularity
-            + p.mix_interaction;
+            + p.mix_interaction
+            + p.mix_tag_relation.max(0.0);
         if sum <= 0.0 {
             Self::default()
         } else {
@@ -217,6 +251,7 @@ impl MixWeights {
                 media: p.mix_media / sum,
                 popularity: p.mix_popularity / sum,
                 interaction: p.mix_interaction / sum,
+                tag_relation: p.mix_tag_relation.max(0.0) / sum,
             }
         }
     }
@@ -226,6 +261,8 @@ pub struct ScoringContext<'a> {
     priors: &'a Priors,
     profile: &'a AccountPreferenceProfile,
     idf: &'a IdfIndex,
+    global_relation: &'a TagRelationGraph,
+    user_relation: &'a TagRelationGraph,
     group_wts: [f32; GROUP_COUNT],
     user: [HashMap<String, f32>; GROUP_COUNT],
     u_norm: f32,
@@ -242,6 +279,8 @@ impl<'a> ScoringContext<'a> {
         priors: &'a Priors,
         idf: &'a IdfIndex,
         profile: &'a AccountPreferenceProfile,
+        global_relation: &'a TagRelationGraph,
+        user_relation: &'a TagRelationGraph,
     ) -> Self {
         let mut group_wts = [1.0f32; GROUP_COUNT];
         for &g in &Group::ALL {
@@ -302,6 +341,8 @@ impl<'a> ScoringContext<'a> {
             priors,
             profile,
             idf,
+            global_relation,
+            user_relation,
             group_wts,
             user,
             u_norm: u_norm_sq.sqrt(),
@@ -321,6 +362,7 @@ impl<'a> ScoringContext<'a> {
         let media = self.media_fit(post);
         let (interaction, veto) = self.interaction_fit(post);
         let recency = self.recency_fit(age_days);
+        let tag_relation = self.tag_relation_fit(post);
 
         let mix = self.mix;
         let raw = mix.sim * sim
@@ -329,7 +371,8 @@ impl<'a> ScoringContext<'a> {
             + mix.rating * rating
             + mix.media * media
             + mix.popularity * popularity
-            + mix.interaction * interaction;
+            + mix.interaction * interaction
+            + mix.tag_relation * tag_relation;
         let mut score = raw.clamp(0.0, 1.0);
         if veto {
             score *= 1.0 - self.priors.strong_negative_penalty.clamp(0.0, 1.0);
@@ -343,6 +386,7 @@ impl<'a> ScoringContext<'a> {
             media_fit: media,
             popularity_fit: popularity,
             interaction_fit: interaction,
+            tag_relation_fit: tag_relation,
         };
 
         (score.clamp(0.0, 1.0), breakdown)
@@ -514,6 +558,114 @@ impl<'a> ScoringContext<'a> {
             (weighted / total_weight).clamp(0.0, 1.0)
         };
         (score, strong_neg)
+    }
+
+    fn tag_relation_fit(&self, post: &Post) -> f32 {
+        let w_g = self.priors.tag_relation_w_global.max(0.0);
+        let w_u = self.priors.tag_relation_w_personal.max(0.0);
+        if w_g + w_u <= 0.0 {
+            return FEEDBACK_NEUTRAL;
+        }
+
+        let mut tags: Vec<(u8, String)> = Vec::with_capacity(24);
+        for (group, group_tags) in [
+            (Group::Artist, &post.tags.artist),
+            (Group::Character, &post.tags.character),
+            (Group::Copyright, &post.tags.copyright),
+            (Group::Species, &post.tags.species),
+            (Group::General, &post.tags.general),
+            (Group::Lore, &post.tags.lore),
+        ] {
+            let gw = self.group_wts[group as usize];
+            if gw <= 0.0 {
+                continue;
+            }
+            for t in group_tags {
+                if t.is_empty() {
+                    continue;
+                }
+                tags.push((group as u8, normalize_tag(t)));
+            }
+        }
+        if tags.len() < 2 {
+            return FEEDBACK_NEUTRAL;
+        }
+
+        let global_marg: Vec<i64> = tags
+            .iter()
+            .map(|(g, t)| self.global_relation.marginal(*g, t))
+            .collect();
+        let user_marg: Vec<i64> = tags
+            .iter()
+            .map(|(g, t)| self.user_relation.marginal(*g, t))
+            .collect();
+
+        let ng = self.global_relation.n_posts().max(1) as f32;
+        let pmi_scale = self.priors.tag_relation_pmi_scale.max(1e-3);
+        let min_cooc_global = self.priors.tag_relation_min_cooc.max(1);
+        let user_smooth = self.priors.tag_relation_user_smooth.max(0.0);
+        let pair_wsum = (w_g + w_u).max(1e-6);
+
+        let mut num = 0.0f32;
+        let mut den = 0.0f32;
+
+        for i in 0..tags.len() {
+            let (gi, ti) = &tags[i];
+            let gi_w = self.group_wts[*gi as usize];
+            let gi_df = global_marg[i].max(0) as f32;
+            let gi_um = user_marg[i].max(0) as f32;
+            for j in (i + 1)..tags.len() {
+                let (gj, tj) = &tags[j];
+                let gj_w = self.group_wts[*gj as usize];
+
+                let pair_w = (gi_w * gj_w).sqrt();
+                if pair_w <= 0.0 {
+                    continue;
+                }
+
+                let global_score = {
+                    let c = self.global_relation.cooc(*gi, ti, *gj, tj);
+                    let gj_df = global_marg[j].max(0) as f32;
+                    if c >= min_cooc_global && gi_df > 0.0 && gj_df > 0.0 {
+                        let denom = gi_df * gj_df / ng;
+                        if denom > 0.0 {
+                            let lift = (c as f32) / denom;
+                            (lift.max(1e-6).ln() / pmi_scale).clamp(0.0, 1.0)
+                        } else {
+                            0.0
+                        }
+                    } else {
+                        0.0
+                    }
+                };
+
+                let user_score = {
+                    let c = self.user_relation.cooc(*gi, ti, *gj, tj) as f32;
+                    let gj_um = user_marg[j].max(0) as f32;
+                    if gi_um + gj_um > 0.0 {
+                        let denom = gi_um.min(gj_um).max(0.0) + user_smooth;
+                        if denom > 0.0 {
+                            (c / denom).clamp(0.0, 1.0)
+                        } else {
+                            0.0
+                        }
+                    } else {
+                        0.0
+                    }
+                };
+
+                let pair_score = (w_g * global_score + w_u * user_score) / pair_wsum;
+
+                num += pair_w * pair_score;
+                den += pair_w;
+            }
+        }
+
+        if den <= 0.0 {
+            FEEDBACK_NEUTRAL
+        } else {
+            (num / den).clamp(0.0, 1.0)
+        }
     }
 
     fn recency_fit(&self, age_days: f32) -> f32 {

@@ -75,6 +75,7 @@ mix_rating = 0.10
 mix_media = 0.08
 mix_popularity = 0.07
 mix_interaction = 0.10
+mix_tag_relation = 0.08
 
 idf_lambda = 0.35
 idf_alpha = 0.65
@@ -101,6 +102,12 @@ strong_negative_count = 3
 strong_negative_ratio = 2.0
 strong_negative_penalty = 0.40
 recency_personal_floor_frac = 1.0
+
+tag_relation_w_global = 0.4
+tag_relation_w_personal = 0.6
+tag_relation_pmi_scale = 5.0
+tag_relation_min_cooc = 2
+tag_relation_user_smooth = 1.0
 ```
 
 Small guide on scoring vars
@@ -122,6 +129,7 @@ Small guide on scoring vars
 |`mix_media`|media-type preference matters less|media-type preference matters more|
 |`mix_popularity`|popularity fit matters less|feed tracks account's usual popularity range more|
 |`mix_interaction`|feed history matters less|recent browsing behavior matters more|
+|`mix_tag_relation`|tag co-occurrence graph ignored|tag pairs that cluster together (globally or in favourites) lift scores more|
 |`quality_w_absolute`|trust user-relative score/comment ratios more|rely more on raw site score + fav thresholds|
 |`quality_w_relative_score`|absolute score dominates|user's typical score level matters more|
 |`quality_w_relative_comments`|comments barely count|comment volume vs user's norm matters more|
@@ -139,6 +147,11 @@ Small guide on scoring vars
 |`strong_negative_ratio`|dislikes trigger veto even if you sometimes opened the tag|negatives must clearly outweigh positives to veto|
 |`strong_negative_penalty`|vetoed posts barely affected|vetoed posts pushed far down the feed (1.0 = zeroed)|
 |`recency_personal_floor_frac`|personal recency window can collapse tight|personal recency always at least this fraction of `recency_tau_days`|
+|`tag_relation_w_global`|ignore whole-catalog tag pairing|global PMI-style lift dominates the tag-relation component|
+|`tag_relation_w_personal`|ignore user-specific tag pairings|pair co-occurrence inside the user's own favourites dominates the tag-relation component|
+|`tag_relation_pmi_scale`|low-lift pairs already saturate the global signal|only strongly-associated pairs contribute meaningfully|
+|`tag_relation_min_cooc`|thin pairs contribute global signal|require more joint occurrences before a pair is trusted|
+|`tag_relation_user_smooth`|rare user pairs can max out the personal signal|small user samples stay conservative until more evidence accrues|
 
 http://localhost:8080
 

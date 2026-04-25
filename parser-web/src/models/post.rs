@@ -149,6 +149,8 @@ pub struct ScoreBreakdown {
     pub media_fit: f32,
     pub popularity_fit: f32,
     pub interaction_fit: f32,
+    #[serde(default)]
+    pub tag_relation_fit: f32,
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq)]

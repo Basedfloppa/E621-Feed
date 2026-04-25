@@ -407,6 +407,9 @@ pub fn post_card(props: &PostCardProps) -> Html {
                                 <span class="badge text-muted text-truncate mw-100" title="Signal from your recent feed behaviour on this post's tags (views, opens, hides).">
                                     { format!("Interact {:.2}", breakdown.interaction_fit) }
                                 </span>
+                                <span class="badge text-muted text-truncate mw-100" title="How coherently this post's tags relate to each other — globally (PMI lift) and inside your own favourites (pair co-occurrence).">
+                                    { format!("Relation {:.2}", breakdown.tag_relation_fit) }
+                                </span>
                             </div>
                         }
                     } else {

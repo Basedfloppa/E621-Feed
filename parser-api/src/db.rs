@@ -641,6 +641,7 @@ pub fn refresh_account_profiles(account_id: i32) -> Result<(), String> {
     set_media_profile(account_id)?;
     set_quality_profile(account_id)?;
     set_recency_profile(account_id)?;
+    set_account_tag_cooccurrence(account_id)?;
     Ok(())
 }
 
@@ -963,6 +964,7 @@ pub fn save_posts_tags_batch(posts: &[Post], blacklist: &HashSet<String>) -> Res
     let mut connection = open_db()?;
     let tx = connection.transaction().map_err(|e| format!("tx: {e}"))?;
 
+    let mut cooc_dirty = false;
     {
         let mut insert_tag = tx
             .prepare_cached("INSERT OR IGNORE INTO tags (name, group_type) VALUES (?1, ?2)")
@@ -976,8 +978,26 @@ pub fn save_posts_tags_batch(posts: &[Post], blacklist: &HashSet<String>) -> Res
         let mut df = tx
             .prepare_cached("UPDATE tags SET df = (SELECT count(*) FROM tags_posts WHERE tag_id = ?1) WHERE id = ?1;")
             .map_err(|e| format!("prep df: {e}"))?;
+        let mut post_has_tags = tx
+            .prepare_cached("SELECT EXISTS(SELECT 1 FROM tags_posts WHERE post_id = ?1)")
+            .map_err(|e| format!("prep post_has_tags: {e}"))?;
+        let mut insert_cooc = tx
+            .prepare_cached(
+                "
+                INSERT INTO tag_cooccurrence (tag1_id, tag2_id, cooc_count) VALUES (?1, ?2, 1)
+                ON CONFLICT(tag1_id, tag2_id) DO UPDATE SET cooc_count = cooc_count + 1
+                ",
+            )
+            .map_err(|e| format!("prep insert_cooc: {e}"))?;
 
         for post in posts {
+            let pid = post.id;
+            let had_tags: bool = post_has_tags
+                .query_row(params![pid], |r| r.get(0))
+                .map_err(|e| format!("post_has_tags lookup: {e}"))?;
+
+            let mut post_tag_ids: Vec<i64> = Vec::new();
+
             for (group, tags) in [
                 ("artist", &post.tags.artist),
                 ("character", &post.tags.character),
@@ -986,7 +1006,6 @@ pub fn save_posts_tags_batch(posts: &[Post], blacklist: &HashSet<String>) -> Res
                 ("lore", &post.tags.lore),
                 ("species", &post.tags.species),
             ] {
-                let pid = post.id;
                 for tag in tags {
                     if tag.is_empty() || blacklist.contains(tag) {
                         continue;
@@ -1005,14 +1024,188 @@ pub fn save_posts_tags_batch(posts: &[Post], blacklist: &HashSet<String>) -> Res
 
                     df.execute(params![tag_id])
                         .map_err(|e| format!("insert tag df: {e}"))?;
+
+                    post_tag_ids.push(tag_id);
                 }
+            }
+
+            if !had_tags && post_tag_ids.len() >= 2 {
+                post_tag_ids.sort_unstable();
+                post_tag_ids.dedup();
+                let n = post_tag_ids.len();
+                for i in 0..n {
+                    let a = post_tag_ids[i];
+                    for &b in &post_tag_ids[i + 1..] {
+                        insert_cooc
+                            .execute(params![a, b])
+                            .map_err(|e| format!("insert tag cooc: {e}"))?;
+                    }
+                }
+                cooc_dirty = true;
             }
         }
     }
 
     tx.commit()
         .map_err(|e| format!("commit save_posts_tags_batch: {e}"))?;
+
+    if cooc_dirty {
+        crate::utils::mark_global_relation_dirty();
+    }
     Ok(())
+}
+
+pub fn set_account_tag_cooccurrence(account_id: i32) -> Result<(), String> {
+    let mut connection = open_db()?;
+    let tx = connection
+        .transaction()
+        .map_err(|e| format!("Failed to get tx: {e}"))?;
+
+    tx.execute(
+        "DELETE FROM account_tag_cooccurrence WHERE account_id = ?1",
+        params![account_id],
+    )
+    .map_err(|e| format!("Failed to clear account tag cooccurrence: {e}"))?;
+
+    tx.execute(
+        "
+        INSERT INTO account_tag_cooccurrence (
+            account_id, tag1_name, tag1_group, tag2_name, tag2_group, cooc_count
+        )
+        SELECT
+            ?1,
+            t1.name, t1.group_type,
+            t2.name, t2.group_type,
+            COUNT(*)
+        FROM accounts_post ap
+        INNER JOIN tags_posts tp1 ON tp1.post_id = ap.post_id
+        INNER JOIN tags_posts tp2
+            ON tp2.post_id = ap.post_id
+           AND tp1.tag_id < tp2.tag_id
+        INNER JOIN tags t1 ON t1.id = tp1.tag_id
+        INNER JOIN tags t2 ON t2.id = tp2.tag_id
+        WHERE ap.account_id = ?1
+        GROUP BY t1.name, t1.group_type, t2.name, t2.group_type
+        ",
+        params![account_id],
+    )
+    .map_err(|e| format!("Failed to populate account tag cooccurrence: {e}"))?;
+
+    tx.commit()
+        .map_err(|e| format!("Failed to commit account tag cooccurrence: {e}"))?;
+    Ok(())
+}
+
+pub fn load_global_tag_relation() -> rusqlite::Result<crate::utils::TagRelationGraph> {
+    let conn = open_db().expect("open_db failed");
+    let n_posts: i64 =
+        conn.query_row("SELECT COUNT(*) FROM posts", [], |row| row.get::<_, i64>(0))?;
+
+    let mut graph = crate::utils::TagRelationGraph::with_posts(n_posts);
+
+    {
+        let mut stmt = conn.prepare(
+            "
+            SELECT t1.name, t1.group_type, t2.name, t2.group_type, c.cooc_count
+            FROM tag_cooccurrence c
+            INNER JOIN tags t1 ON t1.id = c.tag1_id
+            INNER JOIN tags t2 ON t2.id = c.tag2_id
+            ",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, i64>(4)?,
+            ))
+        })?;
+        for r in rows {
+            let (t1, g1, t2, g2, c) = r?;
+            if let (Some(gk1), Some(gk2)) = (
+                crate::utils::group_key_from_str(&g1),
+                crate::utils::group_key_from_str(&g2),
+            ) {
+                graph.insert_pair(gk1, &t1.to_lowercase(), gk2, &t2.to_lowercase(), c);
+            }
+        }
+    }
+
+    {
+        let mut stmt = conn.prepare("SELECT name, group_type, df FROM tags")?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<i64>>(2)?.unwrap_or(0),
+            ))
+        })?;
+        for r in rows {
+            let (name, g, df) = r?;
+            if let Some(gk) = crate::utils::group_key_from_str(&g) {
+                graph.set_marginal(gk, &name.to_lowercase(), df);
+            }
+        }
+    }
+
+    Ok(graph)
+}
+
+pub fn load_account_tag_relation(
+    account_id: i32,
+    user_tag_counts: &[TagCount],
+) -> Result<crate::utils::TagRelationGraph, String> {
+    let conn = open_db()?;
+    let total_posts: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM accounts_post WHERE account_id = ?1",
+            params![account_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("Failed to count account posts: {e}"))?;
+
+    let mut graph = crate::utils::TagRelationGraph::with_posts(total_posts);
+
+    for tc in user_tag_counts {
+        if let Some(gk) = crate::utils::group_key_from_str(&tc.group_type) {
+            graph.set_marginal(gk, &tc.name.to_lowercase(), tc.count);
+        }
+    }
+
+    let mut stmt = conn
+        .prepare(
+            "
+            SELECT tag1_name, tag1_group, tag2_name, tag2_group, cooc_count
+            FROM account_tag_cooccurrence
+            WHERE account_id = ?1
+            ",
+        )
+        .map_err(|e| format!("Failed to prepare account tag cooc query: {e}"))?;
+
+    let rows = stmt
+        .query_map(params![account_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, i64>(4)?,
+            ))
+        })
+        .map_err(|e| format!("Failed to execute account tag cooc query: {e}"))?;
+
+    for r in rows {
+        let (t1, g1, t2, g2, c) = r.map_err(|e| format!("Failed to read account cooc row: {e}"))?;
+        if let (Some(gk1), Some(gk2)) = (
+            crate::utils::group_key_from_str(&g1),
+            crate::utils::group_key_from_str(&g2),
+        ) {
+            graph.insert_pair(gk1, &t1.to_lowercase(), gk2, &t2.to_lowercase(), c);
+        }
+    }
+
+    Ok(graph)
 }
 
 pub fn post_count() -> i64 {

@@ -1,5 +1,9 @@
 mod idf;
 mod scorer;
+mod tag_relation;
 
 pub use idf::{current_idf, mark_idf_dirty};
 pub use scorer::{Priors, ScoringContext, diversify_scored_posts};
+pub use tag_relation::{
+    TagRelationGraph, current_global_relation, group_key_from_str, mark_global_relation_dirty,
+};
