@@ -1,24 +1,3 @@
--- Cardinality notes (read before scaling concerns kick in):
---   - `tag_cooccurrence` is the unordered cartesian product of tags that
---     ever appeared together on any single post, with `tag1_id < tag2_id`.
---   - Worst case: O(T²) where T is the unique tag count. In practice it's
---     much sparser because most tag pairs never co-occur.
---   - Empirical reference: a catalog of ~10k tags / ~250k posts has
---     ~1-2M pairs after the runtime backfill. Memory footprint at load
---     time is dominated by the in-memory HashMap in `TagRelationGraph`,
---     keyed by (group, name, group, name) — roughly 80-120 bytes per
---     entry on 64-bit, so ~150 MB for 1.5M pairs.
---   - The scorer's `tag_relation_min_cooc` (default 2) is applied at
---     load time to prune pairs below threshold (see `load_global_tag_relation`
---     in db.rs). Heavy-tailed distributions mean this typically eliminates
---     50-80% of rows.
---   - If you push past ~10M pairs, plan to either raise `tag_relation_min_cooc`
---     or move the in-memory graph to a streaming/on-demand model.
---
--- `account_tag_cooccurrence` is per-user and bounded by the user's tag set,
--- which is at most a few thousand even for power users — no cardinality
--- concerns there.
-
 CREATE TABLE IF NOT EXISTS tag_cooccurrence (
     tag1_id INTEGER NOT NULL,
     tag2_id INTEGER NOT NULL,
