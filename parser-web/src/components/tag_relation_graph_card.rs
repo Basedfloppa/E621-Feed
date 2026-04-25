@@ -13,6 +13,7 @@ use yew::prelude::*;
 
 use crate::models::{
     TagRelationEdge, TagRelationGraphPayload, TagRelationNode, get_or_create_owner_token,
+    read_config_from_head,
 };
 use crate::pages::UserInfo;
 
@@ -81,14 +82,68 @@ const ZOOM_STEP: f64 = 1.2;
 /// distant clusters use centre-of-mass, nearby pairs are exact.
 const BH_THETA: f64 = 0.9;
 
+/// Click-vs-drag threshold (in pixels of cumulative cursor motion). Below
+/// this, mouseup on a hovered node is treated as a click → open e621 search.
+const CLICK_DRAG_THRESHOLD_PX: f64 = 4.0;
+
+const STORAGE_KEY_TOP_N: &str = "tag_graph_top_n";
+const STORAGE_KEY_MIN_COOC: &str = "tag_graph_min_cooc";
+const STORAGE_KEY_EDGES_PER_TAG: &str = "tag_graph_edges_per_tag";
+
+/// Produce a `(community_id, top_tag_name, node_count)` summary sorted by
+/// size desc, singletons dropped, capped to keep the legend compact.
+fn community_summary(
+    payload: &UseStateHandle<Option<TagRelationGraphPayload>>,
+    layout_ref: &Rc<RefCell<LayoutState>>,
+) -> Vec<(u32, String, usize)> {
+    let Some(graph) = payload.as_ref() else {
+        return Vec::new();
+    };
+    let layout = layout_ref.borrow();
+    let mut by_c: HashMap<u32, (String, i64, usize)> = HashMap::new();
+    for (i, &c) in layout.communities.iter().enumerate() {
+        if i >= graph.nodes.len() {
+            continue;
+        }
+        let entry = by_c.entry(c).or_insert_with(|| (String::new(), 0, 0));
+        entry.2 += 1;
+        if graph.nodes[i].count > entry.1 {
+            entry.1 = graph.nodes[i].count;
+            entry.0 = graph.nodes[i].name.clone();
+        }
+    }
+    let mut out: Vec<(u32, String, usize)> = by_c
+        .into_iter()
+        .filter(|(_, e)| e.2 > 1)
+        .map(|(c, (name, _, size))| (c, name, size))
+        .collect();
+    out.sort_by(|a, b| b.2.cmp(&a.2));
+    out.truncate(10);
+    out
+}
+
+fn read_local<T: std::str::FromStr>(key: &str) -> Option<T> {
+    web_sys::window()
+        .and_then(|w| w.local_storage().ok().flatten())
+        .and_then(|s| s.get_item(key).ok().flatten())
+        .and_then(|v| v.parse::<T>().ok())
+}
+
+fn write_local(key: &str, value: &str) {
+    if let Some(store) = web_sys::window().and_then(|w| w.local_storage().ok().flatten()) {
+        let _ = store.set_item(key, value);
+    }
+}
+
 #[function_component(TagRelationGraphCard)]
 pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
     let payload: UseStateHandle<Option<TagRelationGraphPayload>> = use_state(|| None);
     let loading = use_state(|| false);
     let error: UseStateHandle<Option<String>> = use_state(|| None);
-    let top_n = use_state(|| 60usize);
-    let min_cooc = use_state(|| 3i64);
-    let edges_per_tag = use_state(|| 6usize);
+    let top_n = use_state(|| read_local::<usize>(STORAGE_KEY_TOP_N).unwrap_or(60).clamp(5, 250));
+    let min_cooc = use_state(|| read_local::<i64>(STORAGE_KEY_MIN_COOC).unwrap_or(3).max(1));
+    let edges_per_tag =
+        use_state(|| read_local::<usize>(STORAGE_KEY_EDGES_PER_TAG).unwrap_or(6).clamp(2, 20));
     let theme_trigger = use_state(|| 0u32);
     let resize_trigger = use_state(|| 0u32);
     let hover_idx: UseStateHandle<Option<usize>> = use_state(|| None);
@@ -96,9 +151,17 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
     let canvas_ref = use_node_ref();
     let layout_ref: Rc<RefCell<LayoutState>> = use_mut_ref(LayoutState::default);
     let view: UseStateHandle<ViewTransform> = use_state(ViewTransform::default);
-    // Drag state lives in a ref because mousemove fires often and we don't
-    // want to trigger a re-render on every pixel of motion.
-    let drag_ref: Rc<RefCell<Option<(f64, f64, f64, f64)>>> = use_mut_ref(|| None);
+    // Pan/drag mutates `view_ref` directly and redraws via rAF, bypassing
+    // Yew re-renders. Yew state catches up on drag-end.
+    let view_ref: Rc<RefCell<ViewTransform>> = use_mut_ref(ViewTransform::default);
+    let raf_id: Rc<RefCell<Option<i32>>> = use_mut_ref(|| None);
+    // (start_cursor_x, start_cursor_y, start_offset_x, start_offset_y, total_dist)
+    let drag_ref: Rc<RefCell<Option<(f64, f64, f64, f64, f64)>>> = use_mut_ref(|| None);
+    // Reflected to Yew state only at drag start/end so the cursor flips, without
+    // forcing a re-render per mousemove.
+    let is_dragging = use_state(|| false);
+    // Click-to-isolate community: when Some(c), other communities dim.
+    let isolated_community: UseStateHandle<Option<u32>> = use_state(|| None);
 
     {
         let payload = payload.clone();
@@ -200,6 +263,39 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
     }
 
     {
+        let top_n_val = *top_n;
+        use_effect_with(top_n_val, move |v: &usize| {
+            write_local(STORAGE_KEY_TOP_N, &v.to_string());
+            || ()
+        });
+    }
+    {
+        let min_cooc_val = *min_cooc;
+        use_effect_with(min_cooc_val, move |v: &i64| {
+            write_local(STORAGE_KEY_MIN_COOC, &v.to_string());
+            || ()
+        });
+    }
+    {
+        let edges_per_tag_val = *edges_per_tag;
+        use_effect_with(edges_per_tag_val, move |v: &usize| {
+            write_local(STORAGE_KEY_EDGES_PER_TAG, &v.to_string());
+            || ()
+        });
+    }
+
+    // Reset community isolation when the underlying graph changes, otherwise
+    // a stale community-id from the previous topology could stay focused.
+    {
+        let isolated_community = isolated_community.clone();
+        let nodes_len = payload.as_ref().map(|g| g.nodes.len()).unwrap_or(0);
+        use_effect_with(nodes_len, move |_| {
+            isolated_community.set(None);
+            || ()
+        });
+    }
+
+    {
         let resize_trigger = resize_trigger.clone();
         use_effect_with((), move |_| {
             let closure = Closure::<dyn FnMut()>::new(move || {
@@ -225,8 +321,10 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
         let payload = payload.clone();
         let layout_ref = layout_ref.clone();
         let hover_idx_render = hover_idx.clone();
+        let view_ref_for_effect = view_ref.clone();
         let edges_per_tag_val = *edges_per_tag;
         let view_render = *view;
+        let iso_render = *isolated_community;
         use_effect_with(
             (
                 payload.clone(),
@@ -235,11 +333,16 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
                 *hover_idx_render,
                 edges_per_tag_val,
                 view_render,
+                iso_render,
             ),
-            move |(payload, _, _, hover_idx_val, k_val, view_render)| {
+            move |(payload, _, _, hover_idx_val, k_val, view_render, iso_val)| {
                 let Some(canvas) = canvas_ref.cast::<HtmlCanvasElement>() else {
                     return;
                 };
+                // Sync Yew view → view_ref so non-Yew redraw paths (drag rAF)
+                // see the latest canonical scale/offset.
+                *view_ref_for_effect.borrow_mut() = *view_render;
+
                 if let Some(graph) = payload.as_ref() {
                     let logical_width = canvas.client_width().max(0) as f64;
                     if logical_width <= 0.0 {
@@ -253,7 +356,6 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
                     let size_changed = (layout.width - logical_width).abs() > 0.5
                         || (layout.height - logical_height).abs() > 0.5;
                     if nodes_changed {
-                        // Full path: backbone + topology changed → re-simulate.
                         let backbone = select_backbone(graph, *k_val);
                         *layout = initial_layout(
                             &graph.nodes,
@@ -263,19 +365,11 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
                         );
                         run_simulation(&mut layout, simulation_iterations(graph.nodes.len()));
                         fit_to_viewport(&mut layout, 0.06);
-                        // View transform is intentionally NOT reset here — a
-                        // user pan/zoom should survive parameter tweaks (top_n,
-                        // edges_per_tag, etc.), so they can iterate without
-                        // losing their place. Use double-click or the reset
-                        // button to recenter explicitly.
+                        // View transform survives param tweaks; user can dbl-click to recenter.
                     } else if size_changed {
-                        // Resize-only: keep the simulated topology, just
-                        // rescale node positions into the new canvas. Avoids a
-                        // multi-hundred-millisecond re-simulation on every
-                        // window resize event.
                         rescale_layout(&mut layout, logical_width, logical_height);
                     }
-                    draw_graph(&canvas, &layout, graph, *hover_idx_val, *view_render);
+                    draw_graph(&canvas, &layout, graph, *hover_idx_val, *iso_val, *view_render);
                 } else {
                     let logical_width = canvas.client_width().max(0) as f64;
                     let logical_height = 360.0;
@@ -291,8 +385,11 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
         let canvas_ref = canvas_ref.clone();
         let layout_ref = layout_ref.clone();
         let hover_idx = hover_idx.clone();
-        let view = view.clone();
+        let view_ref = view_ref.clone();
         let drag_ref = drag_ref.clone();
+        let raf_id = raf_id.clone();
+        let payload = payload.clone();
+        let isolated_community = isolated_community.clone();
         Callback::from(move |evt: WebMouseEvent| {
             let Some(canvas) = canvas_ref.cast::<HtmlCanvasElement>() else {
                 return;
@@ -302,30 +399,47 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
             let x = evt.client_x() as f64 - rect.left();
             let y = evt.client_y() as f64 - rect.top();
 
-            // Drag → pan the viewport.
-            if let Some((start_cx, start_cy, start_off_x, start_off_y)) =
-                *drag_ref.borrow()
-            {
-                let new_off_x = start_off_x + (x - start_cx);
-                let new_off_y = start_off_y + (y - start_cy);
-                let cur = *view;
-                if (cur.offset_x - new_off_x).abs() > 0.5
-                    || (cur.offset_y - new_off_y).abs() > 0.5
-                {
-                    view.set(ViewTransform {
+            // Drag → pan via rAF without Yew re-render.
+            let drag_active = drag_ref.borrow().is_some();
+            if drag_active {
+                let (new_off_x, new_off_y, dx, dy) = {
+                    let mut d = drag_ref.borrow_mut();
+                    let entry = d.as_mut().unwrap();
+                    let (start_cx, start_cy, start_off_x, start_off_y, _) = *entry;
+                    let new_off_x = start_off_x + (x - start_cx);
+                    let new_off_y = start_off_y + (y - start_cy);
+                    let cur = *view_ref.borrow();
+                    let dx = (cur.offset_x - new_off_x).abs();
+                    let dy = (cur.offset_y - new_off_y).abs();
+                    entry.4 += (dx * dx + dy * dy).sqrt();
+                    (new_off_x, new_off_y, dx, dy)
+                };
+                if dx > 0.5 || dy > 0.5 {
+                    let scale = view_ref.borrow().scale;
+                    *view_ref.borrow_mut() = ViewTransform {
                         offset_x: new_off_x,
                         offset_y: new_off_y,
-                        scale: cur.scale,
-                    });
+                        scale,
+                    };
+                    schedule_redraw(
+                        &canvas_ref,
+                        &layout_ref,
+                        &payload,
+                        &hover_idx,
+                        &isolated_community,
+                        &view_ref,
+                        &raf_id,
+                    );
                 }
                 return;
             }
 
-            // Hover hit-test in transformed (logical) space.
+            // Hover hit-test in transformed (logical) space (uses view_ref so
+            // it stays correct mid-drag flush, but drag isn't active here).
+            let view = *view_ref.borrow();
             let (lx, ly) = view.to_logical(x, y);
             let layout = layout_ref.borrow();
             let mut found: Option<usize> = None;
-            // Account for the visual-only zoom: pick radius is in logical px.
             let pick_pad = (3.0 / view.scale.max(0.1)).clamp(1.0, 12.0);
             for (i, n) in layout.nodes.iter().enumerate() {
                 let dx = lx - n.x;
@@ -344,20 +458,25 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
     let on_mouse_leave = {
         let hover_idx = hover_idx.clone();
         let drag_ref = drag_ref.clone();
+        let is_dragging = is_dragging.clone();
         Callback::from(move |_: WebMouseEvent| {
             if hover_idx.is_some() {
                 hover_idx.set(None);
             }
+            let was_dragging = drag_ref.borrow().is_some();
             *drag_ref.borrow_mut() = None;
+            if was_dragging {
+                is_dragging.set(false);
+            }
         })
     };
 
     let on_mouse_down = {
         let canvas_ref = canvas_ref.clone();
         let drag_ref = drag_ref.clone();
-        let view = view.clone();
+        let view_ref = view_ref.clone();
+        let is_dragging = is_dragging.clone();
         Callback::from(move |evt: WebMouseEvent| {
-            // Left button only.
             if evt.button() != 0 {
                 return;
             }
@@ -368,15 +487,53 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
             let rect = element.get_bounding_client_rect();
             let x = evt.client_x() as f64 - rect.left();
             let y = evt.client_y() as f64 - rect.top();
-            let cur = *view;
-            *drag_ref.borrow_mut() = Some((x, y, cur.offset_x, cur.offset_y));
+            let cur = *view_ref.borrow();
+            *drag_ref.borrow_mut() = Some((x, y, cur.offset_x, cur.offset_y, 0.0));
+            is_dragging.set(true);
         })
     };
 
     let on_mouse_up = {
         let drag_ref = drag_ref.clone();
-        Callback::from(move |_: WebMouseEvent| {
+        let view_ref = view_ref.clone();
+        let view = view.clone();
+        let hover_idx = hover_idx.clone();
+        let payload = payload.clone();
+        let is_dragging = is_dragging.clone();
+        Callback::from(move |evt: WebMouseEvent| {
+            if evt.button() != 0 {
+                return;
+            }
+            let drag_dist = drag_ref.borrow().map(|(_, _, _, _, d)| d).unwrap_or(f64::INFINITY);
+            let was_dragging = drag_ref.borrow().is_some();
             *drag_ref.borrow_mut() = None;
+            if was_dragging {
+                is_dragging.set(false);
+            }
+
+            // Click (not drag) on a hovered node → open e621 search for that tag.
+            if drag_dist < CLICK_DRAG_THRESHOLD_PX {
+                if let (Some(idx), Some(graph), Some(cfg)) =
+                    (*hover_idx, payload.as_ref(), read_config_from_head())
+                {
+                    if let Some(node) = graph.nodes.get(idx) {
+                        let url = format!(
+                            "{}/posts?tags={}",
+                            cfg.posts_domain,
+                            urlencoding::encode(&node.name),
+                        );
+                        if let Some(win) = web_sys::window() {
+                            let _ = win.open_with_url_and_target(&url, "_blank");
+                        }
+                    }
+                }
+            }
+
+            // Sync ref → Yew state once at drag end so toolbar/ effect see the final view.
+            let final_view = *view_ref.borrow();
+            if *view != final_view {
+                view.set(final_view);
+            }
         })
     };
 
@@ -511,6 +668,64 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
     let hover_summary = (*hover_idx).and_then(|idx| {
         payload.as_ref().and_then(|graph| graph.nodes.get(idx).map(|n| (idx, n.clone())))
     });
+    let community_legend_data = community_summary(&payload, &layout_ref);
+    let legend_html: Html = if community_legend_data.is_empty() {
+        html! {}
+    } else {
+        let cur_iso = *isolated_community;
+        let on_show_all = {
+            let isolated_community = isolated_community.clone();
+            Callback::from(move |_: WebMouseEvent| isolated_community.set(None))
+        };
+        let buttons: Html = community_legend_data
+            .iter()
+            .map(|(c, top_name, count)| {
+                let isolated_community = isolated_community.clone();
+                let target = *c;
+                let onclick = Callback::from(move |_: WebMouseEvent| {
+                    if *isolated_community == Some(target) {
+                        isolated_community.set(None);
+                    } else {
+                        isolated_community.set(Some(target));
+                    }
+                });
+                let active = cur_iso == Some(*c);
+                let hue = (*c as f64 * 137.508_f64) % 360.0;
+                let style = format!(
+                    "border-left: 8px solid hsl({:.0}, 60%, 55%); padding-left: 0.5rem;",
+                    hue
+                );
+                let cls = classes!(
+                    "btn",
+                    "btn-sm",
+                    if active { "btn-secondary" } else { "btn-outline-secondary" }
+                );
+                let title = format!("{count} tags in this community");
+                let label = format!("{top_name} · {count}");
+                html! {
+                    <button type="button" {onclick} class={cls} style={style} title={title}>
+                        { label }
+                    </button>
+                }
+            })
+            .collect();
+        let show_all = if cur_iso.is_some() {
+            html! {
+                <button type="button" class="btn btn-sm btn-outline-secondary" onclick={on_show_all}>
+                    {"Show all"}
+                </button>
+            }
+        } else {
+            html! {}
+        };
+        html! {
+            <div class="d-flex flex-wrap gap-2 mt-2 align-items-center">
+                <small class="text-muted me-1">{"Communities:"}</small>
+                { show_all }
+                { buttons }
+            </div>
+        }
+    };
 
     let has_graph = payload
         .as_ref()
@@ -589,7 +804,7 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
                         ref={canvas_ref.clone()}
                         style={format!(
                             "display: block; width: 100%; touch-action: none; cursor: {};",
-                            if drag_ref.borrow().is_some() { "grabbing" } else { "grab" }
+                            if *is_dragging { "grabbing" } else { "grab" }
                         )}
                         onmousemove={on_mouse_move}
                         onmouseleave={on_mouse_leave}
@@ -622,7 +837,8 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
                         }
                     }
                 </p>
-                <p class="small text-muted mt-1 mb-0">{"Node colour = detected community (cluster of strongly co-occurring tags). Hover for tag type and counts."}</p>
+                <p class="small text-muted mt-1 mb-0">{"Node colour = detected community. Hover for tag info, click a node to open its e621 search, click a community below to isolate it."}</p>
+                { legend_html }
             </>
         }
     };
@@ -1442,6 +1658,7 @@ fn draw_graph(
     layout: &LayoutState,
     graph: &TagRelationGraphPayload,
     hover: Option<usize>,
+    isolated_community: Option<u32>,
     view: ViewTransform,
 ) {
     let width = layout.width;
@@ -1472,10 +1689,55 @@ fn draw_graph(
     let s_min = layout.score_min;
     let span = (layout.score_max - layout.score_min).max(1e-6);
 
-    // ---- Pass 1: backbone edges ------------------------------------------
+    // Isolation: focus on a single community by dimming everything else.
+    let in_focus = |idx: usize| -> bool {
+        match isolated_community {
+            Some(c) => layout.communities.get(idx).copied() == Some(c),
+            None => true,
+        }
+    };
+
+    // ---- Pre-pass: dim out-of-focus edges + nodes (when isolating) -------
+    if isolated_community.is_some() {
+        let mut dim_edges: Vec<usize> = Vec::new();
+        for (idx, &(src, tgt, _, _)) in layout.edges.iter().enumerate() {
+            if src >= layout.nodes.len() || tgt >= layout.nodes.len() {
+                continue;
+            }
+            if !(in_focus(src) && in_focus(tgt)) {
+                dim_edges.push(idx);
+            }
+        }
+        if !dim_edges.is_empty() {
+            ctx.set_stroke_style_str(&with_alpha(&muted, 0.10));
+            ctx.set_line_width(0.6);
+            ctx.begin_path();
+            for &idx in &dim_edges {
+                let (src, tgt, _, _) = layout.edges[idx];
+                let a = layout.nodes[src];
+                let b = layout.nodes[tgt];
+                ctx.move_to(a.x, a.y);
+                ctx.line_to(b.x, b.y);
+            }
+            ctx.stroke();
+        }
+        ctx.set_fill_style_str(&with_alpha(&muted, 0.18));
+        ctx.begin_path();
+        for i in 0..layout.nodes.len().min(graph.nodes.len()) {
+            if in_focus(i) {
+                continue;
+            }
+            let pos = layout.nodes[i];
+            ctx.move_to(pos.x + pos.radius, pos.y);
+            ctx.arc(pos.x, pos.y, pos.radius, 0.0, std::f64::consts::TAU)
+                .ok();
+        }
+        ctx.fill();
+    }
+
+    // ---- Pass 1: backbone edges (in-focus only) --------------------------
     // Quantise (alpha, line_width) into a small grid and stroke each bucket
-    // as a single path. Cuts the number of cross-language canvas calls from
-    // ~6 per edge down to ~2 per edge plus ~3 per occupied bucket.
+    // as a single path.
     const ALPHA_BANDS: usize = 8;
     const WIDTH_BANDS: usize = 4;
     let total_buckets = ALPHA_BANDS * WIDTH_BANDS;
@@ -1483,6 +1745,9 @@ fn draw_graph(
     let mut highlight_edges: Vec<usize> = Vec::new();
     for (idx, &(src, tgt, _, score)) in layout.edges.iter().enumerate() {
         if src >= layout.nodes.len() || tgt >= layout.nodes.len() {
+            continue;
+        }
+        if !(in_focus(src) && in_focus(tgt)) {
             continue;
         }
         let highlight = matches!(hover, Some(h) if h == src || h == tgt);
@@ -1563,6 +1828,9 @@ fn draw_graph(
             // Hover handled separately so the outline width is right.
             continue;
         }
+        if !in_focus(i) {
+            continue;
+        }
         node_buckets[c as usize].push(i);
     }
 
@@ -1589,6 +1857,9 @@ fn draw_graph(
     ctx.begin_path();
     for (i, _) in graph.nodes.iter().enumerate() {
         if hover == Some(i) || i >= layout.nodes.len() {
+            continue;
+        }
+        if !in_focus(i) {
             continue;
         }
         let pos = layout.nodes[i];
@@ -1640,6 +1911,9 @@ fn draw_graph(
     ctx.set_text_align("left");
     ctx.set_fill_style_str(&body_color);
     for i in order {
+        if !in_focus(i) && hover != Some(i) {
+            continue;
+        }
         let pos = layout.nodes[i];
         let is_hover = hover == Some(i);
         let name = &graph.nodes[i].name;
@@ -1711,6 +1985,56 @@ fn zoom_around_centre(
         offset_y: cy - (cy - cur.offset_y) * real,
         scale: new_scale,
     });
+}
+
+/// Queue a single rAF redraw. If one is already pending, no-ops — the pending
+/// frame will pick up whatever state is current when it fires.
+fn schedule_redraw(
+    canvas_ref: &NodeRef,
+    layout_ref: &Rc<RefCell<LayoutState>>,
+    payload: &UseStateHandle<Option<TagRelationGraphPayload>>,
+    hover_idx: &UseStateHandle<Option<usize>>,
+    isolated_community: &UseStateHandle<Option<u32>>,
+    view_ref: &Rc<RefCell<ViewTransform>>,
+    raf_id: &Rc<RefCell<Option<i32>>>,
+) {
+    if raf_id.borrow().is_some() {
+        return;
+    }
+    let Some(win) = web_sys::window() else {
+        return;
+    };
+
+    let canvas_ref = canvas_ref.clone();
+    let layout_ref = layout_ref.clone();
+    let payload = payload.clone();
+    let hover_idx = hover_idx.clone();
+    let isolated_community = isolated_community.clone();
+    let view_ref = view_ref.clone();
+    let raf_id_inner = raf_id.clone();
+
+    let cb = Closure::<dyn FnMut(f64)>::new(move |_: f64| {
+        *raf_id_inner.borrow_mut() = None;
+        let Some(canvas) = canvas_ref.cast::<HtmlCanvasElement>() else {
+            return;
+        };
+        let Some(graph) = payload.as_ref() else {
+            return;
+        };
+        let layout = layout_ref.borrow();
+        if layout.nodes.is_empty() {
+            return;
+        }
+        let view = *view_ref.borrow();
+        draw_graph(&canvas, &layout, graph, *hover_idx, *isolated_community, view);
+    });
+    let id = win
+        .request_animation_frame(cb.as_ref().unchecked_ref())
+        .ok();
+    *raf_id.borrow_mut() = id;
+    // Closure leaks per scheduled frame (~100 bytes each). Coalescing through
+    // `raf_id` caps this to one leak per frame fired, not per request.
+    cb.forget();
 }
 
 fn parse_hex(s: &str) -> Option<(u8, u8, u8)> {
