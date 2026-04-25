@@ -31,7 +31,7 @@ COPY . .
 RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry \
     --mount=type=cache,id=cargo-git,target=/usr/local/cargo/git \
     --mount=type=cache,id=cargo-target,target=/app/target \
-    cargo build --release --frozen --bin e621-account-parser-api \
+    cargo build --release --bin e621-account-parser-api \
     && cp /app/target/release/e621-account-parser-api /app/e621-account-parser-api \
     && strip /app/e621-account-parser-api
 
