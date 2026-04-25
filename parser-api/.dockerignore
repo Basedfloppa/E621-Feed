@@ -1,0 +1,28 @@
+# Cargo build artifacts
+target/
+
+# Local SQLite database. Mounted at runtime via docker-compose.
+database.db
+database.db-journal
+database.db-wal
+database.db-shm
+
+# Editor / IDE
+.idea/
+.vscode/
+*.swp
+*~
+
+# VCS
+.git/
+.gitignore
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local Docker config
+docker-compose.override.yml
+
+# Logs
+*.log

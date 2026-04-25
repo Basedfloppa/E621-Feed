@@ -24,15 +24,16 @@ RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry \
     --mount=type=cache,id=cargo-target,target=/app/target \
     cargo chef cook --release --recipe-path recipe.json
 
-FROM chef-base AS builder
+FROM cacher AS builder
 
 COPY . .
 
 RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry \
     --mount=type=cache,id=cargo-git,target=/usr/local/cargo/git \
     --mount=type=cache,id=cargo-target,target=/app/target \
-    cargo build --release --locked --bin e621-account-parser-api \
-    && strip /app/target/release/e621-account-parser-api
+    cargo build --release --frozen --bin e621-account-parser-api \
+    && cp /app/target/release/e621-account-parser-api /app/e621-account-parser-api \
+    && strip /app/e621-account-parser-api
 
 FROM debian:bookworm-slim AS runtime
 
@@ -45,7 +46,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && groupadd --system app \
     && useradd --system --gid app --create-home --home-dir /app app
 
-COPY --from=builder /app/target/release/e621-account-parser-api /usr/local/bin/e621-account-parser-api
+COPY --from=builder /app/e621-account-parser-api /usr/local/bin/e621-account-parser-api
 COPY --from=builder /app/migrations ./migrations
 
 ENV RUST_BACKTRACE=1
