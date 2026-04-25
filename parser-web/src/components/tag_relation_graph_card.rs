@@ -6,7 +6,7 @@ use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::Closure;
 use web_sys::{
     CanvasRenderingContext2d, HtmlCanvasElement, MouseEvent as WebMouseEvent, MutationObserver,
-    MutationObserverInit, js_sys,
+    MutationObserverInit, WheelEvent as WebWheelEvent, js_sys,
 };
 use yew::prelude::*;
 
@@ -39,6 +39,36 @@ struct LayoutState {
     height: f64,
 }
 
+#[derive(Clone, Copy, PartialEq)]
+struct ViewTransform {
+    offset_x: f64,
+    offset_y: f64,
+    scale: f64,
+}
+
+impl Default for ViewTransform {
+    fn default() -> Self {
+        Self {
+            offset_x: 0.0,
+            offset_y: 0.0,
+            scale: 1.0,
+        }
+    }
+}
+
+impl ViewTransform {
+    fn to_logical(&self, cx: f64, cy: f64) -> (f64, f64) {
+        (
+            (cx - self.offset_x) / self.scale,
+            (cy - self.offset_y) / self.scale,
+        )
+    }
+}
+
+const ZOOM_MIN: f64 = 0.4;
+const ZOOM_MAX: f64 = 6.0;
+const ZOOM_STEP: f64 = 1.2;
+
 #[function_component(TagRelationGraphCard)]
 pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
     let payload: UseStateHandle<Option<TagRelationGraphPayload>> = use_state(|| None);
@@ -53,6 +83,10 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
 
     let canvas_ref = use_node_ref();
     let layout_ref: Rc<RefCell<LayoutState>> = use_mut_ref(LayoutState::default);
+    let view: UseStateHandle<ViewTransform> = use_state(ViewTransform::default);
+    // Drag state lives in a ref because mousemove fires often and we don't
+    // want to trigger a re-render on every pixel of motion.
+    let drag_ref: Rc<RefCell<Option<(f64, f64, f64, f64)>>> = use_mut_ref(|| None);
 
     {
         let payload = payload.clone();
@@ -180,6 +214,8 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
         let layout_ref = layout_ref.clone();
         let hover_idx_render = hover_idx.clone();
         let edges_per_tag_val = *edges_per_tag;
+        let view_render = *view;
+        let view_handle = view.clone();
         use_effect_with(
             (
                 payload.clone(),
@@ -187,8 +223,9 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
                 *resize_trigger,
                 *hover_idx_render,
                 edges_per_tag_val,
+                view_render,
             ),
-            move |(payload, _, _, hover_idx_val, k_val)| {
+            move |(payload, _, _, hover_idx_val, k_val, view_render)| {
                 let Some(canvas) = canvas_ref.cast::<HtmlCanvasElement>() else {
                     return;
                 };
@@ -214,8 +251,13 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
                         );
                         run_simulation(&mut layout, simulation_iterations(graph.nodes.len()));
                         fit_to_viewport(&mut layout, 0.06);
+                        // New layout invalidates any pan/zoom the user had on
+                        // the previous shape — reset to identity.
+                        if *view_render != ViewTransform::default() {
+                            view_handle.set(ViewTransform::default());
+                        }
                     }
-                    draw_graph(&canvas, &layout, graph, *hover_idx_val);
+                    draw_graph(&canvas, &layout, graph, *hover_idx_val, *view_render);
                 } else {
                     let logical_width = canvas.client_width().max(0) as f64;
                     let logical_height = 360.0;
@@ -231,6 +273,8 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
         let canvas_ref = canvas_ref.clone();
         let layout_ref = layout_ref.clone();
         let hover_idx = hover_idx.clone();
+        let view = view.clone();
+        let drag_ref = drag_ref.clone();
         Callback::from(move |evt: WebMouseEvent| {
             let Some(canvas) = canvas_ref.cast::<HtmlCanvasElement>() else {
                 return;
@@ -239,12 +283,36 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
             let rect = element.get_bounding_client_rect();
             let x = evt.client_x() as f64 - rect.left();
             let y = evt.client_y() as f64 - rect.top();
+
+            // Drag → pan the viewport.
+            if let Some((start_cx, start_cy, start_off_x, start_off_y)) =
+                *drag_ref.borrow()
+            {
+                let new_off_x = start_off_x + (x - start_cx);
+                let new_off_y = start_off_y + (y - start_cy);
+                let cur = *view;
+                if (cur.offset_x - new_off_x).abs() > 0.5
+                    || (cur.offset_y - new_off_y).abs() > 0.5
+                {
+                    view.set(ViewTransform {
+                        offset_x: new_off_x,
+                        offset_y: new_off_y,
+                        scale: cur.scale,
+                    });
+                }
+                return;
+            }
+
+            // Hover hit-test in transformed (logical) space.
+            let (lx, ly) = view.to_logical(x, y);
             let layout = layout_ref.borrow();
             let mut found: Option<usize> = None;
+            // Account for the visual-only zoom: pick radius is in logical px.
+            let pick_pad = (3.0 / view.scale.max(0.1)).clamp(1.0, 12.0);
             for (i, n) in layout.nodes.iter().enumerate() {
-                let dx = x - n.x;
-                let dy = y - n.y;
-                if (dx * dx + dy * dy).sqrt() <= n.radius + 2.0 {
+                let dx = lx - n.x;
+                let dy = ly - n.y;
+                if (dx * dx + dy * dy).sqrt() <= n.radius + pick_pad {
                     found = Some(i);
                     break;
                 }
@@ -257,10 +325,101 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
 
     let on_mouse_leave = {
         let hover_idx = hover_idx.clone();
+        let drag_ref = drag_ref.clone();
         Callback::from(move |_: WebMouseEvent| {
             if hover_idx.is_some() {
                 hover_idx.set(None);
             }
+            *drag_ref.borrow_mut() = None;
+        })
+    };
+
+    let on_mouse_down = {
+        let canvas_ref = canvas_ref.clone();
+        let drag_ref = drag_ref.clone();
+        let view = view.clone();
+        Callback::from(move |evt: WebMouseEvent| {
+            // Left button only.
+            if evt.button() != 0 {
+                return;
+            }
+            let Some(canvas) = canvas_ref.cast::<HtmlCanvasElement>() else {
+                return;
+            };
+            let element: &web_sys::Element = canvas.as_ref();
+            let rect = element.get_bounding_client_rect();
+            let x = evt.client_x() as f64 - rect.left();
+            let y = evt.client_y() as f64 - rect.top();
+            let cur = *view;
+            *drag_ref.borrow_mut() = Some((x, y, cur.offset_x, cur.offset_y));
+        })
+    };
+
+    let on_mouse_up = {
+        let drag_ref = drag_ref.clone();
+        Callback::from(move |_: WebMouseEvent| {
+            *drag_ref.borrow_mut() = None;
+        })
+    };
+
+    let on_wheel = {
+        let canvas_ref = canvas_ref.clone();
+        let view = view.clone();
+        Callback::from(move |evt: WebWheelEvent| {
+            evt.prevent_default();
+            let Some(canvas) = canvas_ref.cast::<HtmlCanvasElement>() else {
+                return;
+            };
+            let element: &web_sys::Element = canvas.as_ref();
+            let rect = element.get_bounding_client_rect();
+            let x = evt.client_x() as f64 - rect.left();
+            let y = evt.client_y() as f64 - rect.top();
+            let cur = *view;
+            // Wheel down (positive deltaY) = zoom out; up = zoom in.
+            let direction = if evt.delta_y() < 0.0 { ZOOM_STEP } else { 1.0 / ZOOM_STEP };
+            let new_scale = (cur.scale * direction).clamp(ZOOM_MIN, ZOOM_MAX);
+            if (new_scale - cur.scale).abs() < 1e-6 {
+                return;
+            }
+            let real = new_scale / cur.scale;
+            // Anchor zoom at cursor: keep the pixel under the mouse stationary.
+            let new_off_x = x - (x - cur.offset_x) * real;
+            let new_off_y = y - (y - cur.offset_y) * real;
+            view.set(ViewTransform {
+                offset_x: new_off_x,
+                offset_y: new_off_y,
+                scale: new_scale,
+            });
+        })
+    };
+
+    let on_dblclick = {
+        let view = view.clone();
+        Callback::from(move |_: WebMouseEvent| {
+            view.set(ViewTransform::default());
+        })
+    };
+
+    let on_zoom_in = {
+        let canvas_ref = canvas_ref.clone();
+        let view = view.clone();
+        Callback::from(move |_: WebMouseEvent| {
+            zoom_around_centre(&canvas_ref, &view, ZOOM_STEP);
+        })
+    };
+
+    let on_zoom_out = {
+        let canvas_ref = canvas_ref.clone();
+        let view = view.clone();
+        Callback::from(move |_: WebMouseEvent| {
+            zoom_around_centre(&canvas_ref, &view, 1.0 / ZOOM_STEP);
+        })
+    };
+
+    let on_zoom_reset = {
+        let view = view.clone();
+        Callback::from(move |_: WebMouseEvent| {
+            view.set(ViewTransform::default());
         })
     };
 
@@ -357,21 +516,35 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
                             onchange={on_edges_per_tag_change}
                         />
                     </div>
+                    <div class="col-auto ms-auto">
+                        <div class="btn-group btn-group-sm" role="group" aria-label="Zoom controls">
+                            <button type="button" class="btn btn-outline-secondary" title="Zoom out" onclick={on_zoom_out}>{"−"}</button>
+                            <button type="button" class="btn btn-outline-secondary" title="Reset view (or double-click the graph)" onclick={on_zoom_reset}>{ format!("{:.0}%", view.scale * 100.0) }</button>
+                            <button type="button" class="btn btn-outline-secondary" title="Zoom in" onclick={on_zoom_in}>{"+"}</button>
+                        </div>
+                    </div>
                     if *loading {
                         <div class="col-auto">
                             <span class="spinner-border spinner-border-sm text-primary" role="status"/>
                         </div>
                     }
                 </div>
-                <div class="position-relative">
+                <div class="position-relative" style="user-select: none;">
                     <canvas
                         ref={canvas_ref.clone()}
-                        style="display: block; width: 100%; touch-action: none;"
+                        style={format!(
+                            "display: block; width: 100%; touch-action: none; cursor: {};",
+                            if drag_ref.borrow().is_some() { "grabbing" } else { "grab" }
+                        )}
                         onmousemove={on_mouse_move}
                         onmouseleave={on_mouse_leave}
+                        onmousedown={on_mouse_down}
+                        onmouseup={on_mouse_up}
+                        onwheel={on_wheel}
+                        ondblclick={on_dblclick}
                     />
                     if let Some((_, node)) = hover_summary.clone() {
-                        <div class="position-absolute top-0 end-0 m-2 px-2 py-1 small rounded shadow-sm bg-body border">
+                        <div class="position-absolute top-0 end-0 m-2 px-2 py-1 small rounded shadow-sm bg-body border" style="pointer-events: none;">
                             <strong>{ node.name.clone() }</strong>
                             { format!(" · {} · {}×", node.group_type, node.count) }
                         </div>
@@ -726,6 +899,7 @@ fn draw_graph(
     layout: &LayoutState,
     graph: &TagRelationGraphPayload,
     hover: Option<usize>,
+    view: ViewTransform,
 ) {
     let width = layout.width;
     let height = layout.height;
@@ -739,6 +913,12 @@ fn draw_graph(
         },
         None => return,
     };
+
+    // The DPR scaling done in `clear_canvas` is already applied. Stack the
+    // user pan/zoom on top so all coordinates below are still in logical
+    // canvas space; the transform takes care of where they land.
+    let _ = ctx.translate(view.offset_x, view.offset_y);
+    let _ = ctx.scale(view.scale, view.scale);
 
     let el: &web_sys::Element = canvas.as_ref();
     let body_color = css_var(el, "--bs-body-color").unwrap_or_else(|| "#212529".into());
@@ -867,6 +1047,29 @@ fn with_alpha(color: &str, alpha: f32) -> String {
         return format!("rgba({rest},{:.3})", alpha.clamp(0.0, 1.0));
     }
     trimmed.to_string()
+}
+
+fn zoom_around_centre(
+    canvas_ref: &NodeRef,
+    view: &UseStateHandle<ViewTransform>,
+    factor: f64,
+) {
+    let Some(canvas) = canvas_ref.cast::<HtmlCanvasElement>() else {
+        return;
+    };
+    let cx = (canvas.client_width().max(0) as f64) * 0.5;
+    let cy = (canvas.client_height().max(0) as f64) * 0.5;
+    let cur: ViewTransform = **view;
+    let new_scale = (cur.scale * factor).clamp(ZOOM_MIN, ZOOM_MAX);
+    if (new_scale - cur.scale).abs() < 1e-6 {
+        return;
+    }
+    let real = new_scale / cur.scale;
+    view.set(ViewTransform {
+        offset_x: cx - (cx - cur.offset_x) * real,
+        offset_y: cy - (cy - cur.offset_y) * real,
+        scale: new_scale,
+    });
 }
 
 fn parse_hex(s: &str) -> Option<(u8, u8, u8)> {
