@@ -99,15 +99,18 @@ diversity_w_general = 0.08
 # Optional (defaults shown)
 discrete_smoothing_alpha = 1.0
 strong_negative_count = 3
-strong_negative_ratio = 2.0
 strong_negative_penalty = 0.40
+strong_negative_wilson_threshold = 0.55
 recency_personal_floor_frac = 1.0
+recency_log_personal = true
 
 tag_relation_w_global = 0.4
 tag_relation_w_personal = 0.6
 tag_relation_pmi_scale = 5.0
 tag_relation_min_cooc = 2
 tag_relation_user_smooth = 1.0
+tag_relation_cooc_ref = 20.0
+tag_relation_user_cooc_ref = 5.0
 ```
 
 Small guide on scoring vars
@@ -144,14 +147,17 @@ Small guide on scoring vars
 |`quality_log_bias`|more posts register as "quality"|raises the bar before the absolute-quality sigmoid lights up|
 |`discrete_smoothing_alpha`|rating/media prefs react sharply to small samples|cold-start profiles stay near neutral longer|
 |`strong_negative_count`|one or two dislikes can veto a post|requires a pattern of dislikes before vetoing|
-|`strong_negative_ratio`|dislikes trigger veto even if you sometimes opened the tag|negatives must clearly outweigh positives to veto|
+|`strong_negative_wilson_threshold`|veto fires more easily (loose statistical bar)|veto only when the negative rate is confidently above this fraction (95% lower bound). 0.5 ≈ "more likely negative than not"; 0.6 ≈ "confidently negative"|
 |`strong_negative_penalty`|vetoed posts barely affected|vetoed posts pushed far down the feed (1.0 = zeroed)|
 |`recency_personal_floor_frac`|personal recency window can collapse tight|personal recency always at least this fraction of `recency_tau_days`|
+|`recency_log_personal`|`false`: personal recency uses linear age — 30→60d gap matters as much as 300→600d|`true` (default): personal recency uses log-age — scale-free, treats those gaps equivalently|
 |`tag_relation_w_global`|ignore whole-catalog tag pairing|global PMI-style lift dominates the tag-relation component|
-|`tag_relation_w_personal`|ignore user-specific tag pairings|pair co-occurrence inside the user's own favourites dominates the tag-relation component|
+|`tag_relation_w_personal`|ignore user-specific tag pairings|pair co-occurrence inside the user's own favourites dominates the tag-relation component (auto-shrunk on small profiles)|
 |`tag_relation_pmi_scale`|low-lift pairs already saturate the global signal|only strongly-associated pairs contribute meaningfully|
 |`tag_relation_min_cooc`|thin pairs contribute global signal|require more joint occurrences before a pair is trusted|
 |`tag_relation_user_smooth`|rare user pairs can max out the personal signal|small user samples stay conservative until more evidence accrues|
+|`tag_relation_cooc_ref`|even rare global pairs trusted at full weight|global pairs need more cooc before earning full PMI weight (rare pairs get linearly shrunk toward zero)|
+|`tag_relation_user_cooc_ref`|rare user pairs trusted at full weight|user pairs need more co-occurrences before earning full personal-PMI weight|
 
 http://localhost:8080
 
