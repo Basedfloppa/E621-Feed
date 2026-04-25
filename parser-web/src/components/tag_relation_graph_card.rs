@@ -362,36 +362,73 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
         })
     };
 
-    let on_wheel = {
-        let canvas_ref = canvas_ref.clone();
+    // Wheel listener has to be attached non-passively or `preventDefault()`
+    // is silently ignored and the page scrolls under the cursor. Yew's
+    // `onwheel` registers as passive in modern browsers, hence the manual
+    // `addEventListener` below. Dep on `canvas_present` so we re-bind
+    // whenever the canvas first mounts (i.e. once data arrives).
+    {
+        let canvas_ref_for_effect = canvas_ref.clone();
         let view = view.clone();
-        Callback::from(move |evt: WebWheelEvent| {
-            evt.prevent_default();
-            let Some(canvas) = canvas_ref.cast::<HtmlCanvasElement>() else {
-                return;
-            };
-            let element: &web_sys::Element = canvas.as_ref();
-            let rect = element.get_bounding_client_rect();
-            let x = evt.client_x() as f64 - rect.left();
-            let y = evt.client_y() as f64 - rect.top();
-            let cur = *view;
-            // Wheel down (positive deltaY) = zoom out; up = zoom in.
-            let direction = if evt.delta_y() < 0.0 { ZOOM_STEP } else { 1.0 / ZOOM_STEP };
-            let new_scale = (cur.scale * direction).clamp(ZOOM_MIN, ZOOM_MAX);
-            if (new_scale - cur.scale).abs() < 1e-6 {
-                return;
+        let canvas_present = payload.is_some() || *loading;
+        use_effect_with(canvas_present, move |_present| {
+            let canvas_ref = canvas_ref_for_effect;
+            let mut handle: Option<(HtmlCanvasElement, Closure<dyn FnMut(WebWheelEvent)>)> =
+                None;
+
+            if let Some(canvas) = canvas_ref.cast::<HtmlCanvasElement>() {
+                let canvas_for_cb = canvas.clone();
+                let view_for_cb = view.clone();
+                let cb = Closure::<dyn FnMut(WebWheelEvent)>::new(
+                    move |evt: WebWheelEvent| {
+                        evt.prevent_default();
+                        let element: &web_sys::Element = canvas_for_cb.as_ref();
+                        let rect = element.get_bounding_client_rect();
+                        let x = evt.client_x() as f64 - rect.left();
+                        let y = evt.client_y() as f64 - rect.top();
+                        let cur = *view_for_cb;
+                        let direction = if evt.delta_y() < 0.0 {
+                            ZOOM_STEP
+                        } else {
+                            1.0 / ZOOM_STEP
+                        };
+                        let new_scale =
+                            (cur.scale * direction).clamp(ZOOM_MIN, ZOOM_MAX);
+                        if (new_scale - cur.scale).abs() < 1e-6 {
+                            return;
+                        }
+                        let real = new_scale / cur.scale;
+                        view_for_cb.set(ViewTransform {
+                            offset_x: x - (x - cur.offset_x) * real,
+                            offset_y: y - (y - cur.offset_y) * real,
+                            scale: new_scale,
+                        });
+                    },
+                );
+
+                let opts = web_sys::AddEventListenerOptions::new();
+                opts.set_passive(false);
+                let _ = canvas
+                    .add_event_listener_with_callback_and_add_event_listener_options(
+                        "wheel",
+                        cb.as_ref().unchecked_ref(),
+                        &opts,
+                    );
+
+                handle = Some((canvas, cb));
             }
-            let real = new_scale / cur.scale;
-            // Anchor zoom at cursor: keep the pixel under the mouse stationary.
-            let new_off_x = x - (x - cur.offset_x) * real;
-            let new_off_y = y - (y - cur.offset_y) * real;
-            view.set(ViewTransform {
-                offset_x: new_off_x,
-                offset_y: new_off_y,
-                scale: new_scale,
-            });
-        })
-    };
+
+            move || {
+                if let Some((canvas, cb)) = handle {
+                    let _ = canvas.remove_event_listener_with_callback(
+                        "wheel",
+                        cb.as_ref().unchecked_ref(),
+                    );
+                    drop(cb);
+                }
+            }
+        });
+    }
 
     let on_dblclick = {
         let view = view.clone();
@@ -540,7 +577,6 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
                         onmouseleave={on_mouse_leave}
                         onmousedown={on_mouse_down}
                         onmouseup={on_mouse_up}
-                        onwheel={on_wheel}
                         ondblclick={on_dblclick}
                     />
                     if let Some((_, node)) = hover_summary.clone() {
