@@ -1,15 +1,12 @@
 use reqwasm::http::Request;
 use std::rc::Rc;
 use wasm_bindgen::JsCast;
-use wasm_bindgen::JsValue;
 use wasm_bindgen::closure::Closure;
 use wasm_bindgen_futures::spawn_local;
-use web_sys::{
-    Element, IntersectionObserver, IntersectionObserverEntry, IntersectionObserverInit,
-    ResizeObserver, ResizeObserverEntry, window,
-};
+use web_sys::{Element, ResizeObserver, ResizeObserverEntry, window};
 use yew::prelude::*;
 
+use crate::components::shared_observer;
 use crate::models::*;
 
 #[derive(Properties, PartialEq)]
@@ -164,98 +161,74 @@ pub fn post_card(props: &PostCardProps) -> Html {
         let impression_logged = impression_logged.clone();
 
         use_effect_with(post.id, move |_| {
-            let mut observer: Option<IntersectionObserver> = None;
-            let mut observer_callback: Option<
-                Closure<dyn FnMut(web_sys::js_sys::Array, IntersectionObserver)>,
-            > = None;
+            let mut registration: Option<(Element, u64)> = None;
 
             if !*impression_logged {
                 if let Some(el) = root_ref.cast::<Element>() {
                     let is_visible = std::rc::Rc::new(std::cell::Cell::new(false));
                     let is_scheduled = std::rc::Rc::new(std::cell::Cell::new(false));
 
-                    let callback = {
+                    let on_entry: shared_observer::CardCallback = {
                         let is_visible = is_visible.clone();
                         let is_scheduled = is_scheduled.clone();
                         let impression_logged = impression_logged.clone();
                         let backend_url = backend_url.clone();
                         let session_id = session_id.clone();
 
-                        Closure::wrap(Box::new(
-                            move |entries: web_sys::js_sys::Array, _obs: IntersectionObserver| {
-                                let Some(entry) = entries
-                                    .get(0)
-                                    .dyn_ref::<IntersectionObserverEntry>()
-                                    .cloned()
-                                else {
-                                    return;
-                                };
+                        Box::new(move |entry| {
+                            if entry.intersection_ratio() >= 0.5 {
+                                is_visible.set(true);
+                                if !is_scheduled.get() && !*impression_logged {
+                                    is_scheduled.set(true);
 
-                                if entry.intersection_ratio() >= 0.5 {
-                                    is_visible.set(true);
-                                    if !is_scheduled.get() && !*impression_logged {
-                                        is_scheduled.set(true);
+                                    let is_visible_timeout = is_visible.clone();
+                                    let is_scheduled_timeout = is_scheduled.clone();
+                                    let impression_logged = impression_logged.clone();
+                                    let backend_url = backend_url.clone();
+                                    let session_id = session_id.clone();
 
-                                        let is_visible_timeout = is_visible.clone();
-                                        let is_scheduled_timeout = is_scheduled.clone();
-                                        let impression_logged = impression_logged.clone();
-                                        let backend_url = backend_url.clone();
-                                        let session_id = session_id.clone();
+                                    let timeout_cb = Closure::once_into_js(move || {
+                                        is_scheduled_timeout.set(false);
+                                        if is_visible_timeout.get() && !*impression_logged {
+                                            impression_logged.set(true);
+                                            send_interaction(
+                                                backend_url,
+                                                FeedInteractionRequest {
+                                                    owner_token: get_or_create_owner_token()
+                                                        .unwrap_or_default(),
+                                                    account_id,
+                                                    post_id,
+                                                    event_type:
+                                                        FeedInteractionType::QualifiedImpression,
+                                                    position,
+                                                    session_id,
+                                                },
+                                            );
+                                        }
+                                    });
 
-                                        let timeout_cb = Closure::once_into_js(move || {
-                                            is_scheduled_timeout.set(false);
-                                            if is_visible_timeout.get() && !*impression_logged {
-                                                impression_logged.set(true);
-                                                send_interaction(
-                                                    backend_url,
-                                                    FeedInteractionRequest {
-                                                        owner_token: get_or_create_owner_token()
-                                                            .unwrap_or_default(),
-                                                        account_id,
-                                                        post_id,
-                                                        event_type:
-                                                            FeedInteractionType::QualifiedImpression,
-                                                        position,
-                                                        session_id,
-                                                    },
-                                                );
-                                            }
-                                        });
-
-                                        if let Some(win) = window() {
-                                            let _ = win.set_timeout_with_callback_and_timeout_and_arguments_0(
+                                    if let Some(win) = window() {
+                                        let _ = win.set_timeout_with_callback_and_timeout_and_arguments_0(
                                             timeout_cb.as_ref().unchecked_ref(),
                                             800,
                                         );
-                                        }
                                     }
-                                } else {
-                                    is_visible.set(false);
                                 }
-                            },
-                        )
-                            as Box<dyn FnMut(web_sys::js_sys::Array, IntersectionObserver)>)
+                            } else {
+                                is_visible.set(false);
+                            }
+                        })
                     };
 
-                    let options = IntersectionObserverInit::new();
-                    options.set_threshold(&JsValue::from_f64(0.5));
-                    let created = IntersectionObserver::new_with_options(
-                        callback.as_ref().unchecked_ref(),
-                        &options,
-                    )
-                    .expect("create IntersectionObserver");
-                    created.observe(&el);
-
-                    observer = Some(created);
-                    observer_callback = Some(callback);
+                    let id = shared_observer::observe(&el, on_entry);
+                    registration = Some((el, id));
                 }
             }
 
             move || {
-                if let Some(observer) = observer {
-                    observer.disconnect();
+                if let Some((el, id)) = registration {
+                    shared_observer::unobserve(&el, id);
                 }
-                drop(observer_callback);
             }
         });
     }
@@ -553,58 +526,52 @@ fn is_supported_image(url: &str) -> bool {
 }
 
 fn fallback_image_url(post: &Post) -> String {
-    if post.preview.clone().unwrap().url.is_some()
-        && is_supported_image(&post.preview.clone().unwrap().url.unwrap())
-    {
-        post.preview.clone().unwrap().url.unwrap()
-    } else if post.sample.clone().unwrap().url.is_some()
-        && is_supported_image(&post.sample.clone().unwrap().url.unwrap())
-    {
-        post.sample.clone().unwrap().url.unwrap()
-    } else if post.file.clone().unwrap().url.is_some()
-        && is_supported_image(&post.file.clone().unwrap().url.unwrap())
-    {
-        post.file.clone().unwrap().url.unwrap()
-    } else {
-        "".to_string()
+    if let Some(url) = post.preview.as_ref().and_then(|p| p.url.as_deref()) {
+        if is_supported_image(url) {
+            return url.to_owned();
+        }
     }
+    if let Some(url) = post.sample.as_ref().and_then(|s| s.url.as_deref()) {
+        if is_supported_image(url) {
+            return url.to_owned();
+        }
+    }
+    if let Some(url) = post.file.as_ref().and_then(|f| f.url.as_deref()) {
+        if is_supported_image(url) {
+            return url.to_owned();
+        }
+    }
+    String::new()
 }
 
 fn preferred_image_url(post: &Post, required_width: i64) -> Option<AttrValue> {
     let mut candidates: Vec<(AttrValue, i64)> = Vec::new();
 
-    if post.preview.clone()?.url.is_some()
-        && is_supported_image(&post.preview.clone().unwrap().url.unwrap())
-    {
-        candidates.push((
-            AttrValue::from(post.preview.clone()?.url?.clone()),
-            post.preview.clone()?.width,
-        ));
+    if let Some(p) = post.preview.as_ref() {
+        if let Some(url) = p.url.as_deref() {
+            if is_supported_image(url) {
+                candidates.push((AttrValue::from(url.to_owned()), p.width));
+            }
+        }
     }
-    if post.sample.clone()?.url.is_some()
-        && is_supported_image(&post.sample.clone().unwrap().url.unwrap())
-    {
-        candidates.push((
-            AttrValue::from(post.sample.clone()?.url?.clone()),
-            post.sample.clone()?.width?,
-        ));
+    if let Some(s) = post.sample.as_ref() {
+        if let (Some(url), Some(w)) = (s.url.as_deref(), s.width) {
+            if is_supported_image(url) {
+                candidates.push((AttrValue::from(url.to_owned()), w));
+            }
+        }
     }
-    if post.file.clone()?.url.is_some()
-        && is_supported_image(&post.file.clone().unwrap().url.unwrap())
-    {
-        candidates.push((
-            AttrValue::from(post.file.clone()?.url?.clone()),
-            post.file.clone()?.width,
-        ));
+    if let Some(f) = post.file.as_ref() {
+        if let Some(url) = f.url.as_deref() {
+            if is_supported_image(url) {
+                candidates.push((AttrValue::from(url.to_owned()), f.width));
+            }
+        }
     }
 
     candidates.sort_by_key(|&(_, w)| w);
-    if let Some((u, _)) = candidates
-        .iter()
-        .find(|&&(_, w)| w >= required_width)
-        .cloned()
-    {
-        return Some(u);
+    if let Some((u, _)) = candidates.iter().find(|&&(_, w)| w >= required_width) {
+        return Some(u.clone());
     }
     candidates.last().map(|(u, _)| u.clone())
 }

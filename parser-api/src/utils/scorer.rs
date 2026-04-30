@@ -1,5 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 
 use crate::models::{AccountPreferenceProfile, Post, ScoreBreakdown, ScoredPost, TagCount};
@@ -159,12 +160,12 @@ fn sigmoid(x: f32) -> f32 {
 }
 
 #[inline]
-fn normalize_tag(t: &str) -> String {
+fn normalize_tag(t: &str) -> Cow<'_, str> {
     let trimmed = t.trim();
     if trimmed.bytes().any(|b| b.is_ascii_uppercase()) {
-        trimmed.to_ascii_lowercase()
+        Cow::Owned(trimmed.to_ascii_lowercase())
     } else {
-        trimmed.to_owned()
+        Cow::Borrowed(trimmed)
     }
 }
 
@@ -297,7 +298,7 @@ pub struct ScoringContext<'a> {
     group_wts: [f32; GROUP_COUNT],
     user: [HashMap<String, f32>; GROUP_COUNT],
     u_norm: f32,
-    feedback: HashMap<(u8, String), CompactFeedback>,
+    feedback: [HashMap<String, CompactFeedback>; GROUP_COUNT],
     rating_total: i64,
     media_total: i64,
     /// 0 = no personal data → fall back to global signals.
@@ -352,7 +353,9 @@ impl<'a> ScoringContext<'a> {
             let saturated = (tf * (BM25_K + 1.0)) / (tf + BM25_K);
             let w = saturated.powf(priors.freq_alpha) * g * idf_w;
             if w > 0.0 {
-                *user[group as usize].entry(tlc).or_insert(0.0) += w;
+                *user[group as usize]
+                    .entry(tlc.into_owned())
+                    .or_insert(0.0) += w;
             }
         }
         for map in &user {
@@ -363,16 +366,15 @@ impl<'a> ScoringContext<'a> {
 
         let mut total_pos = 0.0f32;
         let mut total_neg = 0.0f32;
-        let mut feedback: HashMap<(u8, String), CompactFeedback> =
-            HashMap::with_capacity(profile.feedback.len());
+        let mut feedback: [HashMap<String, CompactFeedback>; GROUP_COUNT] = Default::default();
         for fb in &profile.feedback {
             let Some(group) = Group::from_str(fb.group_type.as_str()) else {
                 continue;
             };
             total_pos += fb.positive_count.max(0) as f32;
             total_neg += fb.negative_count.max(0) as f32;
-            feedback.insert(
-                (group as u8, normalize_tag(&fb.tag_name)),
+            feedback[group as usize].insert(
+                normalize_tag(&fb.tag_name).into_owned(),
                 CompactFeedback {
                     positive: fb.positive_count,
                     negative: fb.negative_count,
@@ -480,7 +482,7 @@ impl<'a> ScoringContext<'a> {
                 let idf_w = self.idf.idf_tempered(&tlc, lambda, alpha);
                 let pw = g * idf_w;
                 p_norm_sq += pw * pw;
-                if let Some(&uw) = user_map.get(&tlc) {
+                if let Some(&uw) = user_map.get(tlc.as_ref()) {
                     dot += uw * pw;
                 }
             }
@@ -594,12 +596,13 @@ impl<'a> ScoringContext<'a> {
             if group_weight <= 0.0 {
                 continue;
             }
+            let group_feedback = &self.feedback[group as usize];
             for tag in tags {
                 if tag.is_empty() {
                     continue;
                 }
-                let key = (group as u8, normalize_tag(tag));
-                if let Some(fb) = self.feedback.get(&key) {
+                let tlc = normalize_tag(tag);
+                if let Some(fb) = group_feedback.get(tlc.as_ref()) {
                     let pos = fb.positive.max(0) as f32;
                     let neg = fb.negative.max(0) as f32;
                     let imp = fb.impressions.max(0) as f32;
@@ -662,8 +665,8 @@ impl<'a> ScoringContext<'a> {
                     continue;
                 }
                 let tlc = normalize_tag(t);
-                let g_id = self.global_relation.tag_id(group as u8, &tlc);
-                let u_id = self.user_relation.tag_id(group as u8, &tlc);
+                let g_id = self.global_relation.tag_id(group as u8, tlc.as_ref());
+                let u_id = self.user_relation.tag_id(group as u8, tlc.as_ref());
                 entries.push((gw, g_id, u_id));
             }
         }
@@ -809,9 +812,24 @@ struct PostFeatures {
 impl PostFeatures {
     fn from_post(p: &Post) -> Self {
         Self {
-            artist: p.tags.artist.iter().map(|t| normalize_tag(t)).collect(),
-            character: p.tags.character.iter().map(|t| normalize_tag(t)).collect(),
-            general: p.tags.general.iter().map(|t| normalize_tag(t)).collect(),
+            artist: p
+                .tags
+                .artist
+                .iter()
+                .map(|t| normalize_tag(t).into_owned())
+                .collect(),
+            character: p
+                .tags
+                .character
+                .iter()
+                .map(|t| normalize_tag(t).into_owned())
+                .collect(),
+            general: p
+                .tags
+                .general
+                .iter()
+                .map(|t| normalize_tag(t).into_owned())
+                .collect(),
         }
     }
 }
@@ -848,10 +866,17 @@ pub fn diversify_scored_posts(mut posts: Vec<ScoredPost>, priors: &Priors) -> Ve
     let mut selected: Vec<ScoredPost> = Vec::with_capacity(posts.len());
     let mut selected_feats: Vec<PostFeatures> = Vec::with_capacity(posts.len());
 
+    // Cache top_score across iterations; only re-scan when the just-picked
+    // item carried the current maximum (otherwise removing it can't change
+    // `max(remaining.score)`). Drops the per-iteration full scan and turns
+    // the loop's overhead into roughly O(N + #ties).
+    let mut top_score = posts
+        .iter()
+        .map(|p| p.score)
+        .fold(f32::MIN, f32::max);
+
     while !posts.is_empty() {
         // MMR: penalty = redundancy * gap-from-top. Perfect score → gap≈0 → minimal penalty.
-        let top_score = posts.iter().fold(f32::MIN, |m, p| m.max(p.score));
-
         let mut best_idx = 0usize;
         let mut best_value = f32::MIN;
         let mut best_id = i64::MAX;
@@ -877,8 +902,15 @@ pub fn diversify_scored_posts(mut posts: Vec<ScoredPost>, priors: &Priors) -> Ve
             }
         }
 
+        let removed_was_top = (posts[best_idx].score - top_score).abs() < 1e-6;
         selected.push(posts.swap_remove(best_idx));
         selected_feats.push(features.swap_remove(best_idx));
+        if removed_was_top && !posts.is_empty() {
+            top_score = posts
+                .iter()
+                .map(|p| p.score)
+                .fold(f32::MIN, f32::max);
+        }
     }
 
     selected

@@ -5,6 +5,7 @@ use std::rc::Rc;
 use reqwasm::http::Request;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::Closure;
+use wasm_bindgen_futures::{JsFuture, spawn_local};
 use web_sys::{
     CanvasRenderingContext2d, HtmlCanvasElement, MouseEvent as WebMouseEvent, MutationObserver,
     MutationObserverInit, WheelEvent as WebWheelEvent, js_sys,
@@ -155,6 +156,11 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
     // Yew re-renders. Yew state catches up on drag-end.
     let view_ref: Rc<RefCell<ViewTransform>> = use_mut_ref(ViewTransform::default);
     let raf_id: Rc<RefCell<Option<i32>>> = use_mut_ref(|| None);
+    // Bumped every time a new simulation starts (or the previous effect
+    // unmounts). The async chunked runner captures the value at spawn and
+    // bails out as soon as it sees a different one — that's how the previous
+    // run gets cancelled when the user changes top_n / picks another account.
+    let sim_gen: Rc<RefCell<u64>> = use_mut_ref(|| 0u64);
     // (start_cursor_x, start_cursor_y, start_offset_x, start_offset_y, total_dist)
     let drag_ref: Rc<RefCell<Option<(f64, f64, f64, f64, f64)>>> = use_mut_ref(|| None);
     // Reflected to Yew state only at drag start/end so the cursor flips, without
@@ -322,6 +328,8 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
         let layout_ref = layout_ref.clone();
         let hover_idx_render = hover_idx.clone();
         let view_ref_for_effect = view_ref.clone();
+        let sim_gen_for_effect = sim_gen.clone();
+        let isolated_community_for_effect = isolated_community.clone();
         let edges_per_tag_val = *edges_per_tag;
         let view_render = *view;
         let iso_render = *isolated_community;
@@ -338,46 +346,186 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
                 iso_render,
             ),
             move |(payload, _, _, hover_idx_val, k_val, view_render, iso_val)| {
-                let Some(canvas) = canvas_ref.cast::<HtmlCanvasElement>() else {
-                    return;
-                };
                 // Mirror Yew view → view_ref so drag-pan (rAF) sees latest scale/offset.
                 *view_ref_for_effect.borrow_mut() = *view_render;
                 let view = *view_render;
+                let hover_idx_val = *hover_idx_val;
+                let iso_val = *iso_val;
+                let k_val = *k_val;
 
-                if let Some(graph) = payload.as_ref() {
-                    let logical_width = canvas.client_width().max(0) as f64;
-                    if logical_width <= 0.0 {
-                        return;
+                let cleanup_sim_gen = sim_gen_for_effect.clone();
+                // Closure for the no-canvas / no-graph paths.
+                let clear_or_skip = || -> Option<()> {
+                    let canvas = canvas_ref.cast::<HtmlCanvasElement>()?;
+                    if payload.is_none() {
+                        let logical_width = canvas.client_width().max(0) as f64;
+                        if logical_width > 0.0 {
+                            let _ = clear_canvas(&canvas, logical_width, 360.0);
+                        }
                     }
-                    let logical_height = (logical_width * 0.85).clamp(480.0, 900.0);
+                    Some(())
+                };
 
-                    let mut layout = layout_ref.borrow_mut();
-                    let nodes_changed = layout.nodes.len() != graph.nodes.len()
-                        || layout.edges.len() != expected_backbone_len(graph, *k_val);
-                    let size_changed = (layout.width - logical_width).abs() > 0.5
-                        || (layout.height - logical_height).abs() > 0.5;
-                    if nodes_changed {
-                        let backbone = select_backbone(graph, *k_val);
-                        *layout = initial_layout(
-                            &graph.nodes,
-                            logical_width,
-                            logical_height,
-                            backbone,
+                let canvas = match canvas_ref.cast::<HtmlCanvasElement>() {
+                    Some(c) => c,
+                    None => {
+                        return Box::new(move || {
+                            *cleanup_sim_gen.borrow_mut() =
+                                cleanup_sim_gen.borrow().wrapping_add(1);
+                        }) as Box<dyn FnOnce()>;
+                    }
+                };
+
+                let Some(graph_arc) = payload.as_ref().cloned().map(Rc::new) else {
+                    let _ = clear_or_skip();
+                    return Box::new(move || {
+                        *cleanup_sim_gen.borrow_mut() =
+                            cleanup_sim_gen.borrow().wrapping_add(1);
+                    });
+                };
+
+                let logical_width = canvas.client_width().max(0) as f64;
+                if logical_width <= 0.0 {
+                    return Box::new(move || {
+                        *cleanup_sim_gen.borrow_mut() =
+                            cleanup_sim_gen.borrow().wrapping_add(1);
+                    });
+                }
+                let logical_height = (logical_width * 0.85).clamp(480.0, 900.0);
+
+                // Decide whether we need a fresh simulation. The whole layout
+                // borrow is contained in this scope so the async runner can
+                // borrow_mut later without conflict.
+                let (nodes_changed, size_changed) = {
+                    let layout = layout_ref.borrow();
+                    (
+                        layout.nodes.len() != graph_arc.nodes.len()
+                            || layout.edges.len() != expected_backbone_len(&graph_arc, k_val),
+                        (layout.width - logical_width).abs() > 0.5
+                            || (layout.height - logical_height).abs() > 0.5,
+                    )
+                };
+
+                if nodes_changed {
+                    let backbone = select_backbone(&graph_arc, k_val);
+                    let new_layout =
+                        initial_layout(&graph_arc.nodes, logical_width, logical_height, backbone);
+                    *layout_ref.borrow_mut() = new_layout;
+
+                    // Initial draw shows the grid layout immediately so the
+                    // user gets feedback while the simulation chunks run.
+                    {
+                        let layout = layout_ref.borrow();
+                        draw_graph(
+                            &canvas,
+                            &layout,
+                            &graph_arc,
+                            hover_idx_val,
+                            iso_val,
+                            view,
                         );
-                        run_simulation(&mut layout, simulation_iterations(graph.nodes.len()));
-                        fit_to_viewport(&mut layout, 0.06);
-                    } else if size_changed {
+                    }
+
+                    // Bump the generation: any in-flight async runner from a
+                    // previous effect will see the change and bail.
+                    let my_gen = {
+                        let mut g = sim_gen_for_effect.borrow_mut();
+                        *g = g.wrapping_add(1);
+                        *g
+                    };
+
+                    let max_iter = simulation_iterations(graph_arc.nodes.len());
+                    let layout_ref_async = layout_ref.clone();
+                    let canvas_ref_async = canvas_ref.clone();
+                    let hover_idx_async = hover_idx_render.clone();
+                    let isolated_community_async = isolated_community_for_effect.clone();
+                    let view_ref_async = view_ref_for_effect.clone();
+                    let sim_gen_async = sim_gen_for_effect.clone();
+                    let graph_for_async = graph_arc.clone();
+
+                    spawn_local(async move {
+                        const CHUNK: usize = 30;
+
+                        let Some(mut ctx) = SimulationContext::new(
+                            &layout_ref_async.borrow(),
+                            max_iter,
+                        ) else {
+                            return;
+                        };
+
+                        loop {
+                            if *sim_gen_async.borrow() != my_gen {
+                                return;
+                            }
+
+                            let done = {
+                                let mut layout = layout_ref_async.borrow_mut();
+                                ctx.step(&mut layout, CHUNK)
+                            };
+
+                            if *sim_gen_async.borrow() != my_gen {
+                                return;
+                            }
+
+                            // Redraw between chunks for visible settling.
+                            if let Some(canvas) = canvas_ref_async.cast::<HtmlCanvasElement>() {
+                                let layout = layout_ref_async.borrow();
+                                let view = *view_ref_async.borrow();
+                                draw_graph(
+                                    &canvas,
+                                    &layout,
+                                    &graph_for_async,
+                                    *hover_idx_async,
+                                    *isolated_community_async,
+                                    view,
+                                );
+                            }
+
+                            if done {
+                                break;
+                            }
+
+                            next_animation_frame().await;
+                        }
+
+                        if *sim_gen_async.borrow() != my_gen {
+                            return;
+                        }
+
+                        // Final layout fixup + redraw.
+                        {
+                            let mut layout = layout_ref_async.borrow_mut();
+                            ctx.finalize(&mut layout);
+                            fit_to_viewport(&mut layout, 0.06);
+                        }
+                        if let Some(canvas) = canvas_ref_async.cast::<HtmlCanvasElement>() {
+                            let layout = layout_ref_async.borrow();
+                            let view = *view_ref_async.borrow();
+                            draw_graph(
+                                &canvas,
+                                &layout,
+                                &graph_for_async,
+                                *hover_idx_async,
+                                *isolated_community_async,
+                                view,
+                            );
+                        }
+                    });
+                } else {
+                    if size_changed {
+                        let mut layout = layout_ref.borrow_mut();
                         rescale_layout(&mut layout, logical_width, logical_height);
                     }
-                    draw_graph(&canvas, &layout, graph, *hover_idx_val, *iso_val, view);
-                } else {
-                    let logical_width = canvas.client_width().max(0) as f64;
-                    let logical_height = 360.0;
-                    if logical_width > 0.0 {
-                        let _ = clear_canvas(&canvas, logical_width, logical_height);
-                    }
+                    let layout = layout_ref.borrow();
+                    draw_graph(&canvas, &layout, &graph_arc, hover_idx_val, iso_val, view);
                 }
+
+                Box::new(move || {
+                    // Cancel any in-flight chunked simulation so it doesn't
+                    // race the next effect's borrow_mut on layout_ref.
+                    *cleanup_sim_gen.borrow_mut() =
+                        cleanup_sim_gen.borrow().wrapping_add(1);
+                })
             },
         );
     }
@@ -1430,152 +1578,207 @@ impl QuadTree {
     }
 }
 
-/// Fruchterman–Reingold over the backbone with Barnes-Hut repulsion. Stops
-/// early when total node displacement falls below an epsilon (≈ 0.5 px per
-/// node on average), capped by the iteration budget.
-fn run_simulation(layout: &mut LayoutState, max_iterations: usize) {
-    let n = layout.nodes.len();
-    if n < 2 {
-        return;
-    }
+/// Persistent state for the FR simulation. Lives across rAF-yielded chunks so
+/// the loop can resume mid-run without re-initialising temperature, force
+/// buffers, or score normalisation.
+struct SimulationContext {
+    n: usize,
+    k: f64,
+    k_sq: f64,
+    s_min: f64,
+    s_max: f64,
+    span: f64,
+    t: f64,
+    cooling: f64,
+    max_iterations: usize,
+    iter: usize,
+    convergence_eps: f64,
+    forces: Vec<(f64, f64)>,
+    positions: Vec<(f64, f64)>,
+    pad: f64,
+    max_radius: f64,
+}
 
-    let area = layout.width * layout.height;
-    let k = ((area / n as f64).sqrt() * 1.35).max(36.0);
-    let k_sq = k * k;
-
-    // Normalise edge scores into a (0.15..1.0) attraction multiplier so the
-    // strongest pair-specific links pull harder than the weakest.
-    let scores: Vec<f64> = layout.edges.iter().map(|(_, _, _, s)| *s).collect();
-    let s_min = scores.iter().cloned().fold(f64::INFINITY, f64::min);
-    let s_max = scores.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-    let span = (s_max - s_min).max(1e-6);
-
-    let initial_temp = layout.width.max(layout.height) * 0.20;
-    let cooling = 0.992f64;
-    let mut t = initial_temp;
-    // Convergence epsilon: stop when total motion is under ~0.5px per node.
-    let convergence_eps = (n as f64) * 0.5;
-
-    let mut forces: Vec<(f64, f64)> = vec![(0.0, 0.0); n];
-    let mut positions: Vec<(f64, f64)> = layout
-        .nodes
-        .iter()
-        .map(|p| (p.x, p.y))
-        .collect();
-    let pad = 4.0_f64;
-
-    for iter in 0..max_iterations {
-        for f in forces.iter_mut() {
-            *f = (0.0, 0.0);
-        }
-        for (i, p) in layout.nodes.iter().enumerate() {
-            positions[i] = (p.x, p.y);
+impl SimulationContext {
+    fn new(layout: &LayoutState, max_iterations: usize) -> Option<Self> {
+        let n = layout.nodes.len();
+        if n < 2 {
+            return None;
         }
 
-        // Build quadtree over current positions. Pad bounds slightly so
-        // boundary nodes are inside the root cell.
-        let (mut min_x, mut min_y, mut max_x, mut max_y) =
-            (f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY);
-        for &(x, y) in &positions {
-            if x < min_x {
-                min_x = x;
-            }
-            if y < min_y {
-                min_y = y;
-            }
-            if x > max_x {
-                max_x = x;
-            }
-            if y > max_y {
-                max_y = y;
-            }
-        }
-        let size = ((max_x - min_x).max(max_y - min_y)).max(1.0) + 8.0;
-        let mut tree = QuadTree::new(min_x - 4.0, min_y - 4.0, size);
-        for (i, &(x, y)) in positions.iter().enumerate() {
-            tree.insert(i, x, y, &positions);
-        }
+        let area = layout.width * layout.height;
+        let k = ((area / n as f64).sqrt() * 1.35).max(36.0);
+        let k_sq = k * k;
 
-        // Repulsion via Barnes-Hut. Plus a near-field core overlap correction
-        // so nodes can't sit on top of each other regardless of theta. The
-        // overlap query uses the quadtree to visit only nodes inside the
-        // candidate radius — O(log N) per body in the typical case versus the
-        // O(N) all-pairs sweep this used to do.
+        // Normalise edge scores into a (0.15..1.0) attraction multiplier so
+        // the strongest pair-specific links pull harder than the weakest.
+        let scores: Vec<f64> = layout.edges.iter().map(|(_, _, _, s)| *s).collect();
+        let s_min = scores.iter().cloned().fold(f64::INFINITY, f64::min);
+        let s_max = scores.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        let span = (s_max - s_min).max(1e-6);
+
         let max_radius = layout
             .nodes
             .iter()
             .map(|m| m.radius)
             .fold(0.0_f64, f64::max);
-        for i in 0..n {
-            let (px, py) = positions[i];
-            let (mut fx, mut fy) = tree.repulse(px, py, k_sq, BH_THETA, i);
 
-            let r_i = layout.nodes[i].radius;
-            // Anything closer than r_i + r_max + pad could overlap.
-            let query_r = r_i + max_radius + pad;
-            tree.query_neighbours(px, py, query_r, &positions, |j, jx, jy| {
-                if i == j {
-                    return;
-                }
-                let dx = px - jx;
-                let dy = py - jy;
-                let dist_sq = dx * dx + dy * dy;
-                let min_dist = r_i + layout.nodes[j].radius + pad;
-                if dist_sq < min_dist * min_dist {
-                    let dist = dist_sq.sqrt().max(0.5);
-                    let core_boost = (min_dist - dist) * 8.0;
-                    fx += (dx / dist) * core_boost;
-                    fy += (dy / dist) * core_boost;
-                }
-            });
-
-            forces[i].0 += fx;
-            forces[i].1 += fy;
-        }
-
-        // Attraction (backbone edges only).
-        for &(a, b, _, score) in &layout.edges {
-            let w = (0.15 + 0.85 * ((score - s_min) / span)).clamp(0.15, 1.0);
-            let dx = layout.nodes[a].x - layout.nodes[b].x;
-            let dy = layout.nodes[a].y - layout.nodes[b].y;
-            let dist = (dx * dx + dy * dy).sqrt().max(0.5);
-            let force = (dist * dist / k) * w;
-            let fx = (dx / dist) * force;
-            let fy = (dy / dist) * force;
-            forces[a].0 -= fx;
-            forces[a].1 -= fy;
-            forces[b].0 += fx;
-            forces[b].1 += fy;
-        }
-
-        // Integrate, capped by the current temperature, and tally motion.
-        let mut total_motion = 0.0f64;
-        for i in 0..n {
-            let (fx, fy) = forces[i];
-            let mag = (fx * fx + fy * fy).sqrt();
-            if mag <= 1e-6 {
-                continue;
-            }
-            let mv = mag.min(t);
-            layout.nodes[i].x += (fx / mag) * mv;
-            layout.nodes[i].y += (fy / mag) * mv;
-            total_motion += mv;
-        }
-
-        t *= cooling;
-
-        // Convergence: if both motion is small and we've burned enough
-        // iterations to settle, exit early. The min-iter floor avoids
-        // bailing out on the first pass before any forces have been felt.
-        if iter > 60 && total_motion < convergence_eps {
-            break;
-        }
+        Some(Self {
+            n,
+            k,
+            k_sq,
+            s_min,
+            s_max,
+            span,
+            t: layout.width.max(layout.height) * 0.20,
+            cooling: 0.992,
+            max_iterations,
+            iter: 0,
+            // Convergence epsilon: stop when total motion is under ~0.5px per node.
+            convergence_eps: (n as f64) * 0.5,
+            forces: vec![(0.0, 0.0); n],
+            positions: layout.nodes.iter().map(|p| (p.x, p.y)).collect(),
+            pad: 4.0,
+            max_radius,
+        })
     }
 
-    // Cache the edge-score range so `draw_graph` doesn't recompute on every
-    // paint (60+ paints/sec while panning).
-    layout.score_min = if s_min.is_finite() { s_min } else { 0.0 };
-    layout.score_max = if s_max.is_finite() { s_max } else { 1.0 };
+    /// Run up to `n_iters` iterations; return `true` when the simulation is
+    /// finished (max iterations reached or motion below convergence ε).
+    fn step(&mut self, layout: &mut LayoutState, n_iters: usize) -> bool {
+        for _ in 0..n_iters {
+            if self.iter >= self.max_iterations {
+                return true;
+            }
+
+            for f in self.forces.iter_mut() {
+                *f = (0.0, 0.0);
+            }
+            for (i, p) in layout.nodes.iter().enumerate() {
+                self.positions[i] = (p.x, p.y);
+            }
+
+            let (mut min_x, mut min_y, mut max_x, mut max_y) = (
+                f64::INFINITY,
+                f64::INFINITY,
+                f64::NEG_INFINITY,
+                f64::NEG_INFINITY,
+            );
+            for &(x, y) in &self.positions {
+                if x < min_x {
+                    min_x = x;
+                }
+                if y < min_y {
+                    min_y = y;
+                }
+                if x > max_x {
+                    max_x = x;
+                }
+                if y > max_y {
+                    max_y = y;
+                }
+            }
+            let size = ((max_x - min_x).max(max_y - min_y)).max(1.0) + 8.0;
+            let mut tree = QuadTree::new(min_x - 4.0, min_y - 4.0, size);
+            for (i, &(x, y)) in self.positions.iter().enumerate() {
+                tree.insert(i, x, y, &self.positions);
+            }
+
+            // Repulsion via Barnes-Hut, plus a near-field overlap correction.
+            for i in 0..self.n {
+                let (px, py) = self.positions[i];
+                let (mut fx, mut fy) = tree.repulse(px, py, self.k_sq, BH_THETA, i);
+
+                let r_i = layout.nodes[i].radius;
+                let query_r = r_i + self.max_radius + self.pad;
+                let nodes = layout.nodes.as_slice();
+                let pad = self.pad;
+                tree.query_neighbours(px, py, query_r, &self.positions, |j, jx, jy| {
+                    if i == j {
+                        return;
+                    }
+                    let dx = px - jx;
+                    let dy = py - jy;
+                    let dist_sq = dx * dx + dy * dy;
+                    let min_dist = r_i + nodes[j].radius + pad;
+                    if dist_sq < min_dist * min_dist {
+                        let dist = dist_sq.sqrt().max(0.5);
+                        let core_boost = (min_dist - dist) * 8.0;
+                        fx += (dx / dist) * core_boost;
+                        fy += (dy / dist) * core_boost;
+                    }
+                });
+
+                self.forces[i].0 += fx;
+                self.forces[i].1 += fy;
+            }
+
+            // Attraction (backbone edges only).
+            for &(a, b, _, score) in &layout.edges {
+                let w = (0.15 + 0.85 * ((score - self.s_min) / self.span)).clamp(0.15, 1.0);
+                let dx = layout.nodes[a].x - layout.nodes[b].x;
+                let dy = layout.nodes[a].y - layout.nodes[b].y;
+                let dist = (dx * dx + dy * dy).sqrt().max(0.5);
+                let force = (dist * dist / self.k) * w;
+                let fx = (dx / dist) * force;
+                let fy = (dy / dist) * force;
+                self.forces[a].0 -= fx;
+                self.forces[a].1 -= fy;
+                self.forces[b].0 += fx;
+                self.forces[b].1 += fy;
+            }
+
+            // Integrate, capped by the current temperature, and tally motion.
+            let mut total_motion = 0.0f64;
+            for i in 0..self.n {
+                let (fx, fy) = self.forces[i];
+                let mag = (fx * fx + fy * fy).sqrt();
+                if mag <= 1e-6 {
+                    continue;
+                }
+                let mv = mag.min(self.t);
+                layout.nodes[i].x += (fx / mag) * mv;
+                layout.nodes[i].y += (fy / mag) * mv;
+                total_motion += mv;
+            }
+
+            self.t *= self.cooling;
+            let prev_iter = self.iter;
+            self.iter += 1;
+
+            // Convergence: motion small and enough iterations to settle.
+            if prev_iter > 60 && total_motion < self.convergence_eps {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn finalize(&self, layout: &mut LayoutState) {
+        // Cache the edge-score range so `draw_graph` doesn't recompute on every
+        // paint (60+ paints/sec while panning).
+        layout.score_min = if self.s_min.is_finite() {
+            self.s_min
+        } else {
+            0.0
+        };
+        layout.score_max = if self.s_max.is_finite() {
+            self.s_max
+        } else {
+            1.0
+        };
+    }
+}
+
+/// Yields back to the browser for one paint frame. Used to chunk the FR
+/// simulation so the main thread isn't blocked for the entire run.
+async fn next_animation_frame() {
+    let promise = js_sys::Promise::new(&mut |resolve, _reject| {
+        if let Some(win) = web_sys::window() {
+            let _ = win.request_animation_frame(&resolve);
+        }
+    });
+    let _ = JsFuture::from(promise).await;
 }
 
 /// Rescale already-simulated positions to a new canvas size — used when the

@@ -255,37 +255,61 @@ pub fn feed_page() -> Html {
             let mut listener: Option<(web_sys::Window, Closure<dyn FnMut(Event)>)> = None;
 
             if let Some(win) = window() {
+                // Throttle: scroll fires at >100Hz on touchpads/wheels and
+                // each call reads `scroll_height` (forces layout). Coalesce
+                // to one check per frame via rAF.
+                let scroll_pending: Rc<Cell<bool>> = Rc::new(Cell::new(false));
+
                 let is_loading_cb = is_loading.clone();
                 let selected_user_cb = selected_user.clone();
                 let exhausted_cb = exhausted.clone();
                 let fetch_page_cb = fetch_page.clone();
 
                 let win_for_cb = win.clone();
+                let scroll_pending_cb = scroll_pending.clone();
                 let on_scroll = Closure::<dyn FnMut(Event)>::wrap(Box::new(move |_e: Event| {
-                    if (*selected_user_cb).is_some() && !*is_loading_cb && !*exhausted_cb {
-                        let scroll_y = win_for_cb.scroll_y().unwrap_or(0.0);
-                        let inner_h = win_for_cb
-                            .inner_height()
-                            .ok()
-                            .and_then(|h| h.as_f64())
-                            .unwrap_or(0.0);
-
-                        let doc = match win_for_cb.document() {
-                            Some(d) => d,
-                            None => return,
-                        };
-                        let scroll_h = if let Some(el) = doc.document_element() {
-                            el.scroll_height() as f64
-                        } else if let Some(body) = doc.body() {
-                            body.scroll_height() as f64
-                        } else {
-                            0.0
-                        };
-
-                        if scroll_y + inner_h + PIXELS_BEFORE_REFETCH >= scroll_h {
-                            fetch_page_cb.emit(());
-                        }
+                    if scroll_pending_cb.get() {
+                        return;
                     }
+                    scroll_pending_cb.set(true);
+
+                    let scroll_pending_inner = scroll_pending_cb.clone();
+                    let win_inner = win_for_cb.clone();
+                    let selected_user_inner = selected_user_cb.clone();
+                    let is_loading_inner = is_loading_cb.clone();
+                    let exhausted_inner = exhausted_cb.clone();
+                    let fetch_inner = fetch_page_cb.clone();
+
+                    let raf_cb = Closure::once_into_js(move |_: f64| {
+                        scroll_pending_inner.set(false);
+                        if (*selected_user_inner).is_some()
+                            && !*is_loading_inner
+                            && !*exhausted_inner
+                        {
+                            let scroll_y = win_inner.scroll_y().unwrap_or(0.0);
+                            let inner_h = win_inner
+                                .inner_height()
+                                .ok()
+                                .and_then(|h| h.as_f64())
+                                .unwrap_or(0.0);
+
+                            let Some(doc) = win_inner.document() else {
+                                return;
+                            };
+                            let scroll_h = if let Some(el) = doc.document_element() {
+                                el.scroll_height() as f64
+                            } else if let Some(body) = doc.body() {
+                                body.scroll_height() as f64
+                            } else {
+                                0.0
+                            };
+
+                            if scroll_y + inner_h + PIXELS_BEFORE_REFETCH >= scroll_h {
+                                fetch_inner.emit(());
+                            }
+                        }
+                    });
+                    let _ = win_for_cb.request_animation_frame(raf_cb.as_ref().unchecked_ref());
                 }));
 
                 let _ = win
@@ -329,6 +353,33 @@ pub fn feed_page() -> Html {
             }
         });
     }
+
+    let backend_url = read_config_from_head()
+        .map(|cfg| cfg.backend_domain)
+        .unwrap_or_default();
+    let card_account_id = selected_user.as_ref().map(|u| u.id as i32).unwrap_or_default();
+    let card_col_class = (*grid).col_class();
+    let card_session_id = (*session_id).clone();
+    let feed_cards: Html = posts
+        .iter()
+        .enumerate()
+        .map(|(idx, sp)| {
+            let position = (idx + 1) as i32;
+            html! {
+                <div key={sp.post.id} class={ card_col_class } style="min-width: 200px">
+                    <PostCard
+                        affinity={sp.score}
+                        post={Rc::new(sp.post.clone())}
+                        backend_url={backend_url.clone()}
+                        account_id={card_account_id}
+                        session_id={card_session_id.clone()}
+                        position={position}
+                        breakdown={sp.breakdown.clone()}
+                    />
+                </div>
+            }
+        })
+        .collect();
 
     html! {
         <div class="container my-4 gap-2 feed-page">
@@ -500,28 +551,7 @@ pub fn feed_page() -> Html {
             }
 
             <div class="row g-3 m-3 feed-grid" aria-busy={(*is_loading).to_string()}>
-                {
-                    posts.iter().enumerate().map(|(idx, sp)| {
-                        let sp = sp.clone();
-                        let position = (idx + 1) as i32;
-                        let backend_url = read_config_from_head()
-                            .map(|cfg| cfg.backend_domain)
-                            .unwrap_or_default();
-                        html! {
-                            <div key={sp.post.id} class={ (*grid).col_class() } style="min-width: 200px">
-                                <PostCard
-                                    affinity={sp.score}
-                                    post={Rc::new(sp.post.clone())}
-                                    backend_url={backend_url}
-                                    account_id={selected_user.as_ref().map(|u| u.id as i32).unwrap_or_default()}
-                                    session_id={(*session_id).clone()}
-                                    position={position}
-                                    breakdown={sp.breakdown.clone()}
-                                />
-                            </div>
-                        }
-                    }).collect::<Html>()
-                }
+                { feed_cards }
             </div>
 
             {

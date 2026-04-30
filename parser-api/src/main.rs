@@ -46,6 +46,21 @@ use jobs::{BeginResult, ProcessJobState};
 
 const PROCESS_FETCH_CONCURRENCY: usize = 4;
 
+/// Run a blocking rusqlite closure on the spawn_blocking pool so it doesn't
+/// park the request's Tokio worker for the duration of the SQLite call.
+/// Returns the closure's `Result<T, String>` flat, plus a panic-to-Err
+/// translation for the JoinHandle.
+async fn db_blocking<F, T>(f: F) -> Result<T, String>
+where
+    F: FnOnce() -> Result<T, String> + Send + 'static,
+    T: Send + 'static,
+{
+    match rocket::tokio::task::spawn_blocking(f).await {
+        Ok(res) => res,
+        Err(e) => Err(format!("DB task panicked: {e}")),
+    }
+}
+
 /// Kicks off a background `/process` job and returns immediately with the
 /// current job state. If a job for this account is already running, returns
 /// the existing state instead of starting a new one.
@@ -55,12 +70,14 @@ async fn process_posts(
     account_id: i32,
     owner_token: &str,
 ) -> Result<Json<ProcessJobState>, String> {
-    let _ = get_account_by_id(owner_token, account_id).map_err(|e| e.to_string())?;
+    let owner_token_owned = owner_token.to_string();
+    let owner_for_check = owner_token_owned.clone();
+    db_blocking(move || get_account_by_id(&owner_for_check, account_id).map_err(|e| e.to_string()))
+        .await?;
 
     match jobs::try_begin(account_id) {
         BeginResult::AlreadyRunning(state) => Ok(Json(state)),
         BeginResult::Started(state) => {
-            let owner_token_owned = owner_token.to_string();
             tokio::spawn(async move {
                 let result = run_process(account_id, owner_token_owned).await;
                 if let Err(ref e) = result {
@@ -79,7 +96,8 @@ async fn process_status(
     account_id: i32,
     owner_token: &str,
 ) -> Result<Json<Option<ProcessJobState>>, String> {
-    let _ = get_account_by_id(owner_token, account_id).map_err(|e| e.to_string())?;
+    let owner = owner_token.to_string();
+    db_blocking(move || get_account_by_id(&owner, account_id).map_err(|e| e.to_string())).await?;
     Ok(Json(jobs::get_state(account_id)))
 }
 
@@ -88,7 +106,10 @@ async fn run_process(account_id: i32, owner_token: String) -> Result<(), String>
     let blacklist: HashSet<String> =
         cfg.tag_blacklist.iter().map(|s| s.to_lowercase()).collect();
 
-    let account = get_account_by_id(&owner_token, account_id).map_err(|e| e.to_string())?;
+    let account = db_blocking(move || {
+        get_account_by_id(&owner_token, account_id).map_err(|e| e.to_string())
+    })
+    .await?;
     let user = api::get_account(&account).await?;
     let favcount = match user {
         UserApiResponse::FullCurrentUser(u) => u.favorite_count,
@@ -98,8 +119,11 @@ async fn run_process(account_id: i32, owner_token: String) -> Result<(), String>
         (favcount / cfg.posts_limit) + (if favcount % cfg.posts_limit > 0 { 1 } else { 0 });
     jobs::set_pages_total(account_id, pages);
 
-    db::drop_account_posts(account_id)
-        .map_err(|e| format!("Failed to drop account posts: {e}"))?;
+    db_blocking(move || {
+        db::drop_account_posts(account_id)
+            .map_err(|e| format!("Failed to drop account posts: {e}"))
+    })
+    .await?;
 
     // Fetch pages in parallel; writes stay serial because SQLite is
     // single-writer anyway.
@@ -120,17 +144,27 @@ async fn run_process(account_id: i32, owner_token: String) -> Result<(), String>
         })
         .buffer_unordered(PROCESS_FETCH_CONCURRENCY);
 
+    let acc_id = account.id;
     while let Some((i, posts)) = stream.next().await {
-        info!("{} post(s) found on page {}", posts.len(), i);
-        db::save_posts(&posts, account.id).map_err(|e| format!("Failed to save posts: {e}"))?;
-        db::save_posts_tags_batch(&posts, &blacklist, true)
-            .map_err(|e| format!("Failed to save tags for page {i}: {e}"))?;
+        let posts_len = posts.len();
+        info!("{posts_len} post(s) found on page {i}");
+        let bl = blacklist.clone();
+        db_blocking(move || -> Result<(), String> {
+            db::save_posts(&posts, acc_id).map_err(|e| format!("Failed to save posts: {e}"))?;
+            db::save_posts_tags_batch(&posts, &bl, true)
+                .map_err(|e| format!("Failed to save tags for page {i}: {e}"))?;
+            Ok(())
+        })
+        .await?;
         jobs::record_page_done(account_id);
     }
     mark_idf_dirty();
 
-    refresh_account_profiles(account_id)
-        .map_err(|e| format!("Failed to refresh account profiles: {e}"))?;
+    db_blocking(move || {
+        refresh_account_profiles(account_id)
+            .map_err(|e| format!("Failed to refresh account profiles: {e}"))
+    })
+    .await?;
     Ok(())
 }
 
@@ -154,48 +188,56 @@ async fn get_account_tag_counts(
     account_id: i32,
     owner_token: &str,
 ) -> Result<Json<Vec<TagCount>>, String> {
-    get_account_by_id(owner_token, account_id)
-        .map_err(|e| format!("Failed to validate account access: {e}"))?;
-    match get_tag_counts(account_id) {
-        Ok(counts) => Ok(Json(counts.to_vec())),
-        Err(e) => {
-            let error_msg = format!("Failed to get tag counts: {e}");
-            eprintln!("{error_msg}");
-            Err(error_msg)
-        }
-    }
+    let owner = owner_token.to_string();
+    db_blocking(move || {
+        get_account_by_id(&owner, account_id)
+            .map_err(|e| format!("Failed to validate account access: {e}"))?;
+        get_tag_counts(account_id).map_err(|e| {
+            let m = format!("Failed to get tag counts: {e}");
+            eprintln!("{m}");
+            m
+        })
+    })
+    .await
+    .map(Json)
 }
 
 #[openapi(tag = "Users")]
 #[get("/user/name/<name>?<owner_token>")]
 async fn get_account_name(name: &str, owner_token: &str) -> Result<Json<TruncatedAccount>, String> {
-    match get_account_by_name(owner_token, name.to_string()) {
-        Ok(account) => Ok(Json(account)),
-        Err(e) => {
-            let error_msg = format!("Failed to get account: {e}");
-            eprintln!("{error_msg}");
-            Err(error_msg)
-        }
-    }
+    let owner = owner_token.to_string();
+    let name_owned = name.to_string();
+    db_blocking(move || {
+        get_account_by_name(&owner, name_owned).map_err(|e| {
+            let m = format!("Failed to get account: {e}");
+            eprintln!("{m}");
+            m
+        })
+    })
+    .await
+    .map(Json)
 }
 
 #[openapi(tag = "Users")]
 #[get("/user/id/<id>?<owner_token>")]
 async fn get_account_id(id: i32, owner_token: &str) -> Result<Json<TruncatedAccount>, String> {
-    match get_account_by_id(owner_token, id) {
-        Ok(account) => Ok(Json(account)),
-        Err(e) => {
-            let error_msg = format!("Failed to get account: {e}");
-            eprintln!("{error_msg}");
-            Err(error_msg)
-        }
-    }
+    let owner = owner_token.to_string();
+    db_blocking(move || {
+        get_account_by_id(&owner, id).map_err(|e| {
+            let m = format!("Failed to get account: {e}");
+            eprintln!("{m}");
+            m
+        })
+    })
+    .await
+    .map(Json)
 }
 
 #[openapi(tag = "Accounts")]
 #[get("/accounts?<owner_token>")]
 async fn list_accounts(owner_token: &str) -> Result<Json<Vec<TruncatedAccount>>, String> {
-    get_accounts_for_owner(owner_token).map(Json)
+    let owner = owner_token.to_string();
+    db_blocking(move || get_accounts_for_owner(&owner)).await.map(Json)
 }
 
 #[openapi(tag = "Accounts")]
@@ -203,19 +245,16 @@ async fn list_accounts(owner_token: &str) -> Result<Json<Vec<TruncatedAccount>>,
 async fn create_account(
     account: Json<DeviceScopedAccount>,
 ) -> Result<Json<TruncatedAccount>, String> {
-    match set_account(
-        &account.owner_token,
-        account.id,
-        &account.name,
-        &account.blacklist,
-    ) {
-        Ok(saved) => Ok(Json(saved)),
-        Err(e) => {
-            let error_msg = format!("Failed to get account: {e}");
-            eprintln!("{error_msg}");
-            Err(error_msg)
-        }
-    }
+    let acc = account.into_inner();
+    db_blocking(move || {
+        set_account(&acc.owner_token, acc.id, &acc.name, &acc.blacklist).map_err(|e| {
+            let m = format!("Failed to get account: {e}");
+            eprintln!("{m}");
+            m
+        })
+    })
+    .await
+    .map(Json)
 }
 
 struct IfNoneMatch(Option<String>);
@@ -282,11 +321,15 @@ async fn get_account_tag_relations(
     min_cooc: Option<i64>,
     if_none_match: IfNoneMatch,
 ) -> Result<EtagJson, String> {
-    get_account_by_id(owner_token, account_id)
-        .map_err(|e| format!("Failed to validate account access: {e}"))?;
     let top = top.unwrap_or(60).clamp(2, 250);
     let min_cooc = min_cooc.unwrap_or(2).max(1);
-    let mut payload = get_account_tag_relation_graph(account_id, top, min_cooc)?;
+    let owner = owner_token.to_string();
+    let mut payload = db_blocking(move || {
+        get_account_by_id(&owner, account_id)
+            .map_err(|e| format!("Failed to validate account access: {e}"))?;
+        get_account_tag_relation_graph(account_id, top, min_cooc)
+    })
+    .await?;
 
     let priors = &cfg().priors;
     let n_fav = payload.account_post_count.max(0) as f32;
@@ -312,8 +355,11 @@ async fn get_account_blacklist(
     account_id: i32,
     owner_token: &str,
 ) -> Result<Json<BlacklistPayload>, String> {
-    let account = get_account_by_id(owner_token, account_id)
-        .map_err(|e| format!("Failed to get account: {e}"))?;
+    let owner = owner_token.to_string();
+    let account = db_blocking(move || {
+        get_account_by_id(&owner, account_id).map_err(|e| format!("Failed to get account: {e}"))
+    })
+    .await?;
     Ok(Json(BlacklistPayload {
         blacklist: account.blacklist,
     }))
@@ -326,20 +372,24 @@ async fn update_account_blacklist(
     owner_token: &str,
     payload: Json<BlacklistPayload>,
 ) -> Result<Json<TruncatedAccount>, String> {
-    match update_device_blacklist(owner_token, account_id, &payload.blacklist) {
-        Ok(saved) => Ok(Json(saved)),
-        Err(e) => {
-            let error_msg = format!("Failed to update blacklist: {e}");
-            eprintln!("{error_msg}");
-            Err(error_msg)
-        }
-    }
+    let owner = owner_token.to_string();
+    let body = payload.into_inner();
+    db_blocking(move || {
+        update_device_blacklist(&owner, account_id, &body.blacklist).map_err(|e| {
+            let m = format!("Failed to update blacklist: {e}");
+            eprintln!("{m}");
+            m
+        })
+    })
+    .await
+    .map(Json)
 }
 
 #[openapi(tag = "Recommendations")]
 #[post("/interaction", data = "<payload>")]
 async fn log_feed_interaction(payload: Json<FeedInteractionRequest>) -> Result<(), String> {
-    record_feed_interaction(&payload)
+    let body = payload.into_inner();
+    db_blocking(move || record_feed_interaction(&body)).await
 }
 
 #[openapi(tag = "Recommendations")]
@@ -355,31 +405,58 @@ async fn get_recommendations(
     let mut priors = cfg.priors.clone();
     priors.now = Utc::now();
 
-    let tags: Vec<TagCount> = get_tag_counts(account_id)
-        .map_err(|e| std::io::Error::other(format!("Failed to get tag counts: {e}")))?
-        .to_vec();
-    let profile = get_account_preference_profile(account_id)
-        .map_err(|e| std::io::Error::other(format!("Failed to get account profile: {e}")))?;
+    // Read-side DB ops collapsed into a single blocking call so we pay one
+    // thread hand-off per request, not four. user_relation is a read of
+    // `account_tag_cooccurrence` which only the /process path mutates, so
+    // it's safe to read off the same snapshot as `tags`.
+    let owner = owner_token.to_string();
+    let (tags, profile, account, user_relation) = db_blocking(move || -> Result<_, String> {
+        let tags: Vec<TagCount> = get_tag_counts(account_id)
+            .map_err(|e| format!("Failed to get tag counts: {e}"))?;
+        let profile = get_account_preference_profile(account_id)
+            .map_err(|e| format!("Failed to get account profile: {e}"))?;
+        let account = get_account_by_id(&owner, account_id)
+            .map_err(|e| format!("Failed to get account: {e}"))?;
+        let user_relation = db::load_account_tag_relation(account_id, &tags)
+            .map_err(|e| format!("Failed to load user tag relation graph: {e}"))?;
+        Ok((tags, profile, account, user_relation))
+    })
+    .await
+    .map_err(std::io::Error::other)?;
 
-    let account = get_account_by_id(owner_token, account_id)
-        .map_err(|e| std::io::Error::other(format!("Failed to get account: {e}")))?;
     let posts: Vec<Post> = api::get_posts(&account, page)
         .await
         .map_err(|e| std::io::Error::other(format!("Failed to fetch posts: {e}")))?;
-    upsert_catalog_posts(&posts).map_err(|e| {
-        std::io::Error::other(format!("Failed to store recommendation catalog posts: {e}"))
-    })?;
-    // Skip the per-pair cooccurrence upsert here: candidate browse posts are
-    // not part of the user's truth set, and the heavy O(T²) work would land
-    // on the request path. /process is the only place that drives the graph.
-    db::save_posts_tags_batch(&posts, &HashSet::new(), false)
-        .map_err(|e| std::io::Error::other(format!("Failed to store recommendation tags: {e}")))?;
-    mark_idf_dirty();
+
+    // Catalog persistence is fire-and-forget: it's a write contender against
+    // the SQLite single writer, and infinite scroll fires this several times
+    // per second. Pulling it off the request path means the response shape
+    // doesn't depend on whether the previous page's writes have flushed.
+    // Tradeoff: tags newly seen here aren't in IDF / global_relation until
+    // the next rebuild — `mark_idf_dirty` schedules one. Unknown tags fall
+    // back to IDF=1.0 and `tag_id() = None`, both safe defaults.
+    {
+        let posts_for_persist = posts.clone();
+        rocket::tokio::spawn(async move {
+            let res = rocket::tokio::task::spawn_blocking(move || -> Result<(), String> {
+                upsert_catalog_posts(&posts_for_persist)
+                    .map_err(|e| format!("Failed to store recommendation catalog posts: {e}"))?;
+                // Skip cooccurrence: candidate browse posts aren't user truth.
+                db::save_posts_tags_batch(&posts_for_persist, &HashSet::new(), false)
+                    .map_err(|e| format!("Failed to store recommendation tags: {e}"))?;
+                Ok(())
+            })
+            .await;
+            match res {
+                Ok(Ok(())) => mark_idf_dirty(),
+                Ok(Err(e)) => warn!("background recommendation persist failed: {e}"),
+                Err(e) => warn!("background recommendation persist task panicked: {e}"),
+            }
+        });
+    }
+
     let idf = current_idf();
     let global_relation = current_global_relation();
-    let user_relation = db::load_account_tag_relation(account_id, &tags).map_err(|e| {
-        std::io::Error::other(format!("Failed to load user tag relation graph: {e}"))
-    })?;
 
     let ctx = ScoringContext::new(
         &tags,

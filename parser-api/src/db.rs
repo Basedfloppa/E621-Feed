@@ -226,9 +226,17 @@ pub fn get_accounts_for_owner(owner_token: &str) -> Result<Vec<TruncatedAccount>
 
     drop(stmt);
 
-    for account in &accounts {
-        let _ = touch_account_link(&conn, owner_token, account.id);
-    }
+    // One UPDATE per request instead of N. The `WHERE owner_token = ?1` is
+    // already enough — we don't need to enumerate account ids; the device-link
+    // table has one row per (token, account) and we want to bump them all.
+    let _ = conn.execute(
+        "
+        UPDATE account_device_links
+        SET last_seen_at = ?2
+        WHERE owner_token = ?1
+        ",
+        params![owner_token, Utc::now().to_rfc3339()],
+    );
 
     Ok(accounts)
 }
@@ -1050,13 +1058,21 @@ pub fn save_posts_tags_batch(
 
     let mut cooc_dirty = false;
     let mut touched_tag_ids: HashSet<i64> = HashSet::new();
+    // Per-batch cache: a 320-post batch has ~5–10K tag references but only a
+    // few hundred distinct (name, group) pairs. Caching collapses repeats to
+    // a HashMap hit and avoids the upsert+RETURNING round-trip.
+    let mut tag_id_cache: HashMap<(String, &'static str), i64> = HashMap::new();
     {
-        let mut insert_tag = tx
-            .prepare_cached("INSERT OR IGNORE INTO tags (name, group_type) VALUES (?1, ?2)")
-            .map_err(|e| format!("prep ins tag: {e}"))?;
-        let mut select_id = tx
-            .prepare_cached("SELECT id FROM tags WHERE name = ?1 AND group_type = ?2")
-            .map_err(|e| format!("prep sel id: {e}"))?;
+        // Single statement for "ensure tag exists, give me its id". The
+        // `DO UPDATE SET name = name` no-op forces RETURNING to fire on the
+        // conflict path too, so we always get a row back.
+        let mut upsert_tag = tx
+            .prepare_cached(
+                "INSERT INTO tags (name, group_type) VALUES (?1, ?2)
+                 ON CONFLICT(name, group_type) DO UPDATE SET name = name
+                 RETURNING id",
+            )
+            .map_err(|e| format!("prep upsert tag: {e}"))?;
         let mut link = tx
             .prepare_cached("INSERT OR IGNORE INTO tags_posts(tag_id, post_id) VALUES (?1, ?2)")
             .map_err(|e| format!("prep link: {e}"))?;
@@ -1101,13 +1117,18 @@ pub fn save_posts_tags_batch(
                         continue;
                     }
 
-                    insert_tag
-                        .execute(params![&tag_lc, group])
-                        .map_err(|e| format!("ins tag: {e}"))?;
-
-                    let tag_id: i64 = select_id
-                        .query_row(params![&tag_lc, group], |r| r.get(0))
-                        .map_err(|e| format!("get id {tag_lc}:{group}: {e}"))?;
+                    let cache_key = (tag_lc, group);
+                    let tag_id = if let Some(&id) = tag_id_cache.get(&cache_key) {
+                        id
+                    } else {
+                        let id: i64 = upsert_tag
+                            .query_row(params![&cache_key.0, group], |r| r.get(0))
+                            .map_err(|e| {
+                                format!("upsert tag {}:{group}: {e}", cache_key.0)
+                            })?;
+                        tag_id_cache.insert(cache_key, id);
+                        id
+                    };
 
                     link.execute(params![tag_id, pid])
                         .map_err(|e| format!("link tag_id={tag_id} post_id={pid}: {e}"))?;

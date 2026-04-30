@@ -3,6 +3,7 @@ pub mod theme_toggle;
 pub mod post_card;
 pub mod saved_accounts_select;
 pub mod fetch_analyze_button;
+pub mod shared_observer;
 pub mod tag_chart_card;
 pub mod tag_relation_graph_card;
 pub mod user_info_alert;

@@ -2,16 +2,28 @@ use arc_swap::ArcSwap;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock};
+use std::time::{Duration, Instant};
+
+/// Same coalescing as IDF: hold the rebuild worker alive briefly so a burst of
+/// dirty marks (one per /recommendations page during scroll) doesn't re-spawn
+/// the thread for every page.
+const REBUILD_COOLDOWN: Duration = Duration::from_secs(15);
 
 pub type GroupKey = u8;
 pub type TagId = u32;
 
+const GROUP_COUNT: usize = 7;
+
 /// PMI co-occurrence graph keyed by interned u32 tag-ids. The hot path
 /// (`tag_relation_fit`) resolves each post's tags once into ids, then walks
 /// `T*(T-1)/2` pairs without any string allocation.
+///
+/// `tag_to_id` is a per-group array of `HashMap<String, TagId>` (rather than a
+/// single `HashMap<(GroupKey, String), TagId>`) so lookups can pass a borrowed
+/// `&str` directly — no transient `(u8, String)` tuple per call.
 #[derive(Debug, Clone, Default)]
 pub struct TagRelationGraph {
-    tag_to_id: HashMap<(GroupKey, String), TagId>,
+    tag_to_id: [HashMap<String, TagId>; GROUP_COUNT],
     pairs: HashMap<(TagId, TagId), i64>,
     marginals: Vec<i64>,
     n_posts: i64,
@@ -24,7 +36,7 @@ impl TagRelationGraph {
 
     pub fn with_posts(n_posts: i64) -> Self {
         Self {
-            tag_to_id: HashMap::new(),
+            tag_to_id: Default::default(),
             pairs: HashMap::new(),
             marginals: Vec::new(),
             n_posts: n_posts.max(0),
@@ -32,27 +44,26 @@ impl TagRelationGraph {
     }
 
     /// Intern a (group, tag) pair, returning a stable id for the lifetime of
-    /// this graph. Allocates the key string once; on cache hit the allocation
-    /// is wasted, but `intern` only runs at graph-load time, not per request.
+    /// this graph. Allocates the key string only on first sight; lookup-only
+    /// callers (`tag_id`) hit the map without allocating at all.
     fn intern(&mut self, g: GroupKey, t: &str) -> TagId {
-        let key = (g, t.to_owned());
-        if let Some(&id) = self.tag_to_id.get(&key) {
+        let bucket = &mut self.tag_to_id[g as usize];
+        if let Some(&id) = bucket.get(t) {
             return id;
         }
         let id = self.marginals.len() as TagId;
-        self.tag_to_id.insert(key, id);
+        bucket.insert(t.to_owned(), id);
         self.marginals.push(0);
         id
     }
 
-    /// Look up the id for a (group, tag) without inserting. Allocates one
-    /// String per call (HashMap key); used at the start of `tag_relation_fit`
-    /// once per post tag, then ids are reused in the inner pair loop.
+    /// Look up the id for a (group, tag) without inserting. Zero-alloc:
+    /// borrows directly into the per-group HashMap.
     pub fn tag_id(&self, g: GroupKey, t: &str) -> Option<TagId> {
         if t.is_empty() {
             return None;
         }
-        self.tag_to_id.get(&(g, t.to_owned())).copied()
+        self.tag_to_id.get(g as usize)?.get(t).copied()
     }
 
     pub fn insert_pair(&mut self, g1: GroupKey, t1: &str, g2: GroupKey, t2: &str, count: i64) {
@@ -113,7 +124,8 @@ fn spawn_rebuild_if_needed() {
     std::thread::Builder::new()
         .name("tag-relation-rebuild".to_string())
         .spawn(|| {
-            'outer: loop {
+            loop {
+                let mut last_rebuild_failed = false;
                 'work: loop {
                     if !GLOBAL_DIRTY.swap(false, Ordering::AcqRel) {
                         break 'work;
@@ -123,22 +135,33 @@ fn spawn_rebuild_if_needed() {
                         Err(e) => {
                             eprintln!("[tag-relation] rebuild failed: {e}");
                             GLOBAL_DIRTY.store(true, Ordering::Release);
-                            break 'outer;
+                            last_rebuild_failed = true;
+                            break 'work;
                         }
                     }
                 }
 
-                GLOBAL_REBUILDING.store(false, Ordering::Release);
+                if last_rebuild_failed {
+                    break;
+                }
+
+                let deadline = Instant::now() + REBUILD_COOLDOWN;
+                while Instant::now() < deadline {
+                    if GLOBAL_DIRTY.load(Ordering::Acquire) {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(500));
+                }
 
                 if !GLOBAL_DIRTY.load(Ordering::Acquire) {
-                    return; // truly idle
-                }
-                if GLOBAL_REBUILDING.swap(true, Ordering::AcqRel) {
-                    return; // marker already spawned a fresh worker
+                    break;
                 }
             }
 
             GLOBAL_REBUILDING.store(false, Ordering::Release);
+            if GLOBAL_DIRTY.load(Ordering::Acquire) {
+                spawn_rebuild_if_needed();
+            }
         })
         .expect("spawn tag-relation-rebuild thread");
 }
