@@ -1,6 +1,30 @@
 use crate::ThemeToggle;
-use yew::{Callback, Html, MouseEvent, classes, function_component, html};
+use yew::{Callback, Html, MouseEvent, classes, function_component, html, use_effect_with};
 use crate::models::{read_config_from_head, start_tour, AttachTo, Button, Step};
+
+fn should_run_tour() -> bool {
+    let win = match web_sys::window() {
+        Some(w) => w,
+        None => return false,
+    };
+    let storage = match win.local_storage() {
+        Ok(Some(s)) => s,
+        _ => return false,
+    };
+    match storage.get_item("finished_tour") {
+        Ok(Some(v)) => v == "false",
+        Ok(None) => true,
+        Err(_) => false,
+    }
+}
+
+fn mark_tour_finished() {
+    if let Some(win) = web_sys::window() {
+        if let Ok(Some(storage)) = win.local_storage() {
+            let _ = storage.set_item("finished_tour", "true");
+        }
+    }
+}
 
 #[function_component(Header)]
 pub fn header() -> Html {
@@ -28,19 +52,22 @@ pub fn header() -> Html {
         }
     };
 
-    {
-        let window = web_sys::window().unwrap();
-        let local_storage = window.local_storage().unwrap().expect("");
-        let site_tour = local_storage.get_item("finished_tour").unwrap();
-        if site_tour.is_none() || site_tour.unwrap() == "false" {
-            let domain = read_config_from_head().unwrap().posts_domain;
-            let steps = vec![
+    use_effect_with((), |_| {
+        if !should_run_tour() {
+            return;
+        }
+        mark_tour_finished();
+
+        let domain = read_config_from_head()
+            .map(|c| c.posts_domain)
+            .unwrap_or_else(|| "https://e621.net".to_string());
+        let steps = vec![
                 Step {
                     id: "welcome".into(),
                     title: Some("Welcome 👋".into()),
                     text: "It seems like you are new here. Would you like to get the website tour?".into(),
                     route: Some("/".into()),
-                    attach_to: Some(AttachTo { element: "#header".into(), on: "bottom".into() }),
+                    attach_to: None,
                     buttons: Some(vec![
                         Button { text: "Yes".into(), action: "next".into(), classes: None },
                         Button { text: "Skip".into(), action: "cancel".into(), classes: None },
@@ -63,8 +90,8 @@ pub fn header() -> Html {
                 },
                 Step {
                     id: "account-id".into(),
-                    title: Some("Account id.".into()),
-                    text: format!("This is a field for your account id, you can find it in url when opening your profile in {domain}. {domain}/users/[your-id-here]"),
+                    title: Some("Account ID.".into()),
+                    text: format!("This is your account ID field — you can find it in the URL when opening your profile: {domain}/users/[your-id-here]"),
                     route: Some("/account".into()),
                     attach_to: Some(AttachTo { element: "#account-id".into(), on: "bottom".into() }),
                     buttons: Some(vec![
@@ -90,7 +117,7 @@ pub fn header() -> Html {
                 Step {
                     id: "account-blacklist".into(),
                     title: Some("Account blacklist.".into()),
-                    text: format!("This is a field for your account blacklist, you can leave it empty if you are content with default blacklist, if you want to add your own, copy it from {domain}."),
+                    text: format!("This is a field for your account blacklist. Leave it empty to use the default blacklist, or copy your own from {domain}."),
                     route: Some("/account".into()),
                     attach_to: Some(AttachTo { element: "#account-blacklist".into(), on: "bottom".into() }),
                     buttons: Some(vec![
@@ -103,7 +130,7 @@ pub fn header() -> Html {
                 Step {
                     id: "home-account".into(),
                     title: Some("Pick your account.".into()),
-                    text: "After you added your account, you can pick it from selectors.".into(),
+                    text: "Once you've added your account, you can pick it from the selectors.".into(),
                     route: Some("/".into()),
                     attach_to: Some(AttachTo { element: "#home-account".into(), on: "bottom".into() }),
                     buttons: Some(vec![
@@ -116,7 +143,7 @@ pub fn header() -> Html {
                 Step {
                     id: "home-analyzer".into(),
                     title: Some("Tag analyzer.".into()),
-                    text: "After you picked your account, you can start tag analyzer, it will scan your favourites posts for tags and build statistics that will be used for post recommendations.".into(),
+                    text: "Once you've picked your account, you can start the tag analyzer — it scans your favourite posts for tags and builds the statistics that drive recommendations.".into(),
                     route: Some("/".into()),
                     attach_to: Some(AttachTo { element: "#home-analyzer".into(), on: "bottom".into() }),
                     buttons: Some(vec![
@@ -129,7 +156,7 @@ pub fn header() -> Html {
                 Step {
                     id: "feed-account".into(),
                     title: Some("Feed account.".into()),
-                    text: "After you finished with tag analysis, you can go to feed page and pick your account from selector.".into(),
+                    text: "Once tag analysis finishes, head to the feed page and pick your account from the selector.".into(),
                     route: Some("/feed".into()),
                     attach_to: Some(AttachTo { element: "#feed-account".into(), on: "bottom".into() }),
                     buttons: Some(vec![
@@ -142,7 +169,7 @@ pub fn header() -> Html {
                 Step {
                     id: "feed-affinity".into(),
                     title: Some("Post affinity.".into()),
-                    text: "But before that you should pick post affinity, so you dont see things you may not like, I recommend to set it to 0.2 for the starters.".into(),
+                    text: "Before scrolling, set a post affinity threshold so you don't see things you may not like — 0.2 is a good starting value.".into(),
                     route: Some("/feed".into()),
                     attach_to: Some(AttachTo { element: "#feed-affinity".into(), on: "bottom".into() }),
                     buttons: Some(vec![
@@ -155,7 +182,7 @@ pub fn header() -> Html {
                 Step {
                     id: "feed-grid".into(),
                     title: Some("Feed grid.".into()),
-                    text: "Here you can pick grid layout for more comfort viewing of post on you screen width.".into(),
+                    text: "Pick the grid layout that's most comfortable for your screen width.".into(),
                     route: Some("/feed".into()),
                     attach_to: Some(AttachTo { element: "#feed-grid".into(), on: "bottom".into() }),
                     buttons: Some(vec![
@@ -168,21 +195,19 @@ pub fn header() -> Html {
                 Step {
                     id: "final".into(),
                     title: Some("Finally.".into()),
-                    text: "And that it, hope you'll have a good time using the site!".into(),
+                    text: "And that's it — hope you'll have a good time using the site!".into(),
                     route: Some("/".into()),
-                    attach_to: Some(AttachTo { element: "#header".into(), on: "bottom".into() }),
+                    attach_to: None,
                     buttons: Some(vec![
-                        Button { text: "Finish".into(), action: "done".into(), classes: None },
+                        Button { text: "Finish".into(), action: "cancel".into(), classes: None },
                         Button { text: "Back".into(), action: "back".into(), classes: None },
                     ]),
                     wait_timeout: Some(8000),
                     must_be_visible: Some(true),
                 },
             ];
-            start_tour(steps);
-            let _ = local_storage.set_item("finished_tour","true");
-        }
-    }
+        start_tour(steps);
+    });
 
     let restart_tour = Callback::from(|e: MouseEvent| {
         e.prevent_default();
