@@ -5214,4 +5214,4 @@ Shepherd.Tour = isServerSide ? TourNoOp : Tour;
 // Reexport types so they can be more easily used.
 
 export { ShepherdBase, Shepherd as default };
-//# sourceMappingURL=shepherd.mjs.map
+
