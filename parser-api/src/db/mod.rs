@@ -65,7 +65,7 @@ fn pool() -> &'static DbPool {
                 PRAGMA foreign_keys = ON;
                 PRAGMA journal_mode = WAL;
                 PRAGMA synchronous  = NORMAL;
-                PRAGMA busy_timeout = 15000;
+                PRAGMA busy_timeout = 60000;
                 PRAGMA temp_store   = MEMORY;
                 ",
             )
@@ -76,6 +76,7 @@ fn pool() -> &'static DbPool {
             .expect("build sqlite pool")
     })
 }
+
 
 /// Begin a writer transaction with `BEGIN IMMEDIATE` so concurrent writers
 /// queue via `busy_timeout` instead of failing with `SQLITE_BUSY_SNAPSHOT`.

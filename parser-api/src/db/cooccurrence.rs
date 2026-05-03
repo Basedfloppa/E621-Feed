@@ -8,7 +8,7 @@ use super::open_db;
 /// SQLite default SQLITE_MAX_VARIABLE_NUMBER is 999. Each pair is 2 params,
 /// plus headroom — cap at 200 pairs (400 params) per statement.
 const COOC_PAIRS_PER_STATEMENT: usize = 200;
-const COOC_BACKFILL_BATCH: i64 = 200;
+const COOC_BACKFILL_BATCH: i64 = 25;
 const COOC_BACKFILL_INTER_BATCH_SLEEP_MS: u64 = 25;
 
 pub(super) fn upsert_cooccurrence_pairs(
