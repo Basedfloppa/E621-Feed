@@ -47,6 +47,15 @@ struct LayoutState {
     score_max: f64,
     width: f64,
     height: f64,
+    /// Inputs the current layout was built from. Compared on every effect
+    /// re-run to decide whether to rebuild the backbone + restart the
+    /// simulation, or just redraw with the existing layout. Length-based
+    /// comparison was unreliable: `select_backbone` UNIONs MST + top-K
+    /// edges, so the post-union count is usually smaller than the
+    /// candidate sum, and a length check would falsely fire on every
+    /// hover.
+    built_for_node_count: usize,
+    built_for_edges_per_tag: usize,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -390,14 +399,16 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
                 }
                 let logical_height = (logical_width * 0.85).clamp(480.0, 900.0);
 
-                // Decide whether we need a fresh simulation. The whole layout
-                // borrow is contained in this scope so the async runner can
-                // borrow_mut later without conflict.
+                // Decide whether we need a fresh simulation. Compare against
+                // the actual inputs the cached layout was built from — using
+                // `expected_backbone_len` here is wrong because the upper
+                // bound it returns rarely matches the post-MST-union
+                // backbone size, so the check would fire on every hover.
                 let (nodes_changed, size_changed) = {
                     let layout = layout_ref.borrow();
                     (
-                        layout.nodes.len() != graph_arc.nodes.len()
-                            || layout.edges.len() != expected_backbone_len(&graph_arc, k_val),
+                        layout.built_for_node_count != graph_arc.nodes.len()
+                            || layout.built_for_edges_per_tag != k_val,
                         (layout.width - logical_width).abs() > 0.5
                             || (layout.height - logical_height).abs() > 0.5,
                     )
@@ -405,8 +416,13 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
 
                 if nodes_changed {
                     let backbone = select_backbone(&graph_arc, k_val);
-                    let new_layout =
-                        initial_layout(&graph_arc.nodes, logical_width, logical_height, backbone);
+                    let new_layout = initial_layout(
+                        &graph_arc.nodes,
+                        logical_width,
+                        logical_height,
+                        backbone,
+                        k_val,
+                    );
                     *layout_ref.borrow_mut() = new_layout;
 
                     // Initial draw shows the grid layout immediately so the
@@ -1150,30 +1166,6 @@ fn select_backbone(graph: &TagRelationGraphPayload, k: usize) -> Vec<(usize, usi
     out
 }
 
-/// Cheap upper bound used to detect "the user changed `edges_per_tag`" so the
-/// layout cache invalidates without us having to recompute the backbone twice.
-/// Includes an MST allowance (n-1 edges if connected) so the count matches the
-/// real backbone post-MST union.
-fn expected_backbone_len(graph: &TagRelationGraphPayload, k: usize) -> usize {
-    let n = graph.nodes.len();
-    if n == 0 {
-        return 0;
-    }
-    let mut count = 0usize;
-    let mut per_node = vec![0usize; n];
-    for e in &graph.edges {
-        if e.source >= n || e.target >= n {
-            continue;
-        }
-        if per_node[e.source] < k || per_node[e.target] < k {
-            count += 1;
-            per_node[e.source] += 1;
-            per_node[e.target] += 1;
-        }
-    }
-    count + (n.saturating_sub(1))
-}
-
 fn simulation_iterations(n: usize) -> usize {
     // Hard cap; convergence detection in `run_simulation` typically stops
     // earlier on small graphs and runs longer on large ones.
@@ -1187,6 +1179,7 @@ fn initial_layout(
     width: f64,
     height: f64,
     backbone: Vec<(usize, usize, usize, f64)>,
+    edges_per_tag: usize,
 ) -> LayoutState {
     let mut state = LayoutState {
         nodes: Vec::with_capacity(nodes.len()),
@@ -1196,6 +1189,8 @@ fn initial_layout(
         score_max: 1.0,
         width,
         height,
+        built_for_node_count: nodes.len(),
+        built_for_edges_per_tag: edges_per_tag,
     };
     if nodes.is_empty() {
         return state;
