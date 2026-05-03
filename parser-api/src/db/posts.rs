@@ -7,31 +7,19 @@ use crate::models::Post;
 use super::{open_db, parse_db_datetime};
 
 pub fn drop_account_posts(account_id: i32) -> Result<(), String> {
-    let mut connection = open_db()?;
-
-    let tx = super::begin_write_tx(&mut connection)?;
-
-    {
+    super::with_write_tx(|tx| {
         let mut clear_account_post = tx
             .prepare_cached("DELETE FROM accounts_post WHERE account_id = ?1")
             .map_err(|e| format!("Failed to prepare transaction: {e}"))?;
         clear_account_post
             .execute(params![account_id])
             .map_err(|e| format!("Failed to execute transaction: {e}"))?;
-    }
-
-    tx.commit()
-        .map_err(|e| format!("Failed to commit transaction: {e}"))?;
-
-    Ok(())
+        Ok(())
+    })
 }
 
 pub fn save_posts(posts: &[Post], account_id: i32) -> Result<(), String> {
-    let mut connection = open_db()?;
-
-    let tx = super::begin_write_tx(&mut connection)?;
-
-    {
+    super::with_write_tx(|tx| {
         let mut insert_post = tx
             .prepare_cached(POST_UPSERT_SQL)
             .map_err(|e| format!("Failed to prepare transaction: {e}"))?;
@@ -50,12 +38,8 @@ pub fn save_posts(posts: &[Post], account_id: i32) -> Result<(), String> {
                 .execute(params![account_id, post.id])
                 .map_err(|e| format!("Failed to execute transaction: {e}"))?;
         }
-    }
-
-    tx.commit()
-        .map_err(|e| format!("Failed to commit transaction: {e}"))?;
-
-    Ok(())
+        Ok(())
+    })
 }
 
 /// Single source of truth for the posts upsert. Both `save_posts` and
@@ -157,10 +141,7 @@ fn post_upsert_params(post: &Post) -> Vec<rusqlite::types::Value> {
 }
 
 pub fn upsert_catalog_posts(posts: &[Post]) -> Result<(), String> {
-    let mut connection = open_db()?;
-    let tx = super::begin_write_tx(&mut connection)?;
-
-    {
+    super::with_write_tx(|tx| {
         let mut insert_post = tx
             .prepare_cached(POST_UPSERT_SQL)
             .map_err(|e| format!("Failed to prepare catalog upsert: {e}"))?;
@@ -170,11 +151,8 @@ pub fn upsert_catalog_posts(posts: &[Post]) -> Result<(), String> {
                 .execute(rusqlite::params_from_iter(post_upsert_params(post)))
                 .map_err(|e| format!("Failed to upsert catalog post: {e}"))?;
         }
-    }
-
-    tx.commit()
-        .map_err(|e| format!("Failed to commit catalog post transaction: {e}"))?;
-    Ok(())
+        Ok(())
+    })
 }
 
 pub fn post_count() -> i64 {

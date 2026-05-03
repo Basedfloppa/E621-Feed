@@ -11,101 +11,89 @@ use super::{
 };
 
 pub fn set_rating_profile(account_id: i32) -> Result<(), String> {
-    let mut connection = open_db()?;
-    let tx = super::begin_write_tx(&mut connection)?;
+    super::with_write_tx(|tx| {
+        tx.execute(
+            "DELETE FROM account_rating_profile WHERE account_id = ?1",
+            params![account_id],
+        )
+        .map_err(|e| format!("Failed to clear rating profile: {e}"))?;
 
-    tx.execute(
-        "DELETE FROM account_rating_profile WHERE account_id = ?1",
-        params![account_id],
-    )
-    .map_err(|e| format!("Failed to clear rating profile: {e}"))?;
-
-    tx.execute(
-        "
-        INSERT INTO account_rating_profile (account_id, rating, count)
-        SELECT ?1, p.rating, COUNT(*)
-        FROM posts p
-        INNER JOIN accounts_post ap ON ap.post_id = p.id
-        WHERE ap.account_id = ?1
-        GROUP BY p.rating
-        ",
-        params![account_id],
-    )
-    .map_err(|e| format!("Failed to populate rating profile: {e}"))?;
-
-    tx.commit()
-        .map_err(|e| format!("Failed to commit rating profile transaction: {e}"))?;
-    Ok(())
+        tx.execute(
+            "
+            INSERT INTO account_rating_profile (account_id, rating, count)
+            SELECT ?1, p.rating, COUNT(*)
+            FROM posts p
+            INNER JOIN accounts_post ap ON ap.post_id = p.id
+            WHERE ap.account_id = ?1
+            GROUP BY p.rating
+            ",
+            params![account_id],
+        )
+        .map_err(|e| format!("Failed to populate rating profile: {e}"))?;
+        Ok(())
+    })
 }
 
 pub fn set_media_profile(account_id: i32) -> Result<(), String> {
-    let mut connection = open_db()?;
-    let tx = super::begin_write_tx(&mut connection)?;
+    super::with_write_tx(|tx| {
+        tx.execute(
+            "DELETE FROM account_media_profile WHERE account_id = ?1",
+            params![account_id],
+        )
+        .map_err(|e| format!("Failed to clear media profile: {e}"))?;
 
-    tx.execute(
-        "DELETE FROM account_media_profile WHERE account_id = ?1",
-        params![account_id],
-    )
-    .map_err(|e| format!("Failed to clear media profile: {e}"))?;
-
-    tx.execute(
-        "
-        INSERT INTO account_media_profile (account_id, media_type, count)
-        SELECT
-            ?1,
-            CASE
-                WHEN LOWER(COALESCE(p.file_ext, '')) = 'gif' THEN 'animated'
-                WHEN LOWER(COALESCE(p.file_ext, '')) IN ('webm', 'mp4') OR COALESCE(p.duration, 0) > 0 THEN 'video'
-                WHEN COALESCE(p.is_animated, 0) = 1 THEN 'animated'
-                ELSE 'image'
-            END AS media_type,
-            COUNT(*)
-        FROM posts p
-        INNER JOIN accounts_post ap ON ap.post_id = p.id
-        WHERE ap.account_id = ?1
-        GROUP BY media_type
-        ",
-        params![account_id],
-    )
-    .map_err(|e| format!("Failed to populate media profile: {e}"))?;
-
-    tx.commit()
-        .map_err(|e| format!("Failed to commit media profile transaction: {e}"))?;
-    Ok(())
+        tx.execute(
+            "
+            INSERT INTO account_media_profile (account_id, media_type, count)
+            SELECT
+                ?1,
+                CASE
+                    WHEN LOWER(COALESCE(p.file_ext, '')) = 'gif' THEN 'animated'
+                    WHEN LOWER(COALESCE(p.file_ext, '')) IN ('webm', 'mp4') OR COALESCE(p.duration, 0) > 0 THEN 'video'
+                    WHEN COALESCE(p.is_animated, 0) = 1 THEN 'animated'
+                    ELSE 'image'
+                END AS media_type,
+                COUNT(*)
+            FROM posts p
+            INNER JOIN accounts_post ap ON ap.post_id = p.id
+            WHERE ap.account_id = ?1
+            GROUP BY media_type
+            ",
+            params![account_id],
+        )
+        .map_err(|e| format!("Failed to populate media profile: {e}"))?;
+        Ok(())
+    })
 }
 
 pub fn set_quality_profile(account_id: i32) -> Result<(), String> {
-    let mut connection = open_db()?;
-    let tx = super::begin_write_tx(&mut connection)?;
-
-    tx.execute(
-        "DELETE FROM account_quality_profile WHERE account_id = ?1",
-        params![account_id],
-    )
-    .map_err(|e| format!("Failed to clear quality profile: {e}"))?;
-
-    tx.execute(
-        "
-        INSERT INTO account_quality_profile (
-            account_id, avg_score_total, avg_fav_count, avg_comment_count, avg_duration
+    super::with_write_tx(|tx| {
+        tx.execute(
+            "DELETE FROM account_quality_profile WHERE account_id = ?1",
+            params![account_id],
         )
-        SELECT
-            ?1,
-            COALESCE(AVG(p.score_total), 0),
-            COALESCE(AVG(p.fav_count), 0),
-            COALESCE(AVG(p.comment_count), 0),
-            COALESCE(AVG(COALESCE(p.duration, 0)), 0)
-        FROM posts p
-        INNER JOIN accounts_post ap ON ap.post_id = p.id
-        WHERE ap.account_id = ?1
-        ",
-        params![account_id],
-    )
-    .map_err(|e| format!("Failed to populate quality profile: {e}"))?;
+        .map_err(|e| format!("Failed to clear quality profile: {e}"))?;
 
-    tx.commit()
-        .map_err(|e| format!("Failed to commit quality profile transaction: {e}"))?;
-    Ok(())
+        tx.execute(
+            "
+            INSERT INTO account_quality_profile (
+                account_id, avg_score_total, avg_fav_count, avg_comment_count, avg_duration
+            )
+            SELECT
+                ?1,
+                COALESCE(AVG(p.score_total), 0),
+                COALESCE(AVG(p.fav_count), 0),
+                COALESCE(AVG(p.comment_count), 0),
+                COALESCE(AVG(COALESCE(p.duration, 0)), 0)
+            FROM posts p
+            INNER JOIN accounts_post ap ON ap.post_id = p.id
+            WHERE ap.account_id = ?1
+            ",
+            params![account_id],
+        )
+        .map_err(|e| format!("Failed to populate quality profile: {e}"))?;
+        Ok(())
+    })
 }
 
 pub fn set_recency_profile(account_id: i32) -> Result<(), String> {
@@ -159,41 +147,35 @@ pub fn refresh_account_profiles(account_id: i32) -> Result<(), String> {
 pub fn decay_account_tag_feedback(account_id: i32) -> Result<(), String> {
     let cfg = crate::models::cfg();
     let half_life = cfg.priors.feedback_decay_half_life_days.max(1.0);
-
-    let mut connection = open_db()?;
     let now = Utc::now();
     let now_iso = now.to_rfc3339();
 
-    let tx = connection
-        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-        .map_err(|e| format!("Failed to start decay tx: {e}"))?;
+    super::with_write_tx(|tx| {
+        let rows: Vec<(String, String, String, i64, i64, i64)> = {
+            let mut stmt = tx
+                .prepare(
+                    "SELECT tag_name, group_type, last_decayed_at,
+                            impression_count, positive_count, negative_count
+                     FROM account_tag_feedback
+                     WHERE account_id = ?1",
+                )
+                .map_err(|e| format!("Failed to prepare decay query: {e}"))?;
 
-    let rows: Vec<(String, String, String, i64, i64, i64)> = {
-        let mut stmt = tx
-            .prepare(
-                "SELECT tag_name, group_type, last_decayed_at,
-                        impression_count, positive_count, negative_count
-                 FROM account_tag_feedback
-                 WHERE account_id = ?1",
-            )
-            .map_err(|e| format!("Failed to prepare decay query: {e}"))?;
+            stmt.query_map(params![account_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, i64>(5)?,
+                ))
+            })
+            .map_err(|e| format!("Failed to fetch decay rows: {e}"))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("Failed to enumerate decay rows: {e}"))?
+        };
 
-        stmt.query_map(params![account_id], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, i64>(3)?,
-                row.get::<_, i64>(4)?,
-                row.get::<_, i64>(5)?,
-            ))
-        })
-        .map_err(|e| format!("Failed to fetch decay rows: {e}"))?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| format!("Failed to enumerate decay rows: {e}"))?
-    };
-
-    {
         let mut update = tx
             .prepare_cached(
                 "UPDATE account_tag_feedback
@@ -238,10 +220,8 @@ pub fn decay_account_tag_feedback(account_id: i32) -> Result<(), String> {
                     .map_err(|e| format!("Failed to update decayed row: {e}"))?;
             }
         }
-    }
-    tx.commit()
-        .map_err(|e| format!("Failed to commit decay tx: {e}"))?;
-    Ok(())
+        Ok(())
+    })
 }
 
 pub fn get_account_rating_profile(account_id: i32) -> Result<Vec<AccountRatingStat>, String> {

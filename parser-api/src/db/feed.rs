@@ -7,108 +7,105 @@ use crate::models::{FeedInteractionRequest, FeedInteractionType};
 use super::open_db;
 
 pub fn record_feed_interaction(interaction: &FeedInteractionRequest) -> Result<(), String> {
-    let mut connection = open_db()?;
-    let tx = super::begin_write_tx(&mut connection)?;
-
-    let linked: bool = tx
-        .query_row(
-            "
-            SELECT EXISTS(
-                SELECT 1 FROM account_device_links
-                WHERE owner_token = ?1 AND account_id = ?2
+    super::with_write_tx(|tx| {
+        let linked: bool = tx
+            .query_row(
+                "
+                SELECT EXISTS(
+                    SELECT 1 FROM account_device_links
+                    WHERE owner_token = ?1 AND account_id = ?2
+                )
+                ",
+                params![interaction.owner_token, interaction.account_id],
+                |row| row.get(0),
             )
-            ",
-            params![interaction.owner_token, interaction.account_id],
-            |row| row.get(0),
-        )
-        .map_err(|e| format!("Failed to validate feed interaction owner link: {e}"))?;
+            .map_err(|e| format!("Failed to validate feed interaction owner link: {e}"))?;
 
-    if !linked {
-        return Err("Account is not linked to this device token".to_string());
-    }
+        if !linked {
+            return Err("Account is not linked to this device token".to_string());
+        }
 
-    // Resolve the bucket the same way `get_recommendations` does so the
-    // logged arm matches the one the user actually saw.
-    let explicit: Option<String> = tx
-        .query_row(
-            "SELECT experiment_bucket FROM accounts WHERE id = ?1",
-            params![interaction.account_id],
-            |r| r.get::<_, Option<String>>(0),
-        )
-        .unwrap_or(None);
-    let bucket: Option<String> = crate::models::cfg()
-        .pick_bucket(interaction.account_id, explicit.as_deref())
-        .0;
-
-    let inserted = tx
-        .execute(
-            "
-            INSERT OR IGNORE INTO feed_interactions (
-                account_id, post_id, event_type, position, session_id, created_at, experiment_bucket
+        // Resolve the bucket the same way `get_recommendations` does so the
+        // logged arm matches the one the user actually saw.
+        let explicit: Option<String> = tx
+            .query_row(
+                "SELECT experiment_bucket FROM accounts WHERE id = ?1",
+                params![interaction.account_id],
+                |r| r.get::<_, Option<String>>(0),
             )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-            ",
-            params![
-                interaction.account_id,
-                interaction.post_id,
-                interaction.event_type.to_string(),
-                interaction.position,
-                interaction.session_id,
-                Utc::now().to_rfc3339(),
-                bucket,
-            ],
-        )
-        .map_err(|e| format!("Failed to record feed interaction: {e}"))?;
+            .unwrap_or(None);
+        let bucket: Option<String> = crate::models::cfg()
+            .pick_bucket(interaction.account_id, explicit.as_deref())
+            .0;
 
-    if inserted > 0 {
-        let (impression_delta, positive_delta, negative_delta) = match interaction.event_type {
-            FeedInteractionType::QualifiedImpression => (1, 0, 0),
-            FeedInteractionType::Open => (0, 1, 0),
-            FeedInteractionType::Hide => (0, 0, 1),
-        };
-
-        let now_iso = Utc::now().to_rfc3339();
-        tx.execute(
-            "
-            INSERT INTO account_tag_feedback (
-                account_id, tag_name, group_type,
-                impression_count, positive_count, negative_count,
-                last_interaction_at, last_decayed_at
+        let inserted = tx
+            .execute(
+                "
+                INSERT OR IGNORE INTO feed_interactions (
+                    account_id, post_id, event_type, position, session_id, created_at, experiment_bucket
+                )
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                ",
+                params![
+                    interaction.account_id,
+                    interaction.post_id,
+                    interaction.event_type.to_string(),
+                    interaction.position,
+                    interaction.session_id,
+                    Utc::now().to_rfc3339(),
+                    bucket,
+                ],
             )
-            SELECT
-                ?1,
-                t.name,
-                t.group_type,
-                ?2,
-                ?3,
-                ?4,
-                ?5,
-                ?5
-            FROM tags t
-            INNER JOIN tags_posts tp ON tp.tag_id = t.id
-            WHERE tp.post_id = ?6
-            ON CONFLICT(account_id, tag_name, group_type) DO UPDATE SET
-                impression_count = account_tag_feedback.impression_count + excluded.impression_count,
-                positive_count = account_tag_feedback.positive_count + excluded.positive_count,
-                negative_count = account_tag_feedback.negative_count + excluded.negative_count,
-                last_interaction_at = excluded.last_interaction_at,
-                last_decayed_at = excluded.last_decayed_at
-            ",
-            params![
-                interaction.account_id,
-                impression_delta,
-                positive_delta,
-                negative_delta,
-                now_iso,
-                interaction.post_id,
-            ],
-        )
-        .map_err(|e| format!("Failed to update tag feedback aggregates: {e}"))?;
-    }
+            .map_err(|e| format!("Failed to record feed interaction: {e}"))?;
 
-    tx.commit()
-        .map_err(|e| format!("Failed to commit feed interaction transaction: {e}"))?;
-    Ok(())
+        if inserted > 0 {
+            let (impression_delta, positive_delta, negative_delta) = match interaction.event_type {
+                FeedInteractionType::QualifiedImpression => (1, 0, 0),
+                FeedInteractionType::Open => (0, 1, 0),
+                FeedInteractionType::Hide => (0, 0, 1),
+            };
+
+            let now_iso = Utc::now().to_rfc3339();
+            tx.execute(
+                "
+                INSERT INTO account_tag_feedback (
+                    account_id, tag_name, group_type,
+                    impression_count, positive_count, negative_count,
+                    last_interaction_at, last_decayed_at
+                )
+                SELECT
+                    ?1,
+                    t.name,
+                    t.group_type,
+                    ?2,
+                    ?3,
+                    ?4,
+                    ?5,
+                    ?5
+                FROM tags t
+                INNER JOIN tags_posts tp ON tp.tag_id = t.id
+                WHERE tp.post_id = ?6
+                ON CONFLICT(account_id, tag_name, group_type) DO UPDATE SET
+                    impression_count = account_tag_feedback.impression_count + excluded.impression_count,
+                    positive_count = account_tag_feedback.positive_count + excluded.positive_count,
+                    negative_count = account_tag_feedback.negative_count + excluded.negative_count,
+                    last_interaction_at = excluded.last_interaction_at,
+                    last_decayed_at = excluded.last_decayed_at
+                ",
+                params![
+                    interaction.account_id,
+                    impression_delta,
+                    positive_delta,
+                    negative_delta,
+                    now_iso,
+                    interaction.post_id,
+                ],
+            )
+            .map_err(|e| format!("Failed to update tag feedback aggregates: {e}"))?;
+        }
+
+        Ok(())
+    })
 }
 
 /// Posts the user has already qualified-impressed within the last `days`.

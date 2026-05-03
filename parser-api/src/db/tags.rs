@@ -14,9 +14,6 @@ pub fn save_posts_tags_batch(
         return Ok(());
     }
 
-    let mut connection = open_db()?;
-    let tx = super::begin_write_tx(&mut connection)?;
-
     let mut cooc_dirty = false;
     let mut touched_tag_ids: HashSet<i64> = HashSet::new();
     // tag_id → number of (tag_id, post_id) rows actually inserted in this
@@ -28,7 +25,8 @@ pub fn save_posts_tags_batch(
     // (name, group) pairs in a 320-post batch. Caching collapses repeats to
     // a HashMap hit and avoids the upsert+RETURNING round-trip.
     let mut tag_id_cache: HashMap<(String, &'static str), i64> = HashMap::new();
-    {
+
+    super::with_write_tx(|tx| {
         // The `DO UPDATE SET name = name` no-op forces RETURNING to fire on
         // the conflict path, so we always get a row back.
         let mut upsert_tag = tx
@@ -107,19 +105,20 @@ pub fn save_posts_tags_batch(
             if track_cooccurrence && !had_tags && post_tag_ids.len() >= 2 {
                 post_tag_ids.sort_unstable();
                 post_tag_ids.dedup();
-                super::cooccurrence::upsert_cooccurrence_pairs(&tx, &post_tag_ids)?;
+                super::cooccurrence::upsert_cooccurrence_pairs(tx, &post_tag_ids)?;
                 cooc_dirty = true;
             }
         }
 
         if !touched_tag_ids.is_empty() {
-            recompute_df_for_tags(&tx, &touched_tag_ids)?;
+            recompute_df_for_tags(tx, &touched_tag_ids)?;
         }
-    }
+        Ok(())
+    })?;
 
-    // Build the (lowercased name → df_delta) map *before* commit so we can
-    // reuse the per-batch tag_id_cache; the bump itself is deferred until
-    // after commit so readers never see a phantom delta on rollback.
+    // Build the (lowercased name → df_delta) map after commit. The
+    // tag_id_cache and df_delta_by_id maps survive past the closure, so
+    // we still have everything we need to bump the in-memory IDF index.
     let df_delta_by_name: HashMap<String, i64> = if df_delta_by_id.is_empty() {
         HashMap::new()
     } else {
@@ -132,9 +131,6 @@ pub fn save_posts_tags_batch(
             .filter_map(|(id, delta)| id_to_name.get(id).map(|n| (n.clone(), *delta)))
             .collect()
     };
-
-    tx.commit()
-        .map_err(|e| format!("commit save_posts_tags_batch: {e}"))?;
 
     // n_posts_delta = 0: catalog growth shifts every IDF by a tiny fraction,
     // and the periodic full rebuild reconciles the absolute level.
@@ -173,7 +169,7 @@ pub(super) fn recompute_df_for_tags(
 }
 
 pub fn set_tag_counts(account_id: i32) -> Result<(), String> {
-    let mut connection = open_db()?;
+    let connection = open_db()?;
 
     let counts: Vec<TagCount> = {
         let mut stmt = connection
@@ -202,9 +198,9 @@ pub fn set_tag_counts(account_id: i32) -> Result<(), String> {
         .map_err(|e| format!("Failed to enumerate accounts: {e}"))?
     };
 
-    let tx = super::begin_write_tx(&mut connection)?;
+    drop(connection);
 
-    {
+    super::with_write_tx(|tx| {
         tx.execute(
             "DELETE FROM account_tag_counts WHERE account_id = ?1",
             params![account_id],
@@ -232,12 +228,8 @@ pub fn set_tag_counts(account_id: i32) -> Result<(), String> {
                 ])
                 .map_err(|e| format!("Failed to execute transaction: {e}"))?;
         }
-    }
-
-    tx.commit()
-        .map_err(|e| format!("Failed to commit transaction: {e}"))?;
-
-    Ok(())
+        Ok(())
+    })
 }
 
 pub fn get_tag_counts(account_id: i32) -> Result<Vec<TagCount>, String> {

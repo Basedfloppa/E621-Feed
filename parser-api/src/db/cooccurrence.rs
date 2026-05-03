@@ -59,42 +59,38 @@ pub(super) fn upsert_cooccurrence_pairs(
 }
 
 pub fn set_account_tag_cooccurrence(account_id: i32) -> Result<(), String> {
-    let mut connection = open_db()?;
-    let tx = super::begin_write_tx(&mut connection)?;
-
-    tx.execute(
-        "DELETE FROM account_tag_cooccurrence WHERE account_id = ?1",
-        params![account_id],
-    )
-    .map_err(|e| format!("Failed to clear account tag cooccurrence: {e}"))?;
-
-    tx.execute(
-        "
-        INSERT INTO account_tag_cooccurrence (
-            account_id, tag1_name, tag1_group, tag2_name, tag2_group, cooc_count
+    super::with_write_tx(|tx| {
+        tx.execute(
+            "DELETE FROM account_tag_cooccurrence WHERE account_id = ?1",
+            params![account_id],
         )
-        SELECT
-            ?1,
-            t1.name, t1.group_type,
-            t2.name, t2.group_type,
-            COUNT(*)
-        FROM accounts_post ap
-        INNER JOIN tags_posts tp1 ON tp1.post_id = ap.post_id
-        INNER JOIN tags_posts tp2
-            ON tp2.post_id = ap.post_id
-           AND tp1.tag_id < tp2.tag_id
-        INNER JOIN tags t1 ON t1.id = tp1.tag_id
-        INNER JOIN tags t2 ON t2.id = tp2.tag_id
-        WHERE ap.account_id = ?1
-        GROUP BY t1.name, t1.group_type, t2.name, t2.group_type
-        ",
-        params![account_id],
-    )
-    .map_err(|e| format!("Failed to populate account tag cooccurrence: {e}"))?;
+        .map_err(|e| format!("Failed to clear account tag cooccurrence: {e}"))?;
 
-    tx.commit()
-        .map_err(|e| format!("Failed to commit account tag cooccurrence: {e}"))?;
-    Ok(())
+        tx.execute(
+            "
+            INSERT INTO account_tag_cooccurrence (
+                account_id, tag1_name, tag1_group, tag2_name, tag2_group, cooc_count
+            )
+            SELECT
+                ?1,
+                t1.name, t1.group_type,
+                t2.name, t2.group_type,
+                COUNT(*)
+            FROM accounts_post ap
+            INNER JOIN tags_posts tp1 ON tp1.post_id = ap.post_id
+            INNER JOIN tags_posts tp2
+                ON tp2.post_id = ap.post_id
+               AND tp1.tag_id < tp2.tag_id
+            INNER JOIN tags t1 ON t1.id = tp1.tag_id
+            INNER JOIN tags t2 ON t2.id = tp2.tag_id
+            WHERE ap.account_id = ?1
+            GROUP BY t1.name, t1.group_type, t2.name, t2.group_type
+            ",
+            params![account_id],
+        )
+        .map_err(|e| format!("Failed to populate account tag cooccurrence: {e}"))?;
+        Ok(())
+    })
 }
 
 pub fn load_global_tag_relation() -> rusqlite::Result<crate::utils::TagRelationGraph> {
@@ -444,9 +440,10 @@ fn backfill_global_tag_cooccurrence() -> Result<(), String> {
     let mut processed: i64 = 0;
 
     loop {
-        let mut connection = open_db()?;
-
+        // Read post-ids on a pool connection so we don't hold the writer
+        // mutex across the SELECT.
         let post_ids: Vec<i64> = {
+            let connection = open_db()?;
             let mut stmt = connection
                 .prepare(
                     "
@@ -471,8 +468,7 @@ fn backfill_global_tag_cooccurrence() -> Result<(), String> {
 
         last_id = *post_ids.last().unwrap();
 
-        let tx = super::begin_write_tx(&mut connection)?;
-        {
+        super::with_write_tx(|tx| {
             let mut upsert = tx
                 .prepare_cached(
                     "
@@ -508,8 +504,8 @@ fn backfill_global_tag_cooccurrence() -> Result<(), String> {
                         .map_err(|e| format!("upsert pair {a},{b}: {e}"))?;
                 }
             }
-        }
-        tx.commit().map_err(|e| format!("commit batch: {e}"))?;
+            Ok(())
+        })?;
 
         processed += post_ids.len() as i64;
         if processed % 2_000 == 0 || processed >= total_posts {

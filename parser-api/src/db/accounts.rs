@@ -35,33 +35,30 @@ loli
 shota";
     }
 
-    let mut conn = open_db()?;
-    let tx = super::begin_write_tx(&mut conn)?;
+    super::with_write_tx(|tx| {
+        tx.execute(
+            "
+            INSERT INTO accounts (id, name, blacklisted_tags)
+            VALUES (?1, ?2, ?3)
+            ON CONFLICT(id) DO UPDATE SET
+            name = excluded.name,
+            blacklisted_tags = excluded.blacklisted_tags",
+            params![account_id, name, blacklisted_tags],
+        )
+        .map_err(|e| format!("Failed to upsert account: {e}"))?;
 
-    tx.execute(
-        "
-        INSERT INTO accounts (id, name, blacklisted_tags)
-        VALUES (?1, ?2, ?3)
-        ON CONFLICT(id) DO UPDATE SET
-        name = excluded.name,
-        blacklisted_tags = excluded.blacklisted_tags",
-        params![account_id, name, blacklisted_tags],
-    )
-    .map_err(|e| format!("Failed to upsert account: {e}"))?;
-
-    tx.execute(
-        "
-        INSERT INTO account_device_links (owner_token, account_id, linked_at, last_seen_at)
-        VALUES (?1, ?2, ?3, ?3)
-        ON CONFLICT(owner_token, account_id) DO UPDATE SET
-            last_seen_at = excluded.last_seen_at
-        ",
-        params![owner_token, account_id, Utc::now().to_rfc3339()],
-    )
-    .map_err(|e| format!("Failed to link device token to account: {e}"))?;
-
-    tx.commit()
-        .map_err(|e| format!("Failed to commit account transaction: {e}"))?;
+        tx.execute(
+            "
+            INSERT INTO account_device_links (owner_token, account_id, linked_at, last_seen_at)
+            VALUES (?1, ?2, ?3, ?3)
+            ON CONFLICT(owner_token, account_id) DO UPDATE SET
+                last_seen_at = excluded.last_seen_at
+            ",
+            params![owner_token, account_id, Utc::now().to_rfc3339()],
+        )
+        .map_err(|e| format!("Failed to link device token to account: {e}"))?;
+        Ok(())
+    })?;
 
     get_account_by_id(owner_token, account_id)
 }
