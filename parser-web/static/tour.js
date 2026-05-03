@@ -1,4 +1,4 @@
-import Shepherd from './vendor/shepherd.mjs';
+import Shepherd from '/static/vendor/shepherd.mjs';
 
 let TOUR = null;
 
