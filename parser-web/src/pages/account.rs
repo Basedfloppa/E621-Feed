@@ -2,6 +2,7 @@ use crate::models::{get_or_create_owner_token, humanize_error_body, read_config_
 use crate::pages::UserInfo;
 use gloo_timers::callback::Timeout;
 use reqwasm::http::Request;
+use std::collections::HashMap;
 use web_sys::{HtmlInputElement, HtmlTextAreaElement};
 use yew::prelude::*;
 
@@ -19,6 +20,7 @@ pub fn account_creator() -> Html {
     let edit_draft = use_state(String::new);
     let edit_saving = use_state(|| false);
     let remove_error: UseStateHandle<Option<String>> = use_state(|| None);
+    let experiment_buckets: UseStateHandle<HashMap<i64, String>> = use_state(HashMap::new);
 
     {
         let message = message.clone();
@@ -59,6 +61,44 @@ pub fn account_creator() -> Html {
                         }
                     }
                 });
+            }
+            || ()
+        });
+    }
+
+    {
+        let saved_accounts = saved_accounts.clone();
+        let experiment_buckets = experiment_buckets.clone();
+        let ids: Vec<i64> = (*saved_accounts).iter().map(|a| a.id).collect();
+        use_effect_with(ids, move |ids: &Vec<i64>| {
+            let ids = ids.clone();
+            let cfg = read_config_from_head();
+            let owner_token = get_or_create_owner_token();
+            if !ids.is_empty() {
+                if let (Some(cfg), Some(owner_token)) = (cfg, owner_token) {
+                    wasm_bindgen_futures::spawn_local(async move {
+                        let mut found: HashMap<i64, String> = HashMap::new();
+                        for id in ids {
+                            let url = format!(
+                                "{}/account/{}/experiment_bucket?owner_token={}",
+                                cfg.backend_domain,
+                                id,
+                                urlencoding::encode(&owner_token)
+                            );
+                            if let Ok(resp) = Request::get(&url).send().await {
+                                if resp.ok() {
+                                    if let Ok(v) = resp.json::<serde_json::Value>().await {
+                                        if let Some(name) = v.get("bucket").and_then(|b| b.as_str())
+                                        {
+                                            found.insert(id, name.to_string());
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        experiment_buckets.set(found);
+                    });
+                }
             }
             || ()
         });
@@ -167,7 +207,10 @@ pub fn account_creator() -> Html {
         let edit_draft = edit_draft.clone();
         let remove_error = remove_error.clone();
         Callback::from(move |account_id: i64| {
-            let target = (*saved_accounts).iter().find(|a| a.id == account_id).cloned();
+            let target = (*saved_accounts)
+                .iter()
+                .find(|a| a.id == account_id)
+                .cloned();
             let Some(target) = target else {
                 return;
             };
@@ -337,9 +380,8 @@ pub fn account_creator() -> Html {
             loading.set(true);
 
             let Some(cfg) = read_config_from_head() else {
-                message.set(
-                    "App configuration failed to load — please reload the page.".to_string(),
-                );
+                message
+                    .set("App configuration failed to load — please reload the page.".to_string());
                 error.set(true);
                 loading.set(false);
                 return;
@@ -487,12 +529,21 @@ pub fn account_creator() -> Html {
                                         let on_draft_change = on_edit_draft_change.clone();
                                         let draft_value = (*edit_draft).clone();
                                         let is_saving = *edit_saving;
+                                        let bucket = experiment_buckets.get(&acc.id).cloned();
                                         html! {
                                             <li class="list-group-item">
                                                 <div class="d-flex justify-content-between align-items-center gap-2">
                                                     <span>
                                                         <strong>{&acc.name}</strong>
                                                         {format!(" (ID: {})", acc.id)}
+                                                        if let Some(bucket_name) = bucket {
+                                                            <span
+                                                                class="badge text-bg-info ms-2"
+                                                                title="A/B experiment variant currently used for recommendations on this account"
+                                                            >
+                                                                { format!("variant: {bucket_name}") }
+                                                            </span>
+                                                        }
                                                     </span>
                                                     <div class="btn-group btn-group-sm" role="group">
                                                         if is_editing {

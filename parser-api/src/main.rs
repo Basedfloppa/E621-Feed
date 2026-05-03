@@ -401,6 +401,26 @@ async fn get_account_blacklist(
     }))
 }
 
+#[openapi(tag = "Accounts")]
+#[get("/account/<account_id>/experiment_bucket?<owner_token>")]
+async fn get_account_experiment_bucket(
+    account_id: i32,
+    owner_token: &str,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    validation::validate_owner_token(owner_token)?;
+    validation::validate_account_id(account_id)?;
+    let owner = owner_token.to_string();
+    let explicit = db_blocking(move || {
+        get_account_by_id(&owner, account_id)
+            .map_err(|e| format!("Failed to validate account access: {e}"))?;
+        db::get_account_experiment_bucket(account_id)
+            .map_err(|e| format!("Failed to read experiment bucket: {e}"))
+    })
+    .await?;
+    let (bucket, _) = cfg().pick_bucket(account_id, explicit.as_deref());
+    Ok(Json(serde_json::json!({ "bucket": bucket })))
+}
+
 /// Sever the device → account link. The underlying `accounts` row stays
 /// intact so other devices that linked the same account aren't affected;
 /// any orphaned rows are removed by the periodic GC (Phase 6).
@@ -447,6 +467,11 @@ async fn update_account_blacklist(
 async fn log_feed_interaction(payload: Json<FeedInteractionRequest>) -> Result<(), ApiError> {
     let body = payload.into_inner();
     validation::validate_feed_interaction(&body)?;
+
+    if matches!(body.event_type, models::FeedInteractionType::Unknown) {
+        debug!("[feed] dropped unknown event_type from forward-compat client");
+        return Ok(());
+    }
     // Tight per-device cap — feed scrolling fires impressions per card,
     // a normal session is well under this. Anything higher is either a
     // bug (re-render storm) or an attempt to write-flood SQLite.
@@ -679,6 +704,7 @@ async fn rocket() -> _ {
         delete_account,
         get_account_blacklist,
         update_account_blacklist,
+        get_account_experiment_bucket,
         get_recommendations
     ];
 

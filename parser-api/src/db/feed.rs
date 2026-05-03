@@ -63,6 +63,7 @@ pub fn record_feed_interaction(interaction: &FeedInteractionRequest) -> Result<(
                 FeedInteractionType::QualifiedImpression => (1, 0, 0),
                 FeedInteractionType::Open => (0, 1, 0),
                 FeedInteractionType::Hide => (0, 0, 1),
+                FeedInteractionType::Unknown => (0, 0, 0),
             };
 
             let now_iso = Utc::now().to_rfc3339();

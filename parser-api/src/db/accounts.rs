@@ -194,6 +194,19 @@ pub fn delete_device_link(owner_token: &str, account_id: i32) -> Result<usize, S
     })
 }
 
+pub fn cleanup_orphan_accounts() -> Result<i64, String> {
+    let deleted = super::with_write_tx(|tx| {
+        tx.execute(
+            "DELETE FROM accounts
+             WHERE id NOT IN (SELECT account_id FROM account_device_links)
+               AND id NOT IN (SELECT DISTINCT account_id FROM accounts_post)",
+            [],
+        )
+        .map_err(|e| format!("delete orphan accounts: {e}"))
+    })?;
+    Ok(deleted as i64)
+}
+
 pub fn get_account_experiment_bucket(account_id: i32) -> Result<Option<String>, String> {
     let conn = open_db()?;
     conn.query_row(

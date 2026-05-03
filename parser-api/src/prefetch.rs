@@ -77,6 +77,16 @@ async fn cleanup_loop() {
             Err(e) => warn!("[catalog-cleanup] task panicked: {e}"),
             _ => {}
         }
+
+        match rocket::tokio::task::spawn_blocking(db::cleanup_orphan_accounts).await {
+            Ok(Ok(deleted)) if deleted > 0 => {
+                info!("[account-cleanup] dropped {deleted} orphan accounts");
+            }
+            Ok(Err(e)) => warn!("[account-cleanup] failed: {e}"),
+            Err(e) => warn!("[account-cleanup] task panicked: {e}"),
+            _ => {}
+        }
+
         let secs = cfg().runtime.cleanup_interval_secs.max(60);
         rocket::tokio::time::sleep(Duration::from_secs(secs)).await;
     }

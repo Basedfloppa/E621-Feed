@@ -12,6 +12,7 @@ wasm-bindgen-futures = "0.4"
 wasm-bindgen = { version = "0.2.100", features = [] }
 web-sys = { version = "0.3.77", features = [
     "Window",
+    "Crypto",
     "Storage",
     "StorageEvent",
     "HtmlElement",

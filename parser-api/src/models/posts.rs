@@ -161,6 +161,9 @@ pub enum FeedInteractionType {
     QualifiedImpression,
     Open,
     Hide,
+
+    #[serde(other)]
+    Unknown,
 }
 
 impl Display for FeedInteractionType {
@@ -169,6 +172,7 @@ impl Display for FeedInteractionType {
             FeedInteractionType::QualifiedImpression => write!(f, "qualified_impression"),
             FeedInteractionType::Open => write!(f, "open"),
             FeedInteractionType::Hide => write!(f, "hide"),
+            FeedInteractionType::Unknown => write!(f, "unknown"),
         }
     }
 }
