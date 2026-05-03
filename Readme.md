@@ -15,6 +15,12 @@ https://e621scraper.duckdns.org
 
 ---
 
+## About
+
+A self-hosted alternative to e621's built-in feed: imports your favourites, builds a per-account preference profile, and serves a personalized feed.
+
+---
+
 ## Features
 - Save and manage personal favorites
 - Generate a customized feed based on your preferences
@@ -110,4 +116,11 @@ http://localhost:8000
 cd ./parser-web/
 trunk serve
 ```
+
+---
+
+## License
+
+[MIT-0 (MIT No Attribution)](LICENCE) — use, modify, and redistribute
+freely, no attribution required.
 
