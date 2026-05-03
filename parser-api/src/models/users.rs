@@ -1,6 +1,6 @@
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
 use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(untagged)]
@@ -60,6 +60,18 @@ pub struct DeviceScopedAccount {
 #[serde(crate = "rocket::serde")]
 pub struct BlacklistPayload {
     pub blacklist: String,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct UserSearchResult {
+    pub id: i32,
+    pub name: String,
+    #[serde(default)]
+    pub level: i32,
+    #[serde(default)]
+    pub post_upload_count: i32,
+    #[serde(default)]
+    pub is_banned: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

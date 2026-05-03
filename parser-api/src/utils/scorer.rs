@@ -8,14 +8,12 @@ use crate::utils::idf::IdfIndex;
 use crate::utils::tag_relation::{TagId, TagRelationGraph};
 
 const GROUP_COUNT: usize = 7;
-const DIVERSITY_INTERACTION_DAMP: f32 = 0.35;
-const DIVERSITY_MAX_PENALTY: f32 = 0.45;
-const DISCRETE_PREF_FLOOR: f32 = 0.05;
 const FEEDBACK_NEUTRAL: f32 = 0.5;
-/// At n_favorites = COLDSTART_N0 the personal signal hits 50% confidence.
-const COLDSTART_N0: f32 = 50.0;
-/// 95% one-sided Wilson lower-bound z-score.
+/// 95% one-sided Wilson lower-bound z-score. Mathematical constant — kept
+/// in source (changing it changes the meaning of `strong_negative_*`
+/// thresholds, not just the magnitude).
 const WILSON_Z: f32 = 1.96;
+/// BM25 saturation constant. Standard literature default.
 const BM25_K: f32 = 1.6;
 
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
@@ -134,25 +132,87 @@ pub struct Priors {
     /// tags); this weight applies in the interaction channel only.
     #[serde(default = "default_meta_interaction_weight")]
     pub meta_interaction_weight: f32,
+
+    /// Cold-start half-confidence point. At `n_favorites = coldstart_n0` the
+    /// personal-vs-global blend hits 50%. Lower → personal signal kicks in
+    /// for newer users; higher → wait for more data before trusting it.
+    #[serde(default = "default_coldstart_n0")]
+    pub coldstart_n0: f32,
+    /// Floor for "discrete preference" smoothing on rating/media. Lower →
+    /// allow strong rejection of unseen options; higher → keep neutral floor.
+    #[serde(default = "default_discrete_pref_floor")]
+    pub discrete_pref_floor: f32,
+    /// MMR diversity: max penalty a candidate can receive for redundancy.
+    #[serde(default = "default_diversity_max_penalty")]
+    pub diversity_max_penalty: f32,
+    /// MMR: how strongly per-tag interaction history rescues redundant items.
+    #[serde(default = "default_diversity_interaction_damp")]
+    pub diversity_interaction_damp: f32,
 }
 
-fn default_quality_log_bias() -> f32 { -3.0 }
-fn default_discrete_smoothing_alpha() -> f32 { 1.0 }
-fn default_strong_negative_count() -> i64 { 3 }
-fn default_strong_negative_penalty() -> f32 { 0.40 }
-fn default_recency_personal_floor_frac() -> f32 { 1.0 }
-fn default_mix_tag_relation() -> f32 { 0.0 }
-fn default_tag_relation_w_global() -> f32 { 0.4 }
-fn default_tag_relation_w_personal() -> f32 { 0.6 }
-fn default_tag_relation_pmi_scale() -> f32 { 5.0 }
-fn default_tag_relation_min_cooc() -> i64 { 2 }
-fn default_tag_relation_user_min_cooc() -> i64 { 1 }
-fn default_tag_relation_cooc_ref() -> f32 { 20.0 }
-fn default_tag_relation_user_cooc_ref() -> f32 { 5.0 }
-fn default_strong_negative_wilson_threshold() -> f32 { 0.55 }
-fn default_recency_log_personal() -> bool { true }
-fn default_feedback_decay_half_life_days() -> f32 { 90.0 }
-fn default_meta_interaction_weight() -> f32 { 0.3 }
+fn default_quality_log_bias() -> f32 {
+    -3.0
+}
+fn default_discrete_smoothing_alpha() -> f32 {
+    1.0
+}
+fn default_strong_negative_count() -> i64 {
+    3
+}
+fn default_strong_negative_penalty() -> f32 {
+    0.40
+}
+fn default_recency_personal_floor_frac() -> f32 {
+    1.0
+}
+fn default_mix_tag_relation() -> f32 {
+    0.0
+}
+fn default_tag_relation_w_global() -> f32 {
+    0.4
+}
+fn default_tag_relation_w_personal() -> f32 {
+    0.6
+}
+fn default_tag_relation_pmi_scale() -> f32 {
+    3.5
+}
+fn default_tag_relation_min_cooc() -> i64 {
+    2
+}
+fn default_tag_relation_user_min_cooc() -> i64 {
+    1
+}
+fn default_tag_relation_cooc_ref() -> f32 {
+    16.0
+}
+fn default_tag_relation_user_cooc_ref() -> f32 {
+    5.0
+}
+fn default_strong_negative_wilson_threshold() -> f32 {
+    0.55
+}
+fn default_recency_log_personal() -> bool {
+    true
+}
+fn default_feedback_decay_half_life_days() -> f32 {
+    90.0
+}
+fn default_meta_interaction_weight() -> f32 {
+    0.3
+}
+fn default_coldstart_n0() -> f32 {
+    25.0
+}
+fn default_discrete_pref_floor() -> f32 {
+    0.05
+}
+fn default_diversity_max_penalty() -> f32 {
+    0.45
+}
+fn default_diversity_interaction_damp() -> f32 {
+    0.35
+}
 
 #[inline]
 fn sigmoid(x: f32) -> f32 {
@@ -179,7 +239,7 @@ fn one_sided_ratio(value: f32, baseline: f32) -> f32 {
 }
 
 #[inline]
-fn discrete_preference_smooth(total: i64, matched: i64, k: usize, alpha: f32) -> f32 {
+fn discrete_preference_smooth(total: i64, matched: i64, k: usize, alpha: f32, floor: f32) -> f32 {
     if total <= 0 {
         return FEEDBACK_NEUTRAL;
     }
@@ -187,7 +247,7 @@ fn discrete_preference_smooth(total: i64, matched: i64, k: usize, alpha: f32) ->
     let a = alpha.max(0.0);
     let num = matched.max(0) as f32 + a;
     let den = total as f32 + a * k;
-    (num / den).sqrt().clamp(DISCRETE_PREF_FLOOR, 1.0)
+    (num / den).sqrt().clamp(floor, 1.0)
 }
 
 #[inline]
@@ -353,9 +413,7 @@ impl<'a> ScoringContext<'a> {
             let saturated = (tf * (BM25_K + 1.0)) / (tf + BM25_K);
             let w = saturated.powf(priors.freq_alpha) * g * idf_w;
             if w > 0.0 {
-                *user[group as usize]
-                    .entry(tlc.into_owned())
-                    .or_insert(0.0) += w;
+                *user[group as usize].entry(tlc.into_owned()).or_insert(0.0) += w;
             }
         }
         for map in &user {
@@ -388,7 +446,7 @@ impl<'a> ScoringContext<'a> {
 
         // n_favorites ≈ rating_total; media_total is a fallback if rating missing.
         let n_favorites = rating_total.max(media_total).max(0) as f32;
-        let personal_confidence = confidence(n_favorites, COLDSTART_N0);
+        let personal_confidence = confidence(n_favorites, priors.coldstart_n0.max(1.0));
 
         let strong_total = total_pos + total_neg;
         let user_base_positive_rate = if strong_total > 0.0 {
@@ -552,8 +610,15 @@ impl<'a> ScoringContext<'a> {
             .unwrap_or(0);
         let k = self.profile.rating.len().max(3);
         // Expand smoothing on small profiles so rare ratings aren't nuked by tiny samples.
-        let alpha = self.priors.discrete_smoothing_alpha * (1.0 + (1.0 - self.personal_confidence) * 2.0);
-        discrete_preference_smooth(self.rating_total, matched, k, alpha)
+        let alpha =
+            self.priors.discrete_smoothing_alpha * (1.0 + (1.0 - self.personal_confidence) * 2.0);
+        discrete_preference_smooth(
+            self.rating_total,
+            matched,
+            k,
+            alpha,
+            self.priors.discrete_pref_floor,
+        )
     }
 
     fn media_fit(&self, post: &Post) -> f32 {
@@ -566,8 +631,15 @@ impl<'a> ScoringContext<'a> {
             .map(|s| s.count.max(0))
             .unwrap_or(0);
         let k = self.profile.media.len().max(3);
-        let alpha = self.priors.discrete_smoothing_alpha * (1.0 + (1.0 - self.personal_confidence) * 2.0);
-        discrete_preference_smooth(self.media_total, matched, k, alpha)
+        let alpha =
+            self.priors.discrete_smoothing_alpha * (1.0 + (1.0 - self.personal_confidence) * 2.0);
+        discrete_preference_smooth(
+            self.media_total,
+            matched,
+            k,
+            alpha,
+            self.priors.discrete_pref_floor,
+        )
     }
 
     fn interaction_fit(&self, post: &Post) -> (f32, bool) {
@@ -576,19 +648,46 @@ impl<'a> ScoringContext<'a> {
         let mut strong_neg = false;
 
         let strong_min = self.priors.strong_negative_count.max(1) as f32;
-        let wilson_threshold = self.priors.strong_negative_wilson_threshold.clamp(0.05, 0.99);
+        let wilson_threshold = self
+            .priors
+            .strong_negative_wilson_threshold
+            .clamp(0.05, 0.99);
         let p0 = self.user_base_positive_rate;
         let meta_w = self.priors.meta_interaction_weight.max(0.0);
 
         // Meta is excluded from tag_similarity / tag_relation but contributes
         // here under its own weight (preferences for monochrome, absurd_res, …).
         let groups: [(Group, &Vec<String>, f32); 7] = [
-            (Group::Artist, &post.tags.artist, self.group_wts[Group::Artist as usize]),
-            (Group::Character, &post.tags.character, self.group_wts[Group::Character as usize]),
-            (Group::Copyright, &post.tags.copyright, self.group_wts[Group::Copyright as usize]),
-            (Group::Species, &post.tags.species, self.group_wts[Group::Species as usize]),
-            (Group::General, &post.tags.general, self.group_wts[Group::General as usize]),
-            (Group::Lore, &post.tags.lore, self.group_wts[Group::Lore as usize]),
+            (
+                Group::Artist,
+                &post.tags.artist,
+                self.group_wts[Group::Artist as usize],
+            ),
+            (
+                Group::Character,
+                &post.tags.character,
+                self.group_wts[Group::Character as usize],
+            ),
+            (
+                Group::Copyright,
+                &post.tags.copyright,
+                self.group_wts[Group::Copyright as usize],
+            ),
+            (
+                Group::Species,
+                &post.tags.species,
+                self.group_wts[Group::Species as usize],
+            ),
+            (
+                Group::General,
+                &post.tags.general,
+                self.group_wts[Group::General as usize],
+            ),
+            (
+                Group::Lore,
+                &post.tags.lore,
+                self.group_wts[Group::Lore as usize],
+            ),
             (Group::Meta, &post.tags.meta, meta_w),
         ];
 
@@ -713,8 +812,7 @@ impl<'a> ScoringContext<'a> {
                             let denom = gi_df * gj_df / ng;
                             if denom > 0.0 {
                                 let lift = (c as f32) / denom;
-                                let raw_pmi =
-                                    (lift.max(1e-6).ln() / pmi_scale).clamp(0.0, 1.0);
+                                let raw_pmi = (lift.max(1e-6).ln() / pmi_scale).clamp(0.0, 1.0);
                                 let conf_pmi =
                                     ((c as f32 + 1.0).ln() / cooc_ref_log).clamp(0.0, 1.0);
                                 (raw_pmi * conf_pmi, true)
@@ -738,10 +836,9 @@ impl<'a> ScoringContext<'a> {
                             let denom = gi_um * gj_um / nu;
                             if denom > 0.0 {
                                 let lift = (c as f32) / denom;
-                                let signed_pmi =
-                                    (lift.max(1e-6).ln() / pmi_scale).clamp(-1.0, 1.0);
-                                let conf_user = ((c as f32 + 1.0).ln() / user_cooc_ref_log)
-                                    .clamp(0.0, 1.0);
+                                let signed_pmi = (lift.max(1e-6).ln() / pmi_scale).clamp(-1.0, 1.0);
+                                let conf_user =
+                                    ((c as f32 + 1.0).ln() / user_cooc_ref_log).clamp(0.0, 1.0);
                                 let mapped = (signed_pmi * conf_user + 1.0) * 0.5;
                                 (mapped.clamp(0.0, 1.0), true)
                             } else {
@@ -791,9 +888,13 @@ impl<'a> ScoringContext<'a> {
             let log_age = age_days.max(0.0).ln_1p();
             let log_avg = avg_age.max(0.0).ln_1p();
             let log_spread = (spread / avg_age.max(1.0)).max(0.05);
-            (-((log_age - log_avg).abs()) / log_spread).exp().clamp(0.0, 1.0)
+            (-((log_age - log_avg).abs()) / log_spread)
+                .exp()
+                .clamp(0.0, 1.0)
         } else {
-            (-((age_days - avg_age).abs()) / spread).exp().clamp(0.0, 1.0)
+            (-((age_days - avg_age).abs()) / spread)
+                .exp()
+                .clamp(0.0, 1.0)
         };
 
         let conf = self.personal_confidence;
@@ -870,10 +971,7 @@ pub fn diversify_scored_posts(mut posts: Vec<ScoredPost>, priors: &Priors) -> Ve
     // item carried the current maximum (otherwise removing it can't change
     // `max(remaining.score)`). Drops the per-iteration full scan and turns
     // the loop's overhead into roughly O(N + #ties).
-    let mut top_score = posts
-        .iter()
-        .map(|p| p.score)
-        .fold(f32::MIN, f32::max);
+    let mut top_score = posts.iter().map(|p| p.score).fold(f32::MIN, f32::max);
 
     while !posts.is_empty() {
         // MMR: penalty = redundancy * gap-from-top. Perfect score → gap≈0 → minimal penalty.
@@ -891,8 +989,8 @@ pub fn diversify_scored_posts(mut posts: Vec<ScoredPost>, priors: &Priors) -> Ve
             let gap = (top_score - posts[idx].score).max(0.0);
             let penalty = (redundancy
                 * gap
-                * (1.0 - DIVERSITY_INTERACTION_DAMP * interaction_fit))
-                .clamp(0.0, DIVERSITY_MAX_PENALTY);
+                * (1.0 - priors.diversity_interaction_damp.clamp(0.0, 1.0) * interaction_fit))
+                .clamp(0.0, priors.diversity_max_penalty.clamp(0.0, 1.0));
             let adj = posts[idx].score - penalty;
             let id = posts[idx].post.id;
             if adj > best_value || (adj == best_value && id < best_id) {
@@ -906,10 +1004,7 @@ pub fn diversify_scored_posts(mut posts: Vec<ScoredPost>, priors: &Priors) -> Ve
         selected.push(posts.swap_remove(best_idx));
         selected_feats.push(features.swap_remove(best_idx));
         if removed_was_top && !posts.is_empty() {
-            top_score = posts
-                .iter()
-                .map(|p| p.score)
-                .fold(f32::MIN, f32::max);
+            top_score = posts.iter().map(|p| p.score).fold(f32::MIN, f32::max);
         }
     }
 

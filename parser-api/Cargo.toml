@@ -2,6 +2,14 @@
 name = "e621-account-parser-api"
 path = "src/main.rs"
 
+[[bin]]
+name = "calibrate"
+path = "src/bin/calibrate.rs"
+
+[[bin]]
+name = "seed"
+path = "src/bin/seed.rs"
+
 [package]
 name = "e621-account-parser-api"
 version = "0.1.0"
@@ -24,6 +32,7 @@ toml = "0.9"
 arc-swap = "1"
 rocket_okapi = { version = "0.9", features = ["swagger"] }
 schemars = { version = "0.8.21", features = ["chrono"] }
+rayon = "1"
 
 [target.'cfg(debug_assertions)'.dependencies]
 rocket_cors = "0.6.0"

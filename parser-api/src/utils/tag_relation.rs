@@ -5,9 +5,16 @@ use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
 
 /// Same coalescing as IDF: hold the rebuild worker alive briefly so a burst of
-/// dirty marks (one per /recommendations page during scroll) doesn't re-spawn
-/// the thread for every page.
-const REBUILD_COOLDOWN: Duration = Duration::from_secs(15);
+/// dirty marks doesn't re-spawn the thread for every page. Read fresh from
+/// `runtime.tag_relation_rebuild_cooldown_secs` per iteration.
+fn rebuild_cooldown() -> Duration {
+    Duration::from_secs(
+        crate::models::cfg()
+            .runtime
+            .tag_relation_rebuild_cooldown_secs
+            .max(1),
+    )
+}
 
 pub type GroupKey = u8;
 pub type TagId = u32;
@@ -145,7 +152,7 @@ fn spawn_rebuild_if_needed() {
                     break;
                 }
 
-                let deadline = Instant::now() + REBUILD_COOLDOWN;
+                let deadline = Instant::now() + rebuild_cooldown();
                 while Instant::now() < deadline {
                     if GLOBAL_DIRTY.load(Ordering::Acquire) {
                         break;

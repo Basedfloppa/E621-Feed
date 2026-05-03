@@ -1,0 +1,126 @@
+# Example config showing every supported key with its default value.
+# Copy to `config.toml`, set the secrets at the top, and override only
+# the knobs you actually want to change — everything else is optional.
+#
+# This file is the source of truth for default values referenced in
+# `../Readme.md` and `../docs/calibration.md`. Keep it in sync with the
+# `default_*` functions in `src/models/config.rs`.
+
+# --- Required ---------------------------------------------------------------
+admin_user    = "username"
+admin_api     = "api_key"
+
+# --- Top-level ---------------------------------------------------------------
+tag_blacklist = ["tag1", "tag2", "tagN"]
+posts_domain  = "https://uri.com"
+posts_limit   = 160       # 320 is the e621 max
+rps_delay_ms  = 250
+max_retries   = 3
+df_floor      = 0.7
+idf_max       = 100.0
+
+# --- Tag-group weights ------------------------------------------------------
+[group_weights]
+'artist'    = 2.0
+'character' = 1.6
+'copyright' = 1.2
+'species'   = 1.1
+'general'   = 1.0
+'lore'      = 0.45
+'meta'      = 0.0
+
+# --- Scoring priors ---------------------------------------------------------
+[priors]
+now              = "2000-1-01T12:00:00Z"  # dummy, replaced with current date at load
+recency_tau_days = 10.0
+
+quality_a        = 0.50
+quality_b        = 0.20
+quality_log_bias = -3.0
+
+mix_sim          = 0.58
+mix_quality      = 0.05
+mix_recency      = 0.04
+mix_rating       = 0.07
+mix_media        = 0.05
+mix_popularity   = 0.04
+mix_interaction  = 0.10
+mix_tag_relation = 0.08
+
+# IDF / frequency shaping
+idf_lambda = 0.55
+idf_alpha  = 0.85
+freq_alpha = 0.65
+
+# Quality channel internals (sum to 1.0)
+quality_w_absolute          = 0.55
+quality_w_relative_score    = 0.30
+quality_w_relative_comments = 0.15
+
+# Popularity channel internals (sum to 1.0)
+popularity_w_fav      = 0.80
+popularity_w_duration = 0.20
+
+# Recency channel internals (sum to 1.0)
+recency_w_global   = 0.40
+recency_w_personal = 0.60
+
+# Diversity / MMR
+diversity_window     = 32
+diversity_w_artist   = 0.22
+diversity_w_character = 0.16
+diversity_w_general  = 0.08
+
+# Discrete-preference smoothing + strong-negative veto
+discrete_smoothing_alpha          = 1.0
+strong_negative_count             = 3
+strong_negative_penalty           = 0.40
+strong_negative_wilson_threshold  = 0.55
+
+# Personal recency window
+recency_personal_floor_frac = 1.0
+recency_log_personal        = true
+
+# Tag-relation graph (pmi_scale and cooc_ref tuned in v5 grid)
+tag_relation_w_global       = 0.4
+tag_relation_w_personal     = 0.6
+tag_relation_pmi_scale      = 3.5
+tag_relation_min_cooc       = 2
+tag_relation_user_min_cooc  = 1
+tag_relation_cooc_ref       = 16.0
+tag_relation_user_cooc_ref  = 5.0
+
+# Feedback decay + meta interaction
+feedback_decay_half_life_days = 90.0
+meta_interaction_weight       = 0.3
+
+# Cold-start + diversity caps
+coldstart_n0               = 25.0
+discrete_pref_floor        = 0.05
+diversity_max_penalty      = 0.45
+diversity_interaction_damp = 0.35
+
+# --- Runtime / worker tuning ------------------------------------------------
+[runtime]
+local_candidate_limit            = 400    # local-catalog candidates per /recommendations page
+dedup_lookback_days              = 14     # hide posts seen within this window
+process_fetch_concurrency        = 4      # parallel pages during /process import
+idf_rebuild_cooldown_secs        = 15
+idf_bump_drift_threshold         = 200    # full IDF rebuild after this many incremental bumps
+tag_relation_rebuild_cooldown_secs = 15
+prefetch_interval_secs           = 180    # background catalog prefetcher cadence
+cleanup_interval_secs            = 21600  # 6h — stale-catalog pruning cadence
+catalog_retention_days           = 90     # prune posts older than this if no user owns them
+prefetch_active_window_days      = 14     # only prefetch for accounts active in this window
+
+# --- Calibration / seed knobs (see ../docs/calibration.md) ------------------
+[backtest]
+min_favs           = 100
+test_fraction      = 0.20
+negative_ratio     = 10                  # ~max_accounts × 256 × NEG × 5 KB cached RAM — don't exceed free RAM
+top_k_ndcg         = 20
+top_k_recall       = 50
+max_accounts       = 150
+max_pages_per_user = 8                   # 160 favs/page on e621
+seed_owner_token   = "calibration-seed"
+calibrate_threads  = 0                   # 0 = auto = nproc/2

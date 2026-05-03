@@ -1,43 +1,58 @@
 use arc_swap::ArcSwap;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, LazyLock};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::models::cfg;
 
-/// After a rebuild completes, the worker thread lingers for this long picking
-/// up any further `mark_idf_dirty()` calls. Without it, a busy /recommendations
-/// stream re-spawns the rebuild thread on every request — same work, more
-/// thread churn and more redundant table scans.
-const REBUILD_COOLDOWN: Duration = Duration::from_secs(15);
+/// Coalesce a burst of dirty marks into one rebuild. Duration read fresh from
+/// `runtime.idf_rebuild_cooldown_secs` so config reloads take effect on the
+/// next worker iteration.
+fn rebuild_cooldown() -> Duration {
+    Duration::from_secs(cfg().runtime.idf_rebuild_cooldown_secs.max(1))
+}
 
 #[derive(Debug, Clone)]
 pub struct IdfIndex {
+    df: HashMap<String, i64>,
     idf: HashMap<String, f32>,
+    n_posts: i64,
 }
 
 impl IdfIndex {
     pub fn empty() -> Self {
-        Self { idf: HashMap::new() }
+        Self {
+            df: HashMap::new(),
+            idf: HashMap::new(),
+            n_posts: 0,
+        }
+    }
+
+    fn compute_idf(df_raw: i64, n_posts: i64) -> f32 {
+        let cfg = cfg();
+        let n = n_posts.max(1) as f32;
+        let dfv = df_raw.max(0) as f32;
+        let dfp = dfv + cfg.df_floor;
+        (1.0 + ((n - dfp + 0.5) / (dfp + 0.5)).max(0.0))
+            .ln()
+            .min(cfg.idf_max)
+            .max(0.0)
     }
 
     pub fn from_df(df: &HashMap<String, i64>, n_posts: i64) -> Self {
-        let cfg = cfg();
         let mut idf = HashMap::with_capacity(df.len());
-        let n = n_posts.max(1) as f32;
-
+        let mut df_lc: HashMap<String, i64> = HashMap::with_capacity(df.len());
         for (tag, &df_raw) in df {
-            let dfv = df_raw.max(0) as f32;
-            let dfp = dfv + cfg.df_floor;
-            let val = (1.0 + ((n - dfp + 0.5) / (dfp + 0.5)).max(0.0))
-                .ln()
-                .min(cfg.idf_max)
-                .max(0.0);
-            idf.insert(tag.to_lowercase(), val);
+            let lc = tag.to_lowercase();
+            idf.insert(lc.clone(), Self::compute_idf(df_raw, n_posts));
+            df_lc.insert(lc, df_raw);
         }
-
-        Self { idf }
+        Self {
+            df: df_lc,
+            idf,
+            n_posts,
+        }
     }
 
     pub fn from_db() -> rusqlite::Result<Self> {
@@ -61,16 +76,66 @@ impl IdfIndex {
         let blended = 1.0 + lambda.clamp(0.0, 1.0) * (raw - 1.0);
         blended.powf(alpha.clamp(0.0, 1.0))
     }
+
+    pub fn bump(&mut self, df_delta: &HashMap<String, i64>, n_posts_delta: i64) {
+        if df_delta.is_empty() && n_posts_delta == 0 {
+            return;
+        }
+        self.n_posts = (self.n_posts + n_posts_delta).max(0);
+
+        if n_posts_delta != 0 {
+            for (tag, df_raw) in &self.df {
+                self.idf
+                    .insert(tag.clone(), Self::compute_idf(*df_raw, self.n_posts));
+            }
+        }
+
+        for (tag, &delta) in df_delta {
+            if delta == 0 {
+                continue;
+            }
+            let lc = if tag.bytes().any(|b| b.is_ascii_uppercase()) {
+                tag.to_ascii_lowercase()
+            } else {
+                tag.clone()
+            };
+            let new_df = {
+                let entry = self.df.entry(lc.clone()).or_insert(0);
+                *entry = (*entry + delta).max(0);
+                *entry
+            };
+            self.idf.insert(lc, Self::compute_idf(new_df, self.n_posts));
+        }
+    }
 }
 
 static IDF_CACHE: LazyLock<ArcSwap<IdfIndex>> =
     LazyLock::new(|| ArcSwap::from_pointee(IdfIndex::empty()));
 static IDF_DIRTY: AtomicBool = AtomicBool::new(true);
 static IDF_REBUILDING: AtomicBool = AtomicBool::new(false);
+static BUMP_LOCK: Mutex<()> = Mutex::new(());
+static BUMP_DRIFT_COUNT: AtomicI64 = AtomicI64::new(0);
 
 pub fn mark_idf_dirty() {
     IDF_DIRTY.store(true, Ordering::Release);
     spawn_rebuild_if_needed();
+}
+
+pub fn bump_idf(df_delta: HashMap<String, i64>, n_posts_delta: i64) {
+    if df_delta.is_empty() && n_posts_delta == 0 {
+        return;
+    }
+    let _guard = BUMP_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let current = IDF_CACHE.load_full();
+    let mut next = (*current).clone();
+    next.bump(&df_delta, n_posts_delta);
+    IDF_CACHE.store(Arc::new(next));
+
+    let n = BUMP_DRIFT_COUNT.fetch_add(1, Ordering::AcqRel) + 1;
+    if n >= cfg().runtime.idf_bump_drift_threshold.max(1) {
+        BUMP_DRIFT_COUNT.store(0, Ordering::Release);
+        mark_idf_dirty();
+    }
 }
 
 fn spawn_rebuild_if_needed() {
@@ -87,7 +152,10 @@ fn spawn_rebuild_if_needed() {
                         break 'work;
                     }
                     match IdfIndex::from_db() {
-                        Ok(new) => IDF_CACHE.store(Arc::new(new)),
+                        Ok(new) => {
+                            IDF_CACHE.store(Arc::new(new));
+                            BUMP_DRIFT_COUNT.store(0, Ordering::Release);
+                        }
                         Err(e) => {
                             eprintln!("[idf] rebuild failed: {e}");
                             IDF_DIRTY.store(true, Ordering::Release);
@@ -106,7 +174,7 @@ fn spawn_rebuild_if_needed() {
                 // Cooldown: stay alive briefly so a burst of mark_idf_dirty()
                 // calls (e.g. infinite-scroll fetches) coalesces into a single
                 // follow-up rebuild instead of re-spawning the thread.
-                let deadline = Instant::now() + REBUILD_COOLDOWN;
+                let deadline = Instant::now() + rebuild_cooldown();
                 while Instant::now() < deadline {
                     if IDF_DIRTY.load(Ordering::Acquire) {
                         break;
