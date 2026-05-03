@@ -78,6 +78,78 @@ function buildStep(tour, raw) {
     return step;
 }
 
+function attachFocusTrap(tour) {
+    let prevFocus = null;
+    let trapHandler = null;
+
+    function focusableNodes(stepEl) {
+        return Array.from(stepEl.querySelectorAll(
+            'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+        ));
+    }
+
+    function detach() {
+        if (trapHandler) {
+            document.removeEventListener('keydown', trapHandler, true);
+            trapHandler = null;
+        }
+    }
+
+    function restorePrevFocus() {
+        if (prevFocus && typeof prevFocus.focus === 'function') {
+            try { prevFocus.focus(); } catch (_) { /* element may have been removed */ }
+        }
+        prevFocus = null;
+    }
+
+    tour.on('show', () => {
+        const stepEl = tour.getCurrentStep()?.getElement();
+        if (!stepEl) return;
+        if (!prevFocus) {
+            prevFocus = document.activeElement;
+        }
+
+        // Detach any previous step's handler so we don't stack listeners.
+        detach();
+
+        const focusables = focusableNodes(stepEl);
+        if (focusables.length > 0) {
+            // Defer to the next frame: Shepherd inserts the step element
+            // and animates it in; focusing too early loses to the
+            // animation reset.
+            requestAnimationFrame(() => focusables[0].focus());
+        }
+
+        trapHandler = (e) => {
+            if (e.key === 'Escape') {
+                e.preventDefault();
+                tour.cancel();
+                return;
+            }
+            if (e.key !== 'Tab') return;
+            const live = focusableNodes(stepEl);
+            if (live.length === 0) {
+                e.preventDefault();
+                return;
+            }
+            const first = live[0];
+            const last = live[live.length - 1];
+            if (e.shiftKey && document.activeElement === first) {
+                e.preventDefault();
+                last.focus();
+            } else if (!e.shiftKey && document.activeElement === last) {
+                e.preventDefault();
+                first.focus();
+            }
+        };
+        document.addEventListener('keydown', trapHandler, true);
+    });
+
+    tour.on('hide', detach);
+    tour.on('complete', () => { detach(); restorePrevFocus(); });
+    tour.on('cancel', () => { detach(); restorePrevFocus(); });
+}
+
 export function startTour(steps = [], options = {}) {
     if (TOUR) {
         TOUR.cancel();
@@ -95,6 +167,7 @@ export function startTour(steps = [], options = {}) {
     });
 
     steps.forEach(raw => TOUR.addStep(buildStep(TOUR, raw)));
+    attachFocusTrap(TOUR);
     TOUR.start();
 }
 

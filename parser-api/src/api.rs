@@ -386,6 +386,22 @@ pub async fn get_user_by_id(uid: i32) -> Result<UserApiResponse, String> {
     json::from_str::<UserApiResponse>(&body).map_err(|e| format!("user-by-id parse failed: {e}"))
 }
 
+/// Resolve a user by name. e621's `/users/<x>.json` endpoint accepts
+/// either a numeric id or a name string, so the shape mirrors
+/// `get_user_by_id`. Used by the `/api/user/name/<name>` route as a
+/// fallback when the username isn't linked to the device yet — the
+/// audit (M-2) called out that the previous "search only finds
+/// already-linked accounts" UX trapped first-time visitors.
+pub async fn get_user_by_name(name: &str) -> Result<UserApiResponse, String> {
+    let cfg = cfg();
+    let url = format!("{}/users/{}.json", cfg.posts_domain, encode(name));
+    let body = fetch_authed_text(url)
+        .await
+        .map_err(|e| format!("user-by-name {e}"))?;
+    json::from_str::<UserApiResponse>(&body)
+        .map_err(|e| format!("user-by-name parse failed: {e}"))
+}
+
 /// Same as `get_posts` but with a caller-supplied `tags` query — used by the
 /// background prefetcher to warm the catalog with content matched to specific
 /// users' top tags. The blacklist still applies, prepended to the query.

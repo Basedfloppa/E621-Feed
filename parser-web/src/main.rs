@@ -34,7 +34,9 @@ fn app() -> Html {
     html! {
         <BrowserRouter>
             <Header />
-            <Switch<Route> render={switch} />
+            <main id="main-content">
+                <Switch<Route> render={switch} />
+            </main>
         </BrowserRouter>
     }
 }

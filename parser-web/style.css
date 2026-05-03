@@ -41,6 +41,26 @@ body {
     overflow-wrap: anywhere;
 }
 
+.list-group-item {
+    overflow-wrap: anywhere;
+    word-break: break-word;
+}
+
+.list-group-item > .d-flex {
+    min-width: 0;
+}
+
+.list-group-item > .d-flex > span {
+    min-width: 0;
+    flex: 1 1 auto;
+}
+
+.btn:disabled,
+.btn.disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+}
+
 .post-card-hide-btn {
     opacity: 0;
     transition: opacity 0.15s ease-in-out;

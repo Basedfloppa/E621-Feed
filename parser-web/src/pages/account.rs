@@ -1,5 +1,6 @@
-use crate::models::{get_or_create_owner_token, read_config_from_head};
+use crate::models::{get_or_create_owner_token, humanize_error_body, read_config_from_head};
 use crate::pages::UserInfo;
+use gloo_timers::callback::Timeout;
 use reqwasm::http::Request;
 use web_sys::{HtmlInputElement, HtmlTextAreaElement};
 use yew::prelude::*;
@@ -17,6 +18,26 @@ pub fn account_creator() -> Html {
     let editing_id = use_state(|| None::<i64>);
     let edit_draft = use_state(String::new);
     let edit_saving = use_state(|| false);
+    let remove_error: UseStateHandle<Option<String>> = use_state(|| None);
+
+    {
+        let message = message.clone();
+        let is_error = *error;
+        let current_message = (*message).clone();
+        use_effect_with(
+            (current_message.clone(), is_error),
+            move |(msg, err): &(String, bool)| {
+                let timeout = if !msg.is_empty() && !*err {
+                    Some(Timeout::new(5_000, move || {
+                        message.set(String::new());
+                    }))
+                } else {
+                    None
+                };
+                move || drop(timeout)
+            },
+        );
+    }
 
     {
         let saved_accounts = saved_accounts.clone();
@@ -137,6 +158,82 @@ pub fn account_creator() -> Html {
         Callback::from(move |_| {
             editing_id.set(None);
             edit_draft.set(String::new());
+        })
+    };
+
+    let on_remove = {
+        let saved_accounts = saved_accounts.clone();
+        let editing_id = editing_id.clone();
+        let edit_draft = edit_draft.clone();
+        let remove_error = remove_error.clone();
+        Callback::from(move |account_id: i64| {
+            let target = (*saved_accounts).iter().find(|a| a.id == account_id).cloned();
+            let Some(target) = target else {
+                return;
+            };
+            let confirmed = web_sys::window()
+                .and_then(|w| {
+                    w.confirm_with_message(&format!(
+                        "Remove '{}' (ID {}) from this device's saved accounts? \
+                         The account itself isn't deleted on e621.",
+                        target.name, target.id
+                    ))
+                    .ok()
+                })
+                .unwrap_or(false);
+            if !confirmed {
+                return;
+            }
+
+            let Some(cfg) = read_config_from_head() else {
+                remove_error.set(Some(
+                    "App configuration failed to load — please reload the page.".to_string(),
+                ));
+                return;
+            };
+            let Some(owner_token) = get_or_create_owner_token() else {
+                remove_error.set(Some("Missing device token".to_string()));
+                return;
+            };
+            let url = format!(
+                "{}/account/{}?owner_token={}",
+                cfg.backend_domain,
+                target.id,
+                urlencoding::encode(&owner_token)
+            );
+
+            let saved_accounts = saved_accounts.clone();
+            let editing_id = editing_id.clone();
+            let edit_draft = edit_draft.clone();
+            let remove_error = remove_error.clone();
+            wasm_bindgen_futures::spawn_local(async move {
+                match Request::delete(&url).send().await {
+                    Ok(resp) if resp.ok() => {
+                        let new_list: Vec<UserInfo> = saved_accounts
+                            .iter()
+                            .filter(|u| u.id != target.id)
+                            .cloned()
+                            .collect();
+                        saved_accounts.set(new_list);
+                        // If the removed account was being edited, drop
+                        // the editor state so the form doesn't reopen
+                        // pointing at a row that no longer exists.
+                        if *editing_id == Some(target.id) {
+                            editing_id.set(None);
+                            edit_draft.set(String::new());
+                        }
+                        remove_error.set(None);
+                    }
+                    Ok(resp) => {
+                        let status = resp.status();
+                        let body = resp.text().await.unwrap_or_default();
+                        remove_error.set(Some(humanize_error_body(status, &body)));
+                    }
+                    Err(e) => {
+                        remove_error.set(Some(format!("Network error: {e}")));
+                    }
+                }
+            });
         })
     };
 
@@ -370,6 +467,15 @@ pub fn account_creator() -> Html {
                         <div class="card shadow mb-4">
                             <div class="card-body">
                                 <h2 class="card-title text-center mb-4">{"Saved Accounts"}</h2>
+                                {
+                                    if let Some(err) = &*remove_error {
+                                        html! {
+                                            <div class="alert alert-danger py-2 px-3 mb-3" role="alert">
+                                                { err }
+                                            </div>
+                                        }
+                                    } else { html!{} }
+                                }
                                 <ul class="list-group">
                                     {for accounts_list.iter().map(|acc| {
                                         let is_editing = current_edit == Some(acc.id);
@@ -377,32 +483,42 @@ pub fn account_creator() -> Html {
                                         let start_edit = start_edit.clone();
                                         let cancel_edit = cancel_edit.clone();
                                         let save_edit = save_edit.clone();
+                                        let on_remove = on_remove.clone();
                                         let on_draft_change = on_edit_draft_change.clone();
                                         let draft_value = (*edit_draft).clone();
                                         let is_saving = *edit_saving;
                                         html! {
                                             <li class="list-group-item">
-                                                <div class="d-flex justify-content-between align-items-center">
+                                                <div class="d-flex justify-content-between align-items-center gap-2">
                                                     <span>
                                                         <strong>{&acc.name}</strong>
                                                         {format!(" (ID: {})", acc.id)}
                                                     </span>
-                                                    if is_editing {
-                                                        <button
-                                                            class="btn btn-sm btn-outline-secondary"
-                                                            onclick={Callback::from(move |_| cancel_edit.emit(()))}
-                                                            disabled={is_saving}
-                                                        >
-                                                            {"Cancel"}
-                                                        </button>
-                                                    } else {
-                                                        <button
-                                                            class="btn btn-sm btn-outline-primary"
-                                                            onclick={Callback::from(move |_| start_edit.emit(acc_id))}
-                                                        >
-                                                            {"Edit blacklist"}
-                                                        </button>
-                                                    }
+                                                    <div class="btn-group btn-group-sm" role="group">
+                                                        if is_editing {
+                                                            <button
+                                                                class="btn btn-outline-secondary"
+                                                                onclick={Callback::from(move |_| cancel_edit.emit(()))}
+                                                                disabled={is_saving}
+                                                            >
+                                                                {"Cancel"}
+                                                            </button>
+                                                        } else {
+                                                            <button
+                                                                class="btn btn-outline-primary"
+                                                                onclick={Callback::from(move |_| start_edit.emit(acc_id))}
+                                                            >
+                                                                {"Edit blacklist"}
+                                                            </button>
+                                                            <button
+                                                                class="btn btn-outline-danger"
+                                                                title="Unlink this account from the device"
+                                                                onclick={Callback::from(move |_| on_remove.emit(acc_id))}
+                                                            >
+                                                                {"Remove"}
+                                                            </button>
+                                                        }
+                                                    </div>
                                                 </div>
                                                 if is_editing {
                                                     <div class="mt-3">

@@ -215,15 +215,28 @@ async fn get_account_name(
     validation::validate_owner_token(owner_token)?;
     let owner = owner_token.to_string();
     let name_owned = name.to_string();
-    let acc = db_blocking(move || {
-        get_account_by_name(&owner, name_owned).map_err(|e| {
-            let m = format!("Failed to get account: {e}");
-            error!("{m}");
-            m
-        })
-    })
-    .await?;
-    Ok(Json(acc))
+
+    let owner_for_local = owner.clone();
+    let name_for_local = name_owned.clone();
+    let local = db_blocking(move || get_account_by_name(&owner_for_local, name_for_local)).await;
+    if let Ok(acc) = local {
+        return Ok(Json(acc));
+    }
+
+    ratelimit::check(&format!("user_lookup:owner:{owner_token}"), 30, 10)?;
+    let response = api::get_user_by_name(&name_owned).await.map_err(|e| {
+        error!("e621 user lookup for '{name_owned}' failed: {e}");
+        ApiError::NotFound(format!("No account found for '{name_owned}'"))
+    })?;
+    let (id, resolved_name) = match response {
+        UserApiResponse::FullCurrentUser(u) => (u.id, u.name),
+        UserApiResponse::FullUser(u) => (u.id, u.name),
+    };
+    Ok(Json(TruncatedAccount {
+        id,
+        name: resolved_name,
+        blacklist: String::new(),
+    }))
 }
 
 #[openapi(tag = "Users")]

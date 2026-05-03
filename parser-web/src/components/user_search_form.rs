@@ -1,7 +1,9 @@
 use reqwasm::http::Request;
+use std::cell::Cell;
 use web_sys::{HtmlInputElement, InputEvent}; // <-- from web_sys
 use yew::{
-    Callback, Html, Properties, TargetCast, UseStateHandle, function_component, html, use_state,
+    Callback, Html, Properties, TargetCast, UseStateHandle, function_component, html, use_mut_ref,
+    use_state,
 };
 
 use crate::models::{get_or_create_owner_token, humanize_error_body};
@@ -18,6 +20,7 @@ pub struct UserSearchProps {
 #[function_component(UserSearchForm)]
 pub fn user_search_form(props: &UserSearchProps) -> Html {
     let user_query = use_state(String::new);
+    let inflight = use_mut_ref(|| Cell::new(false));
 
     let on_input = {
         let user_query = user_query.clone();
@@ -33,8 +36,12 @@ pub fn user_search_form(props: &UserSearchProps) -> Html {
         let found_user = props.found_user.clone();
         let is_loading = props.is_loading.clone();
         let error = props.error.clone();
+        let inflight = inflight.clone();
 
         Callback::from(move |_| {
+            if inflight.borrow().get() {
+                return;
+            }
             let mut query = user_query.to_string();
             query = query.trim().to_string();
             if query.is_empty() {
@@ -42,6 +49,7 @@ pub fn user_search_form(props: &UserSearchProps) -> Html {
                 return;
             }
 
+            inflight.borrow().set(true);
             is_loading.set(true);
             error.set(None);
 
@@ -67,6 +75,7 @@ pub fn user_search_form(props: &UserSearchProps) -> Html {
             let found_user = found_user.clone();
             let is_loading = is_loading.clone();
             let error = error.clone();
+            let inflight_done = inflight.clone();
 
             wasm_bindgen_futures::spawn_local(async move {
                 match Request::get(&url).send().await {
@@ -90,6 +99,7 @@ pub fn user_search_form(props: &UserSearchProps) -> Html {
                     Err(e) => error.set(Some(format!("Network error: {e}"))),
                 }
                 is_loading.set(false);
+                inflight_done.borrow().set(false);
             });
         })
     };

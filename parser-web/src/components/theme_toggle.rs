@@ -87,9 +87,21 @@ pub fn theme_toggle() -> Html {
         })
     };
 
+    let label = if *is_light_theme {
+        "Switch to dark theme"
+    } else {
+        "Switch to light theme"
+    };
     html!(
-        <button type="button" class="btn" onclick={on_click}>
-            <i class={ if *is_light_theme {"bi bi-brightness-high"} else {"bi bi-moon"}}></i>
+        <button
+            type="button"
+            class="btn"
+            onclick={on_click}
+            aria-label={label}
+            title={label}
+            aria-pressed={(!*is_light_theme).to_string()}
+        >
+            <i class={ if *is_light_theme {"bi bi-brightness-high"} else {"bi bi-moon"}} aria-hidden="true"></i>
         </button>
     )
 }
