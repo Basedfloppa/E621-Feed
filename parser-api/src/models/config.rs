@@ -1,7 +1,6 @@
 use crate::utils::Priors;
 use anyhow::Context;
 use arc_swap::ArcSwap;
-use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher};
 use rocket::serde::Deserialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -336,55 +335,32 @@ pub fn default_path() -> anyhow::Result<PathBuf> {
 }
 
 pub fn start_config_watcher(path: PathBuf) -> anyhow::Result<ConfigWatcher> {
-    let parent = path
-        .parent()
-        .unwrap_or_else(|| Path::new("."))
-        .to_path_buf();
     let stop = Arc::new(AtomicBool::new(false));
     let stop_flag = stop.clone();
+    let _ = path; // path is captured by the closure below
 
     let handle = thread::spawn(move || {
-        let (tx, rx) = std::sync::mpsc::channel::<notify::Result<Event>>();
-
-        let mut watcher: RecommendedWatcher = notify::recommended_watcher(move |res| {
-            let _ = tx.send(res);
-        })
-        .expect("create watcher");
-
-        watcher
-            .watch(&parent, RecursiveMode::NonRecursive)
-            .expect("watch parent");
-
         let mut last_mtime: Option<SystemTime> = file_mtime(&path).ok();
 
         while !stop_flag.load(Ordering::Relaxed) {
-            match rx.recv_timeout(Duration::from_millis(500)) {
-                Ok(Ok(event)) => {
-                    if event
-                        .paths
-                        .iter()
-                        .any(|p| p == &path || p.file_name() == path.file_name())
-                    {
-                        thread::sleep(Duration::from_millis(120));
+            thread::sleep(Duration::from_secs(2));
+            if stop_flag.load(Ordering::Relaxed) {
+                break;
+            }
+            if let Ok(mtime) = file_mtime(&path) {
+                if last_mtime.is_none_or(|old| old < mtime) {
+                    thread::sleep(Duration::from_millis(120));
 
-                        if let Ok(mtime) = file_mtime(&path) {
-                            if last_mtime.is_none_or(|old| old < mtime) {
-                                match reload_from(&path) {
-                                    Ok(_) => {
-                                        last_mtime = Some(mtime);
-                                        eprintln!("[config] reloaded {}", path.display());
-                                    }
-                                    Err(e) => {
-                                        eprintln!("[config] reload failed: {e:#}");
-                                    }
-                                }
-                            }
+                    match reload_from(&path) {
+                        Ok(_) => {
+                            last_mtime = Some(mtime);
+                            eprintln!("[config] reloaded {}", path.display());
+                        }
+                        Err(e) => {
+                            eprintln!("[config] reload failed: {e:#}");
                         }
                     }
                 }
-                Ok(Err(e)) => eprintln!("[config] watch error: {e}"),
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
-                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
             }
         }
     });
