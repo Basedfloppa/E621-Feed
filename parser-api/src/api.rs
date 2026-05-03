@@ -50,9 +50,10 @@ fn build_url(path: &str, params: &[(&str, String)]) -> String {
 }
 
 static HTTP_CLIENT: LazyLock<Client> = LazyLock::new(|| {
-    info!("Building shared HTTP client");
+    let cfg = cfg();
+    info!("Building shared HTTP client (user_agent={})", cfg.user_agent);
     Client::builder()
-        .user_agent(format!("account scraper (by {0})", cfg().admin_user))
+        .user_agent(cfg.user_agent.clone())
         .connect_timeout(Duration::from_secs(10))
         .timeout(Duration::from_secs(30))
         .pool_idle_timeout(Some(Duration::from_secs(90)))

@@ -15,6 +15,7 @@
 //! `api.rs`, ensuring background traffic doesn't eat into the live request
 //! budget.
 
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use chrono::Utc;
@@ -24,6 +25,8 @@ use crate::api;
 use crate::db;
 use crate::models::cfg;
 use crate::utils::{bump_idf, mark_global_relation_dirty};
+
+static PREFETCH_CONSECUTIVE_FAILS: AtomicU32 = AtomicU32::new(0);
 
 pub fn spawn_prefetch_workers() {
     rocket::tokio::spawn(prefetch_loop());
@@ -36,10 +39,26 @@ async fn prefetch_loop() {
     rocket::tokio::time::sleep(Duration::from_secs(60)).await;
 
     loop {
+        let runtime = cfg().runtime.clone();
+        let threshold = runtime.prefetch_breaker_threshold;
+        let fails = PREFETCH_CONSECUTIVE_FAILS.load(Ordering::Relaxed);
+
+        if threshold > 0 && fails >= threshold {
+            let pause = runtime.prefetch_breaker_pause_secs.max(60);
+            warn!(
+                "[catalog-prefetch] circuit breaker open after {fails} consecutive failures \
+                 (threshold {threshold}); pausing {pause}s before resuming"
+            );
+            rocket::tokio::time::sleep(Duration::from_secs(pause)).await;
+            PREFETCH_CONSECUTIVE_FAILS.store(0, Ordering::Relaxed);
+            info!("[catalog-prefetch] circuit breaker reset, resuming");
+            continue;
+        }
+
         if let Err(e) = run_prefetch_tick().await {
             warn!("[catalog-prefetch] tick failed: {e}");
         }
-        let secs = cfg().runtime.prefetch_interval_secs.max(10);
+        let secs = runtime.prefetch_interval_secs.max(10);
         rocket::tokio::time::sleep(Duration::from_secs(secs)).await;
     }
 }
@@ -87,6 +106,9 @@ async fn run_prefetch_tick() -> Result<(), String> {
     for q in queries {
         match api::get_posts_by_tags(&target.blacklist, &q, Some(0)).await {
             Ok(posts) if !posts.is_empty() => {
+                // Successful fetch — reset the breaker.
+                PREFETCH_CONSECUTIVE_FAILS.store(0, Ordering::Relaxed);
+
                 let posts_for_persist = posts.clone();
                 let res = rocket::tokio::task::spawn_blocking(move || -> Result<(), String> {
                     db::upsert_catalog_posts(&posts_for_persist)
@@ -109,10 +131,16 @@ async fn run_prefetch_tick() -> Result<(), String> {
                 }
             }
             Ok(_) => {}
-            Err(e) => warn!(
-                "[catalog-prefetch] e621 fetch failed for account={} q={q}: {e}",
-                target.account_id
-            ),
+            Err(e) => {
+                // Count this failure and bail out of the rest of the tick.
+                let n = PREFETCH_CONSECUTIVE_FAILS.fetch_add(1, Ordering::Relaxed) + 1;
+                warn!(
+                    "[catalog-prefetch] e621 fetch failed for account={} q={q} \
+                     (consecutive_fails={n}): {e}",
+                    target.account_id
+                );
+                break;
+            }
         }
     }
 

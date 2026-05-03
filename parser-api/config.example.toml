@@ -16,6 +16,10 @@ posts_domain  = "https://uri.com"
 posts_limit   = 160       # 320 is the e621 max
 rps_delay_ms  = 250
 max_retries   = 3
+
+# HTTP User-Agent sent to e621.
+user_agent    = "E621AccountParser/0.1 (+https://github.com/Basedfloppa/E621-Feed; contact: you@example.com)"
+
 df_floor      = 0.7
 idf_max       = 100.0
 
@@ -112,6 +116,8 @@ prefetch_interval_secs           = 180    # background catalog prefetcher cadenc
 cleanup_interval_secs            = 21600  # 6h — stale-catalog pruning cadence
 catalog_retention_days           = 90     # prune posts older than this if no user owns them
 prefetch_active_window_days      = 14     # only prefetch for accounts active in this window
+prefetch_breaker_threshold       = 3      # open circuit breaker after N consecutive e621 failures (0 = disabled)
+prefetch_breaker_pause_secs      = 600    # how long to pause when the breaker is open (10m)
 
 # --- Calibration / seed knobs (see ../docs/calibration.md) ------------------
 [backtest]

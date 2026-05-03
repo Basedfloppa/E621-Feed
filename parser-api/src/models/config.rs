@@ -19,6 +19,10 @@ pub struct Config {
     pub posts_limit: i32,
     pub rps_delay_ms: u64,
     pub max_retries: u64,
+
+    #[serde(default = "default_user_agent")]
+    pub user_agent: String,
+
     pub group_weights: HashMap<String, f32>,
     pub priors: Priors,
     pub df_floor: f32,
@@ -77,6 +81,18 @@ pub struct RuntimeConfig {
     /// within this window.
     #[serde(default = "default_prefetch_active_window_days")]
     pub prefetch_active_window_days: i64,
+    /// Circuit-breaker: after this many consecutive e621 fetch failures
+    /// the prefetcher pauses for `prefetch_breaker_pause_secs` instead of
+    /// hammering an already-failing upstream. Without this a single
+    /// Cloudflare 403/520 against the admin account turns into an N-tag,
+    /// every-`prefetch_interval_secs` retry storm that accelerates any
+    /// rate-limit/ban already in progress.
+    #[serde(default = "default_prefetch_breaker_threshold")]
+    pub prefetch_breaker_threshold: u32,
+    /// How long the prefetcher sleeps once the circuit breaker is open
+    /// before resetting the counter and resuming normal cadence.
+    #[serde(default = "default_prefetch_breaker_pause_secs")]
+    pub prefetch_breaker_pause_secs: u64,
 }
 
 impl Default for RuntimeConfig {
@@ -92,8 +108,14 @@ impl Default for RuntimeConfig {
             cleanup_interval_secs: default_cleanup_interval_secs(),
             catalog_retention_days: default_catalog_retention_days(),
             prefetch_active_window_days: default_prefetch_active_window_days(),
+            prefetch_breaker_threshold: default_prefetch_breaker_threshold(),
+            prefetch_breaker_pause_secs: default_prefetch_breaker_pause_secs(),
         }
     }
+}
+
+fn default_user_agent() -> String {
+    "E621AccountParser/0.1 (+https://github.com/zorolin/E621-Account-Parser)".to_string()
 }
 
 fn default_local_candidate_limit() -> i64 {
@@ -122,6 +144,12 @@ fn default_catalog_retention_days() -> i64 {
 }
 fn default_prefetch_active_window_days() -> i64 {
     14
+}
+fn default_prefetch_breaker_threshold() -> u32 {
+    3
+}
+fn default_prefetch_breaker_pause_secs() -> u64 {
+    600
 }
 
 #[derive(Debug, Clone, Deserialize)]

@@ -74,6 +74,11 @@ server {
         try_files $uri $uri/ /index.html;
     }
 
+    # Block Swagger UI and the OpenAPI in production
+    location ~ ^/api/(swagger-ui|openapi\.json) {
+        return 404;
+    }
+
     # --- Backend: reverse proxy under /api -> local :8080 ---
     location /api/ {
         proxy_pass http://127.0.0.1:8080;

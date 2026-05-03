@@ -17,6 +17,12 @@ const PIXELS_BEFORE_REFETCH: f64 = 1000.0;
 /// Stop auto-fetching after this many consecutive empty/all-duplicate pages,
 /// so an exhausted catalog or a strict affinity filter can't loop forever.
 const MAX_CONSECUTIVE_EMPTY_PAGES: u32 = 10;
+/// Stop auto-fetching after this many consecutive backend errors. Without
+/// this, a scrolling user whose first request 500'd would re-trigger the
+/// same broken request on every scroll frame — and each retry hits e621
+/// from the admin account, accelerating any rate-limit/ban already in
+/// progress. The user has to click "Retry" to resume after the threshold.
+const MAX_CONSECUTIVE_ERRORS: u32 = 3;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum GridType {
@@ -63,6 +69,7 @@ pub fn feed_page() -> Html {
     let inflight = use_mut_ref(|| Cell::new(false));
     let exhausted = use_state(|| false);
     let consecutive_empty = use_mut_ref(|| Cell::new(0u32));
+    let consecutive_errors = use_mut_ref(|| Cell::new(0u32));
     let error = use_state(|| Option::<String>::None);
     let selected_user = use_state(|| Option::<UserInfo>::None);
     let session_id = use_state(|| {
@@ -116,6 +123,7 @@ pub fn feed_page() -> Html {
         let inflight = inflight.clone();
         let exhausted = exhausted.clone();
         let consecutive_empty = consecutive_empty.clone();
+        let consecutive_errors = consecutive_errors.clone();
 
         Callback::from(move |_| {
             if inflight.borrow().get() {
@@ -160,6 +168,7 @@ pub fn feed_page() -> Html {
             let error = error.clone();
             let exhausted = exhausted.clone();
             let consecutive_empty = consecutive_empty.clone();
+            let consecutive_errors = consecutive_errors.clone();
 
             spawn_local(async move {
                 let done = || {
@@ -193,13 +202,24 @@ pub fn feed_page() -> Html {
                                 exhausted.set(true);
                             }
                         }
+                        // A successful round-trip clears the error budget,
+                        consecutive_errors.borrow().set(0);
                         page.set(*page + 1);
 
                         done();
                     }
                     Err(e) => {
                         web_sys::console::log_1(&e.clone().into());
-                        error.set(Some(e));
+                        let n = consecutive_errors.borrow().get() + 1;
+                        consecutive_errors.borrow().set(n);
+                        if n >= MAX_CONSECUTIVE_ERRORS {
+                            exhausted.set(true);
+                            error.set(Some(format!(
+                                "{e} — auto-retry suspended after {n} failures. Click Retry to resume."
+                            )));
+                        } else {
+                            error.set(Some(e));
+                        }
                         done();
                     }
                 }
@@ -214,6 +234,7 @@ pub fn feed_page() -> Html {
         let is_loading = is_loading.clone();
         let exhausted = exhausted.clone();
         let consecutive_empty = consecutive_empty.clone();
+        let consecutive_errors = consecutive_errors.clone();
         let fetch_page = fetch_page.clone();
 
         use_effect_with(
@@ -226,6 +247,7 @@ pub fn feed_page() -> Html {
                     is_loading.set(false);
                     exhausted.set(false);
                     consecutive_empty.borrow().set(0);
+                    consecutive_errors.borrow().set(0);
                     fetch_page.emit(());
                 }
                 || ()
@@ -238,9 +260,13 @@ pub fn feed_page() -> Html {
     {
         let exhausted = exhausted.clone();
         let consecutive_empty = consecutive_empty.clone();
+        let consecutive_errors = consecutive_errors.clone();
+        let error = error.clone();
         use_effect_with(*affinity, move |_| {
             exhausted.set(false);
             consecutive_empty.borrow().set(0);
+            consecutive_errors.borrow().set(0);
+            error.set(None);
             || ()
         });
     }
@@ -249,6 +275,7 @@ pub fn feed_page() -> Html {
         let is_loading = is_loading.clone();
         let selected_user = selected_user.clone();
         let exhausted = exhausted.clone();
+        let error = error.clone();
         let fetch_page = fetch_page.clone();
 
         use_effect(move || {
@@ -263,6 +290,7 @@ pub fn feed_page() -> Html {
                 let is_loading_cb = is_loading.clone();
                 let selected_user_cb = selected_user.clone();
                 let exhausted_cb = exhausted.clone();
+                let error_cb = error.clone();
                 let fetch_page_cb = fetch_page.clone();
 
                 let win_for_cb = win.clone();
@@ -278,13 +306,17 @@ pub fn feed_page() -> Html {
                     let selected_user_inner = selected_user_cb.clone();
                     let is_loading_inner = is_loading_cb.clone();
                     let exhausted_inner = exhausted_cb.clone();
+                    let error_inner = error_cb.clone();
                     let fetch_inner = fetch_page_cb.clone();
 
                     let raf_cb = Closure::once_into_js(move |_: f64| {
                         scroll_pending_inner.set(false);
+                        // `error.is_none()` gate: once a request fails, don't
+                        // let scrolling re-trigger the same broken request.
                         if (*selected_user_inner).is_some()
                             && !*is_loading_inner
                             && !*exhausted_inner
+                            && (*error_inner).is_none()
                         {
                             let scroll_y = win_inner.scroll_y().unwrap_or(0.0);
                             let inner_h = win_inner
@@ -337,6 +369,7 @@ pub fn feed_page() -> Html {
                 if (*selected_user).is_some()
                     && !*is_loading
                     && !*exhausted
+                    && (*error).is_none()
                     && (scroll_y + inner_h + PIXELS_BEFORE_REFETCH >= scroll_h)
                 {
                     fetch_page.emit(());
@@ -530,7 +563,20 @@ pub fn feed_page() -> Html {
                                 type="button"
                                 onclick={{
                                     let fetch_page = fetch_page.clone();
-                                    Callback::from(move |_| fetch_page.emit(()))
+                                    let error = error.clone();
+                                    let exhausted = exhausted.clone();
+                                    let consecutive_errors = consecutive_errors.clone();
+                                    // Reset the error/exhaust gates set by
+                                    // the consecutive-error threshold, then
+                                    // re-emit the fetch. Without these
+                                    // resets the fetch_page guard would
+                                    // short-circuit on `*exhausted`.
+                                    Callback::from(move |_| {
+                                        consecutive_errors.borrow().set(0);
+                                        exhausted.set(false);
+                                        error.set(None);
+                                        fetch_page.emit(());
+                                    })
                                 }}
                             >
                                 { "Retry" }
