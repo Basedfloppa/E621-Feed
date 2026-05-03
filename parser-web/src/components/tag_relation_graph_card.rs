@@ -370,8 +370,7 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
                     Some(c) => c,
                     None => {
                         return Box::new(move || {
-                            *cleanup_sim_gen.borrow_mut() =
-                                cleanup_sim_gen.borrow().wrapping_add(1);
+                            cleanup_sim_gen.replace_with(|v| v.wrapping_add(1));
                         }) as Box<dyn FnOnce()>;
                     }
                 };
@@ -379,16 +378,14 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
                 let Some(graph_arc) = payload.as_ref().cloned().map(Rc::new) else {
                     let _ = clear_or_skip();
                     return Box::new(move || {
-                        *cleanup_sim_gen.borrow_mut() =
-                            cleanup_sim_gen.borrow().wrapping_add(1);
+                        cleanup_sim_gen.replace_with(|v| v.wrapping_add(1));
                     });
                 };
 
                 let logical_width = canvas.client_width().max(0) as f64;
                 if logical_width <= 0.0 {
                     return Box::new(move || {
-                        *cleanup_sim_gen.borrow_mut() =
-                            cleanup_sim_gen.borrow().wrapping_add(1);
+                        cleanup_sim_gen.replace_with(|v| v.wrapping_add(1));
                     });
                 }
                 let logical_height = (logical_width * 0.85).clamp(480.0, 900.0);
@@ -523,8 +520,7 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
                 Box::new(move || {
                     // Cancel any in-flight chunked simulation so it doesn't
                     // race the next effect's borrow_mut on layout_ref.
-                    *cleanup_sim_gen.borrow_mut() =
-                        cleanup_sim_gen.borrow().wrapping_add(1);
+                    cleanup_sim_gen.replace_with(|v| v.wrapping_add(1));
                 })
             },
         );
