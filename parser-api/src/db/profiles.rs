@@ -97,12 +97,10 @@ pub fn set_quality_profile(account_id: i32) -> Result<(), String> {
 }
 
 pub fn set_recency_profile(account_id: i32) -> Result<(), String> {
-    let connection = open_db()?;
-
-    // The `WHERE true` disambiguates ON CONFLICT from a join clause
-    // (SQLite UPSERT-with-SELECT quirk).
-    connection
-        .execute(
+    super::with_write_tx(|tx| {
+        // The `WHERE true` disambiguates ON CONFLICT from a join clause
+        // (SQLite UPSERT-with-SELECT quirk).
+        tx.execute(
             "
             WITH ages AS (
                 SELECT max(0.0, julianday('now') - julianday(p.created_at)) AS age
@@ -125,8 +123,8 @@ pub fn set_recency_profile(account_id: i32) -> Result<(), String> {
             params![account_id],
         )
         .map_err(|e| format!("Failed to upsert recency profile: {e}"))?;
-
-    Ok(())
+        Ok(())
+    })
 }
 
 pub fn refresh_account_profiles(account_id: i32) -> Result<(), String> {
