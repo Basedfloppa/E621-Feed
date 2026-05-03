@@ -15,7 +15,7 @@ pub fn save_posts_tags_batch(
     }
 
     let mut connection = open_db()?;
-    let tx = connection.transaction().map_err(|e| format!("tx: {e}"))?;
+    let tx = super::begin_write_tx(&mut connection)?;
 
     let mut cooc_dirty = false;
     let mut touched_tag_ids: HashSet<i64> = HashSet::new();
@@ -202,9 +202,7 @@ pub fn set_tag_counts(account_id: i32) -> Result<(), String> {
         .map_err(|e| format!("Failed to enumerate accounts: {e}"))?
     };
 
-    let tx = connection
-        .transaction()
-        .map_err(|e| format!("Failed to get transaction: {e}"))?;
+    let tx = super::begin_write_tx(&mut connection)?;
 
     {
         tx.execute(

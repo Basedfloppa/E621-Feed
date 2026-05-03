@@ -36,9 +36,7 @@ shota";
     }
 
     let mut conn = open_db()?;
-    let tx = conn
-        .transaction()
-        .map_err(|e| format!("Failed to start account transaction: {e}"))?;
+    let tx = super::begin_write_tx(&mut conn)?;
 
     tx.execute(
         "

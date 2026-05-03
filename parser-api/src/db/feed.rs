@@ -8,9 +8,7 @@ use super::open_db;
 
 pub fn record_feed_interaction(interaction: &FeedInteractionRequest) -> Result<(), String> {
     let mut connection = open_db()?;
-    let tx = connection
-        .transaction()
-        .map_err(|e| format!("Failed to get transaction: {e}"))?;
+    let tx = super::begin_write_tx(&mut connection)?;
 
     let linked: bool = tx
         .query_row(

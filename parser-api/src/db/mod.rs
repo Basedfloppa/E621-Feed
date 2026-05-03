@@ -65,7 +65,7 @@ fn pool() -> &'static DbPool {
                 PRAGMA foreign_keys = ON;
                 PRAGMA journal_mode = WAL;
                 PRAGMA synchronous  = NORMAL;
-                PRAGMA busy_timeout = 5000;
+                PRAGMA busy_timeout = 15000;
                 PRAGMA temp_store   = MEMORY;
                 ",
             )
@@ -75,6 +75,17 @@ fn pool() -> &'static DbPool {
             .build(manager)
             .expect("build sqlite pool")
     })
+}
+
+/// Begin a writer transaction with `BEGIN IMMEDIATE` so concurrent writers
+/// queue via `busy_timeout` instead of failing with `SQLITE_BUSY_SNAPSHOT`.
+/// The default `BEGIN DEFERRED` tries to upgrade a read snapshot to a write
+/// lock — when two connections both hold a snapshot, neither can win and
+/// `busy_timeout` cannot retry safely (it would deadlock). Always use this
+/// helper for any transaction that performs writes.
+pub(super) fn begin_write_tx(conn: &mut DbConn) -> Result<rusqlite::Transaction<'_>, String> {
+    conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| format!("Failed to begin write transaction: {e}"))
 }
 
 pub(super) fn open_db() -> Result<DbConn, String> {

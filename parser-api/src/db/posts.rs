@@ -9,9 +9,7 @@ use super::{open_db, parse_db_datetime};
 pub fn drop_account_posts(account_id: i32) -> Result<(), String> {
     let mut connection = open_db()?;
 
-    let tx = connection
-        .transaction()
-        .map_err(|e| format!("Failed to get transaction: {e}"))?;
+    let tx = super::begin_write_tx(&mut connection)?;
 
     {
         let mut clear_account_post = tx
@@ -31,9 +29,7 @@ pub fn drop_account_posts(account_id: i32) -> Result<(), String> {
 pub fn save_posts(posts: &[Post], account_id: i32) -> Result<(), String> {
     let mut connection = open_db()?;
 
-    let tx = connection
-        .transaction()
-        .map_err(|e| format!("Failed to get transaction: {e}"))?;
+    let tx = super::begin_write_tx(&mut connection)?;
 
     {
         let mut insert_post = tx
@@ -162,9 +158,7 @@ fn post_upsert_params(post: &Post) -> Vec<rusqlite::types::Value> {
 
 pub fn upsert_catalog_posts(posts: &[Post]) -> Result<(), String> {
     let mut connection = open_db()?;
-    let tx = connection
-        .transaction()
-        .map_err(|e| format!("Failed to get transaction: {e}"))?;
+    let tx = super::begin_write_tx(&mut connection)?;
 
     {
         let mut insert_post = tx

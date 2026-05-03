@@ -12,9 +12,7 @@ use super::{
 
 pub fn set_rating_profile(account_id: i32) -> Result<(), String> {
     let mut connection = open_db()?;
-    let tx = connection
-        .transaction()
-        .map_err(|e| format!("Failed to get transaction: {e}"))?;
+    let tx = super::begin_write_tx(&mut connection)?;
 
     tx.execute(
         "DELETE FROM account_rating_profile WHERE account_id = ?1",
@@ -42,9 +40,7 @@ pub fn set_rating_profile(account_id: i32) -> Result<(), String> {
 
 pub fn set_media_profile(account_id: i32) -> Result<(), String> {
     let mut connection = open_db()?;
-    let tx = connection
-        .transaction()
-        .map_err(|e| format!("Failed to get transaction: {e}"))?;
+    let tx = super::begin_write_tx(&mut connection)?;
 
     tx.execute(
         "DELETE FROM account_media_profile WHERE account_id = ?1",
@@ -80,9 +76,7 @@ pub fn set_media_profile(account_id: i32) -> Result<(), String> {
 
 pub fn set_quality_profile(account_id: i32) -> Result<(), String> {
     let mut connection = open_db()?;
-    let tx = connection
-        .transaction()
-        .map_err(|e| format!("Failed to get transaction: {e}"))?;
+    let tx = super::begin_write_tx(&mut connection)?;
 
     tx.execute(
         "DELETE FROM account_quality_profile WHERE account_id = ?1",

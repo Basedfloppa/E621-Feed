@@ -60,9 +60,7 @@ pub(super) fn upsert_cooccurrence_pairs(
 
 pub fn set_account_tag_cooccurrence(account_id: i32) -> Result<(), String> {
     let mut connection = open_db()?;
-    let tx = connection
-        .transaction()
-        .map_err(|e| format!("Failed to get tx: {e}"))?;
+    let tx = super::begin_write_tx(&mut connection)?;
 
     tx.execute(
         "DELETE FROM account_tag_cooccurrence WHERE account_id = ?1",
@@ -473,9 +471,7 @@ fn backfill_global_tag_cooccurrence() -> Result<(), String> {
 
         last_id = *post_ids.last().unwrap();
 
-        let tx = connection
-            .transaction()
-            .map_err(|e| format!("begin batch tx: {e}"))?;
+        let tx = super::begin_write_tx(&mut connection)?;
         {
             let mut upsert = tx
                 .prepare_cached(
