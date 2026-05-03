@@ -5,6 +5,7 @@ server {
     listen 80;
     listen [::]:80;
     server_name domain.com www.domain.com;
+    server_tokens off;
 
     # Let's Encrypt HTTP-01 challenge
     location ^~ /.well-known/acme-challenge/ {
@@ -26,6 +27,7 @@ server {
     listen [::]:443 ssl;
     http2 on;
     server_name domain.com;
+    server_tokens off;
 
     # --- TLS ---
     ssl_certificate     /etc/letsencrypt/live/domain.com/fullchain.pem;
@@ -35,8 +37,15 @@ server {
     ssl_protocols TLSv1.2 TLSv1.3;
     ssl_prefer_server_ciphers off;
 
-    # --- HSTS ---
-    # add_header Strict-Transport-Security "max-age=31536000; includeSubDomains; preload" always;
+    # --- Security headers         -----------------------------
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains; preload" always;
+    add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data: https://*.e621.net; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'" always;
+    add_header Referrer-Policy "no-referrer" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-Frame-Options "DENY" always;
+    add_header Cross-Origin-Opener-Policy "same-origin" always;
+    add_header Cross-Origin-Resource-Policy "same-origin" always;
+    add_header Permissions-Policy "geolocation=(), microphone=(), camera=(), payment=(), usb=(), interest-cohort=()" always;
 
     # --- Frontend: static SPA ---
     root /var/www/E621-Account-Parser/parser-web/dist;
@@ -65,6 +74,12 @@ server {
     location ~* /(manifest\.json|manifest\.webmanifest|service-worker\.js)$ {
         add_header Cache-Control "public, max-age=3600, must-revalidate";
         try_files $uri =404;
+    }
+
+    # robots.txt — served as plain text
+    location = /robots.txt {
+        default_type "text/plain; charset=utf-8";
+        return 200 "User-agent: *\nDisallow: /api/\n";
     }
 
     # SPA fallback for client-side routes

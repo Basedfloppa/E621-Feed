@@ -1,4 +1,4 @@
-import Shepherd from 'https://cdn.jsdelivr.net/npm/shepherd.js@13/dist/esm/shepherd.mjs';
+import Shepherd from './vendor/shepherd.mjs';
 
 let TOUR = null;
 
