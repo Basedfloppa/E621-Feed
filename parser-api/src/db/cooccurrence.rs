@@ -352,7 +352,7 @@ pub fn spawn_tag_cooccurrence_backfill_if_needed() {
         .name("cooc-backfill".to_string())
         .spawn(|| {
             if let Err(e) = backfill_tag_cooccurrence_if_needed() {
-                eprintln!("[cooc-backfill] failed: {e}");
+                error!("[cooc-backfill] failed: {e}");
             }
         })
         .expect("spawn cooc-backfill thread");
@@ -371,20 +371,20 @@ fn backfill_tag_cooccurrence_if_needed() -> Result<(), String> {
     drop(conn);
 
     if needs_global {
-        eprintln!("[cooc-backfill] starting global tag co-occurrence backfill");
+        info!("[cooc-backfill] starting global tag co-occurrence backfill");
         backfill_global_tag_cooccurrence()?;
         crate::utils::mark_global_relation_dirty();
-        eprintln!("[cooc-backfill] global backfill complete");
+        info!("[cooc-backfill] global backfill complete");
     }
 
     for account_id in pending_accounts {
-        eprintln!("[cooc-backfill] backfilling account {account_id}");
+        info!("[cooc-backfill] backfilling account {account_id}");
         if let Err(e) = set_account_tag_cooccurrence(account_id) {
-            eprintln!("[cooc-backfill] account {account_id} failed: {e}");
+            error!("[cooc-backfill] account {account_id} failed: {e}");
         }
     }
 
-    eprintln!("[cooc-backfill] all done");
+    info!("[cooc-backfill] all done");
     Ok(())
 }
 
@@ -509,7 +509,7 @@ fn backfill_global_tag_cooccurrence() -> Result<(), String> {
 
         processed += post_ids.len() as i64;
         if processed % 2_000 == 0 || processed >= total_posts {
-            eprintln!("[cooc-backfill] global progress: {processed}/{total_posts} posts");
+            info!("[cooc-backfill] global progress: {processed}/{total_posts} posts");
         }
 
         std::thread::sleep(std::time::Duration::from_millis(

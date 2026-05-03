@@ -296,7 +296,7 @@ pub fn post_card(props: &PostCardProps) -> Html {
     };
 
     let onclick = {
-        let cfg = read_config_from_head().unwrap();
+        let posts_domain = read_config_from_head().map(|c| c.posts_domain);
         let id = post.id;
         let backend_url = props.backend_url.to_string();
         let session_id = props.session_id.to_string();
@@ -314,18 +314,21 @@ pub fn post_card(props: &PostCardProps) -> Html {
                     session_id: session_id.clone(),
                 },
             );
+            let Some(domain) = posts_domain.as_deref() else {
+                return;
+            };
             if e.button() == 1 {
                 e.prevent_default();
                 if let Some(win) = window() {
                     let _ = win.open_with_url_and_target(
-                        &format!("{}/posts/{}", cfg.posts_domain, id),
+                        &format!("{domain}/posts/{id}"),
                         "_blank",
                     );
                 }
             } else if e.button() == 0 {
                 e.prevent_default();
                 if let Some(win) = window() {
-                    let _ = win.open_with_url(&format!("{}/posts/{}", cfg.posts_domain, id));
+                    let _ = win.open_with_url(&format!("{domain}/posts/{id}"));
                 }
             }
         })

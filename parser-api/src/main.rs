@@ -16,7 +16,7 @@ use std::collections::HashSet;
 use std::hash::{DefaultHasher, Hasher};
 use std::io::Cursor;
 
-use e621_account_parser_api::{api, db, jobs, models, prefetch, utils};
+use e621_account_parser_api::{api, db, errors::ApiError, jobs, models, prefetch, utils};
 
 use db::{
     DbInit, collect_local_candidate_ids, get_account_by_id, get_account_by_name,
@@ -61,7 +61,7 @@ where
 async fn process_posts(
     account_id: i32,
     owner_token: &str,
-) -> Result<Json<ProcessJobState>, String> {
+) -> Result<Json<ProcessJobState>, ApiError> {
     let owner_token_owned = owner_token.to_string();
     let owner_for_check = owner_token_owned.clone();
     db_blocking(move || get_account_by_id(&owner_for_check, account_id).map_err(|e| e.to_string()))
@@ -87,7 +87,7 @@ async fn process_posts(
 async fn process_status(
     account_id: i32,
     owner_token: &str,
-) -> Result<Json<Option<ProcessJobState>>, String> {
+) -> Result<Json<Option<ProcessJobState>>, ApiError> {
     let owner = owner_token.to_string();
     db_blocking(move || get_account_by_id(&owner, account_id).map_err(|e| e.to_string())).await?;
     Ok(Json(jobs::get_state(account_id)))
@@ -175,76 +175,78 @@ fn strip_blacklisted_tags(mut p: Post, blacklist: &HashSet<String>) -> Post {
 async fn get_account_tag_counts(
     account_id: i32,
     owner_token: &str,
-) -> Result<Json<Vec<TagCount>>, String> {
+) -> Result<Json<Vec<TagCount>>, ApiError> {
     let owner = owner_token.to_string();
-    db_blocking(move || {
+    let counts = db_blocking(move || {
         get_account_by_id(&owner, account_id)
             .map_err(|e| format!("Failed to validate account access: {e}"))?;
         get_tag_counts(account_id).map_err(|e| {
             let m = format!("Failed to get tag counts: {e}");
-            eprintln!("{m}");
+            error!("{m}");
             m
         })
     })
-    .await
-    .map(Json)
+    .await?;
+    Ok(Json(counts))
 }
 
 #[openapi(tag = "Users")]
 #[get("/user/name/<name>?<owner_token>")]
-async fn get_account_name(name: &str, owner_token: &str) -> Result<Json<TruncatedAccount>, String> {
+async fn get_account_name(
+    name: &str,
+    owner_token: &str,
+) -> Result<Json<TruncatedAccount>, ApiError> {
     let owner = owner_token.to_string();
     let name_owned = name.to_string();
-    db_blocking(move || {
+    let acc = db_blocking(move || {
         get_account_by_name(&owner, name_owned).map_err(|e| {
             let m = format!("Failed to get account: {e}");
-            eprintln!("{m}");
+            error!("{m}");
             m
         })
     })
-    .await
-    .map(Json)
+    .await?;
+    Ok(Json(acc))
 }
 
 #[openapi(tag = "Users")]
 #[get("/user/id/<id>?<owner_token>")]
-async fn get_account_id(id: i32, owner_token: &str) -> Result<Json<TruncatedAccount>, String> {
+async fn get_account_id(id: i32, owner_token: &str) -> Result<Json<TruncatedAccount>, ApiError> {
     let owner = owner_token.to_string();
-    db_blocking(move || {
+    let acc = db_blocking(move || {
         get_account_by_id(&owner, id).map_err(|e| {
             let m = format!("Failed to get account: {e}");
-            eprintln!("{m}");
+            error!("{m}");
             m
         })
     })
-    .await
-    .map(Json)
+    .await?;
+    Ok(Json(acc))
 }
 
 #[openapi(tag = "Accounts")]
 #[get("/accounts?<owner_token>")]
-async fn list_accounts(owner_token: &str) -> Result<Json<Vec<TruncatedAccount>>, String> {
+async fn list_accounts(owner_token: &str) -> Result<Json<Vec<TruncatedAccount>>, ApiError> {
     let owner = owner_token.to_string();
-    db_blocking(move || get_accounts_for_owner(&owner))
-        .await
-        .map(Json)
+    let accounts = db_blocking(move || get_accounts_for_owner(&owner)).await?;
+    Ok(Json(accounts))
 }
 
 #[openapi(tag = "Accounts")]
 #[post("/account", data = "<account>")]
 async fn create_account(
     account: Json<DeviceScopedAccount>,
-) -> Result<Json<TruncatedAccount>, String> {
+) -> Result<Json<TruncatedAccount>, ApiError> {
     let acc = account.into_inner();
-    db_blocking(move || {
+    let result = db_blocking(move || {
         set_account(&acc.owner_token, acc.id, &acc.name, &acc.blacklist).map_err(|e| {
-            let m = format!("Failed to get account: {e}");
-            eprintln!("{m}");
+            let m = format!("Failed to set account: {e}");
+            error!("{m}");
             m
         })
     })
-    .await
-    .map(Json)
+    .await?;
+    Ok(Json(result))
 }
 
 struct IfNoneMatch(Option<String>);
@@ -310,7 +312,7 @@ async fn get_account_tag_relations(
     top: Option<usize>,
     min_cooc: Option<i64>,
     if_none_match: IfNoneMatch,
-) -> Result<EtagJson, String> {
+) -> Result<EtagJson, ApiError> {
     let top = top.unwrap_or(60).clamp(2, 250);
     let min_cooc = min_cooc.unwrap_or(2).max(1);
     let owner = owner_token.to_string();
@@ -336,7 +338,7 @@ async fn get_account_tag_relations(
         min_cooc_global: priors.tag_relation_min_cooc.max(1),
         min_cooc_user: priors.tag_relation_user_min_cooc.max(1),
     };
-    EtagJson::new(&payload, &if_none_match)
+    EtagJson::new(&payload, &if_none_match).map_err(ApiError::from)
 }
 
 #[openapi(tag = "Accounts")]
@@ -344,7 +346,7 @@ async fn get_account_tag_relations(
 async fn get_account_blacklist(
     account_id: i32,
     owner_token: &str,
-) -> Result<Json<BlacklistPayload>, String> {
+) -> Result<Json<BlacklistPayload>, ApiError> {
     let owner = owner_token.to_string();
     let account = db_blocking(move || {
         get_account_by_id(&owner, account_id).map_err(|e| format!("Failed to get account: {e}"))
@@ -361,25 +363,27 @@ async fn update_account_blacklist(
     account_id: i32,
     owner_token: &str,
     payload: Json<BlacklistPayload>,
-) -> Result<Json<TruncatedAccount>, String> {
+) -> Result<Json<TruncatedAccount>, ApiError> {
     let owner = owner_token.to_string();
     let body = payload.into_inner();
-    db_blocking(move || {
+    let updated = db_blocking(move || {
         update_device_blacklist(&owner, account_id, &body.blacklist).map_err(|e| {
             let m = format!("Failed to update blacklist: {e}");
-            eprintln!("{m}");
+            error!("{m}");
             m
         })
     })
-    .await
-    .map(Json)
+    .await?;
+    Ok(Json(updated))
 }
 
 #[openapi(tag = "Recommendations")]
 #[post("/interaction", data = "<payload>")]
-async fn log_feed_interaction(payload: Json<FeedInteractionRequest>) -> Result<(), String> {
+async fn log_feed_interaction(payload: Json<FeedInteractionRequest>) -> Result<(), ApiError> {
     let body = payload.into_inner();
-    db_blocking(move || record_feed_interaction(&body)).await
+    db_blocking(move || record_feed_interaction(&body))
+        .await
+        .map_err(ApiError::from)
 }
 
 #[openapi(tag = "Recommendations")]
@@ -389,7 +393,7 @@ async fn get_recommendations(
     owner_token: &str,
     page: Option<i32>,
     affinity_threshold: Option<f32>,
-) -> Result<Json<Vec<ScoredPost>>, std::io::Error> {
+) -> Result<Json<Vec<ScoredPost>>, ApiError> {
     let cfg = cfg();
     // Cloned (cheap, primitives) so the closure below owns its copy and we
     // don't need to hold the Arc<Config> across the blocking task boundary.
@@ -437,8 +441,7 @@ async fn get_recommendations(
             bucket,
         ))
     })
-    .await
-    .map_err(std::io::Error::other)?;
+    .await?;
 
     let (bucket_name, mut priors) = cfg.pick_bucket(account_id, explicit_bucket.as_deref());
     if let Some(bucket) = &bucket_name {
@@ -448,7 +451,7 @@ async fn get_recommendations(
 
     let live_posts: Vec<Post> = api::get_posts(&account, page)
         .await
-        .map_err(|e| std::io::Error::other(format!("Failed to fetch posts: {e}")))?;
+        .map_err(|e| ApiError::Internal(format!("Failed to fetch posts: {e}")))?;
 
     // Catalog persistence is fire-and-forget: it's a write contender against
     // the SQLite single writer, and infinite scroll fires this several times
@@ -487,9 +490,7 @@ async fn get_recommendations(
     let local_posts = if local_to_hydrate.is_empty() {
         Vec::new()
     } else {
-        db_blocking(move || hydrate_posts_by_ids(&local_to_hydrate))
-            .await
-            .map_err(std::io::Error::other)?
+        db_blocking(move || hydrate_posts_by_ids(&local_to_hydrate)).await?
     };
 
     // Filter live e621 posts through the same dedup lens. owned_ids is the
@@ -544,6 +545,25 @@ fn openapi_json(spec: &State<OpenApi>) -> Json<OpenApi> {
     Json(spec.inner().clone())
 }
 
+// Catchers — uniform JSON error envelope for everything Rocket would
+// otherwise serve as a default HTML page (S-3 in the audit). These are
+// registered on the `/api` scope only, so the SPA fallback for `/`
+// keeps returning index.html instead of a JSON 404 to a browser.
+#[catch(404)]
+fn catch_404(_req: &Request<'_>) -> ApiError {
+    ApiError::NotFound("Resource not found".into())
+}
+
+#[catch(422)]
+fn catch_422(_req: &Request<'_>) -> ApiError {
+    ApiError::BadRequest("Unprocessable request body".into())
+}
+
+#[catch(500)]
+fn catch_500(_req: &Request<'_>) -> ApiError {
+    ApiError::Internal("Internal server error".into())
+}
+
 #[cfg(debug_assertions)]
 fn attach_cors(rocket: rocket::Rocket<rocket::Build>) -> rocket::Rocket<rocket::Build> {
     let cors = rocket_cors::CorsOptions::default()
@@ -593,6 +613,7 @@ async fn rocket() -> _ {
                 ..Default::default()
             }),
         )
+        .register("/api", catchers![catch_404, catch_422, catch_500])
         .attach(DbInit);
 
     prefetch::spawn_prefetch_workers();

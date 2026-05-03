@@ -33,6 +33,24 @@ async fn rate_gate_wait() {
     *next = Instant::now() + delay;
 }
 
+/// Trim a non-success response body down to one short line for logs and
+/// error-string propagation. The audit (S-7) flagged that Cloudflare's
+/// `<!DOCTYPE html>... <!--[if lt IE 7]> ...` walls were being copied
+/// verbatim into both stderr and the user-facing 500 string, blowing up
+/// log volume and shipping ~120 bytes of useless markup down to the
+/// frontend on every failure. First non-empty line, capped to 160
+/// characters, is enough to recognise "CF block page" vs "rate limit"
+/// vs "JSON error envelope" without dragging the rest along.
+fn body_preview(body: &str) -> String {
+    body.lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or("")
+        .chars()
+        .take(160)
+        .collect()
+}
+
 fn build_url(path: &str, params: &[(&str, String)]) -> String {
     let cfg = cfg();
     let url = if params.is_empty() {
@@ -205,7 +223,7 @@ pub async fn get_favorites(account: &TruncatedAccount, page: i32) -> Vec<Post> {
     };
 
     if !status.is_success() {
-        let preview = body.chars().take(200).collect::<String>();
+        let preview = body_preview(&body);
         match status {
             StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => {
                 warn!("favorites auth failed ({status}). Body: {preview}");
@@ -221,7 +239,7 @@ pub async fn get_favorites(account: &TruncatedAccount, page: i32) -> Vec<Post> {
     let posts = match json::from_str::<PostsApiResponse>(&body) {
         Ok(r) => r.posts,
         Err(e) => {
-            let preview = body.chars().take(200).collect::<String>();
+            let preview = body_preview(&body);
             warn!("favorites parse failed: {e}; first bytes: {preview}");
             return Vec::new();
         }
@@ -253,7 +271,7 @@ pub async fn get_account(account: &TruncatedAccount) -> Result<UserApiResponse, 
         .await
         .map_err(|e| format!("account body read failed: {e}"))?;
     if !status.is_success() {
-        let preview = body.chars().take(200).collect::<String>();
+        let preview = body_preview(&body);
         return Err(format!("account request returned {status}: {preview}"));
     }
     let parsed = json::from_str::<UserApiResponse>(&body)
@@ -290,7 +308,7 @@ pub async fn search_users(order: &str, page: i32) -> Result<Vec<UserSearchResult
         .await
         .map_err(|e| format!("users search body read failed: {e}"))?;
     if !status.is_success() {
-        let preview = body.chars().take(200).collect::<String>();
+        let preview = body_preview(&body);
         return Err(format!("users search returned {status}: {preview}"));
     }
     // The endpoint occasionally responds with `{ "users": [...] }` and
@@ -328,7 +346,7 @@ pub async fn get_user_by_id(uid: i32) -> Result<UserApiResponse, String> {
         .await
         .map_err(|e| format!("user-by-id body read failed: {e}"))?;
     if !status.is_success() {
-        let preview = body.chars().take(200).collect::<String>();
+        let preview = body_preview(&body);
         return Err(format!("user-by-id returned {status}: {preview}"));
     }
     json::from_str::<UserApiResponse>(&body).map_err(|e| format!("user-by-id parse failed: {e}"))
@@ -378,7 +396,7 @@ pub async fn get_posts_by_tags(
         .await
         .map_err(|e| format!("posts body read failed: {e}"))?;
     if !status.is_success() {
-        let preview = body.chars().take(200).collect::<String>();
+        let preview = body_preview(&body);
         return Err(format!("posts request returned {status}: {preview}"));
     }
     let posts = json::from_str::<PostsApiResponse>(&body)
@@ -424,7 +442,7 @@ pub async fn get_posts(account: &TruncatedAccount, page: Option<i32>) -> Result<
         .await
         .map_err(|e| format!("posts body read failed: {e}"))?;
     if !status.is_success() {
-        let preview = body.chars().take(200).collect::<String>();
+        let preview = body_preview(&body);
         return Err(format!("posts request returned {status}: {preview}"));
     }
     let posts = json::from_str::<PostsApiResponse>(&body)

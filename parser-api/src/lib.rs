@@ -10,6 +10,7 @@ extern crate rocket;
 
 pub mod api;
 pub mod db;
+pub mod errors;
 pub mod jobs;
 pub mod models;
 pub mod prefetch;

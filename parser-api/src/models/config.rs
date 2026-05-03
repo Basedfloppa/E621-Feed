@@ -382,10 +382,10 @@ pub fn start_config_watcher(path: PathBuf) -> anyhow::Result<ConfigWatcher> {
                     match reload_from(&path) {
                         Ok(_) => {
                             last_mtime = Some(mtime);
-                            eprintln!("[config] reloaded {}", path.display());
+                            info!("[config] reloaded {}", path.display());
                         }
                         Err(e) => {
-                            eprintln!("[config] reload failed: {e:#}");
+                            error!("[config] reload failed: {e:#}");
                         }
                     }
                 }
@@ -417,6 +417,6 @@ pub fn reload_from(p: &Path) -> anyhow::Result<()> {
     let new = load_config(p)?;
     let arc = Arc::new(new);
     CONFIG.store(arc.clone());
-    eprintln!("[config] current value:\n{arc:#?}");
+    debug!("[config] current value:\n{arc:#?}");
     Ok(())
 }

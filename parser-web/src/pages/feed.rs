@@ -143,7 +143,12 @@ pub fn feed_page() -> Html {
                 return;
             };
 
-            let cfg = read_config_from_head().unwrap();
+            let Some(cfg) = read_config_from_head() else {
+                error.set(Some(
+                    "App configuration failed to load — please reload the page.".to_string(),
+                ));
+                return;
+            };
             let mut url = format!(
                 "{}/recommendations/{}?owner_token={}&page={}",
                 cfg.backend_domain,
@@ -633,14 +638,6 @@ async fn fetch_json<T: DeserializeOwned>(url: &str) -> Result<T, String> {
         .dyn_into()
         .map_err(|_| "Failed to cast Response".to_string())?;
 
-    if !resp.ok() {
-        return Err(format!(
-            "HTTP error {} {}",
-            resp.status(),
-            resp.status_text()
-        ));
-    }
-
     let text_promise = resp
         .text()
         .map_err(|e| format!("Failed to read response text: {e:?}"))?;
@@ -650,6 +647,10 @@ async fn fetch_json<T: DeserializeOwned>(url: &str) -> Result<T, String> {
     let text = text_js
         .as_string()
         .ok_or("Response text not a string".to_string())?;
+
+    if !resp.ok() {
+        return Err(humanize_error_body(resp.status(), &text));
+    }
 
     serde_json::from_str::<T>(&text).map_err(|e| format!("JSON parse error: {e}"))
 }

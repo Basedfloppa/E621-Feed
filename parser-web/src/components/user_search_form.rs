@@ -4,7 +4,7 @@ use yew::{
     Callback, Html, Properties, TargetCast, UseStateHandle, function_component, html, use_state,
 };
 
-use crate::models::get_or_create_owner_token;
+use crate::models::{get_or_create_owner_token, humanize_error_body};
 use crate::pages::UserInfo;
 
 #[derive(Properties, PartialEq)]
@@ -71,8 +71,10 @@ pub fn user_search_form(props: &UserSearchProps) -> Html {
             wasm_bindgen_futures::spawn_local(async move {
                 match Request::get(&url).send().await {
                     Ok(response) => {
-                        if response.ok() {
-                            match response.json::<UserInfo>().await {
+                        let status = response.status();
+                        let text = response.text().await.unwrap_or_default();
+                        if (200..300).contains(&status) {
+                            match serde_json::from_str::<UserInfo>(&text) {
                                 Ok(user) => {
                                     found_user.set(Some(user));
                                     error.set(None);
@@ -82,12 +84,7 @@ pub fn user_search_form(props: &UserSearchProps) -> Html {
                                 }
                             }
                         } else {
-                            let status = response.status();
-                            let text = response
-                                .text()
-                                .await
-                                .unwrap_or_else(|_| "Unknown error".into());
-                            error.set(Some(format!("Error {status}: {text}")));
+                            error.set(Some(humanize_error_body(status, &text)));
                         }
                     }
                     Err(e) => error.set(Some(format!("Network error: {e}"))),

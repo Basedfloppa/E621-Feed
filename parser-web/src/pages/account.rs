@@ -239,7 +239,14 @@ pub fn account_creator() -> Html {
             e.prevent_default();
             loading.set(true);
 
-            let cfg = read_config_from_head().unwrap();
+            let Some(cfg) = read_config_from_head() else {
+                message.set(
+                    "App configuration failed to load — please reload the page.".to_string(),
+                );
+                error.set(true);
+                loading.set(false);
+                return;
+            };
             let Some(owner_token) = get_or_create_owner_token() else {
                 message.set("Failed to create local device token".to_string());
                 error.set(true);

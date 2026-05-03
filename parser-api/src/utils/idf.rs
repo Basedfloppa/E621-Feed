@@ -157,7 +157,7 @@ fn spawn_rebuild_if_needed() {
                             BUMP_DRIFT_COUNT.store(0, Ordering::Release);
                         }
                         Err(e) => {
-                            eprintln!("[idf] rebuild failed: {e}");
+                            error!("[idf] rebuild failed: {e}");
                             IDF_DIRTY.store(true, Ordering::Release);
                             last_rebuild_failed = true;
                             break 'work;

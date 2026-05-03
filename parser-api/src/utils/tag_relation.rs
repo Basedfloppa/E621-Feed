@@ -140,7 +140,7 @@ fn spawn_rebuild_if_needed() {
                     match crate::db::load_global_tag_relation() {
                         Ok(new) => GLOBAL_CACHE.store(Arc::new(new)),
                         Err(e) => {
-                            eprintln!("[tag-relation] rebuild failed: {e}");
+                            error!("[tag-relation] rebuild failed: {e}");
                             GLOBAL_DIRTY.store(true, Ordering::Release);
                             last_rebuild_failed = true;
                             break 'work;

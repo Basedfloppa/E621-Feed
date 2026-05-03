@@ -26,7 +26,18 @@ enum TagView {
 
 #[function_component(HomePage)]
 pub fn home_page() -> Html {
-    let cfg = read_config_from_head().unwrap();
+    let cfg = match read_config_from_head() {
+        Some(c) => c,
+        None => {
+            return html! {
+                <div class="container mt-4">
+                    <div class="alert alert-danger" role="alert">
+                        { "App configuration failed to load. Please reload the page; if the problem persists, check that /static/config.js is reachable." }
+                    </div>
+                </div>
+            };
+        }
+    };
     let selected_user: UseStateHandle<Option<UserInfo>> = use_state(|| None::<UserInfo>);
     let is_loading: UseStateHandle<bool> = use_state(|| false);
     let tag_counts: UseStateHandle<Vec<TagCount>> = use_state(Vec::<TagCount>::new);
