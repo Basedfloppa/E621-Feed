@@ -175,6 +175,25 @@ pub fn get_account_by_id(owner_token: &str, id: i32) -> Result<TruncatedAccount,
     }
 }
 
+/// Sever the device → account link without touching the underlying
+/// `accounts` row, since other devices may still legitimately point at
+/// it. Returns the number of links removed; 0 means the device never
+/// owned this account in the first place (caller should map this to a
+/// 404 so the user knows the click was a no-op rather than silently
+/// "succeeding"). Audit M-6 / L-7.
+pub fn delete_device_link(owner_token: &str, account_id: i32) -> Result<usize, String> {
+    super::with_write_tx(|tx| {
+        let n = tx
+            .execute(
+                "DELETE FROM account_device_links \
+                 WHERE owner_token = ?1 AND account_id = ?2",
+                params![owner_token, account_id],
+            )
+            .map_err(|e| format!("Failed to delete device link: {e}"))?;
+        Ok(n)
+    })
+}
+
 pub fn get_account_experiment_bucket(account_id: i32) -> Result<Option<String>, String> {
     let conn = open_db()?;
     conn.query_row(

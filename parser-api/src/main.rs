@@ -16,7 +16,13 @@ use std::collections::HashSet;
 use std::hash::{DefaultHasher, Hasher};
 use std::io::Cursor;
 
-use e621_account_parser_api::{api, db, errors::ApiError, jobs, models, prefetch, utils};
+use e621_account_parser_api::{
+    api, db,
+    errors::ApiError,
+    jobs, models, prefetch,
+    ratelimit::{self, ClientIp},
+    utils, validation,
+};
 
 use db::{
     DbInit, collect_local_candidate_ids, get_account_by_id, get_account_by_name,
@@ -61,7 +67,13 @@ where
 async fn process_posts(
     account_id: i32,
     owner_token: &str,
+    client_ip: ClientIp,
 ) -> Result<Json<ProcessJobState>, ApiError> {
+    validation::validate_owner_token(owner_token)?;
+    validation::validate_account_id(account_id)?;
+    // /process is the most expensive route. Cap it hard per device 
+    ratelimit::check(&format!("process:owner:{owner_token}"), 1, 1)?;
+    ratelimit::check(&format!("process:ip:{}", client_ip.0), 5, 5)?;
     let owner_token_owned = owner_token.to_string();
     let owner_for_check = owner_token_owned.clone();
     db_blocking(move || get_account_by_id(&owner_for_check, account_id).map_err(|e| e.to_string()))
@@ -88,6 +100,8 @@ async fn process_status(
     account_id: i32,
     owner_token: &str,
 ) -> Result<Json<Option<ProcessJobState>>, ApiError> {
+    validation::validate_owner_token(owner_token)?;
+    validation::validate_account_id(account_id)?;
     let owner = owner_token.to_string();
     db_blocking(move || get_account_by_id(&owner, account_id).map_err(|e| e.to_string())).await?;
     Ok(Json(jobs::get_state(account_id)))
@@ -176,6 +190,8 @@ async fn get_account_tag_counts(
     account_id: i32,
     owner_token: &str,
 ) -> Result<Json<Vec<TagCount>>, ApiError> {
+    validation::validate_owner_token(owner_token)?;
+    validation::validate_account_id(account_id)?;
     let owner = owner_token.to_string();
     let counts = db_blocking(move || {
         get_account_by_id(&owner, account_id)
@@ -196,6 +212,7 @@ async fn get_account_name(
     name: &str,
     owner_token: &str,
 ) -> Result<Json<TruncatedAccount>, ApiError> {
+    validation::validate_owner_token(owner_token)?;
     let owner = owner_token.to_string();
     let name_owned = name.to_string();
     let acc = db_blocking(move || {
@@ -212,6 +229,8 @@ async fn get_account_name(
 #[openapi(tag = "Users")]
 #[get("/user/id/<id>?<owner_token>")]
 async fn get_account_id(id: i32, owner_token: &str) -> Result<Json<TruncatedAccount>, ApiError> {
+    validation::validate_owner_token(owner_token)?;
+    validation::validate_account_id(id)?;
     let owner = owner_token.to_string();
     let acc = db_blocking(move || {
         get_account_by_id(&owner, id).map_err(|e| {
@@ -227,6 +246,7 @@ async fn get_account_id(id: i32, owner_token: &str) -> Result<Json<TruncatedAcco
 #[openapi(tag = "Accounts")]
 #[get("/accounts?<owner_token>")]
 async fn list_accounts(owner_token: &str) -> Result<Json<Vec<TruncatedAccount>>, ApiError> {
+    validation::validate_owner_token(owner_token)?;
     let owner = owner_token.to_string();
     let accounts = db_blocking(move || get_accounts_for_owner(&owner)).await?;
     Ok(Json(accounts))
@@ -236,8 +256,15 @@ async fn list_accounts(owner_token: &str) -> Result<Json<Vec<TruncatedAccount>>,
 #[post("/account", data = "<account>")]
 async fn create_account(
     account: Json<DeviceScopedAccount>,
+    client_ip: ClientIp,
 ) -> Result<Json<TruncatedAccount>, ApiError> {
     let acc = account.into_inner();
+    validation::validate_device_scoped_account(&acc)?;
+    // Per-IP cap on account creation: H-1 showed how a single client
+    // could spray thousands of bogus accounts in seconds, each one
+    // becoming an admin-authenticated prefetch target afterwards.
+    ratelimit::check(&format!("acct_create:ip:{}", client_ip.0), 5, 5)?;
+    ratelimit::check(&format!("acct_create:owner:{}", acc.owner_token), 10, 10)?;
     let result = db_blocking(move || {
         set_account(&acc.owner_token, acc.id, &acc.name, &acc.blacklist).map_err(|e| {
             let m = format!("Failed to set account: {e}");
@@ -313,6 +340,8 @@ async fn get_account_tag_relations(
     min_cooc: Option<i64>,
     if_none_match: IfNoneMatch,
 ) -> Result<EtagJson, ApiError> {
+    validation::validate_owner_token(owner_token)?;
+    validation::validate_account_id(account_id)?;
     let top = top.unwrap_or(60).clamp(2, 250);
     let min_cooc = min_cooc.unwrap_or(2).max(1);
     let owner = owner_token.to_string();
@@ -347,6 +376,8 @@ async fn get_account_blacklist(
     account_id: i32,
     owner_token: &str,
 ) -> Result<Json<BlacklistPayload>, ApiError> {
+    validation::validate_owner_token(owner_token)?;
+    validation::validate_account_id(account_id)?;
     let owner = owner_token.to_string();
     let account = db_blocking(move || {
         get_account_by_id(&owner, account_id).map_err(|e| format!("Failed to get account: {e}"))
@@ -357,6 +388,24 @@ async fn get_account_blacklist(
     }))
 }
 
+/// Sever the device → account link. The underlying `accounts` row stays
+/// intact so other devices that linked the same account aren't affected;
+/// any orphaned rows are removed by the periodic GC (Phase 6).
+#[openapi(tag = "Accounts")]
+#[delete("/account/<account_id>?<owner_token>")]
+async fn delete_account(account_id: i32, owner_token: &str) -> Result<(), ApiError> {
+    validation::validate_owner_token(owner_token)?;
+    validation::validate_account_id(account_id)?;
+    let owner = owner_token.to_string();
+    let removed = db_blocking(move || db::delete_device_link(&owner, account_id)).await?;
+    if removed == 0 {
+        return Err(ApiError::NotFound(
+            "No account found for this device token".into(),
+        ));
+    }
+    Ok(())
+}
+
 #[openapi(tag = "Accounts")]
 #[patch("/account/<account_id>/blacklist?<owner_token>", data = "<payload>")]
 async fn update_account_blacklist(
@@ -364,6 +413,9 @@ async fn update_account_blacklist(
     owner_token: &str,
     payload: Json<BlacklistPayload>,
 ) -> Result<Json<TruncatedAccount>, ApiError> {
+    validation::validate_owner_token(owner_token)?;
+    validation::validate_account_id(account_id)?;
+    validation::validate_blacklist_payload(&payload)?;
     let owner = owner_token.to_string();
     let body = payload.into_inner();
     let updated = db_blocking(move || {
@@ -381,6 +433,15 @@ async fn update_account_blacklist(
 #[post("/interaction", data = "<payload>")]
 async fn log_feed_interaction(payload: Json<FeedInteractionRequest>) -> Result<(), ApiError> {
     let body = payload.into_inner();
+    validation::validate_feed_interaction(&body)?;
+    // Tight per-device cap — feed scrolling fires impressions per card,
+    // a normal session is well under this. Anything higher is either a
+    // bug (re-render storm) or an attempt to write-flood SQLite.
+    ratelimit::check(
+        &format!("interaction:owner:{}", body.owner_token),
+        120,
+        60,
+    )?;
     db_blocking(move || record_feed_interaction(&body))
         .await
         .map_err(ApiError::from)
@@ -394,6 +455,13 @@ async fn get_recommendations(
     page: Option<i32>,
     affinity_threshold: Option<f32>,
 ) -> Result<Json<Vec<ScoredPost>>, ApiError> {
+    validation::validate_owner_token(owner_token)?;
+    validation::validate_account_id(account_id)?;
+    // Each /recommendations issues an admin-authenticated e621 round-trip.
+    // Cap per device so a misbehaving infinite-scroll loop can't burn
+    // through the admin quota; the burst is intentionally close to the
+    // steady rate so a brief flurry from rAF still passes.
+    ratelimit::check(&format!("recs:owner:{owner_token}"), 60, 30)?;
     let cfg = cfg();
     // Cloned (cheap, primitives) so the closure below owns its copy and we
     // don't need to hold the Arc<Config> across the blocking task boundary.
@@ -595,6 +663,7 @@ async fn rocket() -> _ {
         get_account_id,
         get_account_name,
         create_account,
+        delete_account,
         get_account_blacklist,
         update_account_blacklist,
         get_recommendations

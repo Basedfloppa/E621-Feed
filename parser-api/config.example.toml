@@ -20,6 +20,13 @@ max_retries   = 3
 # HTTP User-Agent sent to e621.
 user_agent    = "E621AccountParser/0.1 (+https://github.com/Basedfloppa/E621-Feed; contact: you@example.com)"
 
+# In-memory TTL cache for outbound GET requests to e621. Hit rate is
+# highest on /recommendations (two devices on the same account, or two
+# accounts with the same default blacklist, dedup into one round-trip).
+# Set ttl=0 to disable; max_entries caps memory under abuse / typos.
+e621_cache_ttl_secs     = 600    # 10 minutes — longer = fewer requests, but staler /process counts
+e621_cache_max_entries  = 5000
+
 df_floor      = 0.7
 idf_max       = 100.0
 

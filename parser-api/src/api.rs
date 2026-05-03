@@ -1,6 +1,7 @@
 use reqwest::{Client, Response, StatusCode};
 use rocket::serde::json;
-use std::sync::LazyLock;
+use std::collections::HashMap;
+use std::sync::{LazyLock, Mutex as StdMutex};
 use std::time::Duration;
 use tokio::sync::Mutex;
 use tokio::time::{Instant, sleep};
@@ -31,6 +32,112 @@ async fn rate_gate_wait() {
         sleep(wait).await;
     }
     *next = Instant::now() + delay;
+}
+
+/// In-memory TTL cache for successful GET responses to e621. The hot
+/// case is `/recommendations` — two devices on the same account, or two
+/// accounts with the same default blacklist, otherwise turn into
+/// duplicate `posts.json` round-trips against the admin's API key. The
+/// audit (C-3, C-4) showed the same admin key under Cloudflare scrutiny
+/// already, so deduping outbound traffic also reduces ban risk.
+///
+/// Stored bodies are raw text — re-parsing on hit is cheap relative to
+/// a network round-trip, and avoids an `Any`-typed cache value. Only
+/// 2xx responses are cached: 4xx/5xx (especially Cloudflare 403/520)
+/// must be re-tried so a transient block doesn't pin itself for the
+/// full TTL.
+struct CachedBody {
+    body: String,
+    inserted_at: std::time::Instant,
+}
+
+static API_CACHE: LazyLock<StdMutex<HashMap<String, CachedBody>>> =
+    LazyLock::new(|| StdMutex::new(HashMap::new()));
+
+fn api_cache_get(url: &str, ttl: Duration) -> Option<String> {
+    if ttl.is_zero() {
+        return None;
+    }
+    let map = API_CACHE.lock().expect("api cache poisoned");
+    let entry = map.get(url)?;
+    if entry.inserted_at.elapsed() < ttl {
+        Some(entry.body.clone())
+    } else {
+        None
+    }
+}
+
+fn api_cache_put(url: &str, body: String, ttl: Duration, max_entries: usize) {
+    if ttl.is_zero() || max_entries == 0 {
+        return;
+    }
+    let mut map = API_CACHE.lock().expect("api cache poisoned");
+    if map.len() >= max_entries {
+        // Drop the oldest 10% in one pass — cheap O(n) compared to
+        // bookkeeping a strict LRU list, and the threshold gets hit
+        // rarely (only past `max_entries`). Stale-by-TTL entries that
+        // have been idle for a while are also caught here.
+        let now = std::time::Instant::now();
+        let mut keys_by_age: Vec<(String, std::time::Instant)> = map
+            .iter()
+            .filter(|(_, v)| now.duration_since(v.inserted_at) < ttl * 2)
+            .map(|(k, v)| (k.clone(), v.inserted_at))
+            .collect();
+        keys_by_age.sort_by_key(|(_, t)| *t);
+        let evict_n = max_entries / 10 + 1;
+        for (k, _) in keys_by_age.into_iter().take(evict_n) {
+            map.remove(&k);
+        }
+        // Also drop everything past the TTL boundary regardless.
+        map.retain(|_, v| now.duration_since(v.inserted_at) < ttl);
+    }
+    map.insert(
+        url.to_string(),
+        CachedBody {
+            body,
+            inserted_at: std::time::Instant::now(),
+        },
+    );
+}
+
+/// Authenticated GET with cache + rate-gate + retry. Returns the body
+/// text on 2xx, or a formatted error string for callers to log/wrap.
+/// All call sites that hit e621 funnel through here so the cache and
+/// rate limits stay consistent.
+async fn fetch_authed_text(url: String) -> Result<String, String> {
+    let cfg = cfg();
+    let ttl = Duration::from_secs(cfg.e621_cache_ttl_secs);
+    let max_entries = cfg.e621_cache_max_entries;
+
+    if let Some(body) = api_cache_get(&url, ttl) {
+        debug!("e621 cache hit: {url}");
+        return Ok(body);
+    }
+
+    let client = get_client();
+    let resp = send_with_retry(
+        client
+            .get(&url)
+            .basic_auth(cfg.admin_user.clone(), Some(cfg.admin_api.clone())),
+    )
+    .await
+    .map_err(|e| format!("request failed: {e}"))?;
+
+    let status = resp.status();
+    let body = resp
+        .text()
+        .await
+        .map_err(|e| format!("body read failed: {e}"))?;
+
+    if !status.is_success() {
+        // Don't poison the cache with a Cloudflare/rate-limit page —
+        // that would pin a 10-minute outage even after upstream recovers.
+        let preview = body_preview(&body);
+        return Err(format!("returned {status}: {preview}"));
+    }
+
+    api_cache_put(&url, body.clone(), ttl, max_entries);
+    Ok(body)
 }
 
 /// Trim a non-success response body down to one short line for logs and
@@ -188,7 +295,6 @@ pub async fn get_favorites(account: &TruncatedAccount, page: i32) -> Vec<Post> {
     info!("Fetching favorites: user_id={} page={}", account.id, page);
 
     let cfg = cfg();
-    let client = get_client();
     let url = build_url(
         "favorites.json",
         &[
@@ -199,42 +305,13 @@ pub async fn get_favorites(account: &TruncatedAccount, page: i32) -> Vec<Post> {
     );
     debug!("GET (auth) /favorites.json?user_id=…&limit=…&page={page}");
 
-    let resp = match send_with_retry(
-        client
-            .get(url)
-            .basic_auth(cfg.admin_user.clone(), Some(cfg.admin_api.clone())),
-    )
-    .await
-    {
-        Ok(r) => r,
+    let body = match fetch_authed_text(url).await {
+        Ok(b) => b,
         Err(e) => {
             warn!("favorites request failed: {e}");
             return Vec::new();
         }
     };
-
-    let status = resp.status();
-    let body = match resp.text().await {
-        Ok(b) => b,
-        Err(e) => {
-            warn!("reading favorites body failed: {e}");
-            return Vec::new();
-        }
-    };
-
-    if !status.is_success() {
-        let preview = body_preview(&body);
-        match status {
-            StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => {
-                warn!("favorites auth failed ({status}). Body: {preview}");
-            }
-            StatusCode::TOO_MANY_REQUESTS => {
-                warn!("favorites rate limited (429). Body: {preview}");
-            }
-            _ => warn!("favorites non-success {status}. Body: {preview}"),
-        }
-        return Vec::new();
-    }
 
     let posts = match json::from_str::<PostsApiResponse>(&body) {
         Ok(r) => r.posts,
@@ -255,25 +332,11 @@ pub async fn get_account(account: &TruncatedAccount) -> Result<UserApiResponse, 
         account.id, account.name
     );
     let cfg = cfg();
-    let client = get_client();
     let url = format!("{}/users/{}.json", cfg.posts_domain, account.id);
     debug!("GET (auth) {url}");
-    let resp = send_with_retry(
-        client
-            .get(url)
-            .basic_auth(cfg.admin_user.clone(), Some(cfg.admin_api.clone())),
-    )
-    .await
-    .map_err(|e| format!("account request failed: {e}"))?;
-    let status = resp.status();
-    let body = resp
-        .text()
+    let body = fetch_authed_text(url)
         .await
-        .map_err(|e| format!("account body read failed: {e}"))?;
-    if !status.is_success() {
-        let preview = body_preview(&body);
-        return Err(format!("account request returned {status}: {preview}"));
-    }
+        .map_err(|e| format!("account request {e}"))?;
     let parsed = json::from_str::<UserApiResponse>(&body)
         .map_err(|e| format!("account parse failed: {e}"))?;
     info!("Fetched account successfully for id={}", account.id);
@@ -285,8 +348,6 @@ pub async fn get_account(account: &TruncatedAccount) -> Result<UserApiResponse, 
 /// Used by the `seed` binary to bootstrap calibration data without going
 /// through the regular account-creation flow.
 pub async fn search_users(order: &str, page: i32) -> Result<Vec<UserSearchResult>, String> {
-    let cfg = cfg();
-    let client = get_client();
     let url = build_url(
         "users.json",
         &[
@@ -295,22 +356,9 @@ pub async fn search_users(order: &str, page: i32) -> Result<Vec<UserSearchResult
             ("page", page.to_string()),
         ],
     );
-    let resp = send_with_retry(
-        client
-            .get(url)
-            .basic_auth(cfg.admin_user.clone(), Some(cfg.admin_api.clone())),
-    )
-    .await
-    .map_err(|e| format!("users search request failed: {e}"))?;
-    let status = resp.status();
-    let body = resp
-        .text()
+    let body = fetch_authed_text(url)
         .await
-        .map_err(|e| format!("users search body read failed: {e}"))?;
-    if !status.is_success() {
-        let preview = body_preview(&body);
-        return Err(format!("users search returned {status}: {preview}"));
-    }
+        .map_err(|e| format!("users search {e}"))?;
     // The endpoint occasionally responds with `{ "users": [...] }` and
     // occasionally with a bare array. Handle both.
     if let Ok(arr) = json::from_str::<Vec<UserSearchResult>>(&body) {
@@ -331,24 +379,10 @@ pub async fn search_users(order: &str, page: i32) -> Result<Vec<UserSearchResult
 /// one only needs an id.
 pub async fn get_user_by_id(uid: i32) -> Result<UserApiResponse, String> {
     let cfg = cfg();
-    let client = get_client();
     let url = format!("{}/users/{}.json", cfg.posts_domain, uid);
-    let resp = send_with_retry(
-        client
-            .get(url)
-            .basic_auth(cfg.admin_user.clone(), Some(cfg.admin_api.clone())),
-    )
-    .await
-    .map_err(|e| format!("user-by-id request failed: {e}"))?;
-    let status = resp.status();
-    let body = resp
-        .text()
+    let body = fetch_authed_text(url)
         .await
-        .map_err(|e| format!("user-by-id body read failed: {e}"))?;
-    if !status.is_success() {
-        let preview = body_preview(&body);
-        return Err(format!("user-by-id returned {status}: {preview}"));
-    }
+        .map_err(|e| format!("user-by-id {e}"))?;
     json::from_str::<UserApiResponse>(&body).map_err(|e| format!("user-by-id parse failed: {e}"))
 }
 
@@ -374,7 +408,6 @@ pub async fn get_posts_by_tags(
         format!("{tags_query} {blacklist}")
     };
     let cfg = cfg();
-    let client = get_client();
     let url = build_url(
         "posts.json",
         &[
@@ -383,22 +416,9 @@ pub async fn get_posts_by_tags(
             ("tags", combined),
         ],
     );
-    let resp = send_with_retry(
-        client
-            .get(url)
-            .basic_auth(cfg.admin_user.clone(), Some(cfg.admin_api.clone())),
-    )
-    .await
-    .map_err(|e| format!("posts request failed: {e}"))?;
-    let status = resp.status();
-    let body = resp
-        .text()
+    let body = fetch_authed_text(url)
         .await
-        .map_err(|e| format!("posts body read failed: {e}"))?;
-    if !status.is_success() {
-        let preview = body_preview(&body);
-        return Err(format!("posts request returned {status}: {preview}"));
-    }
+        .map_err(|e| format!("posts request {e}"))?;
     let posts = json::from_str::<PostsApiResponse>(&body)
         .map_err(|e| format!("posts parse failed: {e}"))?
         .posts;
@@ -418,7 +438,6 @@ pub async fn get_posts(account: &TruncatedAccount, page: Option<i32>) -> Result<
         blacklist.split_whitespace().count()
     );
     let cfg = cfg();
-    let client = get_client();
     let url = build_url(
         "posts.json",
         &[
@@ -428,23 +447,9 @@ pub async fn get_posts(account: &TruncatedAccount, page: Option<i32>) -> Result<
         ],
     );
     debug!("GET (auth) {url}");
-    let resp = send_with_retry(
-        client
-            .get(url)
-            .basic_auth(cfg.admin_user.clone(), Some(cfg.admin_api.clone())),
-    )
-    .await
-    .map_err(|e| format!("posts request failed: {e}"))?;
-
-    let status = resp.status();
-    let body = resp
-        .text()
+    let body = fetch_authed_text(url)
         .await
-        .map_err(|e| format!("posts body read failed: {e}"))?;
-    if !status.is_success() {
-        let preview = body_preview(&body);
-        return Err(format!("posts request returned {status}: {preview}"));
-    }
+        .map_err(|e| format!("posts request {e}"))?;
     let posts = json::from_str::<PostsApiResponse>(&body)
         .map_err(|e| format!("posts parse failed: {e}"))?
         .posts;

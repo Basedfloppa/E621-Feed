@@ -39,6 +39,7 @@ pub enum ApiError {
     BadRequest(String),
     NotFound(String),
     Forbidden(String),
+    TooManyRequests(String),
     Internal(String),
 }
 
@@ -48,6 +49,7 @@ impl ApiError {
             ApiError::BadRequest(_) => Status::BadRequest,
             ApiError::NotFound(_) => Status::NotFound,
             ApiError::Forbidden(_) => Status::Forbidden,
+            ApiError::TooManyRequests(_) => Status::TooManyRequests,
             ApiError::Internal(_) => Status::InternalServerError,
         }
     }
@@ -57,6 +59,7 @@ impl ApiError {
             ApiError::BadRequest(m)
             | ApiError::NotFound(m)
             | ApiError::Forbidden(m)
+            | ApiError::TooManyRequests(m)
             | ApiError::Internal(m) => m,
         }
     }
@@ -113,7 +116,7 @@ impl<'r> Responder<'r, 'static> for ApiError {
 impl OpenApiResponderInner for ApiError {
     fn responses(_gen: &mut OpenApiGenerator) -> rocket_okapi::Result<Responses> {
         let mut responses = Responses::default();
-        for code in [400u16, 403, 404, 500] {
+        for code in [400u16, 403, 404, 429, 500] {
             ensure_status_code_exists(&mut responses, code);
         }
         Ok(responses)

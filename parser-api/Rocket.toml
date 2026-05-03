@@ -1,3 +1,7 @@
 [default]
 addresses = ["127.0.0.1"]
 port = 8080
+
+[default.limits]
+json = "64 KiB"
+form = "32 KiB"

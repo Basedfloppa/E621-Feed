@@ -23,6 +23,19 @@ pub struct Config {
     #[serde(default = "default_user_agent")]
     pub user_agent: String,
 
+    /// In-memory TTL cache over outbound GET requests to e621. Hit rate
+    /// is highest on the recommendations path, where two devices on the
+    /// same account or two accounts with the same default blacklist
+    /// otherwise turn into duplicate `posts.json` round-trips. `0`
+    /// disables the cache entirely.
+    #[serde(default = "default_e621_cache_ttl_secs")]
+    pub e621_cache_ttl_secs: u64,
+    /// Hard cap on cache entries. Past this, the oldest 10% are evicted
+    /// in one pass — keeps memory bounded even under a key-spraying
+    /// adversary or a config typo (e.g. enormous TTL).
+    #[serde(default = "default_e621_cache_max_entries")]
+    pub e621_cache_max_entries: usize,
+
     pub group_weights: HashMap<String, f32>,
     pub priors: Priors,
     pub df_floor: f32,
@@ -116,6 +129,13 @@ impl Default for RuntimeConfig {
 
 fn default_user_agent() -> String {
     "E621AccountParser/0.1 (+https://github.com/zorolin/E621-Account-Parser)".to_string()
+}
+
+fn default_e621_cache_ttl_secs() -> u64 {
+    600
+}
+fn default_e621_cache_max_entries() -> usize {
+    5000
 }
 
 fn default_local_candidate_limit() -> i64 {
