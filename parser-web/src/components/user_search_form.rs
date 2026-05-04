@@ -1,4 +1,3 @@
-use reqwasm::http::Request;
 use std::cell::Cell;
 use web_sys::{HtmlInputElement, InputEvent}; // <-- from web_sys
 use yew::{
@@ -6,7 +5,7 @@ use yew::{
     use_state,
 };
 
-use crate::models::{get_or_create_owner_token, humanize_error_body};
+use crate::models::{api_get, humanize_error_body};
 use crate::pages::UserInfo;
 
 #[derive(Properties, PartialEq)]
@@ -53,12 +52,6 @@ pub fn user_search_form(props: &UserSearchProps) -> Html {
             is_loading.set(true);
             error.set(None);
 
-            let Some(owner_token) = get_or_create_owner_token() else {
-                error.set(Some("Missing device token".into()));
-                is_loading.set(false);
-                return;
-            };
-
             let is_id = query.parse::<i64>().is_ok();
             let encoded = if is_id {
                 query.clone()
@@ -67,9 +60,9 @@ pub fn user_search_form(props: &UserSearchProps) -> Html {
             };
 
             let url = if is_id {
-                format!("{api_base}/user/id/{encoded}?owner_token={}", urlencoding::encode(&owner_token))
+                format!("{api_base}/user/id/{encoded}")
             } else {
-                format!("{api_base}/user/name/{encoded}?owner_token={}", urlencoding::encode(&owner_token))
+                format!("{api_base}/user/name/{encoded}")
             };
 
             let found_user = found_user.clone();
@@ -78,7 +71,7 @@ pub fn user_search_form(props: &UserSearchProps) -> Html {
             let inflight_done = inflight.clone();
 
             wasm_bindgen_futures::spawn_local(async move {
-                match Request::get(&url).send().await {
+                match api_get(&url).send().await {
                     Ok(response) => {
                         let status = response.status();
                         let text = response.text().await.unwrap_or_default();

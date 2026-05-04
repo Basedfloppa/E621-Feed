@@ -1,4 +1,3 @@
-use reqwasm::http::Request;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::Closure;
 use yew::{
@@ -6,7 +5,9 @@ use yew::{
     use_effect_with, use_state,
 };
 
-use crate::models::{ProcessJobPhase, ProcessJobState, get_or_create_owner_token};
+use crate::models::{
+    ProcessJobPhase, ProcessJobState, api_get, api_post, humanize_error_body,
+};
 use crate::pages::{TagCount, UserInfo};
 
 const STATUS_POLL_INTERVAL_MS: i32 = 1500;
@@ -45,19 +46,11 @@ pub fn fetch_analyze_button(props: &AnalyzeButtonProps) -> Html {
                 job_status.set(None);
                 return;
             };
-            let Some(owner_token) = get_or_create_owner_token() else {
-                error.set(Some("Missing device token".to_string()));
-                return;
-            };
-            let url = format!(
-                "{}/process/{}/status?owner_token={}",
-                api_base,
-                user.id,
-                urlencoding::encode(&owner_token)
-            );
+            let _ = error;
+            let url = format!("{}/process/{}/status", api_base, user.id);
             let job_status = job_status.clone();
             wasm_bindgen_futures::spawn_local(async move {
-                if let Ok(resp) = Request::get(&url).send().await {
+                if let Ok(resp) = api_get(&url).send().await {
                     if resp.ok() {
                         if let Ok(s) = resp.json::<Option<ProcessJobState>>().await {
                             job_status.set(s);
@@ -80,26 +73,17 @@ pub fn fetch_analyze_button(props: &AnalyzeButtonProps) -> Html {
                 error.set(Some("No user selected".to_string()));
                 return;
             };
-            let Some(owner_token) = get_or_create_owner_token() else {
-                error.set(Some("Missing device token".to_string()));
-                return;
-            };
 
             is_loading.set(true);
             error.set(None);
 
-            let url = format!(
-                "{}/process/{}?owner_token={}",
-                api_base,
-                user.id,
-                urlencoding::encode(&owner_token)
-            );
+            let url = format!("{}/process/{}", api_base, user.id);
             let job_status = job_status.clone();
             let is_loading = is_loading.clone();
             let error = error.clone();
 
             wasm_bindgen_futures::spawn_local(async move {
-                match Request::post(&url).send().await {
+                match api_post(&url).send().await {
                     Ok(resp) if resp.ok() => match resp.json::<ProcessJobState>().await {
                         Ok(s) => {
                             // Optimistic running state until the first poll
@@ -116,7 +100,10 @@ pub fn fetch_analyze_button(props: &AnalyzeButtonProps) -> Html {
                     Ok(resp) => {
                         let status = resp.status();
                         let text = resp.text().await.unwrap_or_default();
-                        error.set(Some(format!("Processing error {status}: {text}")));
+                        web_sys::console::error_1(
+                            &format!("/process failed (HTTP {status}): {text}").into(),
+                        );
+                        error.set(Some(humanize_error_body(status, &text)));
                         is_loading.set(false);
                     }
                     Err(e) => {
@@ -150,20 +137,15 @@ pub fn fetch_analyze_button(props: &AnalyzeButtonProps) -> Html {
 
             if matches!(phase, ProcessJobPhase::Running) {
                 if let Some(uid) = user_id {
-                    if let Some(owner_token) = get_or_create_owner_token() {
-                        let url = format!(
-                            "{}/process/{}/status?owner_token={}",
-                            api_base,
-                            uid,
-                            urlencoding::encode(&owner_token)
-                        );
+                    {
+                        let url = format!("{}/process/{}/status", api_base, uid);
                         let job_status = job_status.clone();
 
                         let cb = Closure::<dyn FnMut()>::new(move || {
                             let url = url.clone();
                             let job_status = job_status.clone();
                             wasm_bindgen_futures::spawn_local(async move {
-                                if let Ok(resp) = Request::get(&url).send().await {
+                                if let Ok(resp) = api_get(&url).send().await {
                                     if resp.ok() {
                                         if let Ok(s) =
                                             resp.json::<Option<ProcessJobState>>().await
@@ -289,18 +271,9 @@ fn make_fetch_tags(
             error.set(Some("No user selected".to_string()));
             return;
         }
-        let Some(owner_token) = get_or_create_owner_token() else {
-            error.set(Some("Missing device token".to_string()));
-            return;
-        };
 
         let user_id = found_user.as_ref().unwrap().id;
-        let url = format!(
-            "{}/account/{}/tag_counts?owner_token={}",
-            api_base,
-            user_id,
-            urlencoding::encode(&owner_token)
-        );
+        let url = format!("{}/account/{}/tag_counts", api_base, user_id);
 
         let tag_count = tag_count.clone();
         let error = error.clone();
@@ -311,7 +284,7 @@ fn make_fetch_tags(
         is_loading.set(true);
 
         wasm_bindgen_futures::spawn_local(async move {
-            match Request::get(&url).send().await {
+            match api_get(&url).send().await {
                 Ok(response) => {
                     if response.ok() {
                         match response.json::<Vec<TagCount>>().await {

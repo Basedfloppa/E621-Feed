@@ -1,4 +1,3 @@
-use reqwasm::http::Request;
 use std::rc::Rc;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
@@ -194,8 +193,6 @@ pub fn post_card(props: &PostCardProps) -> Html {
                                             send_interaction(
                                                 backend_url,
                                                 FeedInteractionRequest {
-                                                    owner_token: get_or_create_owner_token()
-                                                        .unwrap_or_default(),
                                                     account_id,
                                                     post_id,
                                                     event_type:
@@ -275,7 +272,6 @@ pub fn post_card(props: &PostCardProps) -> Html {
             send_interaction(
                 backend_url.clone(),
                 FeedInteractionRequest {
-                    owner_token: get_or_create_owner_token().unwrap_or_default(),
                     account_id,
                     post_id,
                     event_type: FeedInteractionType::Hide,
@@ -295,42 +291,29 @@ pub fn post_card(props: &PostCardProps) -> Html {
         })
     };
 
-    let onclick = {
-        let posts_domain = read_config_from_head().map(|c| c.posts_domain);
-        let id = post.id;
+    let posts_domain = read_config_from_head().map(|c| c.posts_domain);
+    let post_url = posts_domain
+        .as_deref()
+        .map(|domain| format!("{domain}/posts/{}", post.id))
+        .unwrap_or_else(|| format!("/posts/{}", post.id));
+
+    let on_link_click = {
         let backend_url = props.backend_url.to_string();
         let session_id = props.session_id.to_string();
         let account_id = props.account_id;
         let position = props.position;
-        Callback::from(move |e: MouseEvent| {
+        let post_id = post.id;
+        Callback::from(move |_e: MouseEvent| {
             send_interaction(
                 backend_url.clone(),
                 FeedInteractionRequest {
-                    owner_token: get_or_create_owner_token().unwrap_or_default(),
                     account_id,
-                    post_id: id,
+                    post_id,
                     event_type: FeedInteractionType::Open,
                     position,
                     session_id: session_id.clone(),
                 },
             );
-            let Some(domain) = posts_domain.as_deref() else {
-                return;
-            };
-            if e.button() == 1 {
-                e.prevent_default();
-                if let Some(win) = window() {
-                    let _ = win.open_with_url_and_target(
-                        &format!("{domain}/posts/{id}"),
-                        "_blank",
-                    );
-                }
-            } else if e.button() == 0 {
-                e.prevent_default();
-                if let Some(win) = window() {
-                    let _ = win.open_with_url(&format!("{domain}/posts/{id}"));
-                }
-            }
         })
     };
 
@@ -338,8 +321,8 @@ pub fn post_card(props: &PostCardProps) -> Html {
         "card",
         "h-100",
         "overflow-hidden",
-        "cursor-pointer",
-        "w-100"
+        "w-100",
+        "position-relative"
     );
     if *hidden {
         root_classes.push("post-card-hidden");
@@ -372,6 +355,18 @@ pub fn post_card(props: &PostCardProps) -> Html {
                     }
                 }
 
+                <a
+                    href={post_url.clone()}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    class="stretched-link"
+                    onclick={on_link_click}
+                    aria-label={format!(
+                        "Open post {} on e621 (rating {}, score {}, affinity {:.2})",
+                        post.id, rating_label, post.score.total, &props.affinity
+                    )}
+                />
+
                 <span
                     class={classes!(rating_classes, "position-absolute", "top-0", "start-0", "m-2")}
                     title="Rating"
@@ -387,10 +382,11 @@ pub fn post_card(props: &PostCardProps) -> Html {
                         "rounded-circle", "position-absolute", "top-0", "start-50",
                         "translate-middle-x", "mt-2"
                     )}
+                    style="z-index: 2;"
                     onmousedown={Callback::from(|e: MouseEvent| e.stop_propagation())}
                     onclick={on_hide}
                     title="Not interested"
-                    aria-label="Hide this post"
+                    aria-label={format!("Hide post {}", post.id)}
                 >
                     { "×" }
                 </button>
@@ -484,18 +480,12 @@ pub fn post_card(props: &PostCardProps) -> Html {
     }
 
     html! {
-        <button
-            type="button"
+        <article
             class={root_classes}
             ref={root_ref}
-            onmousedown={onclick}
-            aria-label={format!(
-                "Post {}, rating {:?}, score {}, affinity {}",
-                post.id, post.rating, post.score.total, &props.affinity
-            )}
         >
             { inner }
-        </button>
+        </article>
     }
 }
 
@@ -509,7 +499,7 @@ fn send_interaction(backend_url: String, payload: FeedInteractionRequest) {
             }
         };
 
-        if let Err(err) = Request::post(&format!("{backend_url}/interaction"))
+        if let Err(err) = api_post(&format!("{backend_url}/interaction"))
             .header("Content-Type", "application/json")
             .body(body)
             .send()

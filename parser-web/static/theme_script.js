@@ -1,5 +1,7 @@
-document.addEventListener("DOMContentLoaded", () => {
-  const theme = localStorage.getItem("theme");
-  const body = document.querySelector("body");
-  body.setAttribute("data-bs-theme", theme || "light");
-});
+(function () {
+  var theme = null;
+  try {
+    theme = localStorage.getItem("theme");
+  } catch (_) {}
+  document.documentElement.setAttribute("data-bs-theme", theme || "light");
+})();

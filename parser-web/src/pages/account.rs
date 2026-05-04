@@ -1,7 +1,10 @@
-use crate::models::{get_or_create_owner_token, humanize_error_body, read_config_from_head};
+use crate::components::ConfirmModal;
+use crate::models::{
+    api_delete, api_get, api_patch, api_post, dispatch_account_list_changed, humanize_error_body,
+    read_config_from_head,
+};
 use crate::pages::UserInfo;
 use gloo_timers::callback::Timeout;
-use reqwasm::http::Request;
 use std::collections::HashMap;
 use web_sys::{HtmlInputElement, HtmlTextAreaElement};
 use yew::prelude::*;
@@ -21,6 +24,30 @@ pub fn account_creator() -> Html {
     let edit_saving = use_state(|| false);
     let remove_error: UseStateHandle<Option<String>> = use_state(|| None);
     let experiment_buckets: UseStateHandle<HashMap<i64, String>> = use_state(HashMap::new);
+    let pending_remove: UseStateHandle<Option<UserInfo>> = use_state(|| None);
+    let default_blacklist: UseStateHandle<Vec<String>> = use_state(Vec::new);
+    {
+        let default_blacklist = default_blacklist.clone();
+        use_effect_with((), move |_| {
+            if let Some(cfg) = read_config_from_head() {
+                wasm_bindgen_futures::spawn_local(async move {
+                    let url = format!("{}/defaults/blacklist", cfg.backend_domain);
+                    if let Ok(resp) = api_get(&url).send().await {
+                        if resp.ok() {
+                            #[derive(serde::Deserialize)]
+                            struct Resp {
+                                blacklist: Vec<String>,
+                            }
+                            if let Ok(parsed) = resp.json::<Resp>().await {
+                                default_blacklist.set(parsed.blacklist);
+                            }
+                        }
+                    }
+                });
+            }
+            || ()
+        });
+    }
 
     {
         let message = message.clone();
@@ -44,16 +71,10 @@ pub fn account_creator() -> Html {
     {
         let saved_accounts = saved_accounts.clone();
         use_effect_with((), move |_| {
-            if let (Some(cfg), Some(owner_token)) =
-                (read_config_from_head(), get_or_create_owner_token())
-            {
+            if let Some(cfg) = read_config_from_head() {
                 wasm_bindgen_futures::spawn_local(async move {
-                    let url = format!(
-                        "{}/accounts?owner_token={}",
-                        cfg.backend_domain,
-                        urlencoding::encode(&owner_token)
-                    );
-                    if let Ok(response) = Request::get(&url).send().await {
+                    let url = format!("{}/accounts", cfg.backend_domain);
+                    if let Ok(response) = api_get(&url).send().await {
                         if response.ok() {
                             if let Ok(accounts) = response.json::<Vec<UserInfo>>().await {
                                 saved_accounts.set(accounts);
@@ -73,19 +94,16 @@ pub fn account_creator() -> Html {
         use_effect_with(ids, move |ids: &Vec<i64>| {
             let ids = ids.clone();
             let cfg = read_config_from_head();
-            let owner_token = get_or_create_owner_token();
             if !ids.is_empty() {
-                if let (Some(cfg), Some(owner_token)) = (cfg, owner_token) {
+                if let Some(cfg) = cfg {
                     wasm_bindgen_futures::spawn_local(async move {
                         let mut found: HashMap<i64, String> = HashMap::new();
                         for id in ids {
                             let url = format!(
-                                "{}/account/{}/experiment_bucket?owner_token={}",
-                                cfg.backend_domain,
-                                id,
-                                urlencoding::encode(&owner_token)
+                                "{}/account/{}/experiment_bucket",
+                                cfg.backend_domain, id
                             );
-                            if let Ok(resp) = Request::get(&url).send().await {
+                            if let Ok(resp) = api_get(&url).send().await {
                                 if resp.ok() {
                                     if let Ok(v) = resp.json::<serde_json::Value>().await {
                                         if let Some(name) = v.get("bucket").and_then(|b| b.as_str())
@@ -108,7 +126,11 @@ pub fn account_creator() -> Html {
         let id = id.clone();
         Callback::from(move |e: Event| {
             let input: HtmlInputElement = e.target_unchecked_into();
-            id.set(input.value());
+            let cleaned: String = input.value().chars().filter(|c| c.is_ascii_digit()).collect();
+            if cleaned != input.value() {
+                input.set_value(&cleaned);
+            }
+            id.set(cleaned);
         })
     };
 
@@ -147,9 +169,6 @@ pub fn account_creator() -> Html {
             let Some(cfg) = read_config_from_head() else {
                 return;
             };
-            let Some(owner_token) = get_or_create_owner_token() else {
-                return;
-            };
 
             editing_id.set(Some(account_id));
 
@@ -164,13 +183,8 @@ pub fn account_creator() -> Html {
             let error = error.clone();
 
             wasm_bindgen_futures::spawn_local(async move {
-                let url = format!(
-                    "{}/account/{}/blacklist?owner_token={}",
-                    cfg.backend_domain,
-                    account_id,
-                    urlencoding::encode(&owner_token)
-                );
-                match Request::get(&url).send().await {
+                let url = format!("{}/account/{}/blacklist", cfg.backend_domain, account_id);
+                match api_get(&url).send().await {
                     Ok(resp) if resp.ok() => {
                         if let Ok(payload) = resp.json::<BlacklistResponse>().await {
                             edit_draft.set(payload.blacklist);
@@ -201,32 +215,35 @@ pub fn account_creator() -> Html {
         })
     };
 
+    // Click handler on the row's "Remove" button: stage the target so
+    // the modal renders. The actual DELETE happens only after the user
+    // confirms via `on_remove_confirm`.
     let on_remove = {
+        let saved_accounts = saved_accounts.clone();
+        let pending_remove = pending_remove.clone();
+        Callback::from(move |account_id: i64| {
+            if let Some(target) = (*saved_accounts).iter().find(|a| a.id == account_id) {
+                pending_remove.set(Some(target.clone()));
+            }
+        })
+    };
+
+    let on_remove_cancel = {
+        let pending_remove = pending_remove.clone();
+        Callback::from(move |_| pending_remove.set(None))
+    };
+
+    let on_remove_confirm = {
         let saved_accounts = saved_accounts.clone();
         let editing_id = editing_id.clone();
         let edit_draft = edit_draft.clone();
         let remove_error = remove_error.clone();
-        Callback::from(move |account_id: i64| {
-            let target = (*saved_accounts)
-                .iter()
-                .find(|a| a.id == account_id)
-                .cloned();
-            let Some(target) = target else {
+        let pending_remove = pending_remove.clone();
+        Callback::from(move |_| {
+            let Some(target) = (*pending_remove).clone() else {
                 return;
             };
-            let confirmed = web_sys::window()
-                .and_then(|w| {
-                    w.confirm_with_message(&format!(
-                        "Remove '{}' (ID {}) from this device's saved accounts? \
-                         The account itself isn't deleted on e621.",
-                        target.name, target.id
-                    ))
-                    .ok()
-                })
-                .unwrap_or(false);
-            if !confirmed {
-                return;
-            }
+            pending_remove.set(None);
 
             let Some(cfg) = read_config_from_head() else {
                 remove_error.set(Some(
@@ -234,23 +251,14 @@ pub fn account_creator() -> Html {
                 ));
                 return;
             };
-            let Some(owner_token) = get_or_create_owner_token() else {
-                remove_error.set(Some("Missing device token".to_string()));
-                return;
-            };
-            let url = format!(
-                "{}/account/{}?owner_token={}",
-                cfg.backend_domain,
-                target.id,
-                urlencoding::encode(&owner_token)
-            );
+            let url = format!("{}/account/{}", cfg.backend_domain, target.id);
 
             let saved_accounts = saved_accounts.clone();
             let editing_id = editing_id.clone();
             let edit_draft = edit_draft.clone();
             let remove_error = remove_error.clone();
             wasm_bindgen_futures::spawn_local(async move {
-                match Request::delete(&url).send().await {
+                match api_delete(&url).send().await {
                     Ok(resp) if resp.ok() => {
                         let new_list: Vec<UserInfo> = saved_accounts
                             .iter()
@@ -258,14 +266,12 @@ pub fn account_creator() -> Html {
                             .cloned()
                             .collect();
                         saved_accounts.set(new_list);
-                        // If the removed account was being edited, drop
-                        // the editor state so the form doesn't reopen
-                        // pointing at a row that no longer exists.
                         if *editing_id == Some(target.id) {
                             editing_id.set(None);
                             edit_draft.set(String::new());
                         }
                         remove_error.set(None);
+                        dispatch_account_list_changed();
                     }
                     Ok(resp) => {
                         let status = resp.status();
@@ -295,9 +301,6 @@ pub fn account_creator() -> Html {
             let Some(cfg) = read_config_from_head() else {
                 return;
             };
-            let Some(owner_token) = get_or_create_owner_token() else {
-                return;
-            };
 
             edit_saving.set(true);
 
@@ -314,13 +317,8 @@ pub fn account_creator() -> Html {
             let error = error.clone();
 
             wasm_bindgen_futures::spawn_local(async move {
-                let url = format!(
-                    "{}/account/{}/blacklist?owner_token={}",
-                    cfg.backend_domain,
-                    account_id,
-                    urlencoding::encode(&owner_token)
-                );
-                let response = Request::patch(&url)
+                let url = format!("{}/account/{}/blacklist", cfg.backend_domain, account_id);
+                let response = api_patch(&url)
                     .header("Content-Type", "application/json")
                     .body(body)
                     .send()
@@ -354,7 +352,11 @@ pub fn account_creator() -> Html {
                             .text()
                             .await
                             .unwrap_or_else(|_| "Unknown error".to_string());
-                        message.set(format!("Error: {text} (Status: {status})"));
+                        let humanized = humanize_error_body(status, &text);
+                        web_sys::console::error_1(
+                            &format!("blacklist update failed (HTTP {status}): {text}").into(),
+                        );
+                        message.set(humanized);
                         error.set(true);
                     }
                     Err(e) => {
@@ -386,12 +388,6 @@ pub fn account_creator() -> Html {
                 loading.set(false);
                 return;
             };
-            let Some(owner_token) = get_or_create_owner_token() else {
-                message.set("Failed to create local device token".to_string());
-                error.set(true);
-                loading.set(false);
-                return;
-            };
             let raw_id = id.trim().to_string();
             let raw_name = name.trim().to_string();
             let raw_blacklist = blacklist.trim().to_string();
@@ -412,6 +408,14 @@ pub fn account_creator() -> Html {
                     return;
                 }
             };
+            // Match server-side `validate_account_id` (1..=100_000_000) so
+            // the user gets a clear local error instead of a 400 round-trip.
+            if !(1..=100_000_000).contains(&account_id) {
+                message.set("Account ID must be between 1 and 100000000".to_string());
+                error.set(true);
+                loading.set(false);
+                return;
+            }
 
             let exists = (*saved_accounts)
                 .iter()
@@ -431,7 +435,6 @@ pub fn account_creator() -> Html {
             };
 
             let payload = serde_json::json!({
-                "owner_token": owner_token,
                 "id": account_id,
                 "name": raw_name,
                 "blacklist": raw_blacklist,
@@ -441,9 +444,12 @@ pub fn account_creator() -> Html {
             let error = error.clone();
             let loading = loading.clone();
             let saved_accounts = saved_accounts.clone();
+            let id_for_reset = id.clone();
+            let name_for_reset = name.clone();
+            let blacklist_for_reset = blacklist.clone();
 
             wasm_bindgen_futures::spawn_local(async move {
-                let response = Request::post(&format!("{0}/account", cfg.backend_domain))
+                let response = api_post(&format!("{0}/account", cfg.backend_domain))
                     .header("Content-Type", "application/json")
                     .body(payload.to_string())
                     .send()
@@ -466,16 +472,22 @@ pub fn account_creator() -> Html {
                             saved_accounts.set(accounts);
                             message.set("Account created successfully!".to_string());
                             error.set(false);
+                            id_for_reset.set(String::new());
+                            name_for_reset.set(String::new());
+                            blacklist_for_reset.set(String::new());
+                            dispatch_account_list_changed();
                         } else {
+                            let status = resp.status();
                             let error_msg = resp
                                 .text()
                                 .await
                                 .unwrap_or_else(|_| "Unknown error".to_string());
-                            message.set(format!(
-                                "Error: {} (Status: {})",
-                                error_msg,
-                                resp.status()
-                            ));
+                            let humanized = humanize_error_body(status, &error_msg);
+                            web_sys::console::error_1(
+                                &format!("account create failed (HTTP {status}): {error_msg}")
+                                    .into(),
+                            );
+                            message.set(humanized);
                             error.set(true);
                         }
                     }
@@ -501,8 +513,32 @@ pub fn account_creator() -> Html {
     let accounts_list = (*saved_accounts).clone();
     let current_edit = *editing_id;
 
+    let pending_label = pending_remove
+        .as_ref()
+        .map(|u| format!("'{}' (ID {})", u.name, u.id))
+        .unwrap_or_default();
+
     html! {
         <div class="container mt-5" id="account-page">
+            <h1 class="visually-hidden">{"Account"}</h1>
+            <ConfirmModal
+                open={pending_remove.is_some()}
+                title={"Remove account from this device?".to_string()}
+                confirm_label={"Remove".to_string()}
+                cancel_label={"Cancel".to_string()}
+                destructive=true
+                on_confirm={on_remove_confirm.clone()}
+                on_cancel={on_remove_cancel.clone()}
+            >
+                <p class="mb-2">
+                    { format!("This will unlink {} from this device.", pending_label) }
+                </p>
+                <p class="text-body-secondary mb-0 small">
+                    { "If no other devices are linked, the account's stored favourites, \
+                       blacklist and preference profile are also deleted from the server. \
+                       The e621 account itself is unaffected." }
+                </p>
+            </ConfirmModal>
             <div class="row justify-content-center">
                 <div class="col-md-6">
                     if !accounts_list.is_empty() {
@@ -602,12 +638,15 @@ pub fn account_creator() -> Html {
 
                     <div class="card shadow">
                         <div class="card-body">
-                            <h1 class="card-title text-center mb-4">{"Create New Account"}</h1>
+                            <h2 class="card-title text-center mb-4">{"Create New Account"}</h2>
                             <form onsubmit={onsubmit}>
                                 <div class="mb-3">
                                     <label for="account-id" class="form-label">{"Account ID"}</label>
                                     <input
-                                        type="number"
+                                        type="text"
+                                        inputmode="numeric"
+                                        pattern="[0-9]+"
+                                        maxlength="9"
                                         class="form-control"
                                         id="account-id"
                                         value={(*id).clone()}
@@ -643,6 +682,12 @@ pub fn account_creator() -> Html {
                                     />
                                     <div class="form-text">
                                         { "Optional. Paste the blacklist from your e621 account settings, or leave empty to use the default." }
+                                        if !default_blacklist.is_empty() {
+                                            <div class="mt-1">
+                                                { "Default applied if empty: " }
+                                                <code>{ default_blacklist.join(", ") }</code>
+                                            </div>
+                                        }
                                     </div>
                                 </div>
 

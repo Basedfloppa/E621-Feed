@@ -156,6 +156,26 @@ export function startTour(steps = [], options = {}) {
         TOUR = null;
     }
 
+    const accountSelect = document.querySelector('#saved-accounts-select');
+    const savedSelection = accountSelect ? accountSelect.value : null;
+    const restoreSelection = () => {
+        if (!savedSelection) return;
+        const tryRestore = (attemptsLeft) => {
+            const el = document.querySelector('#saved-accounts-select');
+            if (el) {
+                if (el.value !== savedSelection) {
+                    el.value = savedSelection;
+                    el.dispatchEvent(new Event('change', { bubbles: true }));
+                }
+                return;
+            }
+            if (attemptsLeft > 0) {
+                requestAnimationFrame(() => tryRestore(attemptsLeft - 1));
+            }
+        };
+        tryRestore(120); // ~2s at 60fps for navigation to settle
+    };
+
     TOUR = new Shepherd.Tour({
         useModalOverlay: true,
         defaultStepOptions: {
@@ -168,6 +188,8 @@ export function startTour(steps = [], options = {}) {
 
     steps.forEach(raw => TOUR.addStep(buildStep(TOUR, raw)));
     attachFocusTrap(TOUR);
+    TOUR.on('complete', restoreSelection);
+    TOUR.on('cancel', restoreSelection);
     TOUR.start();
 }
 

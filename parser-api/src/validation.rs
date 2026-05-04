@@ -90,6 +90,8 @@ fn validate_account_name(name: &str) -> Result<(), ApiError> {
     Ok(())
 }
 
+const MAX_BLACKLIST_LINE_LEN: usize = 64;
+
 fn validate_blacklist_text(blacklist: &str) -> Result<(), ApiError> {
     if blacklist.len() > MAX_BLACKLIST_LEN {
         return Err(ApiError::BadRequest(format!(
@@ -102,11 +104,55 @@ fn validate_blacklist_text(blacklist: &str) -> Result<(), ApiError> {
             "blacklist must not contain NUL bytes".into(),
         ));
     }
+
+    let lower = blacklist.to_ascii_lowercase();
+    for needle in ["<script", "javascript:", "data:text/html", "vbscript:"] {
+        if lower.contains(needle) {
+            return Err(ApiError::BadRequest(format!(
+                "blacklist contains forbidden substring '{needle}'"
+            )));
+        }
+    }
+    for c in blacklist.chars() {
+        if c.is_control() && c != '\n' && c != '\r' && c != '\t' {
+            return Err(ApiError::BadRequest(
+                "blacklist must not contain control characters".into(),
+            ));
+        }
+        if c == '<' || c == '>' {
+            return Err(ApiError::BadRequest(
+                "blacklist must not contain '<' or '>'".into(),
+            ));
+        }
+    }
+    for (idx, line) in blacklist.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.chars().count() > MAX_BLACKLIST_LINE_LEN {
+            return Err(ApiError::BadRequest(format!(
+                "blacklist line {} too long (max {MAX_BLACKLIST_LINE_LEN} chars)",
+                idx + 1
+            )));
+        }
+    }
     Ok(())
 }
 
+pub fn normalize_blacklist(blacklist: &str) -> String {
+    let mut seen = std::collections::HashSet::new();
+    let mut lines: Vec<&str> = Vec::new();
+    for raw in blacklist.split('\n') {
+        let trimmed = raw.trim_matches(|c: char| c.is_whitespace());
+        if trimmed.is_empty() {
+            continue;
+        }
+        if seen.insert(trimmed.to_ascii_lowercase()) {
+            lines.push(trimmed);
+        }
+    }
+    lines.join("\n")
+}
+
 pub fn validate_device_scoped_account(acc: &DeviceScopedAccount) -> Result<(), ApiError> {
-    validate_owner_token(&acc.owner_token)?;
     validate_account_id(acc.id)?;
     validate_account_name(&acc.name)?;
     validate_blacklist_text(&acc.blacklist)?;
@@ -118,7 +164,6 @@ pub fn validate_blacklist_payload(payload: &BlacklistPayload) -> Result<(), ApiE
 }
 
 pub fn validate_feed_interaction(req: &FeedInteractionRequest) -> Result<(), ApiError> {
-    validate_owner_token(&req.owner_token)?;
     validate_account_id(req.account_id)?;
     if req.session_id.len() > MAX_SESSION_ID_LEN {
         return Err(ApiError::BadRequest(format!(

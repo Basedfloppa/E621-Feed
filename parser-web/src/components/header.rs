@@ -220,56 +220,63 @@ pub fn header() -> Html {
     });
 
     html! {
-        <nav class="navbar bg-body-tertiary border" id="header">
-            <div class="container-fluid d-flex align-items-center gap-3 flex-wrap">
-                <a class="navbar-brand text-nowrap" href="/">
+        <nav class="navbar navbar-expand-lg bg-body-tertiary border" id="header">
+            <div class="container-fluid d-flex align-items-center gap-2">
+                <a class="navbar-brand text-nowrap me-auto" href="/">
                     {"e621 Account parser"}
                 </a>
-                <ul class="navbar-nav flex-row me-auto gap-2 flex-wrap">
-                    <li class="nav-item">
-                        <a
-                            class={classes!("nav-link", is_active("/").then_some("active"))}
-                            aria-current={is_active("/").then_some("page")}
-                            href="/"
-                        >
-                            {"Home"}
-                        </a>
-                    </li>
-                    <li class="nav-item">
-                        <a
-                            class={classes!("nav-link", is_active("/account").then_some("active"))}
-                            aria-current={is_active("/account").then_some("page")}
-                            href="/account"
-                        >
-                            {"Account"}
-                        </a>
-                    </li>
-                    <li class="nav-item">
-                        <a
-                            class={classes!("nav-link", is_active("/feed").then_some("active"))}
-                            aria-current={is_active("/feed").then_some("page")}
-                            href="/feed"
-                        >
-                            {"Feed"}
-                        </a>
-                    </li>
-                </ul>
-                <ul class="navbar-nav flex-row ms-auto flex-wrap align-items-center">
-                    <li class="nav-item">
-                        <button
-                            type="button"
-                            class="btn btn-link nav-link"
-                            title="Replay the onboarding tour"
-                            aria-label="Replay onboarding tour"
-                            onclick={restart_tour}
-                        >
-                            <i class="bi bi-question-circle"></i>
-                        </button>
-                    </li>
-                    <li class="nav-item">
-                        <ThemeToggle />
-                    </li>
-                </ul>
+                <button
+                    type="button"
+                    class="btn btn-link nav-link order-lg-3"
+                    title="Replay the onboarding tour"
+                    aria-label="Replay onboarding tour"
+                    onclick={restart_tour}
+                >
+                    <i class="bi bi-question-circle" aria-hidden="true"></i>
+                </button>
+                <div class="order-lg-3"><ThemeToggle /></div>
+                <button
+                    class="navbar-toggler order-lg-3"
+                    type="button"
+                    data-bs-toggle="collapse"
+                    data-bs-target="#header-nav-collapse"
+                    aria-controls="header-nav-collapse"
+                    aria-expanded="false"
+                    aria-label="Toggle navigation"
+                >
+                    <span class="navbar-toggler-icon"></span>
+                </button>
+                <div class="collapse navbar-collapse order-lg-2" id="header-nav-collapse">
+                    <ul class="navbar-nav me-auto gap-1">
+                        <li class="nav-item">
+                            <a
+                                class={classes!("nav-link", is_active("/").then_some("active"))}
+                                aria-current={is_active("/").then_some("page")}
+                                href="/"
+                            >
+                                {"Home"}
+                            </a>
+                        </li>
+                        <li class="nav-item">
+                            <a
+                                class={classes!("nav-link", is_active("/account").then_some("active"))}
+                                aria-current={is_active("/account").then_some("page")}
+                                href="/account"
+                            >
+                                {"Account"}
+                            </a>
+                        </li>
+                        <li class="nav-item">
+                            <a
+                                class={classes!("nav-link", is_active("/feed").then_some("active"))}
+                                aria-current={is_active("/feed").then_some("page")}
+                                href="/feed"
+                            >
+                                {"Feed"}
+                            </a>
+                        </li>
+                    </ul>
+                </div>
             </div>
         </nav>
     }

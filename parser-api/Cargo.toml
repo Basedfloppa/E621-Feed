@@ -32,6 +32,7 @@ arc-swap = "1"
 rocket_okapi = { version = "0.9", features = ["swagger"] }
 schemars = { version = "0.8.21", features = ["chrono"] }
 rayon = "1"
+getrandom = "0.2"
 
 [target.'cfg(debug_assertions)'.dependencies]
 rocket_cors = "0.6.0"

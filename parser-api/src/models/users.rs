@@ -50,7 +50,6 @@ pub struct TruncatedAccount {
 #[derive(Debug, Serialize, Deserialize, Clone, JsonSchema)]
 #[serde(crate = "rocket::serde")]
 pub struct DeviceScopedAccount {
-    pub owner_token: String,
     pub id: i32,
     pub name: String,
     pub blacklist: String,

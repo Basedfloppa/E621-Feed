@@ -138,11 +138,6 @@ pub fn feed_page() -> Html {
                 return;
             };
 
-            let Some(owner_token) = get_or_create_owner_token() else {
-                error.set(Some("Missing device token".to_string()));
-                return;
-            };
-
             let Some(cfg) = read_config_from_head() else {
                 error.set(Some(
                     "App configuration failed to load — please reload the page.".to_string(),
@@ -150,11 +145,8 @@ pub fn feed_page() -> Html {
                 return;
             };
             let mut url = format!(
-                "{}/recommendations/{}?owner_token={}&page={}",
-                cfg.backend_domain,
-                user.id,
-                urlencoding::encode(&owner_token),
-                *page
+                "{}/recommendations/{}?page={}",
+                cfg.backend_domain, user.id, *page
             );
 
             let value = *affinity;
@@ -184,6 +176,9 @@ pub fn feed_page() -> Html {
                 match fetch_json::<Vec<ScoredPost>>(&url).await {
                     Ok(mut new_items) => {
                         use std::collections::HashSet;
+                        if value > 0.0 {
+                            new_items.retain(|p| p.score >= value);
+                        }
                         let mut merged: Vec<ScoredPost> = (*posts).clone();
                         let mut seen: HashSet<i64> = merged.iter().map(|p| p.post.id).collect();
                         new_items.retain(|p| seen.insert(p.post.id));
@@ -492,47 +487,59 @@ pub fn feed_page() -> Html {
                     <span class="d-block">{"Grid type"}</span>
                     <div class="btn-group" role="group" aria-label="Grid type">
                         <button
+                            type="button"
                             class={classes!("btn","btn-dark", if *grid == GridType::Auto { "active" } else { "" })}
                             aria-pressed={(*grid == GridType::Auto).to_string()}
+                            aria-label="Auto grid (responsive)"
+                            title="Auto grid (responsive)"
                             onclick={{
                                 let grid = grid.clone();
                                 Callback::from(move |_| grid.set(GridType::Auto))
                             }}
                         >
-                            <i class="bi bi-water"></i>
+                            <i class="bi bi-water" aria-hidden="true"></i>
                         </button>
 
                         <button
+                            type="button"
                             class={classes!("btn","btn-dark", if *grid == GridType::Three { "active" } else { "" })}
                             aria-pressed={(*grid == GridType::Three).to_string()}
+                            aria-label="Three-column grid"
+                            title="Three-column grid"
                             onclick={{
                                 let grid = grid.clone();
                                 Callback::from(move |_| grid.set(GridType::Three))
                             }}
                         >
-                            <i class="bi bi-grid-3x3-gap-fill"></i>
+                            <i class="bi bi-grid-3x3-gap-fill" aria-hidden="true"></i>
                         </button>
 
                         <button
+                            type="button"
                             class={classes!("btn","btn-dark", if *grid == GridType::Two { "active" } else { "" })}
                             aria-pressed={(*grid == GridType::Two).to_string()}
+                            aria-label="Two-column grid"
+                            title="Two-column grid"
                             onclick={{
                                 let grid = grid.clone();
                                 Callback::from(move |_| grid.set(GridType::Two))
                             }}
                         >
-                            <i class="bi bi-grid-fill"></i>
+                            <i class="bi bi-grid-fill" aria-hidden="true"></i>
                         </button>
 
                         <button
+                            type="button"
                             class={classes!("btn","btn-dark", if *grid == GridType::One { "active" } else { "" })}
                             aria-pressed={(*grid == GridType::One).to_string()}
+                            aria-label="Single-column list"
+                            title="Single-column list"
                             onclick={{
                                 let grid = grid.clone();
                                 Callback::from(move |_| grid.set(GridType::One))
                             }}
                         >
-                            <i class="bi bi-square-fill"></i>
+                            <i class="bi bi-square-fill" aria-hidden="true"></i>
                         </button>
                     </div>
                 </div>
@@ -626,6 +633,7 @@ async fn fetch_json<T: DeserializeOwned>(url: &str) -> Result<T, String> {
     let opts = RequestInit::new();
     opts.set_method("GET");
     opts.set_mode(RequestMode::Cors);
+    opts.set_credentials(web_sys::RequestCredentials::Include);
 
     let request = Request::new_with_str_and_init(url, &opts)
         .map_err(|e| format!("Failed to create request: {e:?}"))?;

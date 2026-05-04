@@ -2,7 +2,6 @@ use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap};
 use std::rc::Rc;
 
-use reqwasm::http::Request;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::Closure;
 use wasm_bindgen_futures::{JsFuture, spawn_local};
@@ -13,8 +12,7 @@ use web_sys::{
 use yew::prelude::*;
 
 use crate::models::{
-    TagRelationEdge, TagRelationGraphPayload, TagRelationNode, get_or_create_owner_token,
-    read_config_from_head,
+    TagRelationEdge, TagRelationGraphPayload, TagRelationNode, api_get, read_config_from_head,
 };
 use crate::pages::UserInfo;
 
@@ -199,18 +197,10 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
                     payload.set(None);
                     return;
                 };
-                let Some(owner_token) = get_or_create_owner_token() else {
-                    error.set(Some("Missing device token".to_string()));
-                    return;
-                };
 
                 let url = format!(
-                    "{}/account/{}/tag_relations?owner_token={}&top={}&min_cooc={}",
-                    api_base,
-                    user.id,
-                    urlencoding::encode(&owner_token),
-                    top_n_val,
-                    min_cooc_val,
+                    "{}/account/{}/tag_relations?top={}&min_cooc={}",
+                    api_base, user.id, top_n_val, min_cooc_val,
                 );
                 let payload = payload.clone();
                 let loading = loading.clone();
@@ -219,7 +209,7 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
                 error.set(None);
 
                 wasm_bindgen_futures::spawn_local(async move {
-                    match Request::get(&url).send().await {
+                    match api_get(&url).send().await {
                         Ok(resp) if resp.ok() => match resp.json::<TagRelationGraphPayload>().await
                         {
                             Ok(graph) => {

@@ -14,7 +14,7 @@ pub fn theme_toggle() -> Html {
 
         if let Some(doc_elem) = window()
             .and_then(|w| w.document())
-            .and_then(|d| d.body())
+            .and_then(|d| d.document_element())
         {
             let _ = doc_elem.set_attribute("data-bs-theme", &theme);
         }
@@ -36,7 +36,7 @@ pub fn theme_toggle() -> Html {
 
                 if let Some(doc_elem) = window()
                     .and_then(|w| w.document())
-                    .and_then(|d| d.body())
+                    .and_then(|d| d.document_element())
                 {
                     let _ = doc_elem.set_attribute("data-bs-theme", &theme);
                 }
@@ -73,7 +73,7 @@ pub fn theme_toggle() -> Html {
 
             if let Some(doc_elem) = window()
                 .and_then(|w| w.document())
-                .and_then(|d| d.body())
+                .and_then(|d| d.document_element())
             {
                 let _ = doc_elem.set_attribute("data-bs-theme", theme_str);
             }

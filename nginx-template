@@ -63,6 +63,13 @@ server {
         expires off;
     }
 
+    # Dont cache index to preserve sha integirty
+    location = /index.html {
+        add_header Cache-Control "no-cache, must-revalidate" always;
+        etag on;
+        try_files $uri =404;
+    }
+
     # Explicit WASM MIME.
     location ~* \.wasm$ {
         types { }
@@ -94,17 +101,30 @@ server {
         try_files $uri =404;
     }
 
-    # robots.txt — served as plain text
+    # robots.txt — served as plain text.
     location = /robots.txt {
         default_type "text/plain; charset=utf-8";
-        return 200 "User-agent: *\nDisallow: /api/\n";
+        return 200 "User-agent: *\nDisallow: /api/\nDisallow: /static/snippets/\nDisallow: /admin\nDisallow: /login\nDisallow: /openapi.json\nDisallow: /swagger-ui\n";
     }
 
-    # SPA fallback for client-side routes
+    # SPA fallback for client-side routes.
     location / {
-        # Handle preflight if you ever re-enable CORS for some paths
         if ($request_method = OPTIONS) { return 204; }
-        try_files $uri $uri/ /index.html;
+        add_header Cache-Control "no-cache, must-revalidate" always;
+        try_files $uri =404;
+    }
+
+    location = / {
+        add_header Cache-Control "no-cache, must-revalidate" always;
+        try_files /index.html =404;
+    }
+    location ^~ /account {
+        add_header Cache-Control "no-cache, must-revalidate" always;
+        try_files /index.html =404;
+    }
+    location ^~ /feed {
+        add_header Cache-Control "no-cache, must-revalidate" always;
+        try_files /index.html =404;
     }
 
     # Block Swagger UI and the OpenAPI in production

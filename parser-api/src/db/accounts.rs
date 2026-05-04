@@ -190,6 +190,33 @@ pub fn delete_device_link(owner_token: &str, account_id: i32) -> Result<usize, S
                 params![owner_token, account_id],
             )
             .map_err(|e| format!("Failed to delete device link: {e}"))?;
+        if n > 0 {
+            let remaining: i64 = tx
+                .query_row(
+                    "SELECT COUNT(*) FROM account_device_links WHERE account_id = ?1",
+                    params![account_id],
+                    |r| r.get(0),
+                )
+                .map_err(|e| format!("Failed to count remaining device links: {e}"))?;
+            if remaining == 0 {
+                for stmt in [
+                    "DELETE FROM accounts_post WHERE account_id = ?1",
+                    "DELETE FROM account_tag_counts WHERE account_id = ?1",
+                    "DELETE FROM account_rating_profile WHERE account_id = ?1",
+                    "DELETE FROM account_media_profile WHERE account_id = ?1",
+                    "DELETE FROM account_quality_profile WHERE account_id = ?1",
+                    "DELETE FROM account_tag_feedback WHERE account_id = ?1",
+                    "DELETE FROM account_tag_cooccurrence WHERE account_id = ?1",
+                    "DELETE FROM feed_interactions WHERE account_id = ?1",
+                    "DELETE FROM accounts WHERE id = ?1",
+                ] {
+                    let _ = tx.execute(stmt, params![account_id]).map_err(|e| {
+                        warn!("delete_device_link cascade '{stmt}': {e}");
+                        e.to_string()
+                    });
+                }
+            }
+        }
         Ok(n)
     })
 }

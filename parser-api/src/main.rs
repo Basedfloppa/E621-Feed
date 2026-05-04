@@ -5,24 +5,29 @@ use chrono::Utc;
 use rocket::http::{ContentType, Header, Status};
 use rocket::request::{self, FromRequest, Request};
 use rocket::response::{self, Responder, Response};
-use rocket::{State, get};
+use rocket::shield::Shield;
+use rocket::get;
+#[cfg(debug_assertions)]
+use rocket::State;
 use rocket::{
     futures::{lock::Mutex, stream::StreamExt},
     serde::json::{Json, serde_json},
 };
-use rocket_cors::AllowedOrigins;
 use rusqlite::Result;
 use std::collections::HashSet;
 use std::hash::{DefaultHasher, Hasher};
 use std::io::Cursor;
 
 use e621_account_parser_api::{
-    api, db,
+    api,
+    auth::{self, OwnerToken},
+    db,
     errors::ApiError,
     jobs, models, prefetch,
     ratelimit::{self, ClientIp},
     utils, validation,
 };
+use rocket::http::CookieJar;
 
 use db::{
     DbInit, collect_local_candidate_ids, get_account_by_id, get_account_by_name,
@@ -36,8 +41,11 @@ use models::{
     TagRelationScoring, TruncatedAccount, UserApiResponse, cfg, default_path, reload_from,
     start_config_watcher,
 };
+#[cfg(debug_assertions)]
 use rocket_okapi::okapi::openapi3::OpenApi;
-use rocket_okapi::{openapi, openapi_get_routes_spec, settings::OpenApiSettings, swagger_ui::*};
+use rocket_okapi::{openapi, openapi_get_routes_spec, settings::OpenApiSettings};
+#[cfg(debug_assertions)]
+use rocket_okapi::swagger_ui::{SwaggerUIConfig, make_swagger_ui};
 use utils::{
     ScoringContext, current_global_relation, current_idf, diversify_scored_posts, mark_idf_dirty,
 };
@@ -63,19 +71,18 @@ where
 /// current job state. If a job for this account is already running, returns
 /// the existing state instead of starting a new one.
 #[openapi(tag = "Processing")]
-#[post("/process/<account_id>?<owner_token>")]
+#[post("/process/<account_id>")]
 async fn process_posts(
     account_id: i32,
-    owner_token: &str,
+    owner: OwnerToken,
     client_ip: ClientIp,
 ) -> Result<Json<ProcessJobState>, ApiError> {
-    validation::validate_owner_token(owner_token)?;
     validation::validate_account_id(account_id)?;
-    // /process is the most expensive route. Cap it hard per device 
+    let owner_token = owner.0;
+    // /process is the most expensive route. Cap it hard per device
     ratelimit::check(&format!("process:owner:{owner_token}"), 1, 1)?;
     ratelimit::check(&format!("process:ip:{}", client_ip.0), 5, 5)?;
-    let owner_token_owned = owner_token.to_string();
-    let owner_for_check = owner_token_owned.clone();
+    let owner_for_check = owner_token.clone();
     db_blocking(move || get_account_by_id(&owner_for_check, account_id).map_err(|e| e.to_string()))
         .await?;
 
@@ -83,7 +90,7 @@ async fn process_posts(
         BeginResult::AlreadyRunning(state) => Ok(Json(state)),
         BeginResult::Started(state) => {
             tokio::spawn(async move {
-                let result = run_process(account_id, owner_token_owned).await;
+                let result = run_process(account_id, owner_token).await;
                 if let Err(ref e) = result {
                     warn!("/process for {account_id} failed: {e}");
                 }
@@ -95,15 +102,15 @@ async fn process_posts(
 }
 
 #[openapi(tag = "Processing")]
-#[get("/process/<account_id>/status?<owner_token>")]
+#[get("/process/<account_id>/status")]
 async fn process_status(
     account_id: i32,
-    owner_token: &str,
+    owner: OwnerToken,
 ) -> Result<Json<Option<ProcessJobState>>, ApiError> {
-    validation::validate_owner_token(owner_token)?;
     validation::validate_account_id(account_id)?;
-    let owner = owner_token.to_string();
-    db_blocking(move || get_account_by_id(&owner, account_id).map_err(|e| e.to_string())).await?;
+    let owner_token = owner.0;
+    db_blocking(move || get_account_by_id(&owner_token, account_id).map_err(|e| e.to_string()))
+        .await?;
     Ok(Json(jobs::get_state(account_id)))
 }
 
@@ -185,16 +192,16 @@ fn strip_blacklisted_tags(mut p: Post, blacklist: &HashSet<String>) -> Post {
 }
 
 #[openapi(tag = "Accounts")]
-#[get("/account/<account_id>/tag_counts?<owner_token>")]
+#[get("/account/<account_id>/tag_counts")]
 async fn get_account_tag_counts(
     account_id: i32,
-    owner_token: &str,
+    owner: OwnerToken,
 ) -> Result<Json<Vec<TagCount>>, ApiError> {
-    validation::validate_owner_token(owner_token)?;
     validation::validate_account_id(account_id)?;
-    let owner = owner_token.to_string();
+    let owner_token = owner.0;
+    ratelimit::check(&format!("read:owner:{owner_token}"), 240, 60)?;
     let counts = db_blocking(move || {
-        get_account_by_id(&owner, account_id)
+        get_account_by_id(&owner_token, account_id)
             .map_err(|e| format!("Failed to validate account access: {e}"))?;
         get_tag_counts(account_id).map_err(|e| {
             let m = format!("Failed to get tag counts: {e}");
@@ -207,16 +214,16 @@ async fn get_account_tag_counts(
 }
 
 #[openapi(tag = "Users")]
-#[get("/user/name/<name>?<owner_token>")]
+#[get("/user/name/<name>")]
 async fn get_account_name(
     name: &str,
-    owner_token: &str,
+    owner: OwnerToken,
 ) -> Result<Json<TruncatedAccount>, ApiError> {
-    validation::validate_owner_token(owner_token)?;
-    let owner = owner_token.to_string();
+    let owner_token = owner.0;
+    ratelimit::check(&format!("read:owner:{owner_token}"), 240, 60)?;
     let name_owned = name.to_string();
 
-    let owner_for_local = owner.clone();
+    let owner_for_local = owner_token.clone();
     let name_for_local = name_owned.clone();
     let local = db_blocking(move || get_account_by_name(&owner_for_local, name_for_local)).await;
     if let Ok(acc) = local {
@@ -240,13 +247,13 @@ async fn get_account_name(
 }
 
 #[openapi(tag = "Users")]
-#[get("/user/id/<id>?<owner_token>")]
-async fn get_account_id(id: i32, owner_token: &str) -> Result<Json<TruncatedAccount>, ApiError> {
-    validation::validate_owner_token(owner_token)?;
+#[get("/user/id/<id>")]
+async fn get_account_id(id: i32, owner: OwnerToken) -> Result<Json<TruncatedAccount>, ApiError> {
     validation::validate_account_id(id)?;
-    let owner = owner_token.to_string();
+    let owner_token = owner.0;
+    ratelimit::check(&format!("read:owner:{owner_token}"), 240, 60)?;
     let acc = db_blocking(move || {
-        get_account_by_id(&owner, id).map_err(|e| {
+        get_account_by_id(&owner_token, id).map_err(|e| {
             let m = format!("Failed to get account: {e}");
             error!("{m}");
             m
@@ -257,11 +264,11 @@ async fn get_account_id(id: i32, owner_token: &str) -> Result<Json<TruncatedAcco
 }
 
 #[openapi(tag = "Accounts")]
-#[get("/accounts?<owner_token>")]
-async fn list_accounts(owner_token: &str) -> Result<Json<Vec<TruncatedAccount>>, ApiError> {
-    validation::validate_owner_token(owner_token)?;
-    let owner = owner_token.to_string();
-    let accounts = db_blocking(move || get_accounts_for_owner(&owner)).await?;
+#[get("/accounts")]
+async fn list_accounts(owner: OwnerToken) -> Result<Json<Vec<TruncatedAccount>>, ApiError> {
+    let owner_token = owner.0;
+    ratelimit::check(&format!("read:owner:{owner_token}"), 240, 60)?;
+    let accounts = db_blocking(move || get_accounts_for_owner(&owner_token)).await?;
     Ok(Json(accounts))
 }
 
@@ -269,17 +276,46 @@ async fn list_accounts(owner_token: &str) -> Result<Json<Vec<TruncatedAccount>>,
 #[post("/account", data = "<account>")]
 async fn create_account(
     account: Json<DeviceScopedAccount>,
+    owner: OwnerToken,
     client_ip: ClientIp,
 ) -> Result<Json<TruncatedAccount>, ApiError> {
     let acc = account.into_inner();
+    let owner_token = owner.0;
     validation::validate_device_scoped_account(&acc)?;
     // Per-IP cap on account creation: H-1 showed how a single client
     // could spray thousands of bogus accounts in seconds, each one
     // becoming an admin-authenticated prefetch target afterwards.
     ratelimit::check(&format!("acct_create:ip:{}", client_ip.0), 5, 5)?;
-    ratelimit::check(&format!("acct_create:owner:{}", acc.owner_token), 10, 10)?;
+    ratelimit::check(&format!("acct_create:owner:{owner_token}"), 10, 10)?;
+
+    let resolved = match api::get_user_by_id(acc.id).await {
+        Ok(r) => r,
+        Err(e) => {
+            warn!("e621 lookup for id={} failed: {e}", acc.id);
+            return Err(ApiError::BadRequest(format!(
+                "could not verify account {} on e621",
+                acc.id
+            )));
+        }
+    };
+    let (resolved_id, resolved_name) = match resolved {
+        UserApiResponse::FullCurrentUser(u) => (u.id, u.name),
+        UserApiResponse::FullUser(u) => (u.id, u.name),
+    };
+    if resolved_id != acc.id || !resolved_name.eq_ignore_ascii_case(acc.name.trim()) {
+        return Err(ApiError::BadRequest(format!(
+            "name does not match e621 user {resolved_id} ('{resolved_name}')"
+        )));
+    }
+    // Persist the canonical name from e621 so the device-supplied
+    // capitalisation/whitespace can't drift across devices.
+    let canonical_name = resolved_name;
+    // Collapse `\r\n`, trim each line, drop empties, dedup. Validation
+    // rejected XSS-flavoured inputs above; this just cleans the rest.
+    let normalized_blacklist = validation::normalize_blacklist(&acc.blacklist);
+
     let result = db_blocking(move || {
-        set_account(&acc.owner_token, acc.id, &acc.name, &acc.blacklist).map_err(|e| {
+        set_account(&owner_token, acc.id, &canonical_name, &normalized_blacklist).map_err(|e| {
             let m = format!("Failed to set account: {e}");
             error!("{m}");
             m
@@ -345,21 +381,21 @@ impl<'r> Responder<'r, 'static> for EtagJson {
     }
 }
 
-#[get("/account/<account_id>/tag_relations?<owner_token>&<top>&<min_cooc>")]
+#[get("/account/<account_id>/tag_relations?<top>&<min_cooc>")]
 async fn get_account_tag_relations(
     account_id: i32,
-    owner_token: &str,
+    owner: OwnerToken,
     top: Option<usize>,
     min_cooc: Option<i64>,
     if_none_match: IfNoneMatch,
 ) -> Result<EtagJson, ApiError> {
-    validation::validate_owner_token(owner_token)?;
     validation::validate_account_id(account_id)?;
+    let owner_token = owner.0;
+    ratelimit::check(&format!("read:owner:{owner_token}"), 240, 60)?;
     let top = top.unwrap_or(60).clamp(2, 250);
     let min_cooc = min_cooc.unwrap_or(2).max(1);
-    let owner = owner_token.to_string();
     let mut payload = db_blocking(move || {
-        get_account_by_id(&owner, account_id)
+        get_account_by_id(&owner_token, account_id)
             .map_err(|e| format!("Failed to validate account access: {e}"))?;
         get_account_tag_relation_graph(account_id, top, min_cooc)
     })
@@ -384,16 +420,17 @@ async fn get_account_tag_relations(
 }
 
 #[openapi(tag = "Accounts")]
-#[get("/account/<account_id>/blacklist?<owner_token>")]
+#[get("/account/<account_id>/blacklist")]
 async fn get_account_blacklist(
     account_id: i32,
-    owner_token: &str,
+    owner: OwnerToken,
 ) -> Result<Json<BlacklistPayload>, ApiError> {
-    validation::validate_owner_token(owner_token)?;
     validation::validate_account_id(account_id)?;
-    let owner = owner_token.to_string();
+    let owner_token = owner.0;
+    ratelimit::check(&format!("read:owner:{owner_token}"), 240, 60)?;
     let account = db_blocking(move || {
-        get_account_by_id(&owner, account_id).map_err(|e| format!("Failed to get account: {e}"))
+        get_account_by_id(&owner_token, account_id)
+            .map_err(|e| format!("Failed to get account: {e}"))
     })
     .await?;
     Ok(Json(BlacklistPayload {
@@ -402,16 +439,16 @@ async fn get_account_blacklist(
 }
 
 #[openapi(tag = "Accounts")]
-#[get("/account/<account_id>/experiment_bucket?<owner_token>")]
+#[get("/account/<account_id>/experiment_bucket")]
 async fn get_account_experiment_bucket(
     account_id: i32,
-    owner_token: &str,
+    owner: OwnerToken,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    validation::validate_owner_token(owner_token)?;
     validation::validate_account_id(account_id)?;
-    let owner = owner_token.to_string();
+    let owner_token = owner.0;
+    ratelimit::check(&format!("read:owner:{owner_token}"), 240, 60)?;
     let explicit = db_blocking(move || {
-        get_account_by_id(&owner, account_id)
+        get_account_by_id(&owner_token, account_id)
             .map_err(|e| format!("Failed to validate account access: {e}"))?;
         db::get_account_experiment_bucket(account_id)
             .map_err(|e| format!("Failed to read experiment bucket: {e}"))
@@ -421,16 +458,16 @@ async fn get_account_experiment_bucket(
     Ok(Json(serde_json::json!({ "bucket": bucket })))
 }
 
-/// Sever the device → account link. The underlying `accounts` row stays
-/// intact so other devices that linked the same account aren't affected;
-/// any orphaned rows are removed by the periodic GC (Phase 6).
+/// Sever the device → account link. The cascade in `delete_device_link`
+/// drops the underlying account row + all derived per-account tables
+/// when this was the last device linked to it (audit #7).
 #[openapi(tag = "Accounts")]
-#[delete("/account/<account_id>?<owner_token>")]
-async fn delete_account(account_id: i32, owner_token: &str) -> Result<(), ApiError> {
-    validation::validate_owner_token(owner_token)?;
+#[delete("/account/<account_id>")]
+async fn delete_account(account_id: i32, owner: OwnerToken) -> Result<(), ApiError> {
     validation::validate_account_id(account_id)?;
-    let owner = owner_token.to_string();
-    let removed = db_blocking(move || db::delete_device_link(&owner, account_id)).await?;
+    let owner_token = owner.0;
+    let removed =
+        db_blocking(move || db::delete_device_link(&owner_token, account_id)).await?;
     if removed == 0 {
         return Err(ApiError::NotFound(
             "No account found for this device token".into(),
@@ -440,19 +477,19 @@ async fn delete_account(account_id: i32, owner_token: &str) -> Result<(), ApiErr
 }
 
 #[openapi(tag = "Accounts")]
-#[patch("/account/<account_id>/blacklist?<owner_token>", data = "<payload>")]
+#[patch("/account/<account_id>/blacklist", data = "<payload>")]
 async fn update_account_blacklist(
     account_id: i32,
-    owner_token: &str,
+    owner: OwnerToken,
     payload: Json<BlacklistPayload>,
 ) -> Result<Json<TruncatedAccount>, ApiError> {
-    validation::validate_owner_token(owner_token)?;
     validation::validate_account_id(account_id)?;
     validation::validate_blacklist_payload(&payload)?;
-    let owner = owner_token.to_string();
-    let body = payload.into_inner();
+    let owner_token = owner.0;
+    let mut body = payload.into_inner();
+    body.blacklist = validation::normalize_blacklist(&body.blacklist);
     let updated = db_blocking(move || {
-        update_device_blacklist(&owner, account_id, &body.blacklist).map_err(|e| {
+        update_device_blacklist(&owner_token, account_id, &body.blacklist).map_err(|e| {
             let m = format!("Failed to update blacklist: {e}");
             error!("{m}");
             m
@@ -464,8 +501,12 @@ async fn update_account_blacklist(
 
 #[openapi(tag = "Recommendations")]
 #[post("/interaction", data = "<payload>")]
-async fn log_feed_interaction(payload: Json<FeedInteractionRequest>) -> Result<(), ApiError> {
+async fn log_feed_interaction(
+    payload: Json<FeedInteractionRequest>,
+    owner: OwnerToken,
+) -> Result<(), ApiError> {
     let body = payload.into_inner();
+    let owner_token = owner.0;
     validation::validate_feed_interaction(&body)?;
 
     if matches!(body.event_type, models::FeedInteractionType::Unknown) {
@@ -475,26 +516,22 @@ async fn log_feed_interaction(payload: Json<FeedInteractionRequest>) -> Result<(
     // Tight per-device cap — feed scrolling fires impressions per card,
     // a normal session is well under this. Anything higher is either a
     // bug (re-render storm) or an attempt to write-flood SQLite.
-    ratelimit::check(
-        &format!("interaction:owner:{}", body.owner_token),
-        120,
-        60,
-    )?;
-    db_blocking(move || record_feed_interaction(&body))
+    ratelimit::check(&format!("interaction:owner:{owner_token}"), 120, 60)?;
+    db_blocking(move || record_feed_interaction(&owner_token, &body))
         .await
         .map_err(ApiError::from)
 }
 
 #[openapi(tag = "Recommendations")]
-#[get("/recommendations/<account_id>?<owner_token>&<page>&<affinity_threshold>")]
+#[get("/recommendations/<account_id>?<page>&<affinity_threshold>")]
 async fn get_recommendations(
     account_id: i32,
-    owner_token: &str,
+    owner: OwnerToken,
     page: Option<i32>,
     affinity_threshold: Option<f32>,
 ) -> Result<Json<Vec<ScoredPost>>, ApiError> {
-    validation::validate_owner_token(owner_token)?;
     validation::validate_account_id(account_id)?;
+    let owner_token = owner.0;
     // Each /recommendations issues an admin-authenticated e621 round-trip.
     // Cap per device so a misbehaving infinite-scroll loop can't burn
     // through the admin quota; the burst is intentionally close to the
@@ -505,7 +542,7 @@ async fn get_recommendations(
     // don't need to hold the Arc<Config> across the blocking task boundary.
     let runtime = cfg.runtime.clone();
 
-    let owner = owner_token.to_string();
+    let owner = owner_token;
     // Pull everything the request needs from SQLite in a single blocking
     // hop: profile, blacklist, user-relation graph, the two dedup sets
     // (seen + owned), and the A/B bucket assignment. Done before the network
@@ -646,6 +683,83 @@ async fn get_recommendations(
     Ok(Json(scored))
 }
 
+#[openapi(tag = "Accounts")]
+#[get("/defaults/blacklist")]
+fn get_default_blacklist() -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "blacklist": cfg().tag_blacklist }))
+}
+
+/// Refreshes the cookie's 400-day expiry if one is already attached,
+/// or mints a fresh 256-bit CSPRNG token and installs it. Always
+/// returns 200 — the SPA can call this on every load and rely on the
+/// cookie being valid afterwards.
+#[openapi(tag = "Session")]
+#[post("/session/bootstrap")]
+fn session_bootstrap(cookies: &CookieJar<'_>) -> Json<serde_json::Value> {
+    if let Some(c) = cookies.get(auth::OWNER_TOKEN_COOKIE) {
+        if validation::validate_owner_token(c.value()).is_ok() {
+            cookies.add(auth::build_owner_cookie(c.value().to_string()));
+            return Json(serde_json::json!({ "minted": false }));
+        }
+        cookies.add(auth::build_owner_cookie_clear());
+    }
+
+    // 32 random bytes → base64url ≈ 43 chars, well within the
+    // validator's 16..=128 window and ~256 bits of entropy.
+    let token = mint_owner_token();
+    cookies.add(auth::build_owner_cookie(token));
+    Json(serde_json::json!({ "minted": true }))
+}
+
+/// Explicit logout — clear the cookie. Idempotent.
+#[openapi(tag = "Session")]
+#[delete("/session")]
+fn session_clear(cookies: &CookieJar<'_>) -> Json<serde_json::Value> {
+    cookies.add(auth::build_owner_cookie_clear());
+    Json(serde_json::json!({ "cleared": true }))
+}
+
+fn mint_owner_token() -> String {
+    let mut buf = [0u8; 32];
+    // OS CSPRNG (getrandom(2) on Linux). The only failure mode here is
+    // a fundamentally broken kernel/syscall — if that happens, exit so
+    // we don't accidentally hand out a deterministic token.
+    getrandom::getrandom(&mut buf).expect("OS CSPRNG unavailable");
+    // URL-safe base64 without padding — same alphabet the frontend
+    // uses, so a token minted here is indistinguishable from one the
+    // browser would have produced via `crypto.getRandomValues`.
+    base64_url_encode(&buf)
+}
+
+fn base64_url_encode(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] =
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    let mut i = 0;
+    while i + 3 <= bytes.len() {
+        let n =
+            (u32::from(bytes[i]) << 16) | (u32::from(bytes[i + 1]) << 8) | u32::from(bytes[i + 2]);
+        out.push(ALPHABET[((n >> 18) & 0x3f) as usize] as char);
+        out.push(ALPHABET[((n >> 12) & 0x3f) as usize] as char);
+        out.push(ALPHABET[((n >> 6) & 0x3f) as usize] as char);
+        out.push(ALPHABET[(n & 0x3f) as usize] as char);
+        i += 3;
+    }
+    let rem = bytes.len() - i;
+    if rem == 1 {
+        let n = u32::from(bytes[i]) << 16;
+        out.push(ALPHABET[((n >> 18) & 0x3f) as usize] as char);
+        out.push(ALPHABET[((n >> 12) & 0x3f) as usize] as char);
+    } else if rem == 2 {
+        let n = (u32::from(bytes[i]) << 16) | (u32::from(bytes[i + 1]) << 8);
+        out.push(ALPHABET[((n >> 18) & 0x3f) as usize] as char);
+        out.push(ALPHABET[((n >> 12) & 0x3f) as usize] as char);
+        out.push(ALPHABET[((n >> 6) & 0x3f) as usize] as char);
+    }
+    out
+}
+
+#[cfg(debug_assertions)]
 #[get("/openapi.json")]
 fn openapi_json(spec: &State<OpenApi>) -> Json<OpenApi> {
     Json(spec.inner().clone())
@@ -672,10 +786,23 @@ fn catch_500(_req: &Request<'_>) -> ApiError {
 
 #[cfg(debug_assertions)]
 fn attach_cors(rocket: rocket::Rocket<rocket::Build>) -> rocket::Rocket<rocket::Build> {
-    let cors = rocket_cors::CorsOptions::default()
-        .allowed_origins(AllowedOrigins::all())
-        .to_cors()
-        .expect("Failed to set CORS options");
+    // Cookie-based auth requires `credentials: "include"` from the
+    // browser, which in turn requires `Access-Control-Allow-Credentials:
+    // true` on the response *and* an explicit (non-wildcard) origin
+    // list. In `trunk serve` the SPA lives on :8000 and the API on :8080
+    // — different origins, so we whitelist the dev hosts. Production
+    // skips this fairing entirely (single origin behind nginx).
+    let exact = rocket_cors::AllowedOrigins::some_exact(&[
+        "http://localhost:8000",
+        "http://127.0.0.1:8000",
+    ]);
+    let cors = rocket_cors::CorsOptions {
+        allowed_origins: exact,
+        allow_credentials: true,
+        ..Default::default()
+    }
+    .to_cors()
+    .expect("Failed to set CORS options");
     rocket.attach(cors)
 }
 
@@ -705,14 +832,36 @@ async fn rocket() -> _ {
         get_account_blacklist,
         update_account_blacklist,
         get_account_experiment_bucket,
-        get_recommendations
+        get_recommendations,
+        get_default_blacklist,
+        session_bootstrap,
+        session_clear
     ];
 
+    // Rocket's default Shield fairing emits `X-Frame-Options: SAMEORIGIN`,
+    // `X-Content-Type-Options: nosniff`, and `Permissions-Policy:
+    // interest-cohort=()`. nginx already sets stricter values for all three
+    // (DENY, nosniff, full Permissions-Policy list), and the audit (#4)
+    // flagged the resulting duplicate/conflicting headers — `XFO: SAMEORIGIN`
+    // and `XFO: DENY` arriving together leaves browser behavior to chance.
+    // Attach an empty Shield so nginx remains the single source of truth.
     let r = rocket::build()
         .manage(Mutex::new(watcher))
         .manage(spec)
         .mount("/api", api_routes)
         .mount("/api", rocket::routes![get_account_tag_relations])
+        .register("/api", catchers![catch_404, catch_422, catch_500])
+        .attach(Shield::new())
+        .attach(DbInit);
+
+    // Swagger UI and the OpenAPI document leak a complete map of every
+    // route, parameter, and request shape — useful in dev, an
+    // amplification target for an attacker mapping the surface in prod.
+    // nginx already returns 404 for these paths in the prod template
+    // (defense-in-depth), but skipping the mount altogether means the
+    // bytes never even reach the proxy. Audit #25 / hardening 2.5.
+    #[cfg(debug_assertions)]
+    let r = r
         .mount("/api", routes![openapi_json])
         .mount(
             "/api/swagger-ui",
@@ -720,9 +869,7 @@ async fn rocket() -> _ {
                 url: "/api/openapi.json".to_owned(),
                 ..Default::default()
             }),
-        )
-        .register("/api", catchers![catch_404, catch_422, catch_500])
-        .attach(DbInit);
+        );
 
     prefetch::spawn_prefetch_workers();
 

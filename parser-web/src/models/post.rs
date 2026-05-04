@@ -155,7 +155,6 @@ pub struct ScoreBreakdown {
 
 #[derive(Serialize, Deserialize, Clone, PartialEq)]
 pub struct FeedInteractionRequest {
-    pub owner_token: String,
     pub account_id: i32,
     pub post_id: i64,
     pub event_type: FeedInteractionType,

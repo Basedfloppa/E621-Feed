@@ -6,7 +6,10 @@ use crate::models::{FeedInteractionRequest, FeedInteractionType};
 
 use super::open_db;
 
-pub fn record_feed_interaction(interaction: &FeedInteractionRequest) -> Result<(), String> {
+pub fn record_feed_interaction(
+    owner_token: &str,
+    interaction: &FeedInteractionRequest,
+) -> Result<(), String> {
     super::with_write_tx(|tx| {
         let linked: bool = tx
             .query_row(
@@ -16,7 +19,7 @@ pub fn record_feed_interaction(interaction: &FeedInteractionRequest) -> Result<(
                     WHERE owner_token = ?1 AND account_id = ?2
                 )
                 ",
-                params![interaction.owner_token, interaction.account_id],
+                params![owner_token, interaction.account_id],
                 |row| row.get(0),
             )
             .map_err(|e| format!("Failed to validate feed interaction owner link: {e}"))?;

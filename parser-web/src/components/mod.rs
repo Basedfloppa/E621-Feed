@@ -1,3 +1,4 @@
+pub mod confirm_modal;
 pub mod header;
 pub mod theme_toggle;
 pub mod post_card;
@@ -9,6 +10,7 @@ pub mod tag_relation_graph_card;
 pub mod user_info_alert;
 pub mod user_search_form;
 
+pub use confirm_modal::*;
 pub use header::*;
 pub use theme_toggle::*;
 pub use post_card::*;

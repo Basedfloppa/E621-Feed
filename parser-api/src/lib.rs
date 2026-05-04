@@ -9,6 +9,7 @@
 extern crate rocket;
 
 pub mod api;
+pub mod auth;
 pub mod db;
 pub mod errors;
 pub mod jobs;

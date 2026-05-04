@@ -1,4 +1,5 @@
 use components::*;
+use models::bootstrap_session;
 use pages::*;
 use yew::prelude::*;
 use yew_router::prelude::*;
@@ -42,5 +43,8 @@ fn app() -> Html {
 }
 
 fn main() {
-    yew::Renderer::<App>::new().render();
+    wasm_bindgen_futures::spawn_local(async {
+        bootstrap_session().await;
+        yew::Renderer::<App>::new().render();
+    });
 }

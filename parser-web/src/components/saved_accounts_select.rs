@@ -1,9 +1,11 @@
+use wasm_bindgen::JsCast;
+use wasm_bindgen::closure::Closure;
 use yew::{
     Callback, Event, Html, Properties, TargetCast, UseStateHandle, function_component, html,
     use_effect_with, use_state,
 };
 
-use crate::models::{get_or_create_owner_token, read_config_from_head};
+use crate::models::{ACCOUNT_LIST_CHANGED_EVENT, api_get, read_config_from_head};
 use crate::pages::UserInfo;
 
 #[derive(Properties, PartialEq)]
@@ -18,23 +20,49 @@ pub fn saved_accounts_select(props: &SavedAccountsProps) -> Html {
     let saved_accounts = use_state(Vec::<UserInfo>::new);
 
     {
+        // Refetch on mount and whenever any other component dispatches the
+        // `ACCOUNT_LIST_CHANGED_EVENT` window event (account created, removed,
+        // or blacklist edited)
         let saved_accounts = saved_accounts.clone();
         use_effect_with((), move |_| {
-            if let (Some(cfg), Some(owner_token)) = (read_config_from_head(), get_or_create_owner_token()) {
-                wasm_bindgen_futures::spawn_local(async move {
-                    let url = format!("{}/accounts?owner_token={}", cfg.backend_domain, urlencoding::encode(&owner_token));
-                    match reqwasm::http::Request::get(&url).send().await {
-                        Ok(response) if response.ok() => {
-                            match response.json::<Vec<UserInfo>>().await {
-                                Ok(accounts) => saved_accounts.set(accounts),
-                                Err(_) => saved_accounts.set(Vec::new()),
+            let saved_accounts_for_fetch = saved_accounts.clone();
+            let fetch = move || {
+                let saved_accounts = saved_accounts_for_fetch.clone();
+                if let Some(cfg) = read_config_from_head() {
+                    wasm_bindgen_futures::spawn_local(async move {
+                        let url = format!("{}/accounts", cfg.backend_domain);
+                        match api_get(&url).send().await {
+                            Ok(response) if response.ok() => {
+                                match response.json::<Vec<UserInfo>>().await {
+                                    Ok(accounts) => saved_accounts.set(accounts),
+                                    Err(_) => saved_accounts.set(Vec::new()),
+                                }
                             }
+                            _ => saved_accounts.set(Vec::new()),
                         }
-                        _ => saved_accounts.set(Vec::new()),
-                    }
-                });
+                    });
+                }
+            };
+            fetch();
+
+            let listener_fetch = fetch.clone();
+            let listener: Closure<dyn FnMut(web_sys::Event)> =
+                Closure::new(move |_e: web_sys::Event| listener_fetch());
+            if let Some(window) = web_sys::window() {
+                let _ = window.add_event_listener_with_callback(
+                    ACCOUNT_LIST_CHANGED_EVENT,
+                    listener.as_ref().unchecked_ref(),
+                );
             }
-            || ()
+            move || {
+                if let Some(window) = web_sys::window() {
+                    let _ = window.remove_event_listener_with_callback(
+                        ACCOUNT_LIST_CHANGED_EVENT,
+                        listener.as_ref().unchecked_ref(),
+                    );
+                }
+                drop(listener);
+            }
         });
     }
 
