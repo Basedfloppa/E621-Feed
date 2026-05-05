@@ -6,18 +6,46 @@
    public e621 users (ranked by `favorite_count`). Pure read-only against
    e621; no public side effects.
 2. **`calibrate`** builds a holdout-based evaluation harness from those
-   favourites: per user, keeps the oldest 80% as a synthetic profile and
-   hides the newest 20% as a test set. Sampled negatives come from the
-   catalog. Reports **NDCG@20**, **Recall@50**, **MRR**.
-3. **`calibrate grid`** does a greedy line search over every measurable
-   scoring knob — the 8 `mix_*` weights plus IDF shaping, quality / recency
-   / popularity internals, discrete-preference smoothing, tag-relation
-   scaling, and cold-start. ~26 knobs total, ~3 passes. Reports
-   `[best priors — non-default values]` listing only the fields that moved
-   off baseline.
+   favourites: per user, splits favs into train/test (default: oldest 80%
+   → synthetic profile, newest 20% → test set; switchable to uniform-random
+   via `split=random`). Negatives are sampled from the catalog (default:
+   mixed hard-negatives — popularity- and time-matched; switchable to
+   pure-random via `neg=uniform`). Reports **NDCG@20**, **Recall@50**, **MRR**.
+3. **`calibrate grid`** runs a multi-pass greedy line search with adaptive
+   probe steps (×1.0 / ×0.5 / ×0.25 across passes), followed by a paired
+   sweep over known-correlated knob pairs and a categorical sweep for
+   enum-valued knobs. Reports `[best priors — non-default values]` and a
+   clamp-saturation warning if any knob landed at its search boundary.
 
-   Pass `grid mix-only` to scan only the 8 `mix_*` weights (faster — useful
-   for quick iteration after re-seeding).
+   v5.3 grid covers ~52 numeric knobs + 1 categorical:
+   * 8 `mix_*` weights
+   * IDF / frequency shaping (7): `df_floor`, `idf_max`, `idf_lambda`,
+     `idf_alpha`, `freq_alpha`, `bm25_k`, `one_sided_ratio_exp`,
+     `idf_rsj_smoothing`
+   * Quality channel (5): `quality_a/b/log_bias`,
+     `quality_w_absolute/relative_score/relative_comments`
+   * Popularity channel (2): `popularity_w_fav/duration`
+   * Recency channel (4): `recency_tau_days`, `recency_w_global/personal`,
+     `recency_personal_floor_frac`
+   * Discrete-pref + cold-start (3): `discrete_smoothing_alpha`,
+     `discrete_pref_floor`, `coldstart_n0`
+   * Tag-relation (5): `tag_relation_pmi_scale`, `tag_relation_w_global/personal`,
+     `tag_relation_cooc_ref/user_cooc_ref`
+   * Cold-start internals (2): `coldstart_smoothing_boost`,
+     `interaction_ctr_prior_alpha`
+   * Per-group multipliers (6): `group_w_artist/character/copyright/species/general/lore`
+   * Algorithmic shape (4): `score_temperature`, `confidence_steepness`,
+     `mmr_redundancy_exp`, `tag_sim_jaccard_blend`
+   * Point splits (3, NaN-sentinel disabled): `idf_lambda_meta`,
+     `recency_tau_recent`, `tag_relation_pmi_scale_user`
+   * Categorical (1): `tag_relation_pair_aggregator` ∈ {mean, max, geomean}
+
+   Subsets:
+   * `grid mix-only` — only the 8 mix weights (fastest)
+   * `grid pairs-only` — skip the single-knob sweep, only the paired moves
+   * `grid no-pairs` — skip the paired sweep
+   * `grid with-diversify` — run `diversify_scored_posts` before NDCG so
+     `diversity_*` knobs become measurable
 
 ## Quickstart
 
@@ -160,21 +188,31 @@ the production defaults distilled from them. The "Pre-v5" column is
 what the defaults *used to be*; "v5.1 default" is what they are now
 in [`config.example.toml`](../parser-api/config.example.toml).
 
-| Knob | Pre-v5 | N=23 best | N=150 (early) best | N=150 v5 best | v5 default | N=915 v5.1 best | **v5.1 default** |
-|---|---|---|---|---|---|---|---|
-| `mix_sim` | 0.48 | 0.73 | 0.53 | 0.63 | 0.58 | 0.63 | **0.60** |
-| `mix_quality` | 0.10 | 0.00 | 0.00 | 0.00 | 0.05 | 0.00 | **0.05** |
-| `mix_recency` | 0.07 | 0.00 | 0.00 | 0.00 | 0.04 | 0.00 | **0.04** |
-| `mix_rating` | 0.10 | 0.35 | 0.25 | 0.00 | 0.07 | 0.00 | **0.07** |
-| `mix_media` | 0.08 | 0.03 | 0.03 | 0.03 | 0.05 | 0.05 | **0.05** |
-| `mix_popularity` | 0.07 | 0.00 | 0.00 | 0.00 | 0.04 | 0.00 | **0.04** |
-| `mix_interaction` | 0.10 | 0.10 | 0.10 | 0.10 | 0.10 | 0.10 | **0.10** |
-| `mix_tag_relation` | 0.08 | 0.13 | 0.08 | 0.08 | 0.08 | 0.08 | **0.08** |
-| `idf_lambda` | 0.35 | — | — | 0.80 | 0.55 | 1.00 (pinned) | **0.70** |
-| `idf_alpha` | 0.65 | — | — | 1.00 (pinned) | 0.85 | 1.00 (pinned) | **0.92** |
-| `freq_alpha` | 0.45 | — | — | 0.90 | 0.65 | 1.00 (pinned) | **0.80** |
-| `tag_relation_pmi_scale` | 5.00 | — | — | 2.00 | 3.5 | 3.5 | **3.5** |
-| `tag_relation_cooc_ref` | 20.0 | — | — | 13.0 | 16.0 | 16.0 | **16.0** |
+| Knob | Pre-v5 | N=150 v5 best | v5 default | N=915 v5.1 best | **v5.1 default** |
+|---|---|---|---|---|---|
+| `mix_sim` | 0.48 | 0.63 | 0.58 | 0.63 | **0.60** |
+| `mix_quality` | 0.10 | 0.00 | 0.05 | 0.00 | **0.05** |
+| `mix_recency` | 0.07 | 0.00 | 0.04 | 0.00 | **0.04** |
+| `mix_rating` | 0.10 | 0.00 | 0.07 | 0.00 | **0.07** |
+| `mix_media` | 0.08 | 0.03 | 0.05 | 0.05 | **0.05** |
+| `mix_popularity` | 0.07 | 0.00 | 0.04 | 0.00 | **0.04** |
+| `mix_interaction` | 0.10 | 0.10 | 0.10 | 0.10 | **0.10** |
+| `mix_tag_relation` | 0.08 | 0.08 | 0.08 | 0.08 | **0.08** |
+| `idf_lambda` | 0.35 | 0.80 | 0.55 | 1.00 (pinned) | **0.70** |
+| `idf_alpha` | 0.65 | 1.00 (pinned) | 0.85 | 1.00 (pinned) | **0.92** |
+| `freq_alpha` | 0.45 | 0.90 | 0.65 | 1.00 (pinned) | **0.80** |
+| `tag_relation_pmi_scale` | 5.00 | 2.00 | 3.5 | 3.5 | **3.5** |
+| `tag_relation_cooc_ref` | 20.0 | 13.0 | 16.0 | 16.0 | **16.0** |
+
+### v5.3 added knobs (defaults match prior production behaviour)
+
+| Class | Knobs | Default |
+|---|---|---|
+| A — promoted constants | `idf_rsj_smoothing` / `coldstart_smoothing_boost` / `interaction_ctr_prior_alpha` | 0.5 / 2.0 / 4.0 |
+| B — per-group multipliers | `group_w_{artist,character,copyright,species,general,lore}` | 2.0 / 1.6 / 1.2 / 1.1 / 1.0 / 0.45 |
+| C — algorithmic shape | `score_temperature` / `confidence_steepness` / `mmr_redundancy_exp` / `tag_sim_jaccard_blend` | 0.0 / 1.0 / 1.0 / 0.0 (all no-ops) |
+| D — point splits (NaN = off) | `idf_lambda_meta` / `recency_tau_recent` (with `recency_split_age_days=30`) / `tag_relation_pmi_scale_user` | NaN |
+| E — categorical | `tag_relation_pair_aggregator` ∈ {mean, max, geomean} | "mean" |
 
 The v5.x defaults take **partial steps** toward `[best]` rather than
 copying it verbatim — the `mix_quality` / `mix_recency` /

@@ -27,20 +27,9 @@ user_agent    = "E621AccountParser/0.1 (+https://github.com/Basedfloppa/E621-Fee
 e621_cache_ttl_secs     = 600    # 10 minutes — longer = fewer requests, but staler /process counts
 e621_cache_max_entries  = 5000
 
-df_floor      = 0.7
-idf_max       = 100.0
-
-# --- Tag-group weights ------------------------------------------------------
-[group_weights]
-'artist'    = 2.0
-'character' = 1.6
-'copyright' = 1.2
-'species'   = 1.1
-'general'   = 1.0
-'lore'      = 0.45
-'meta'      = 0.0
-
 # --- Scoring priors ---------------------------------------------------------
+# v5.3: the [group_weights] section was retired. Group multipliers now live
+# inline as `group_w_*` priors and are grid-tunable.
 [priors]
 now              = "2000-1-01T12:00:00Z"  # dummy, replaced with current date at load
 recency_tau_days = 10.0
@@ -59,9 +48,42 @@ mix_interaction  = 0.10
 mix_tag_relation = 0.08
 
 # IDF / frequency shaping
-idf_lambda = 0.70
-idf_alpha  = 0.92
-freq_alpha = 0.80
+df_floor          = 0.70   # promoted to [priors] in v5.2
+idf_max           = 100.0  # IDF saturation cap
+idf_lambda        = 0.70
+idf_alpha         = 0.92
+freq_alpha        = 0.80
+bm25_k            = 1.6    # BM25 saturation k for per-tag user-profile saturation
+one_sided_ratio_exp = 0.5  # exponent in quality/popularity overshoot shape; 0.5 = legacy sqrt
+idf_rsj_smoothing = 0.5    # Robertson-Sparck-Jones IDF smoothing (was hardcoded pre-v5.3)
+
+# Per-group multipliers (v5.3 — promoted from the old [group_weights] section)
+group_w_artist    = 2.0
+group_w_character = 1.6
+group_w_copyright = 1.2
+group_w_species   = 1.1
+group_w_general   = 1.0
+group_w_lore      = 0.45
+
+# Cold-start / Bayesian priors (v5.3 — promoted from hardcoded constants)
+coldstart_smoothing_boost   = 2.0
+interaction_ctr_prior_alpha = 4.0
+
+# Algorithmic shape (v5.3 — Class C, defaults are no-ops/legacy)
+score_temperature      = 0.0   # 0 = identity; >0 sigmoid-sharpens the final score
+confidence_steepness   = 1.0   # 1 = legacy n/(n+n0); >1 sharpens warm-up
+mmr_redundancy_exp     = 1.0   # 1 = legacy linear MMR penalty
+tag_sim_jaccard_blend  = 0.0   # 0 = pure cosine; small >0 hedges sparse profiles
+
+# Point splits (v5.3 — Class D). Each split tracks its parent knob unless
+# explicitly set to a numeric value (then the split is engaged).
+# idf_lambda_meta             = 0.40
+# recency_tau_recent          = 4.0
+recency_split_age_days        = 30.0
+# tag_relation_pmi_scale_user = 2.0
+
+# Categorical (v5.3 — Class E)
+tag_relation_pair_aggregator = "mean"  # "mean" | "max" | "geomean"
 
 # Quality channel internals (sum to 1.0)
 quality_w_absolute          = 0.55

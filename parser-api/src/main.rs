@@ -1,62 +1,43 @@
 #[macro_use]
 extern crate rocket;
 
-use chrono::Utc;
-use rocket::http::{ContentType, Header, Status};
-use rocket::request::{self, FromRequest, Request};
-use rocket::response::{self, Responder, Response};
+use rocket::futures::{lock::Mutex, stream::StreamExt};
+use rocket::http::CookieJar;
+use rocket::request::Request;
+use rocket::serde::json::{serde_json, Json};
 use rocket::shield::Shield;
-use rocket::get;
 #[cfg(debug_assertions)]
 use rocket::State;
-use rocket::{
-    futures::{lock::Mutex, stream::StreamExt},
-    serde::json::{Json, serde_json},
-};
 use rusqlite::Result;
 use std::collections::HashSet;
-use std::hash::{DefaultHasher, Hasher};
-use std::io::Cursor;
 
 use e621_account_parser_api::{
     api,
     auth::{self, OwnerToken},
     db,
+    db::{get_account_by_id, refresh_account_profiles, DbInit},
     errors::ApiError,
-    jobs, models, prefetch,
+    jobs,
+    jobs::{BeginResult, ProcessJobState},
+    models::{cfg, default_path, reload_from, start_config_watcher, Post, UserApiResponse},
+    prefetch,
     ratelimit::{self, ClientIp},
-    utils, validation,
-};
-use rocket::http::CookieJar;
-
-use db::{
-    DbInit, collect_local_candidate_ids, get_account_by_id, get_account_by_name,
-    get_account_preference_profile, get_account_tag_relation_graph, get_accounts_for_owner,
-    get_owned_post_ids, get_recently_seen_post_ids, get_tag_counts, hydrate_posts_by_ids,
-    record_feed_interaction, refresh_account_profiles, set_account, update_device_blacklist,
-    upsert_catalog_posts,
-};
-use models::{
-    BlacklistPayload, DeviceScopedAccount, FeedInteractionRequest, Post, ScoredPost, TagCount,
-    TagRelationScoring, TruncatedAccount, UserApiResponse, cfg, default_path, reload_from,
-    start_config_watcher,
+    utils::mark_idf_dirty,
+    validation,
 };
 #[cfg(debug_assertions)]
 use rocket_okapi::okapi::openapi3::OpenApi;
 use rocket_okapi::{openapi, openapi_get_routes_spec, settings::OpenApiSettings};
 #[cfg(debug_assertions)]
-use rocket_okapi::swagger_ui::{SwaggerUIConfig, make_swagger_ui};
-use utils::{
-    ScoringContext, current_global_relation, current_idf, diversify_scored_posts, mark_idf_dirty,
-};
+use rocket_okapi::swagger_ui::{make_swagger_ui, SwaggerUIConfig};
 
-use jobs::{BeginResult, ProcessJobState};
+mod routes;
 
 /// Run a blocking rusqlite closure on the spawn_blocking pool so it doesn't
 /// park the request's Tokio worker for the duration of the SQLite call.
 /// Returns the closure's `Result<T, String>` flat, plus a panic-to-Err
 /// translation for the JoinHandle.
-async fn db_blocking<F, T>(f: F) -> Result<T, String>
+pub(crate) async fn db_blocking<F, T>(f: F) -> Result<T, String>
 where
     F: FnOnce() -> Result<T, String> + Send + 'static,
     T: Send + 'static,
@@ -189,498 +170,6 @@ fn strip_blacklisted_tags(mut p: Post, blacklist: &HashSet<String>) -> Post {
     filter(&mut p.tags.meta);
     filter(&mut p.tags.species);
     p
-}
-
-#[openapi(tag = "Accounts")]
-#[get("/account/<account_id>/tag_counts")]
-async fn get_account_tag_counts(
-    account_id: i32,
-    owner: OwnerToken,
-) -> Result<Json<Vec<TagCount>>, ApiError> {
-    validation::validate_account_id(account_id)?;
-    let owner_token = owner.0;
-    ratelimit::check(&format!("read:owner:{owner_token}"), 240, 60)?;
-    let counts = db_blocking(move || {
-        get_account_by_id(&owner_token, account_id)
-            .map_err(|e| format!("Failed to validate account access: {e}"))?;
-        get_tag_counts(account_id).map_err(|e| {
-            let m = format!("Failed to get tag counts: {e}");
-            error!("{m}");
-            m
-        })
-    })
-    .await?;
-    Ok(Json(counts))
-}
-
-#[openapi(tag = "Users")]
-#[get("/user/name/<name>")]
-async fn get_account_name(
-    name: &str,
-    owner: OwnerToken,
-) -> Result<Json<TruncatedAccount>, ApiError> {
-    let owner_token = owner.0;
-    ratelimit::check(&format!("read:owner:{owner_token}"), 240, 60)?;
-    let name_owned = name.to_string();
-
-    let owner_for_local = owner_token.clone();
-    let name_for_local = name_owned.clone();
-    let local = db_blocking(move || get_account_by_name(&owner_for_local, name_for_local)).await;
-    if let Ok(acc) = local {
-        return Ok(Json(acc));
-    }
-
-    ratelimit::check(&format!("user_lookup:owner:{owner_token}"), 30, 10)?;
-    let response = api::get_user_by_name(&name_owned).await.map_err(|e| {
-        error!("e621 user lookup for '{name_owned}' failed: {e}");
-        ApiError::NotFound(format!("No account found for '{name_owned}'"))
-    })?;
-    let (id, resolved_name) = match response {
-        UserApiResponse::FullCurrentUser(u) => (u.id, u.name),
-        UserApiResponse::FullUser(u) => (u.id, u.name),
-    };
-    Ok(Json(TruncatedAccount {
-        id,
-        name: resolved_name,
-        blacklist: String::new(),
-    }))
-}
-
-#[openapi(tag = "Users")]
-#[get("/user/id/<id>")]
-async fn get_account_id(id: i32, owner: OwnerToken) -> Result<Json<TruncatedAccount>, ApiError> {
-    validation::validate_account_id(id)?;
-    let owner_token = owner.0;
-    ratelimit::check(&format!("read:owner:{owner_token}"), 240, 60)?;
-    let acc = db_blocking(move || {
-        get_account_by_id(&owner_token, id).map_err(|e| {
-            let m = format!("Failed to get account: {e}");
-            error!("{m}");
-            m
-        })
-    })
-    .await?;
-    Ok(Json(acc))
-}
-
-#[openapi(tag = "Accounts")]
-#[get("/accounts")]
-async fn list_accounts(owner: OwnerToken) -> Result<Json<Vec<TruncatedAccount>>, ApiError> {
-    let owner_token = owner.0;
-    ratelimit::check(&format!("read:owner:{owner_token}"), 240, 60)?;
-    let accounts = db_blocking(move || get_accounts_for_owner(&owner_token)).await?;
-    Ok(Json(accounts))
-}
-
-#[openapi(tag = "Accounts")]
-#[post("/account", data = "<account>")]
-async fn create_account(
-    account: Json<DeviceScopedAccount>,
-    owner: OwnerToken,
-    client_ip: ClientIp,
-) -> Result<Json<TruncatedAccount>, ApiError> {
-    let acc = account.into_inner();
-    let owner_token = owner.0;
-    validation::validate_device_scoped_account(&acc)?;
-    // Per-IP cap on account creation: H-1 showed how a single client
-    // could spray thousands of bogus accounts in seconds, each one
-    // becoming an admin-authenticated prefetch target afterwards.
-    ratelimit::check(&format!("acct_create:ip:{}", client_ip.0), 5, 5)?;
-    ratelimit::check(&format!("acct_create:owner:{owner_token}"), 10, 10)?;
-
-    let resolved = match api::get_user_by_id(acc.id).await {
-        Ok(r) => r,
-        Err(e) => {
-            warn!("e621 lookup for id={} failed: {e}", acc.id);
-            return Err(ApiError::BadRequest(format!(
-                "could not verify account {} on e621",
-                acc.id
-            )));
-        }
-    };
-    let (resolved_id, resolved_name) = match resolved {
-        UserApiResponse::FullCurrentUser(u) => (u.id, u.name),
-        UserApiResponse::FullUser(u) => (u.id, u.name),
-    };
-    if resolved_id != acc.id || !resolved_name.eq_ignore_ascii_case(acc.name.trim()) {
-        return Err(ApiError::BadRequest(format!(
-            "name does not match e621 user {resolved_id} ('{resolved_name}')"
-        )));
-    }
-    // Persist the canonical name from e621 so the device-supplied
-    // capitalisation/whitespace can't drift across devices.
-    let canonical_name = resolved_name;
-    // Collapse `\r\n`, trim each line, drop empties, dedup. Validation
-    // rejected XSS-flavoured inputs above; this just cleans the rest.
-    let normalized_blacklist = validation::normalize_blacklist(&acc.blacklist);
-
-    let result = db_blocking(move || {
-        set_account(&owner_token, acc.id, &canonical_name, &normalized_blacklist).map_err(|e| {
-            let m = format!("Failed to set account: {e}");
-            error!("{m}");
-            m
-        })
-    })
-    .await?;
-    Ok(Json(result))
-}
-
-struct IfNoneMatch(Option<String>);
-
-#[rocket::async_trait]
-impl<'r> FromRequest<'r> for IfNoneMatch {
-    type Error = std::convert::Infallible;
-    async fn from_request(req: &'r Request<'_>) -> request::Outcome<Self, Self::Error> {
-        request::Outcome::Success(IfNoneMatch(
-            req.headers()
-                .get_one("If-None-Match")
-                .map(|s| s.to_string()),
-        ))
-    }
-}
-
-struct EtagJson {
-    body: Vec<u8>,
-    etag: String,
-    not_modified: bool,
-}
-
-impl EtagJson {
-    fn new<T: serde::Serialize>(payload: &T, if_none_match: &IfNoneMatch) -> Result<Self, String> {
-        let body = serde_json::to_vec(payload).map_err(|e| format!("serialize: {e}"))?;
-        let mut h = DefaultHasher::new();
-        h.write(&body);
-        let etag = format!("\"{:x}\"", h.finish());
-        let not_modified = if_none_match
-            .0
-            .as_deref()
-            .map(|tag| tag.split(',').any(|t| t.trim() == "*" || t.trim() == etag))
-            .unwrap_or(false);
-        Ok(Self {
-            body,
-            etag,
-            not_modified,
-        })
-    }
-}
-
-impl<'r> Responder<'r, 'static> for EtagJson {
-    fn respond_to(self, _: &'r Request<'_>) -> response::Result<'static> {
-        let mut build = Response::build();
-        build
-            .header(Header::new("ETag", self.etag))
-            .header(Header::new("Cache-Control", "private, max-age=60"));
-        if self.not_modified {
-            build.status(Status::NotModified);
-        } else {
-            build
-                .header(ContentType::JSON)
-                .sized_body(self.body.len(), Cursor::new(self.body));
-        }
-        build.ok()
-    }
-}
-
-#[get("/account/<account_id>/tag_relations?<top>&<min_cooc>")]
-async fn get_account_tag_relations(
-    account_id: i32,
-    owner: OwnerToken,
-    top: Option<usize>,
-    min_cooc: Option<i64>,
-    if_none_match: IfNoneMatch,
-) -> Result<EtagJson, ApiError> {
-    validation::validate_account_id(account_id)?;
-    let owner_token = owner.0;
-    ratelimit::check(&format!("read:owner:{owner_token}"), 240, 60)?;
-    let top = top.unwrap_or(60).clamp(2, 250);
-    let min_cooc = min_cooc.unwrap_or(2).max(1);
-    let mut payload = db_blocking(move || {
-        get_account_by_id(&owner_token, account_id)
-            .map_err(|e| format!("Failed to validate account access: {e}"))?;
-        get_account_tag_relation_graph(account_id, top, min_cooc)
-    })
-    .await?;
-
-    let priors = &cfg().priors;
-    let n_fav = payload.account_post_count.max(0) as f32;
-    let conf = n_fav / (n_fav + priors.coldstart_n0.max(1.0));
-    let w_personal = priors.tag_relation_w_personal.max(0.0) * conf;
-    let w_global = priors.tag_relation_w_global.max(0.0)
-        + priors.tag_relation_w_personal.max(0.0) * (1.0 - conf);
-    payload.scoring = TagRelationScoring {
-        w_global,
-        w_personal,
-        pmi_scale: priors.tag_relation_pmi_scale.max(1e-3),
-        cooc_ref: priors.tag_relation_cooc_ref.max(1.0),
-        user_cooc_ref: priors.tag_relation_user_cooc_ref.max(1.0),
-        min_cooc_global: priors.tag_relation_min_cooc.max(1),
-        min_cooc_user: priors.tag_relation_user_min_cooc.max(1),
-    };
-    EtagJson::new(&payload, &if_none_match).map_err(ApiError::from)
-}
-
-#[openapi(tag = "Accounts")]
-#[get("/account/<account_id>/blacklist")]
-async fn get_account_blacklist(
-    account_id: i32,
-    owner: OwnerToken,
-) -> Result<Json<BlacklistPayload>, ApiError> {
-    validation::validate_account_id(account_id)?;
-    let owner_token = owner.0;
-    ratelimit::check(&format!("read:owner:{owner_token}"), 240, 60)?;
-    let account = db_blocking(move || {
-        get_account_by_id(&owner_token, account_id)
-            .map_err(|e| format!("Failed to get account: {e}"))
-    })
-    .await?;
-    Ok(Json(BlacklistPayload {
-        blacklist: account.blacklist,
-    }))
-}
-
-#[openapi(tag = "Accounts")]
-#[get("/account/<account_id>/experiment_bucket")]
-async fn get_account_experiment_bucket(
-    account_id: i32,
-    owner: OwnerToken,
-) -> Result<Json<serde_json::Value>, ApiError> {
-    validation::validate_account_id(account_id)?;
-    let owner_token = owner.0;
-    ratelimit::check(&format!("read:owner:{owner_token}"), 240, 60)?;
-    let explicit = db_blocking(move || {
-        get_account_by_id(&owner_token, account_id)
-            .map_err(|e| format!("Failed to validate account access: {e}"))?;
-        db::get_account_experiment_bucket(account_id)
-            .map_err(|e| format!("Failed to read experiment bucket: {e}"))
-    })
-    .await?;
-    let (bucket, _) = cfg().pick_bucket(account_id, explicit.as_deref());
-    Ok(Json(serde_json::json!({ "bucket": bucket })))
-}
-
-/// Sever the device → account link. The cascade in `delete_device_link`
-/// drops the underlying account row + all derived per-account tables
-/// when this was the last device linked to it (audit #7).
-#[openapi(tag = "Accounts")]
-#[delete("/account/<account_id>")]
-async fn delete_account(account_id: i32, owner: OwnerToken) -> Result<(), ApiError> {
-    validation::validate_account_id(account_id)?;
-    let owner_token = owner.0;
-    let removed =
-        db_blocking(move || db::delete_device_link(&owner_token, account_id)).await?;
-    if removed == 0 {
-        return Err(ApiError::NotFound(
-            "No account found for this device token".into(),
-        ));
-    }
-    Ok(())
-}
-
-#[openapi(tag = "Accounts")]
-#[patch("/account/<account_id>/blacklist", data = "<payload>")]
-async fn update_account_blacklist(
-    account_id: i32,
-    owner: OwnerToken,
-    payload: Json<BlacklistPayload>,
-) -> Result<Json<TruncatedAccount>, ApiError> {
-    validation::validate_account_id(account_id)?;
-    validation::validate_blacklist_payload(&payload)?;
-    let owner_token = owner.0;
-    let mut body = payload.into_inner();
-    body.blacklist = validation::normalize_blacklist(&body.blacklist);
-    let updated = db_blocking(move || {
-        update_device_blacklist(&owner_token, account_id, &body.blacklist).map_err(|e| {
-            let m = format!("Failed to update blacklist: {e}");
-            error!("{m}");
-            m
-        })
-    })
-    .await?;
-    Ok(Json(updated))
-}
-
-#[openapi(tag = "Recommendations")]
-#[post("/interaction", data = "<payload>")]
-async fn log_feed_interaction(
-    payload: Json<FeedInteractionRequest>,
-    owner: OwnerToken,
-) -> Result<(), ApiError> {
-    let body = payload.into_inner();
-    let owner_token = owner.0;
-    validation::validate_feed_interaction(&body)?;
-
-    if matches!(body.event_type, models::FeedInteractionType::Unknown) {
-        debug!("[feed] dropped unknown event_type from forward-compat client");
-        return Ok(());
-    }
-    // Tight per-device cap — feed scrolling fires impressions per card,
-    // a normal session is well under this. Anything higher is either a
-    // bug (re-render storm) or an attempt to write-flood SQLite.
-    ratelimit::check(&format!("interaction:owner:{owner_token}"), 120, 60)?;
-    db_blocking(move || record_feed_interaction(&owner_token, &body))
-        .await
-        .map_err(ApiError::from)
-}
-
-#[openapi(tag = "Recommendations")]
-#[get("/recommendations/<account_id>?<page>&<affinity_threshold>")]
-async fn get_recommendations(
-    account_id: i32,
-    owner: OwnerToken,
-    page: Option<i32>,
-    affinity_threshold: Option<f32>,
-) -> Result<Json<Vec<ScoredPost>>, ApiError> {
-    validation::validate_account_id(account_id)?;
-    let owner_token = owner.0;
-    // Each /recommendations issues an admin-authenticated e621 round-trip.
-    // Cap per device so a misbehaving infinite-scroll loop can't burn
-    // through the admin quota; the burst is intentionally close to the
-    // steady rate so a brief flurry from rAF still passes.
-    ratelimit::check(&format!("recs:owner:{owner_token}"), 60, 30)?;
-    let cfg = cfg();
-    // Cloned (cheap, primitives) so the closure below owns its copy and we
-    // don't need to hold the Arc<Config> across the blocking task boundary.
-    let runtime = cfg.runtime.clone();
-
-    let owner = owner_token;
-    // Pull everything the request needs from SQLite in a single blocking
-    // hop: profile, blacklist, user-relation graph, the two dedup sets
-    // (seen + owned), and the A/B bucket assignment. Done before the network
-    // round-trip so the SQL latency overlaps with the e621 RTT.
-    let (
-        tags,
-        profile,
-        account,
-        user_relation,
-        seen_ids,
-        owned_ids,
-        local_candidate_ids,
-        explicit_bucket,
-    ) = db_blocking(move || -> Result<_, String> {
-        let tags: Vec<TagCount> =
-            get_tag_counts(account_id).map_err(|e| format!("Failed to get tag counts: {e}"))?;
-        let profile = get_account_preference_profile(account_id)
-            .map_err(|e| format!("Failed to get account profile: {e}"))?;
-        let account = get_account_by_id(&owner, account_id)
-            .map_err(|e| format!("Failed to get account: {e}"))?;
-        let user_relation = db::load_account_tag_relation(account_id, &tags)
-            .map_err(|e| format!("Failed to load user tag relation graph: {e}"))?;
-        let seen_ids = get_recently_seen_post_ids(account_id, runtime.dedup_lookback_days)
-            .map_err(|e| format!("Failed to load seen post ids: {e}"))?;
-        let owned_ids = get_owned_post_ids(account_id)
-            .map_err(|e| format!("Failed to load owned post ids: {e}"))?;
-        let local_ids = collect_local_candidate_ids(account_id, runtime.local_candidate_limit)
-            .map_err(|e| format!("Failed to collect local candidate ids: {e}"))?;
-        let bucket = db::get_account_experiment_bucket(account_id)
-            .map_err(|e| format!("Failed to load experiment bucket: {e}"))?;
-        Ok((
-            tags,
-            profile,
-            account,
-            user_relation,
-            seen_ids,
-            owned_ids,
-            local_ids,
-            bucket,
-        ))
-    })
-    .await?;
-
-    let (bucket_name, mut priors) = cfg.pick_bucket(account_id, explicit_bucket.as_deref());
-    if let Some(bucket) = &bucket_name {
-        debug!("recommendations account={account_id} bucket={bucket}");
-    }
-    priors.now = Utc::now();
-
-    let live_posts: Vec<Post> = api::get_posts(&account, page)
-        .await
-        .map_err(|e| ApiError::Internal(format!("Failed to fetch posts: {e}")))?;
-
-    // Catalog persistence is fire-and-forget: it's a write contender against
-    // the SQLite single writer, and infinite scroll fires this several times
-    // per second. Pulling it off the request path means the response shape
-    // doesn't depend on whether the previous page's writes have flushed.
-    // The IDF index is updated *incrementally* via `bump_idf` inside
-    // save_posts_tags_batch, so newly-seen tags participate in scoring on
-    // the very next page rather than waiting for a full rebuild.
-    {
-        let posts_for_persist = live_posts.clone();
-        rocket::tokio::spawn(async move {
-            let res = rocket::tokio::task::spawn_blocking(move || -> Result<(), String> {
-                upsert_catalog_posts(&posts_for_persist)
-                    .map_err(|e| format!("Failed to store recommendation catalog posts: {e}"))?;
-                // Skip cooccurrence: candidate browse posts aren't user truth.
-                db::save_posts_tags_batch(&posts_for_persist, &HashSet::new(), false)
-                    .map_err(|e| format!("Failed to store recommendation tags: {e}"))?;
-                Ok(())
-            })
-            .await;
-            if let Ok(Err(e)) = res {
-                warn!("background recommendation persist failed: {e}");
-            } else if let Err(e) = res {
-                warn!("background recommendation persist task panicked: {e}");
-            }
-        });
-    }
-
-    // Hydrate local candidates (skipping anything the user owns or already
-    // saw, plus anything already in the live page so we don't waste a row).
-    let live_ids: HashSet<i64> = live_posts.iter().map(|p| p.id).collect();
-    let local_to_hydrate: Vec<i64> = local_candidate_ids
-        .into_iter()
-        .filter(|id| !live_ids.contains(id) && !owned_ids.contains(id) && !seen_ids.contains(id))
-        .collect();
-    let local_posts = if local_to_hydrate.is_empty() {
-        Vec::new()
-    } else {
-        db_blocking(move || hydrate_posts_by_ids(&local_to_hydrate)).await?
-    };
-
-    // Filter live e621 posts through the same dedup lens. owned_ids is the
-    // user's own favourites — discovering them in a "discover" feed is noise.
-    let mut combined: Vec<Post> = Vec::with_capacity(live_posts.len() + local_posts.len());
-    for post in live_posts {
-        if owned_ids.contains(&post.id) || seen_ids.contains(&post.id) {
-            continue;
-        }
-        combined.push(post);
-    }
-    let mut combined_ids: HashSet<i64> = combined.iter().map(|p| p.id).collect();
-    for post in local_posts {
-        if combined_ids.insert(post.id) {
-            combined.push(post);
-        }
-    }
-
-    let idf = current_idf();
-    let global_relation = current_global_relation();
-
-    let ctx = ScoringContext::new(
-        &tags,
-        &cfg.group_weights,
-        &priors,
-        &idf,
-        &profile,
-        &global_relation,
-        &user_relation,
-    );
-
-    let mut scored: Vec<ScoredPost> = Vec::with_capacity(combined.len());
-    for post in combined {
-        let (s, breakdown) = ctx.score(&post);
-        scored.push(ScoredPost {
-            post,
-            score: s,
-            breakdown: Some(breakdown),
-        });
-    }
-
-    if let Some(threshold) = affinity_threshold {
-        scored.retain(|sp| sp.score >= threshold);
-    }
-    let scored = diversify_scored_posts(scored, &priors);
-
-    Ok(Json(scored))
 }
 
 #[openapi(tag = "Accounts")]
@@ -822,17 +311,17 @@ async fn rocket() -> _ {
         settings:
         process_posts,
         process_status,
-        log_feed_interaction,
-        list_accounts,
-        get_account_tag_counts,
-        get_account_id,
-        get_account_name,
-        create_account,
-        delete_account,
-        get_account_blacklist,
-        update_account_blacklist,
-        get_account_experiment_bucket,
-        get_recommendations,
+        routes::feed::log_feed_interaction,
+        routes::account::list_accounts,
+        routes::account::get_account_tag_counts,
+        routes::account::get_account_id,
+        routes::account::get_account_name,
+        routes::account::create_account,
+        routes::account::delete_account,
+        routes::account::get_account_blacklist,
+        routes::account::update_account_blacklist,
+        routes::account::get_account_experiment_bucket,
+        routes::feed::get_recommendations,
         get_default_blacklist,
         session_bootstrap,
         session_clear
@@ -849,7 +338,7 @@ async fn rocket() -> _ {
         .manage(Mutex::new(watcher))
         .manage(spec)
         .mount("/api", api_routes)
-        .mount("/api", rocket::routes![get_account_tag_relations])
+        .mount("/api", rocket::routes![routes::account::get_account_tag_relations])
         .register("/api", catchers![catch_404, catch_422, catch_500])
         .attach(Shield::new())
         .attach(DbInit);

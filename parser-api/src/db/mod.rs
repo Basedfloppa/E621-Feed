@@ -10,6 +10,7 @@ use std::time::Duration;
 
 mod accounts;
 mod cooccurrence;
+mod cooccurrence_backfill;
 mod feed;
 mod posts;
 mod profiles;
@@ -17,6 +18,7 @@ mod tags;
 
 pub use accounts::*;
 pub use cooccurrence::*;
+pub use cooccurrence_backfill::*;
 pub use feed::*;
 pub use posts::*;
 pub use profiles::*;

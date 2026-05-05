@@ -13,10 +13,12 @@ fn rebuild_cooldown() -> Duration {
     Duration::from_secs(cfg().runtime.idf_rebuild_cooldown_secs.max(1))
 }
 
+/// Stores per-tag raw document frequency only. The IDF transform is applied
+/// at lookup time using priors-supplied `df_floor` / `idf_max`, so calibrate
+/// can probe those two knobs without rebuilding the index.
 #[derive(Debug, Clone)]
 pub struct IdfIndex {
     df: HashMap<String, i64>,
-    idf: HashMap<String, f32>,
     n_posts: i64,
 }
 
@@ -24,33 +26,38 @@ impl IdfIndex {
     pub fn empty() -> Self {
         Self {
             df: HashMap::new(),
-            idf: HashMap::new(),
             n_posts: 0,
         }
     }
 
-    fn compute_idf(df_raw: i64, n_posts: i64) -> f32 {
-        let cfg = cfg();
+    /// Robertson-Sparck-Jones-style smoothed IDF. `df_floor`, `idf_max`,
+    /// `rsj_smoothing` are all priors-supplied so calibrate can probe them.
+    #[inline]
+    fn compute_idf(
+        df_raw: i64,
+        n_posts: i64,
+        df_floor: f32,
+        idf_max: f32,
+        rsj: f32,
+    ) -> f32 {
         let n = n_posts.max(1) as f32;
         let dfv = df_raw.max(0) as f32;
-        let dfp = dfv + cfg.df_floor;
-        (1.0 + ((n - dfp + 0.5) / (dfp + 0.5)).max(0.0))
+        let dfp = dfv + df_floor;
+        let rsj = rsj.max(1e-3);
+        (1.0 + ((n - dfp + rsj) / (dfp + rsj)).max(0.0))
             .ln()
-            .min(cfg.idf_max)
+            .min(idf_max)
             .max(0.0)
     }
 
     pub fn from_df(df: &HashMap<String, i64>, n_posts: i64) -> Self {
-        let mut idf = HashMap::with_capacity(df.len());
         let mut df_lc: HashMap<String, i64> = HashMap::with_capacity(df.len());
         for (tag, &df_raw) in df {
             let lc = tag.to_lowercase();
-            idf.insert(lc.clone(), Self::compute_idf(df_raw, n_posts));
             df_lc.insert(lc, df_raw);
         }
         Self {
             df: df_lc,
-            idf,
             n_posts,
         }
     }
@@ -61,18 +68,39 @@ impl IdfIndex {
         Ok(Self::from_df(&df, n_posts))
     }
 
-    #[inline]
-    pub fn idf_raw(&self, tag: &str) -> f32 {
-        if tag.bytes().any(|b| b.is_ascii_uppercase()) {
-            *self.idf.get(&tag.to_ascii_lowercase()).unwrap_or(&1.0)
-        } else {
-            *self.idf.get(tag).unwrap_or(&1.0)
-        }
+    pub fn n_posts(&self) -> i64 {
+        self.n_posts
     }
 
     #[inline]
-    pub fn idf_tempered(&self, tag: &str, lambda: f32, alpha: f32) -> f32 {
-        let raw = self.idf_raw(tag);
+    fn lookup_df(&self, tag: &str) -> i64 {
+        let v = if tag.bytes().any(|b| b.is_ascii_uppercase()) {
+            self.df.get(&tag.to_ascii_lowercase()).copied()
+        } else {
+            self.df.get(tag).copied()
+        };
+        // Unknown tag → df=0; compute_idf will produce the cap (treats as
+        // maximally rare) — same behaviour as the old "missing → 1.0 raw".
+        v.unwrap_or(0)
+    }
+
+    /// Raw IDF — debug/inspection only; scoring goes through `idf_tempered`.
+    #[inline]
+    pub fn idf_raw(&self, tag: &str, df_floor: f32, idf_max: f32, rsj: f32) -> f32 {
+        Self::compute_idf(self.lookup_df(tag), self.n_posts, df_floor, idf_max, rsj)
+    }
+
+    #[inline]
+    pub fn idf_tempered(
+        &self,
+        tag: &str,
+        df_floor: f32,
+        idf_max: f32,
+        rsj: f32,
+        lambda: f32,
+        alpha: f32,
+    ) -> f32 {
+        let raw = self.idf_raw(tag, df_floor, idf_max, rsj);
         let blended = 1.0 + lambda.clamp(0.0, 1.0) * (raw - 1.0);
         blended.powf(alpha.clamp(0.0, 1.0))
     }
@@ -83,13 +111,8 @@ impl IdfIndex {
         }
         self.n_posts = (self.n_posts + n_posts_delta).max(0);
 
-        if n_posts_delta != 0 {
-            for (tag, df_raw) in &self.df {
-                self.idf
-                    .insert(tag.clone(), Self::compute_idf(*df_raw, self.n_posts));
-            }
-        }
-
+        // No precomputed IDF cache to refresh — `idf_tempered` applies the
+        // transform on-the-fly. Just keep df counters in sync.
         for (tag, &delta) in df_delta {
             if delta == 0 {
                 continue;
@@ -99,12 +122,8 @@ impl IdfIndex {
             } else {
                 tag.clone()
             };
-            let new_df = {
-                let entry = self.df.entry(lc.clone()).or_insert(0);
-                *entry = (*entry + delta).max(0);
-                *entry
-            };
-            self.idf.insert(lc, Self::compute_idf(new_df, self.n_posts));
+            let entry = self.df.entry(lc).or_insert(0);
+            *entry = (*entry + delta).max(0);
         }
     }
 }

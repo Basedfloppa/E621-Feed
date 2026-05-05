@@ -36,10 +36,7 @@ pub struct Config {
     #[serde(default = "default_e621_cache_max_entries")]
     pub e621_cache_max_entries: usize,
 
-    pub group_weights: HashMap<String, f32>,
     pub priors: Priors,
-    pub df_floor: f32,
-    pub idf_max: f32,
 
     #[serde(default)]
     pub buckets: HashMap<String, BucketOverride>,
