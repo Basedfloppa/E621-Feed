@@ -156,38 +156,41 @@ account to `control` while testing the v5 arm (or vice versa).
 ### Calibration history
 
 For reference, the unfiltered `[best]` weights from each grid run and
-the post-v5 production defaults distilled from them. The "Pre-v5"
-column is what the defaults *used to be*; "v5 default" is what they
-are now in [`config.example.toml`](../parser-api/config.example.toml).
+the production defaults distilled from them. The "Pre-v5" column is
+what the defaults *used to be*; "v5.1 default" is what they are now
+in [`config.example.toml`](../parser-api/config.example.toml).
 
-| Knob | Pre-v5 | N=23 best | N=150 (early) best | N=150 v5 best | **v5 default** |
-|---|---|---|---|---|---|
-| `mix_sim` | 0.48 | 0.73 | 0.53 | 0.63 | **0.58** |
-| `mix_quality` | 0.10 | 0.00 | 0.00 | 0.00 | **0.05** |
-| `mix_recency` | 0.07 | 0.00 | 0.00 | 0.00 | **0.04** |
-| `mix_rating` | 0.10 | 0.35 | 0.25 | 0.00 | **0.07** |
-| `mix_media` | 0.08 | 0.03 | 0.03 | 0.03 | **0.05** |
-| `mix_popularity` | 0.07 | 0.00 | 0.00 | 0.00 | **0.04** |
-| `mix_interaction` | 0.10 | 0.10 | 0.10 | 0.10 | 0.10 |
-| `mix_tag_relation` | 0.08 | 0.13 | 0.08 | 0.08 | 0.08 |
-| `idf_lambda` | 0.35 | — | — | 0.80 | **0.55** |
-| `idf_alpha` | 0.65 | — | — | 1.00 (pinned) | **0.85** |
-| `freq_alpha` | 0.45 | — | — | 0.90 | **0.65** |
-| `tag_relation_pmi_scale` | 5.00 | — | — | 2.00 | **3.5** |
-| `tag_relation_cooc_ref` | 20.0 | — | — | 13.0 | **16.0** |
+| Knob | Pre-v5 | N=23 best | N=150 (early) best | N=150 v5 best | v5 default | N=915 v5.1 best | **v5.1 default** |
+|---|---|---|---|---|---|---|---|
+| `mix_sim` | 0.48 | 0.73 | 0.53 | 0.63 | 0.58 | 0.63 | **0.60** |
+| `mix_quality` | 0.10 | 0.00 | 0.00 | 0.00 | 0.05 | 0.00 | **0.05** |
+| `mix_recency` | 0.07 | 0.00 | 0.00 | 0.00 | 0.04 | 0.00 | **0.04** |
+| `mix_rating` | 0.10 | 0.35 | 0.25 | 0.00 | 0.07 | 0.00 | **0.07** |
+| `mix_media` | 0.08 | 0.03 | 0.03 | 0.03 | 0.05 | 0.05 | **0.05** |
+| `mix_popularity` | 0.07 | 0.00 | 0.00 | 0.00 | 0.04 | 0.00 | **0.04** |
+| `mix_interaction` | 0.10 | 0.10 | 0.10 | 0.10 | 0.10 | 0.10 | **0.10** |
+| `mix_tag_relation` | 0.08 | 0.13 | 0.08 | 0.08 | 0.08 | 0.08 | **0.08** |
+| `idf_lambda` | 0.35 | — | — | 0.80 | 0.55 | 1.00 (pinned) | **0.70** |
+| `idf_alpha` | 0.65 | — | — | 1.00 (pinned) | 0.85 | 1.00 (pinned) | **0.92** |
+| `freq_alpha` | 0.45 | — | — | 0.90 | 0.65 | 1.00 (pinned) | **0.80** |
+| `tag_relation_pmi_scale` | 5.00 | — | — | 2.00 | 3.5 | 3.5 | **3.5** |
+| `tag_relation_cooc_ref` | 20.0 | — | — | 13.0 | 16.0 | 16.0 | **16.0** |
 
-The v5 defaults take **partial steps** toward `[best]` rather than
+The v5.x defaults take **partial steps** toward `[best]` rather than
 copying it verbatim — the `mix_quality` / `mix_recency` /
 `mix_popularity` / `mix_rating` columns drift to 0 because of the
 holdout artifacts described above; aggressive zero-ing those would
-produce a worse production feed. The 4 IDF/`freq_alpha`/`tag_relation`
-moves are trustworthy in direction but the v5 magnitudes are pushed by
-the same retrieval-task bias, so we step ~half-way.
+produce a worse production feed. The IDF / `freq_alpha` moves are
+trustworthy in direction but the N=915 grid pinned all three to the
+upper clamp boundary (1.0), which signals that random-negative
+retrieval keeps rewarding ever-sharper rare-tag contrast — also a
+known artifact. v5.1 advances each by ~½ of the gap between the v5
+default and the saturated [best], leaving headroom for online tuning.
 
-NDCG@20 baseline → best on the N=150 v5 full-grid run was
-**0.062 → 0.590** (9.6× lift, 4h2min wall-clock). Real production lift
-will be a fraction of this. Full log:
-[`calibration_results/grid_v5_final.log`](../calibration_results/grid_v5_final.log).
+NDCG@20 / Recall@50 / MRR on the N=915 v5.1 full-grid `[best]` run was
+**0.7274 / 0.1475 / 0.8871**. Real production lift will be a fraction
+of this — copy via the bucket A/B mechanism described above rather
+than as an unconditional rollout.
 
 ## Files
 
