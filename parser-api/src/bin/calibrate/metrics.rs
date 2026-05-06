@@ -1,6 +1,7 @@
 //! Metrics + scoring loop. NDCG@k / Recall@k / MRR over per-account ranked
 //! lists. Parallelism via a bounded rayon pool sized from `calibrate_threads`.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::OnceLock;
 
 use chrono::{DateTime, Utc};
@@ -61,6 +62,10 @@ fn pool() -> &'static ThreadPool {
 /// Score every cached fixture under `priors`. `now` is supplied by the
 /// caller so a grid run can freeze the wall-clock once and have all
 /// probes see identical post-ages.
+///
+/// `progress = true` enables per-batch heartbeats to stderr — useful for
+/// `eval` (single long-running call). The grid loop passes `false` to
+/// avoid drowning the per-probe output in heartbeats.
 pub(crate) fn score_with(
     dataset: &EvalDataset,
     priors: &Priors,
@@ -69,9 +74,53 @@ pub(crate) fn score_with(
     top_k_recall: usize,
     diversify: bool,
 ) -> Metrics {
+    score_with_opts(
+        dataset,
+        priors,
+        now,
+        top_k_ndcg,
+        top_k_recall,
+        diversify,
+        false,
+    )
+}
+
+pub(crate) fn score_with_progress(
+    dataset: &EvalDataset,
+    priors: &Priors,
+    now: DateTime<Utc>,
+    top_k_ndcg: usize,
+    top_k_recall: usize,
+    diversify: bool,
+) -> Metrics {
+    score_with_opts(
+        dataset,
+        priors,
+        now,
+        top_k_ndcg,
+        top_k_recall,
+        diversify,
+        true,
+    )
+}
+
+fn score_with_opts(
+    dataset: &EvalDataset,
+    priors: &Priors,
+    now: DateTime<Utc>,
+    top_k_ndcg: usize,
+    top_k_recall: usize,
+    diversify: bool,
+    progress: bool,
+) -> Metrics {
     let mut priors = priors.clone();
     priors.now = now;
     let priors = &priors;
+
+    let total = dataset.accounts.len();
+    let counter = AtomicUsize::new(0);
+    let report_every = (total / 10).max(20);
+    let t0 = std::time::Instant::now();
 
     let per_account: Vec<(f64, f64, f64)> = pool().install(|| {
         dataset
@@ -129,11 +178,21 @@ pub(crate) fn score_with(
                         .sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
                 }
 
-                (
+                let result = (
                     ndcg_at_k(&scored, top_k_ndcg),
                     recall_at_k(&scored, top_k_recall, fx.test_count),
                     mrr(&scored),
-                )
+                );
+                if progress {
+                    let done = counter.fetch_add(1, Ordering::Relaxed) + 1;
+                    if done % report_every == 0 || done == total {
+                        eprintln!(
+                            "[score]   {done}/{total} accounts scored ({:.1}s elapsed)",
+                            t0.elapsed().as_secs_f32()
+                        );
+                    }
+                }
+                result
             })
             .collect()
     });
@@ -144,6 +203,13 @@ pub(crate) fn score_with(
         totals.recall_at_k += r;
         totals.mrr += m;
         totals.n_accounts += 1;
+    }
+    if progress {
+        eprintln!(
+            "[score] DONE: {} accounts in {:.1}s",
+            totals.n_accounts,
+            t0.elapsed().as_secs_f32()
+        );
     }
     totals
 }

@@ -69,10 +69,10 @@ cargo build --release --bin seed --bin calibrate
 ./target/release/calibrate probe
 
 # 6. Run the baseline (current config.toml priors).
-./target/release/calibrate eval
+./target/release/calibrate eval split=random with-diversify
 
 # 7. Search for better priors.
-./target/release/calibrate grid
+./target/release/calibrate grid split=random with-diversify
 ```
 
 ## Time and disk budget

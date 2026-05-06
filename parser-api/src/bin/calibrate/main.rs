@@ -23,7 +23,7 @@ mod sampling;
 
 use crate::grid::run_grid;
 use crate::knobs::{GRID_KNOBS, MIX_ONLY_KNOBS};
-use crate::metrics::{print_metrics, score_with};
+use crate::metrics::{print_metrics, score_with_progress};
 use crate::options::{GridOptions, NegMode, SplitStrategy};
 use crate::probe::run_probe;
 
@@ -45,12 +45,36 @@ fn main() -> anyhow::Result<()> {
             let top_k_ndcg = cfg_arc.backtest.top_k_ndcg;
             let top_k_recall = cfg_arc.backtest.top_k_recall;
             let opts = parse_grid_flags(env::args().skip(2));
+
+            let t_total = std::time::Instant::now();
+            let t_prep = std::time::Instant::now();
             let dataset = crate::dataset::prepare_eval_dataset(&opts)?;
+            let prep_secs = t_prep.elapsed().as_secs_f32();
+
             let priors = cfg_arc.priors.clone();
             let now = Utc::now();
-            let m = score_with(&dataset, &priors, now, top_k_ndcg, top_k_recall, opts.diversify)
-                .average();
+            eprintln!(
+                "[eval] scoring {} accounts under config.toml priors...",
+                dataset.accounts.len()
+            );
+            let t_score = std::time::Instant::now();
+            let m = score_with_progress(
+                &dataset,
+                &priors,
+                now,
+                top_k_ndcg,
+                top_k_recall,
+                opts.diversify,
+            )
+            .average();
+            let score_secs = t_score.elapsed().as_secs_f32();
             print_metrics("baseline", &m, top_k_ndcg, top_k_recall);
+            eprintln!(
+                "[eval] timings: prep={:.1}s, score={:.1}s, total={:.1}s",
+                prep_secs,
+                score_secs,
+                t_total.elapsed().as_secs_f32()
+            );
         }
         "grid" => {
             // Default: full grid of measurable knobs.
