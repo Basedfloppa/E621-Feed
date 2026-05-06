@@ -90,15 +90,53 @@ pub(crate) fn prepare_eval_dataset(opts: &GridOptions) -> anyhow::Result<EvalDat
     let negative_ratio = bt.negative_ratio;
     let max_accounts = bt.max_accounts;
 
+    eprintln!(
+        "[prep] split={}, neg={}, diversify={}, max_accounts={}, min_favs={}, neg_ratio={}",
+        opts.split.label(),
+        opts.neg_mode.label(),
+        opts.diversify,
+        max_accounts,
+        min_favs,
+        negative_ratio,
+    );
+
+    let t = std::time::Instant::now();
+    eprintln!("[prep] loading IDF index...");
     let idf = IdfIndex::from_db().map_err(|e| anyhow::anyhow!("idf load: {e}"))?;
+    eprintln!("[prep]   IDF loaded in {:.1}s", t.elapsed().as_secs_f32());
+
+    let t = std::time::Instant::now();
+    eprintln!("[prep] loading global tag-relation graph...");
     let global_relation =
         db::load_global_tag_relation().map_err(|e| anyhow::anyhow!("global relation: {e}"))?;
+    eprintln!(
+        "[prep]   global relation loaded in {:.1}s ({} tags, {} pairs)",
+        t.elapsed().as_secs_f32(),
+        global_relation.n_tags(),
+        global_relation.n_pairs(),
+    );
     let empty_user_relation = TagRelationGraph::empty();
-    // Mixed mode loads the full metadata index; uniform mode only ids.
+
+    let t = std::time::Instant::now();
     let catalog: CatalogIndex = match opts.neg_mode {
-        NegMode::Mixed => load_catalog_index()?,
+        NegMode::Mixed => {
+            eprintln!("[prep] loading catalog index (id + fav_count + created_at)...");
+            let c = load_catalog_index()?;
+            eprintln!(
+                "[prep]   catalog index built in {:.1}s ({} posts)",
+                t.elapsed().as_secs_f32(),
+                c.ids.len()
+            );
+            c
+        }
         NegMode::Uniform => {
+            eprintln!("[prep] loading catalog ids (uniform-neg mode)...");
             let ids = catalog_post_ids()?;
+            eprintln!(
+                "[prep]   catalog ids loaded in {:.1}s ({} posts)",
+                t.elapsed().as_secs_f32(),
+                ids.len()
+            );
             let n = ids.len();
             CatalogIndex {
                 ids,
@@ -110,17 +148,21 @@ pub(crate) fn prepare_eval_dataset(opts: &GridOptions) -> anyhow::Result<EvalDat
         }
     };
 
-    eprintln!(
-        "[prep] split={}, neg={}, diversify={}",
-        opts.split.label(),
-        opts.neg_mode.label(),
-        opts.diversify
-    );
-
+    let t = std::time::Instant::now();
     let account_ids = eligible_accounts(min_favs as i64, max_accounts)?;
+    eprintln!(
+        "[prep] {} eligible accounts (top by fav count, after min_favs={} filter)",
+        account_ids.len(),
+        min_favs
+    );
+    let total_accounts = account_ids.len();
     let mut fixtures = Vec::with_capacity(account_ids.len());
+    // Heartbeat cadence: report on percentiles + every N to surface stalls
+    // on individual large accounts.
+    let report_every = (total_accounts / 20).max(5);
+    let mut posts_hydrated: usize = 0;
 
-    for account_id in account_ids {
+    for (i, account_id) in account_ids.into_iter().enumerate() {
         let fav_ids = account_favorite_ids(account_id)?;
         if fav_ids.len() < min_favs {
             continue;
@@ -166,6 +208,7 @@ pub(crate) fn prepare_eval_dataset(opts: &GridOptions) -> anyhow::Result<EvalDat
         let neg_posts = db::hydrate_posts_by_ids(&candidate_ids).unwrap_or_default();
         let test_count = test_posts.len();
 
+        posts_hydrated += test_posts.len() + neg_posts.len();
         fixtures.push(AccountFixture {
             profile,
             tags,
@@ -173,15 +216,23 @@ pub(crate) fn prepare_eval_dataset(opts: &GridOptions) -> anyhow::Result<EvalDat
             neg_posts,
             test_count,
         });
+
+        if (i + 1) % report_every == 0 || i + 1 == total_accounts {
+            eprintln!(
+                "[prep]   hydrated {}/{} accounts ({} posts cached so far, {:.1}s elapsed)",
+                fixtures.len(),
+                total_accounts,
+                posts_hydrated,
+                t.elapsed().as_secs_f32()
+            );
+        }
     }
 
     eprintln!(
-        "[prep] {} accounts hydrated; ~{} posts cached in memory",
+        "[prep] DONE: {} accounts hydrated, {} posts cached in memory, {:.1}s total",
         fixtures.len(),
-        fixtures
-            .iter()
-            .map(|f| f.test_posts.len() + f.neg_posts.len())
-            .sum::<usize>()
+        posts_hydrated,
+        t.elapsed().as_secs_f32()
     );
 
     Ok(EvalDataset {

@@ -41,19 +41,31 @@ pub(crate) fn run_grid(knobs: &[KnobSpec], opts: GridOptions) -> anyhow::Result<
     );
     eprintln!("[grid] adaptive step: {:?}", PASS_SCALES);
 
+    eprintln!("[grid] running baseline eval...");
+    let t_baseline = std::time::Instant::now();
     let baseline = cfg_arc.priors.clone();
     let baseline_m =
         score_with(&dataset, &baseline, now, top_k_ndcg, top_k_recall, opts.diversify).average();
+    eprintln!(
+        "[grid] baseline eval took {:.1}s",
+        t_baseline.elapsed().as_secs_f32()
+    );
     print_metrics("baseline", &baseline_m, top_k_ndcg, top_k_recall);
 
     let mut best = baseline.clone();
     let mut best_score = baseline_m.ndcg_at_k;
+    let mut evals_done: usize = 0;
 
     // Single-knob passes with adaptive scaling.
     if !opts.pairs_only {
         for (pass_idx, &scale) in PASS_SCALES.iter().enumerate() {
             let pass = pass_idx + 1;
+            let pass_t = std::time::Instant::now();
             let mut pass_changed = false;
+            let total_pass_evals: usize = knobs.iter().map(|k| k.probes.len()).sum();
+            let mut pass_evals = 0usize;
+            // Heartbeat every ~10% of the pass so 8h silent runs aren't a thing.
+            let heartbeat_every = (total_pass_evals / 10).max(20);
             for k in knobs {
                 for &raw_delta in k.probes {
                     let delta = raw_delta * scale;
@@ -68,6 +80,8 @@ pub(crate) fn run_grid(knobs: &[KnobSpec], opts: GridOptions) -> anyhow::Result<
                         opts.diversify,
                     )
                     .average();
+                    pass_evals += 1;
+                    evals_done += 1;
                     if m.ndcg_at_k > best_score + 1e-4 {
                         eprintln!(
                             "pass {pass}(×{scale:.2}): {} {delta:+.3}  NDCG@{top_k_ndcg} {:.4} -> {:.4}",
@@ -77,8 +91,20 @@ pub(crate) fn run_grid(knobs: &[KnobSpec], opts: GridOptions) -> anyhow::Result<
                         best_score = m.ndcg_at_k;
                         pass_changed = true;
                     }
+                    if pass_evals % heartbeat_every == 0 {
+                        eprintln!(
+                            "[grid]   pass {pass}(×{scale:.2}) heartbeat: {pass_evals}/{total_pass_evals} probes, current best NDCG@{top_k_ndcg} {:.4}, {:.1}s elapsed",
+                            best_score,
+                            pass_t.elapsed().as_secs_f32()
+                        );
+                    }
                 }
             }
+            eprintln!(
+                "[grid] pass {pass}(×{scale:.2}) done in {:.1}s ({pass_evals} probes; {} so far total)",
+                pass_t.elapsed().as_secs_f32(),
+                evals_done
+            );
             if !pass_changed {
                 eprintln!("pass {pass}(×{scale:.2}): no improvement, converged");
                 break;

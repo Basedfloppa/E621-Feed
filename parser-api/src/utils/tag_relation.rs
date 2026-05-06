@@ -112,6 +112,18 @@ impl TagRelationGraph {
     pub fn n_posts(&self) -> i64 {
         self.n_posts
     }
+
+    /// Total interned (group, tag) keys. Diagnostic only.
+    #[inline]
+    pub fn n_tags(&self) -> usize {
+        self.marginals.len()
+    }
+
+    /// Total stored co-occurrence pairs. Diagnostic only.
+    #[inline]
+    pub fn n_pairs(&self) -> usize {
+        self.pairs.len()
+    }
 }
 
 static GLOBAL_CACHE: LazyLock<ArcSwap<TagRelationGraph>> =
