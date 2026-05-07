@@ -28,6 +28,17 @@ use e621_account_parser_api::{
     validation,
 };
 
+/// Normalise the client-supplied `Option<String>` blacklist. The default
+/// fallback is applied **at DB write** (`db::set_account` /
+/// `db::update_device_blacklist`) — this helper just trims/dedupes and
+/// returns the (possibly empty) text. Empty in → empty out → DB layer
+/// substitutes `cfg().tag_blacklist`.
+fn normalize_optional_blacklist(input: Option<&str>) -> String {
+    input
+        .map(validation::normalize_blacklist)
+        .unwrap_or_default()
+}
+
 #[openapi(tag = "Accounts")]
 #[get("/account/<account_id>/tag_counts")]
 pub(crate) async fn get_account_tag_counts(
@@ -148,7 +159,8 @@ pub(crate) async fn create_account(
         )));
     }
     let canonical_name = resolved_name;
-    let normalized_blacklist = validation::normalize_blacklist(&acc.blacklist);
+    // Just normalise; DB layer applies the default if input is empty.
+    let normalized_blacklist = normalize_optional_blacklist(acc.blacklist.as_deref());
 
     let result = db_blocking(move || {
         set_account(&owner_token, acc.id, &canonical_name, &normalized_blacklist).map_err(|e| {
@@ -269,8 +281,10 @@ pub(crate) async fn get_account_blacklist(
             .map_err(|e| format!("Failed to get account: {e}"))
     })
     .await?;
+    // Wrap in `Some` for symmetry with the input shape — the GET response
+    // always carries the persisted text, never null.
     Ok(Json(BlacklistPayload {
-        blacklist: account.blacklist,
+        blacklist: Some(account.blacklist),
     }))
 }
 
@@ -323,10 +337,10 @@ pub(crate) async fn update_account_blacklist(
     validation::validate_account_id(account_id)?;
     validation::validate_blacklist_payload(&payload)?;
     let owner_token = owner.0;
-    let mut body = payload.into_inner();
-    body.blacklist = validation::normalize_blacklist(&body.blacklist);
+    let body = payload.into_inner();
+    let normalized_blacklist = normalize_optional_blacklist(body.blacklist.as_deref());
     let updated = db_blocking(move || {
-        update_device_blacklist(&owner_token, account_id, &body.blacklist).map_err(|e| {
+        update_device_blacklist(&owner_token, account_id, &normalized_blacklist).map_err(|e| {
             let m = format!("Failed to update blacklist: {e}");
             error!("{m}");
             m

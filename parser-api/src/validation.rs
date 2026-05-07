@@ -155,12 +155,17 @@ pub fn normalize_blacklist(blacklist: &str) -> String {
 pub fn validate_device_scoped_account(acc: &DeviceScopedAccount) -> Result<(), ApiError> {
     validate_account_id(acc.id)?;
     validate_account_name(&acc.name)?;
-    validate_blacklist_text(&acc.blacklist)?;
+    if let Some(bl) = acc.blacklist.as_deref() {
+        validate_blacklist_text(bl)?;
+    }
     Ok(())
 }
 
 pub fn validate_blacklist_payload(payload: &BlacklistPayload) -> Result<(), ApiError> {
-    validate_blacklist_text(&payload.blacklist)
+    if let Some(bl) = payload.blacklist.as_deref() {
+        validate_blacklist_text(bl)?;
+    }
+    Ok(())
 }
 
 pub fn validate_feed_interaction(req: &FeedInteractionRequest) -> Result<(), ApiError> {

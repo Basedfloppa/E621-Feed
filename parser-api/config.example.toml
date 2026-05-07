@@ -11,7 +11,21 @@ admin_user    = "username"
 admin_api     = "api_key"
 
 # --- Top-level ---------------------------------------------------------------
-tag_blacklist = ["tag1", "tag2", "tagN"]
+# Tags stripped from imported posts (audio metadata, DNP markers).
+# Plain tag names only — no e621 search syntax.
+tag_blacklist = ["sound", "sound_warning", "conditional_dnp", "avoid_posting"]
+
+# Default per-account blacklist applied at DB write when the client omits
+# the `blacklist` field on POST /account or PATCH /account/<id>/blacklist.
+# e621-style search syntax (negation, rating qualifiers, etc.).
+default_account_blacklist = [
+    "gore",
+    "scat",
+    "watersports",
+    "young -rating:s",
+    "loli",
+    "shota",
+]
 posts_domain  = "https://uri.com"
 posts_limit   = 160       # 320 is the e621 max
 rps_delay_ms  = 250

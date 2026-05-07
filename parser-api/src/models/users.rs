@@ -52,13 +52,22 @@ pub struct TruncatedAccount {
 pub struct DeviceScopedAccount {
     pub id: i32,
     pub name: String,
-    pub blacklist: String,
+    /// Optional. `None` (or omitted from the JSON body) signals "use the
+    /// server-side default `tag_blacklist` from `config.toml`". Frontend
+    /// must omit the field — not send empty string — to opt into the
+    /// default; an empty string is also treated as "use default" at DB
+    /// write for backwards-compat with older clients.
+    #[serde(default)]
+    pub blacklist: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, JsonSchema)]
 #[serde(crate = "rocket::serde")]
 pub struct BlacklistPayload {
-    pub blacklist: String,
+    /// Same semantics as `DeviceScopedAccount.blacklist` — `None` or empty
+    /// resets the account to the server-side default at write time.
+    #[serde(default)]
+    pub blacklist: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]

@@ -1,25 +1,27 @@
 use chrono::Utc;
 use rusqlite::params;
 
-use crate::models::TruncatedAccount;
+use crate::models::{cfg, TruncatedAccount};
 
 use super::open_db;
+
+fn default_blacklist_text() -> String {
+    cfg().default_account_blacklist.join("\n")
+}
 
 pub fn set_account(
     owner_token: &str,
     account_id: i32,
     name: &str,
-    mut blacklisted_tags: &str,
+    blacklisted_tags: &str,
 ) -> Result<TruncatedAccount, String> {
-    if blacklisted_tags.is_empty() {
-        blacklisted_tags = "
-gore
-scat
-watersports
-young -rating:s
-loli
-shota";
-    }
+    let owned: String;
+    let resolved: &str = if blacklisted_tags.is_empty() {
+        owned = default_blacklist_text();
+        &owned
+    } else {
+        blacklisted_tags
+    };
 
     super::with_write_tx(|tx| {
         tx.execute(
@@ -29,7 +31,7 @@ shota";
             ON CONFLICT(id) DO UPDATE SET
             name = excluded.name,
             blacklisted_tags = excluded.blacklisted_tags",
-            params![account_id, name, blacklisted_tags],
+            params![account_id, name, resolved],
         )
         .map_err(|e| format!("Failed to upsert account: {e}"))?;
 
@@ -54,6 +56,14 @@ pub fn update_device_blacklist(
     account_id: i32,
     blacklisted_tags: &str,
 ) -> Result<TruncatedAccount, String> {
+    let owned: String;
+    let resolved: &str = if blacklisted_tags.is_empty() {
+        owned = default_blacklist_text();
+        &owned
+    } else {
+        blacklisted_tags
+    };
+
     let affected = super::with_write_tx(|tx| {
         tx.execute(
             "
@@ -64,7 +74,7 @@ pub fn update_device_blacklist(
             params![
                 owner_token,
                 account_id,
-                blacklisted_tags,
+                resolved,
                 Utc::now().to_rfc3339(),
             ],
         )

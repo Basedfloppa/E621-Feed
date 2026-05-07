@@ -175,7 +175,7 @@ fn strip_blacklisted_tags(mut p: Post, blacklist: &HashSet<String>) -> Post {
 #[openapi(tag = "Accounts")]
 #[get("/defaults/blacklist")]
 fn get_default_blacklist() -> Json<serde_json::Value> {
-    Json(serde_json::json!({ "blacklist": cfg().tag_blacklist }))
+    Json(serde_json::json!({ "blacklist": cfg().default_account_blacklist }))
 }
 
 /// Refreshes the cookie's 400-day expiry if one is already attached,

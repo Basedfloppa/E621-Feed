@@ -15,6 +15,12 @@ pub struct Config {
     pub admin_user: String,
     pub admin_api: String,
     pub tag_blacklist: Vec<String>,
+    /// Default per-account blacklist applied at DB write when the client
+    /// omits or empties the `blacklist` field. e621-style search syntax;
+    /// promoted from a hardcoded list in `db::accounts::set_account`
+    /// pre-v5.3 so operators can edit it without a rebuild.
+    #[serde(default = "default_default_account_blacklist")]
+    pub default_account_blacklist: Vec<String>,
     pub posts_domain: String,
     pub posts_limit: i32,
     pub rps_delay_ms: u64,
@@ -126,6 +132,17 @@ impl Default for RuntimeConfig {
 
 fn default_user_agent() -> String {
     "E621AccountParser/0.1 (+https://github.com/zorolin/E621-Account-Parser)".to_string()
+}
+
+fn default_default_account_blacklist() -> Vec<String> {
+    vec![
+        "gore".into(),
+        "scat".into(),
+        "watersports".into(),
+        "young -rating:s".into(),
+        "loli".into(),
+        "shota".into(),
+    ]
 }
 
 fn default_e621_cache_ttl_secs() -> u64 {

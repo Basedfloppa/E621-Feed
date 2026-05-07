@@ -187,7 +187,7 @@ pub fn account_creator() -> Html {
                 match api_get(&url).send().await {
                     Ok(resp) if resp.ok() => {
                         if let Ok(payload) = resp.json::<BlacklistResponse>().await {
-                            edit_draft.set(payload.blacklist);
+                            edit_draft.set(payload.blacklist.unwrap_or_default());
                         }
                     }
                     Ok(resp) => {
@@ -304,10 +304,14 @@ pub fn account_creator() -> Html {
 
             edit_saving.set(true);
 
-            let body = serde_json::json!({
-                "blacklist": (*edit_draft).clone(),
-            })
-            .to_string();
+            let draft = (*edit_draft).clone();
+            // Omit the field on empty input → backend resets to the
+            // configured default at DB write.
+            let body = if draft.trim().is_empty() {
+                serde_json::json!({}).to_string()
+            } else {
+                serde_json::json!({ "blacklist": draft }).to_string()
+            };
 
             let editing_id = editing_id.clone();
             let edit_draft = edit_draft.clone();
@@ -434,11 +438,22 @@ pub fn account_creator() -> Html {
                 blacklist: raw_blacklist.clone(),
             };
 
-            let payload = serde_json::json!({
-                "id": account_id,
-                "name": raw_name,
-                "blacklist": raw_blacklist,
-            });
+            // Empty input → omit the field entirely so the backend applies
+            // the configured default at DB write. Sending `""` explicitly
+            // would also be treated as default by the backend, but omitting
+            // keeps the request minimal and matches the user-intent contract.
+            let payload = if raw_blacklist.is_empty() {
+                serde_json::json!({
+                    "id": account_id,
+                    "name": raw_name,
+                })
+            } else {
+                serde_json::json!({
+                    "id": account_id,
+                    "name": raw_name,
+                    "blacklist": raw_blacklist,
+                })
+            };
 
             let message = message.clone();
             let error = error.clone();
@@ -722,5 +737,10 @@ pub fn account_creator() -> Html {
 
 #[derive(serde::Deserialize)]
 struct BlacklistResponse {
-    blacklist: String,
+    // Backend now returns Option<String>: None signals "use default" (the
+    // default tag list is applied at DB write, so persisted accounts
+    // always have a concrete string after creation, but null is still
+    // accepted for forward-compat).
+    #[serde(default)]
+    blacklist: Option<String>,
 }
