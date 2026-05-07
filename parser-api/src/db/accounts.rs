@@ -98,7 +98,7 @@ pub fn get_accounts_for_owner(owner_token: &str) -> Result<Vec<TruncatedAccount>
     let mut stmt = conn
         .prepare(
             r#"
-        SELECT a.id, a.name, COALESCE(NULLIF(adl.blacklisted_tags, ''), a.blacklisted_tags)
+        SELECT a.id, a.name, COALESCE(NULLIF(adl.blacklisted_tags, ''), a.blacklisted_tags, '')
         FROM accounts a
         INNER JOIN account_device_links adl ON adl.account_id = a.id
         WHERE adl.owner_token = ?
@@ -125,7 +125,7 @@ pub fn get_account_by_name(owner_token: &str, name: String) -> Result<TruncatedA
     let mut stmt = conn
         .prepare(
             r#"
-        SELECT a.id, a.name, COALESCE(NULLIF(adl.blacklisted_tags, ''), a.blacklisted_tags)
+        SELECT a.id, a.name, COALESCE(NULLIF(adl.blacklisted_tags, ''), a.blacklisted_tags, '')
         FROM accounts a
         INNER JOIN account_device_links adl ON adl.account_id = a.id
         WHERE a.name = ?1 AND adl.owner_token = ?2
@@ -158,7 +158,7 @@ pub fn get_account_by_id(owner_token: &str, id: i32) -> Result<TruncatedAccount,
     let mut stmt = conn
         .prepare(
             r#"
-        SELECT a.id, a.name, COALESCE(NULLIF(adl.blacklisted_tags, ''), a.blacklisted_tags)
+        SELECT a.id, a.name, COALESCE(NULLIF(adl.blacklisted_tags, ''), a.blacklisted_tags, '')
         FROM accounts a
         INNER JOIN account_device_links adl ON adl.account_id = a.id
         WHERE a.id = ?1 AND adl.owner_token = ?2
