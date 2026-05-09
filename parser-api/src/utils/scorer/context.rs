@@ -223,4 +223,49 @@ impl<'a> ScoringContext<'a> {
         };
         (score.clamp(0.0, 1.0), breakdown)
     }
+
+    /// Cached counterpart of [`Self::score`]: takes pre-resolved
+    /// [`super::cached::CachedPostFeatures`] and skips all the
+    /// `IdfIndex::df_for` / `TagRelationGraph::tag_id` HashMap-by-string
+    /// lookups in the tag-keyed channels. Lets callers (calibrate `eval`
+    /// + `grid`) drop the original `Post` from the dataset entirely.
+    pub fn score_cached(
+        &self,
+        features: &super::cached::CachedPostFeatures,
+    ) -> (f32, ScoreBreakdown) {
+        let sim = self.tag_similarity_cached(features);
+        let age_days =
+            (self.priors.now - features.created_at).num_seconds() as f32 / 86_400.0;
+        let quality = self.quality_fit_cached(features);
+        let popularity = self.popularity_fit_cached(features);
+        let rating = self.rating_fit_cached(features);
+        let media = self.media_fit_cached(features);
+        let (interaction, veto) = self.interaction_fit_cached(features);
+        let recency = self.recency_fit(age_days);
+        let tag_relation = self.tag_relation_fit_cached(features);
+
+        let score = self.final_blend(
+            sim,
+            quality,
+            recency,
+            rating,
+            media,
+            popularity,
+            interaction,
+            tag_relation,
+            veto,
+        );
+
+        let breakdown = ScoreBreakdown {
+            tag_similarity: sim,
+            quality_fit: quality,
+            recency_fit: recency,
+            rating_fit: rating,
+            media_fit: media,
+            popularity_fit: popularity,
+            interaction_fit: interaction,
+            tag_relation_fit: tag_relation,
+        };
+        (score, breakdown)
+    }
 }

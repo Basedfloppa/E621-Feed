@@ -28,7 +28,6 @@
 use chrono::{DateTime, Utc};
 use rayon::prelude::*;
 
-use e621_account_parser_api::models::Post;
 use e621_account_parser_api::utils::{
     diversify_indices, CachedPostFeatures, Priors, ScoringContext,
 };
@@ -109,7 +108,6 @@ pub(crate) struct ScoreCache {
 #[inline]
 fn recompute_one_post(
     ctx: &ScoringContext<'_>,
-    post: &Post,
     features: &CachedPostFeatures,
     now: DateTime<Utc>,
     prev: ChannelScores,
@@ -121,16 +119,16 @@ fn recompute_one_post(
         next.sim = ctx.tag_similarity_cached(features);
     }
     if mask & M_QUALITY != 0 {
-        next.quality = ctx.quality_fit(post);
+        next.quality = ctx.quality_fit_cached(features);
     }
     if mask & M_POPULARITY != 0 {
-        next.popularity = ctx.popularity_fit(post);
+        next.popularity = ctx.popularity_fit_cached(features);
     }
     if mask & M_RATING != 0 {
-        next.rating = ctx.rating_fit(post);
+        next.rating = ctx.rating_fit_cached(features);
     }
     if mask & M_MEDIA != 0 {
-        next.media = ctx.media_fit(post);
+        next.media = ctx.media_fit_cached(features);
     }
     if mask & M_INTERACTION != 0 {
         let (val, veto) = ctx.interaction_fit_cached(features);
@@ -141,7 +139,7 @@ fn recompute_one_post(
         next.tag_relation = ctx.tag_relation_fit_cached(features);
     }
     if mask & M_RECENCY != 0 {
-        let age_days = (now - post.created_at).num_seconds() as f32 / 86_400.0;
+        let age_days = (now - features.created_at).num_seconds() as f32 / 86_400.0;
         next.recency = ctx.recency_fit(age_days);
     }
 
@@ -212,31 +210,21 @@ pub(crate) fn score_with_cache(
                 // below; the only difference is how the resulting list
                 // is ordered.
                 let mut entries: Vec<(f32, f32, i64)> = Vec::with_capacity(total_posts);
-                for (i, (post, features)) in fx
-                    .test_posts
-                    .iter()
-                    .zip(fx.test_features.iter())
-                    .enumerate()
-                {
+                for (i, features) in fx.test_features.iter().enumerate() {
                     let prior = prev_acc.map(|a| a.channels[i]).unwrap_or_default();
                     let ch =
-                        recompute_one_post(&ctx, post, features, priors.now, prior, effective_mask);
+                        recompute_one_post(&ctx, features, priors.now, prior, effective_mask);
                     let score = blend_channel(&ctx, ch);
-                    entries.push((score, ch.interaction, post.id));
+                    entries.push((score, ch.interaction, features.id));
                     next_channels.push(ch);
                 }
-                for (j, (post, features)) in fx
-                    .neg_posts
-                    .iter()
-                    .zip(fx.neg_features.iter())
-                    .enumerate()
-                {
+                for (j, features) in fx.neg_features.iter().enumerate() {
                     let cache_idx = n_test + j;
                     let prior = prev_acc.map(|a| a.channels[cache_idx]).unwrap_or_default();
                     let ch =
-                        recompute_one_post(&ctx, post, features, priors.now, prior, effective_mask);
+                        recompute_one_post(&ctx, features, priors.now, prior, effective_mask);
                     let score = blend_channel(&ctx, ch);
-                    entries.push((score, ch.interaction, post.id));
+                    entries.push((score, ch.interaction, features.id));
                     next_channels.push(ch);
                 }
 

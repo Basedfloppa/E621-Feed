@@ -1,5 +1,4 @@
-//! MMR-style post-list diversification. Runs after `ScoringContext::score`
-//! has produced ranked posts.
+//! MMR-style post-list diversification.
 //!
 //! Two entry points:
 //! * [`diversify_scored_posts`] — owning, prod-side helper. Builds
@@ -11,52 +10,94 @@
 //!   the top-`head_limit` items by raw score (the tail keeps its score
 //!   order). The grid loop calls this once per probe with features
 //!   computed once at dataset prep.
+//!
+//! Memory: each [`DiversityFeatures`] holds three sorted `Vec<u64>` of
+//! per-tag SipHashes. Collisions at 64-bit are negligible at the tag
+//! cardinalities involved (≤ 10⁵ unique tags, ~10⁻¹⁵ collision
+//! probability per pair). This trades a few cents of false-positive
+//! similarity risk for a ~10× memory reduction over the previous
+//! `HashSet<String>` representation, keeping 500-account calibration
+//! datasets inside 15 GB.
 
-use std::collections::HashSet;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 
 use crate::models::{Post, ScoredPost};
 
 use super::priors::Priors;
 use super::util::{normalize_tag, FEEDBACK_NEUTRAL};
 
-/// Pre-computed Jaccard-friendly tag sets for one post. Build once at
-/// prep time so per-probe MMR doesn't redo the lowercase + HashSet
-/// allocation work.
+/// Pre-computed Jaccard-friendly tag fingerprints for one post. Tags are
+/// hashed once and stored as a sorted `Vec<u64>` per group so MMR's
+/// per-pair set intersection is a linear merge instead of a HashSet
+/// probe.
 #[derive(Clone)]
 pub struct DiversityFeatures {
-    artist: HashSet<String>,
-    character: HashSet<String>,
-    general: HashSet<String>,
+    artist: Vec<u64>,
+    character: Vec<u64>,
+    general: Vec<u64>,
 }
 
 impl DiversityFeatures {
     pub fn from_post(p: &Post) -> Self {
-        let collect = |xs: &[String]| -> HashSet<String> {
-            xs.iter().map(|t| normalize_tag(t).into_owned()).collect()
-        };
         Self {
-            artist: collect(&p.tags.artist),
-            character: collect(&p.tags.character),
-            general: collect(&p.tags.general),
+            artist: hashed_tag_set(&p.tags.artist),
+            character: hashed_tag_set(&p.tags.character),
+            general: hashed_tag_set(&p.tags.general),
         }
     }
 }
 
-fn jaccard(a: &HashSet<String>, b: &HashSet<String>) -> f32 {
+fn hash_tag(t: &str) -> u64 {
+    let lc = normalize_tag(t);
+    let mut h = DefaultHasher::new();
+    lc.hash(&mut h);
+    h.finish()
+}
+
+fn hashed_tag_set(tags: &[String]) -> Vec<u64> {
+    let mut out: Vec<u64> = tags
+        .iter()
+        .filter_map(|t| {
+            let trimmed = t.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(hash_tag(trimmed))
+            }
+        })
+        .collect();
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
+/// Jaccard between two sorted-deduped `Vec<u64>` via merge-intersection.
+fn jaccard(a: &[u64], b: &[u64]) -> f32 {
     if a.is_empty() || b.is_empty() {
         return 0.0;
     }
-    let inter = a.intersection(b).count() as f32;
-    let union = (a.len() + b.len()) as f32 - inter;
-    if union <= 0.0 {
+    let (mut i, mut j) = (0usize, 0usize);
+    let mut inter = 0u32;
+    while i < a.len() && j < b.len() {
+        match a[i].cmp(&b[j]) {
+            std::cmp::Ordering::Equal => {
+                inter += 1;
+                i += 1;
+                j += 1;
+            }
+            std::cmp::Ordering::Less => i += 1,
+            std::cmp::Ordering::Greater => j += 1,
+        }
+    }
+    let union = (a.len() + b.len()) as u32 - inter;
+    if union == 0 {
         0.0
     } else {
-        inter / union
+        inter as f32 / union as f32
     }
 }
 
-/// Max similarity to any of the last `diversity_window` selected posts,
-/// resolved through `features` by index.
 fn max_redundancy_indexed(
     cand: &DiversityFeatures,
     selected: &[usize],
@@ -85,7 +126,7 @@ fn max_redundancy_indexed(
 /// Index-based MMR re-ranker. Returns indices in their final order.
 ///
 /// `entries[i] = (score, interaction_fit, tiebreak_id)` is parallel to
-/// `features[i]`. `head_limit` caps how many of the top-by-score items
+/// `features[i]`. `head_limit` caps how many top-by-score items
 /// participate in MMR; everything past that keeps its raw-score
 /// ordering. Pass `head_limit >= entries.len()` for full-list MMR
 /// (legacy behaviour).

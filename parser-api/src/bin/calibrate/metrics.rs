@@ -118,19 +118,19 @@ fn score_with_opts(
                     &dataset.empty_user_relation,
                 );
 
-                let n_test = fx.test_posts.len();
-                let total_posts = n_test + fx.neg_posts.len();
+                let n_test = fx.test_features.len();
+                let total_posts = n_test + fx.neg_features.len();
                 let mut scored: Vec<(i64, f32, bool)> = Vec::with_capacity(total_posts);
 
                 if diversify {
                     let mut entries: Vec<(f32, f32, i64)> = Vec::with_capacity(total_posts);
-                    for p in &fx.test_posts {
-                        let (s, breakdown) = ctx.score(p);
-                        entries.push((s, breakdown.interaction_fit, p.id));
+                    for f in &fx.test_features {
+                        let (s, breakdown) = ctx.score_cached(f);
+                        entries.push((s, breakdown.interaction_fit, f.id));
                     }
-                    for p in &fx.neg_posts {
-                        let (s, breakdown) = ctx.score(p);
-                        entries.push((s, breakdown.interaction_fit, p.id));
+                    for f in &fx.neg_features {
+                        let (s, breakdown) = ctx.score_cached(f);
+                        entries.push((s, breakdown.interaction_fit, f.id));
                     }
                     let head_limit = top_k_ndcg.max(top_k_recall).saturating_mul(2).max(50);
                     let order =
@@ -140,13 +140,13 @@ fn score_with_opts(
                         scored.push((entries[i].2, entries[i].0, is_pos));
                     }
                 } else {
-                    for p in &fx.test_posts {
-                        let (s, _) = ctx.score(p);
-                        scored.push((p.id, s, true));
+                    for f in &fx.test_features {
+                        let (s, _) = ctx.score_cached(f);
+                        scored.push((f.id, s, true));
                     }
-                    for p in &fx.neg_posts {
-                        let (s, _) = ctx.score(p);
-                        scored.push((p.id, s, false));
+                    for f in &fx.neg_features {
+                        let (s, _) = ctx.score_cached(f);
+                        scored.push((f.id, s, false));
                     }
                     scored
                         .sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));

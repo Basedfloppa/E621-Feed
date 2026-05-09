@@ -19,18 +19,16 @@ use crate::sampling::{sample_negatives_mixed, sample_negatives_uniform, split_tr
 
 /// Per-account state needed to score (test ∪ negatives) under any priors.
 ///
-/// `test_features` / `neg_features` are the hot scoring input; tag IDs
+/// `test_features` / `neg_features` are the hot scoring input — tag IDs
 /// and df values are pre-resolved so the grid loop avoids HashMap
-/// lookups. `diversity_features` is the parallel Jaccard-friendly tag
-/// sets the MMR pass consumes, stored concatenated `[test ‖ neg]` so
-/// per-probe diversify can index into one slice without rebuilding
-/// HashSets. `test_posts` / `neg_posts` are kept only as the source
-/// data for the feature builders above.
+/// lookups, and they carry everything the cached channel variants in
+/// `ScoringContext` read (score, fav_count, rating, media_type, …).
+/// `diversity_features` is the parallel MMR input, stored concatenated
+/// `[test ‖ neg]`. The original `Post` structs are dropped at the end
+/// of hydration; nothing in the scoring loop needs them.
 pub(crate) struct AccountFixture {
     pub(crate) profile: AccountPreferenceProfile,
     pub(crate) tags: Vec<TagCount>,
-    pub(crate) test_posts: Vec<Post>,
-    pub(crate) neg_posts: Vec<Post>,
     pub(crate) test_features: Vec<CachedPostFeatures>,
     pub(crate) neg_features: Vec<CachedPostFeatures>,
     pub(crate) diversity_features: Vec<DiversityFeatures>,
@@ -234,16 +232,25 @@ pub(crate) fn prepare_eval_dataset(opts: &GridOptions) -> anyhow::Result<EvalDat
             .iter()
             .map(|p| CachedPostFeatures::from_post(p, &idf, &global_relation))
             .collect();
-        let mut diversity_features: Vec<DiversityFeatures> =
-            Vec::with_capacity(test_posts.len() + neg_posts.len());
-        diversity_features.extend(test_posts.iter().map(DiversityFeatures::from_post));
-        diversity_features.extend(neg_posts.iter().map(DiversityFeatures::from_post));
+        // MMR features only when actually needed — they double the per-post
+        // memory footprint and the non-diversify path never reads them.
+        let diversity_features: Vec<DiversityFeatures> = if opts.diversify {
+            let mut v = Vec::with_capacity(test_posts.len() + neg_posts.len());
+            v.extend(test_posts.iter().map(DiversityFeatures::from_post));
+            v.extend(neg_posts.iter().map(DiversityFeatures::from_post));
+            v
+        } else {
+            Vec::new()
+        };
+        // Drop the heavy `Post` structs (tags as Vec<String>, description,
+        // sources, pools, …) now that everything we need is extracted.
+        // Keeps the per-account steady-state under what `Vec<Post>` cost.
+        drop(test_posts);
+        drop(neg_posts);
 
         fixtures.push(AccountFixture {
             profile,
             tags,
-            test_posts,
-            neg_posts,
             test_features,
             neg_features,
             diversity_features,

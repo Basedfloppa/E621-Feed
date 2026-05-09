@@ -13,7 +13,8 @@
 use super::cached::{CachedPostFeatures, CachedTag};
 use super::context::ScoringContext;
 use super::util::{
-    PairAggregator, FEEDBACK_NEUTRAL, WILSON_Z, ctr_score, wilson_lower_bound,
+    blend2, blend3, ctr_score, discrete_preference_smooth, one_sided_ratio, sigmoid,
+    wilson_lower_bound, PairAggregator, FEEDBACK_NEUTRAL, WILSON_Z,
 };
 use super::Group;
 use crate::utils::tag_relation::TagId;
@@ -255,6 +256,107 @@ impl<'a> ScoringContext<'a> {
     #[allow(dead_code)]
     pub fn cached_post_tag_count(&self, post: &CachedPostFeatures) -> usize {
         post.tags.len()
+    }
+
+    /// Cached `quality_fit` — same math as [`super::channels`] but reads
+    /// `score_total / fav_count / comment_count` from the prebuilt
+    /// features. Lets the calibrate hot path drop the underlying `Post`
+    /// from the dataset entirely.
+    pub fn quality_fit_cached(&self, post: &CachedPostFeatures) -> f32 {
+        let p = self.priors;
+        let exp = p.one_sided_ratio_exp;
+        let absolute = sigmoid(
+            p.quality_a * (post.score_total.max(0) as f32).ln_1p()
+                + p.quality_b * (post.fav_count.max(0) as f32).ln_1p()
+                + p.quality_log_bias,
+        );
+        let rel_score = one_sided_ratio(
+            post.score_total.max(0) as f32,
+            self.profile.quality.avg_score_total,
+            exp,
+        );
+        let rel_comments = one_sided_ratio(
+            post.comment_count.max(0) as f32,
+            self.profile.quality.avg_comment_count,
+            exp,
+        );
+        blend3(
+            absolute,
+            p.quality_w_absolute,
+            rel_score,
+            p.quality_w_relative_score,
+            rel_comments,
+            p.quality_w_relative_comments,
+        )
+    }
+
+    /// Cached `popularity_fit`.
+    pub fn popularity_fit_cached(&self, post: &CachedPostFeatures) -> f32 {
+        let p = self.priors;
+        let exp = p.one_sided_ratio_exp;
+        let fav_fit = one_sided_ratio(
+            post.fav_count.max(0) as f32,
+            self.profile.quality.avg_fav_count,
+            exp,
+        );
+        let dur_val = post.duration;
+        let dur_base = self.profile.quality.avg_duration;
+        let duration_fit = if dur_val > 0.0 || dur_base > 0.0 {
+            one_sided_ratio(dur_val, dur_base, exp)
+        } else {
+            1.0
+        };
+        blend2(
+            fav_fit,
+            p.popularity_w_fav,
+            duration_fit,
+            p.popularity_w_duration,
+        )
+    }
+
+    /// Cached `rating_fit`.
+    pub fn rating_fit_cached(&self, post: &CachedPostFeatures) -> f32 {
+        let rating = post.rating.to_string();
+        let matched = self
+            .profile
+            .rating
+            .iter()
+            .find(|s| s.rating == rating)
+            .map(|s| s.count.max(0))
+            .unwrap_or(0);
+        let k = self.profile.rating.len().max(3);
+        let boost = self.priors.coldstart_smoothing_boost.max(0.0);
+        let alpha = self.priors.discrete_smoothing_alpha
+            * (1.0 + (1.0 - self.personal_confidence) * boost);
+        discrete_preference_smooth(
+            self.rating_total,
+            matched,
+            k,
+            alpha,
+            self.priors.discrete_pref_floor,
+        )
+    }
+
+    /// Cached `media_fit`.
+    pub fn media_fit_cached(&self, post: &CachedPostFeatures) -> f32 {
+        let matched = self
+            .profile
+            .media
+            .iter()
+            .find(|s| s.media_type == post.media_type)
+            .map(|s| s.count.max(0))
+            .unwrap_or(0);
+        let k = self.profile.media.len().max(3);
+        let boost = self.priors.coldstart_smoothing_boost.max(0.0);
+        let alpha = self.priors.discrete_smoothing_alpha
+            * (1.0 + (1.0 - self.personal_confidence) * boost);
+        discrete_preference_smooth(
+            self.media_total,
+            matched,
+            k,
+            alpha,
+            self.priors.discrete_pref_floor,
+        )
     }
 }
 
