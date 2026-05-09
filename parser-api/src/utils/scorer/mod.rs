@@ -56,5 +56,5 @@ mod util;
 
 pub use cached::{CachedPostFeatures, CachedTag};
 pub use context::ScoringContext;
-pub use diversify::diversify_scored_posts;
+pub use diversify::{diversify_indices, diversify_scored_posts, DiversityFeatures};
 pub use priors::Priors;

@@ -28,9 +28,9 @@
 use chrono::{DateTime, Utc};
 use rayon::prelude::*;
 
-use e621_account_parser_api::models::{Post, ScoreBreakdown, ScoredPost};
+use e621_account_parser_api::models::Post;
 use e621_account_parser_api::utils::{
-    diversify_scored_posts, CachedPostFeatures, Priors, ScoringContext,
+    diversify_indices, CachedPostFeatures, Priors, ScoringContext,
 };
 
 use crate::dataset::EvalDataset;
@@ -93,21 +93,6 @@ pub(crate) struct ChannelScores {
     pub(crate) veto: bool,
 }
 
-impl ChannelScores {
-    fn into_breakdown(self) -> ScoreBreakdown {
-        ScoreBreakdown {
-            tag_similarity: self.sim,
-            quality_fit: self.quality,
-            recency_fit: self.recency,
-            rating_fit: self.rating,
-            media_fit: self.media,
-            popularity_fit: self.popularity,
-            interaction_fit: self.interaction,
-            tag_relation_fit: self.tag_relation,
-        }
-    }
-}
-
 /// Per-account ranked entries. Keeps post ids / positives parallel to
 /// channel scores so a partial-mask probe can reblend them without
 /// re-reading the dataset.
@@ -165,12 +150,19 @@ fn recompute_one_post(
 
 // ---- score_with_cache (main entry point) ----------------------------------
 
+/// MMR head size (number of top-by-score posts that participate in the
+/// O(n²) diversifier). Anything past this stays in raw-score order. Two
+/// extra slots above `max(top_k_ndcg, top_k_recall)` give MMR room to
+/// reshuffle past the K cutoff without affecting metrics measured at K.
+fn diversify_head_limit(top_k_ndcg: usize, top_k_recall: usize) -> usize {
+    let k = top_k_ndcg.max(top_k_recall);
+    k.saturating_mul(2).max(50)
+}
+
 /// Drop-in replacement for `score_with` that reuses prior-probe channel
 /// scores when `prev` is `Some` and `mask` excludes some channels.
-///
-/// `prev=None` (or `mask=M_ALL`) → full rebuild, equivalent to the
-/// uncached path. `diversify=true` always forces a full rebuild and
-/// returns an empty cache (callers should not promote on diversify).
+/// Honors `prev`/`mask` on both the plain-sort and the diversify paths;
+/// `prev=None` (or `mask=M_ALL`) forces a full channel rebuild.
 pub(crate) fn score_with_cache(
     dataset: &EvalDataset,
     priors: &Priors,
@@ -181,17 +173,17 @@ pub(crate) fn score_with_cache(
     prev: Option<&ScoreCache>,
     mask: u16,
 ) -> (Metrics, ScoreCache) {
-    if diversify {
-        let m = score_full_with_diversify(dataset, priors, now, top_k_ndcg, top_k_recall);
-        return (m, ScoreCache { accounts: Vec::new() });
-    }
-
     let mut priors = priors.clone();
     priors.now = now;
     let priors = &priors;
 
     let effective_mask = if prev.is_none() { M_ALL } else { mask };
     let total = dataset.accounts.len();
+    let head_limit = if diversify {
+        diversify_head_limit(top_k_ndcg, top_k_recall)
+    } else {
+        0
+    };
 
     let per_account: Vec<(AccountChannelCache, (f64, f64, f64))> = pool().install(|| {
         dataset
@@ -208,36 +200,30 @@ pub(crate) fn score_with_cache(
                     &dataset.empty_user_relation,
                 );
 
-                let total_posts = fx.test_features.len() + fx.neg_features.len();
+                let n_test = fx.test_features.len();
+                let n_neg = fx.neg_features.len();
+                let total_posts = n_test + n_neg;
                 let mut next_channels: Vec<ChannelScores> = Vec::with_capacity(total_posts);
-                let mut scored: Vec<(i64, f32, bool)> = Vec::with_capacity(total_posts);
 
                 let prev_acc = prev.map(|c| &c.accounts[acc_idx]);
 
+                // Channel recompute (cache-aware) for both buckets, then
+                // a final blend per post. Common to both code paths
+                // below; the only difference is how the resulting list
+                // is ordered.
+                let mut entries: Vec<(f32, f32, i64)> = Vec::with_capacity(total_posts);
                 for (i, (post, features)) in fx
                     .test_posts
                     .iter()
                     .zip(fx.test_features.iter())
                     .enumerate()
                 {
-                    let prior = prev_acc
-                        .map(|a| a.channels[i])
-                        .unwrap_or_default();
+                    let prior = prev_acc.map(|a| a.channels[i]).unwrap_or_default();
                     let ch =
                         recompute_one_post(&ctx, post, features, priors.now, prior, effective_mask);
-                    let score = ctx.final_blend(
-                        ch.sim,
-                        ch.quality,
-                        ch.recency,
-                        ch.rating,
-                        ch.media,
-                        ch.popularity,
-                        ch.interaction,
-                        ch.tag_relation,
-                        ch.veto,
-                    );
+                    let score = blend_channel(&ctx, ch);
+                    entries.push((score, ch.interaction, post.id));
                     next_channels.push(ch);
-                    scored.push((post.id, score, true));
                 }
                 for (j, (post, features)) in fx
                     .neg_posts
@@ -245,28 +231,37 @@ pub(crate) fn score_with_cache(
                     .zip(fx.neg_features.iter())
                     .enumerate()
                 {
-                    let cache_idx = fx.test_features.len() + j;
-                    let prior = prev_acc
-                        .map(|a| a.channels[cache_idx])
-                        .unwrap_or_default();
+                    let cache_idx = n_test + j;
+                    let prior = prev_acc.map(|a| a.channels[cache_idx]).unwrap_or_default();
                     let ch =
                         recompute_one_post(&ctx, post, features, priors.now, prior, effective_mask);
-                    let score = ctx.final_blend(
-                        ch.sim,
-                        ch.quality,
-                        ch.recency,
-                        ch.rating,
-                        ch.media,
-                        ch.popularity,
-                        ch.interaction,
-                        ch.tag_relation,
-                        ch.veto,
-                    );
+                    let score = blend_channel(&ctx, ch);
+                    entries.push((score, ch.interaction, post.id));
                     next_channels.push(ch);
-                    scored.push((post.id, score, false));
                 }
 
-                scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+                let scored: Vec<(i64, f32, bool)> = if diversify {
+                    let order =
+                        diversify_indices(&entries, &fx.diversity_features, priors, head_limit);
+                    order
+                        .into_iter()
+                        .map(|i| {
+                            let is_pos = i < n_test;
+                            (entries[i].2, entries[i].0, is_pos)
+                        })
+                        .collect()
+                } else {
+                    let mut s: Vec<(i64, f32, bool)> = (0..total_posts)
+                        .map(|i| {
+                            let is_pos = i < n_test;
+                            (entries[i].2, entries[i].0, is_pos)
+                        })
+                        .collect();
+                    s.sort_by(|a, b| {
+                        b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
+                    });
+                    s
+                };
 
                 let metrics_tuple = (
                     ndcg_at_k_pub(&scored, top_k_ndcg),
@@ -297,111 +292,18 @@ pub(crate) fn score_with_cache(
     (totals, ScoreCache { accounts: accounts_out })
 }
 
-// ---- Diversify fallback (full rebuild, no cache promote) -------------------
-
-fn score_full_with_diversify(
-    dataset: &EvalDataset,
-    priors: &Priors,
-    now: DateTime<Utc>,
-    top_k_ndcg: usize,
-    top_k_recall: usize,
-) -> Metrics {
-    let mut priors = priors.clone();
-    priors.now = now;
-    let priors = &priors;
-
-    let per_account: Vec<(f64, f64, f64)> = pool().install(|| {
-        dataset
-            .accounts
-            .par_iter()
-            .map(|fx| {
-                let ctx = ScoringContext::new(
-                    &fx.tags,
-                    priors,
-                    &dataset.idf,
-                    &fx.profile,
-                    &dataset.global_relation,
-                    &dataset.empty_user_relation,
-                );
-
-                let mut sps: Vec<ScoredPost> =
-                    Vec::with_capacity(fx.test_posts.len() + fx.neg_posts.len());
-                for (post, features) in fx.test_posts.iter().zip(fx.test_features.iter()) {
-                    let ch = recompute_one_post(
-                        &ctx,
-                        post,
-                        features,
-                        priors.now,
-                        ChannelScores::default(),
-                        M_ALL,
-                    );
-                    let score = ctx.final_blend(
-                        ch.sim,
-                        ch.quality,
-                        ch.recency,
-                        ch.rating,
-                        ch.media,
-                        ch.popularity,
-                        ch.interaction,
-                        ch.tag_relation,
-                        ch.veto,
-                    );
-                    sps.push(ScoredPost {
-                        post: post.clone(),
-                        score,
-                        breakdown: Some(ch.into_breakdown()),
-                    });
-                }
-                for (post, features) in fx.neg_posts.iter().zip(fx.neg_features.iter()) {
-                    let ch = recompute_one_post(
-                        &ctx,
-                        post,
-                        features,
-                        priors.now,
-                        ChannelScores::default(),
-                        M_ALL,
-                    );
-                    let score = ctx.final_blend(
-                        ch.sim,
-                        ch.quality,
-                        ch.recency,
-                        ch.rating,
-                        ch.media,
-                        ch.popularity,
-                        ch.interaction,
-                        ch.tag_relation,
-                        ch.veto,
-                    );
-                    sps.push(ScoredPost {
-                        post: post.clone(),
-                        score,
-                        breakdown: Some(ch.into_breakdown()),
-                    });
-                }
-
-                let positives: std::collections::HashSet<i64> =
-                    fx.test_posts.iter().map(|p| p.id).collect();
-                let diversified = diversify_scored_posts(sps, priors);
-                let mut scored: Vec<(i64, f32, bool)> = Vec::with_capacity(diversified.len());
-                for sp in diversified {
-                    let id = sp.post.id;
-                    scored.push((id, sp.score, positives.contains(&id)));
-                }
-                (
-                    ndcg_at_k_pub(&scored, top_k_ndcg),
-                    recall_at_k_pub(&scored, top_k_recall, fx.test_count),
-                    mrr_pub(&scored),
-                )
-            })
-            .collect()
-    });
-
-    let mut totals = Metrics::default();
-    for (n, r, m) in per_account {
-        totals.ndcg_at_k += n;
-        totals.recall_at_k += r;
-        totals.mrr += m;
-        totals.n_accounts += 1;
-    }
-    totals
+#[inline]
+fn blend_channel(ctx: &ScoringContext<'_>, ch: ChannelScores) -> f32 {
+    ctx.final_blend(
+        ch.sim,
+        ch.quality,
+        ch.recency,
+        ch.rating,
+        ch.media,
+        ch.popularity,
+        ch.interaction,
+        ch.tag_relation,
+        ch.veto,
+    )
 }
+

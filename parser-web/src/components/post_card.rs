@@ -408,7 +408,7 @@ pub fn post_card(props: &PostCardProps) -> Html {
                 </span>
             </div>
 
-            <div class="card-text p-2">
+            <div class="card-body p-2 text-center">
                 <h6 class="card-title mt-1">{ format!("#{}", post.id) }</h6>
 
                 {

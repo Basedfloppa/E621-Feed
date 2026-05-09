@@ -8,8 +8,8 @@ use chrono::{DateTime, Utc};
 use rayon::prelude::*;
 use rayon::ThreadPool;
 
-use e621_account_parser_api::models::{cfg, ScoredPost};
-use e621_account_parser_api::utils::{diversify_scored_posts, Priors, ScoringContext};
+use e621_account_parser_api::models::cfg;
+use e621_account_parser_api::utils::{diversify_indices, Priors, ScoringContext};
 
 use crate::dataset::EvalDataset;
 
@@ -118,34 +118,26 @@ fn score_with_opts(
                     &dataset.empty_user_relation,
                 );
 
-                let mut scored: Vec<(i64, f32, bool)> =
-                    Vec::with_capacity(fx.test_posts.len() + fx.neg_posts.len());
+                let n_test = fx.test_posts.len();
+                let total_posts = n_test + fx.neg_posts.len();
+                let mut scored: Vec<(i64, f32, bool)> = Vec::with_capacity(total_posts);
 
                 if diversify {
-                    let mut sps: Vec<ScoredPost> =
-                        Vec::with_capacity(fx.test_posts.len() + fx.neg_posts.len());
+                    let mut entries: Vec<(f32, f32, i64)> = Vec::with_capacity(total_posts);
                     for p in &fx.test_posts {
                         let (s, breakdown) = ctx.score(p);
-                        sps.push(ScoredPost {
-                            post: p.clone(),
-                            score: s,
-                            breakdown: Some(breakdown),
-                        });
+                        entries.push((s, breakdown.interaction_fit, p.id));
                     }
                     for p in &fx.neg_posts {
                         let (s, breakdown) = ctx.score(p);
-                        sps.push(ScoredPost {
-                            post: p.clone(),
-                            score: s,
-                            breakdown: Some(breakdown),
-                        });
+                        entries.push((s, breakdown.interaction_fit, p.id));
                     }
-                    let positives: std::collections::HashSet<i64> =
-                        fx.test_posts.iter().map(|p| p.id).collect();
-                    let diversified = diversify_scored_posts(sps, priors);
-                    for sp in diversified {
-                        let id = sp.post.id;
-                        scored.push((id, sp.score, positives.contains(&id)));
+                    let head_limit = top_k_ndcg.max(top_k_recall).saturating_mul(2).max(50);
+                    let order =
+                        diversify_indices(&entries, &fx.diversity_features, priors, head_limit);
+                    for i in order {
+                        let is_pos = i < n_test;
+                        scored.push((entries[i].2, entries[i].0, is_pos));
                     }
                 } else {
                     for p in &fx.test_posts {

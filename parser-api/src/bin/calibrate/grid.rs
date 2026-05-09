@@ -85,7 +85,7 @@ pub(crate) fn run_grid_with_dataset(
                     let delta = raw_delta * scale;
                     let mut trial = best.clone();
                     (k.apply)(&mut trial, delta);
-                    let prev_cache = if opts.diversify { None } else { Some(&best_cache) };
+                    let prev_cache = Some(&best_cache);
                     let (m_raw, trial_cache) = score_with_cache(
                         &dataset,
                         &trial,

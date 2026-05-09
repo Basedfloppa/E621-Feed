@@ -10,18 +10,22 @@ use e621_account_parser_api::models::{
     cfg, AccountMediaStat, AccountPreferenceProfile, AccountQualityProfile, AccountRatingStat,
     AccountRecencyProfile, Post, TagCount,
 };
-use e621_account_parser_api::utils::{CachedPostFeatures, IdfIndex, TagRelationGraph};
+use e621_account_parser_api::utils::{
+    CachedPostFeatures, DiversityFeatures, IdfIndex, TagRelationGraph,
+};
 
 use crate::options::{GridOptions, NegMode};
 use crate::sampling::{sample_negatives_mixed, sample_negatives_uniform, split_train_test};
 
 /// Per-account state needed to score (test ∪ negatives) under any priors.
 ///
-/// `test_posts` / `neg_posts` are kept for the diversify pass (which
-/// needs full `Post` data) and as the source for `test_features` /
-/// `neg_features`. The cached features array is the hot input the grid
-/// scoring loop reads — pre-resolved tag IDs / df values shave HashMap
-/// lookups out of every probe.
+/// `test_features` / `neg_features` are the hot scoring input; tag IDs
+/// and df values are pre-resolved so the grid loop avoids HashMap
+/// lookups. `diversity_features` is the parallel Jaccard-friendly tag
+/// sets the MMR pass consumes, stored concatenated `[test ‖ neg]` so
+/// per-probe diversify can index into one slice without rebuilding
+/// HashSets. `test_posts` / `neg_posts` are kept only as the source
+/// data for the feature builders above.
 pub(crate) struct AccountFixture {
     pub(crate) profile: AccountPreferenceProfile,
     pub(crate) tags: Vec<TagCount>,
@@ -29,6 +33,7 @@ pub(crate) struct AccountFixture {
     pub(crate) neg_posts: Vec<Post>,
     pub(crate) test_features: Vec<CachedPostFeatures>,
     pub(crate) neg_features: Vec<CachedPostFeatures>,
+    pub(crate) diversity_features: Vec<DiversityFeatures>,
     pub(crate) test_count: usize,
 }
 
@@ -229,6 +234,10 @@ pub(crate) fn prepare_eval_dataset(opts: &GridOptions) -> anyhow::Result<EvalDat
             .iter()
             .map(|p| CachedPostFeatures::from_post(p, &idf, &global_relation))
             .collect();
+        let mut diversity_features: Vec<DiversityFeatures> =
+            Vec::with_capacity(test_posts.len() + neg_posts.len());
+        diversity_features.extend(test_posts.iter().map(DiversityFeatures::from_post));
+        diversity_features.extend(neg_posts.iter().map(DiversityFeatures::from_post));
 
         fixtures.push(AccountFixture {
             profile,
@@ -237,6 +246,7 @@ pub(crate) fn prepare_eval_dataset(opts: &GridOptions) -> anyhow::Result<EvalDat
             neg_posts,
             test_features,
             neg_features,
+            diversity_features,
             test_count,
         });
 

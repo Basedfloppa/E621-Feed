@@ -127,27 +127,23 @@ pub fn home_page() -> Html {
                     html! {}
                 }
             }
-            <div class="container mt-3">
-                <div class="row justify-content-center">
-                    <div class="col-lg-8">
-                        {
-                            match *active_view {
-                                TagView::Chart => html! {
-                                    <TagChartCard
-                                        canvas_ref={canvas_ref.clone()}
-                                        tag_counts={tag_counts.clone()}
-                                    />
-                                },
-                                TagView::Graph => html! {
-                                    <TagRelationGraphCard
-                                        found_user={selected_user.clone()}
-                                        api_base={cfg.backend_domain.clone()}
-                                    />
-                                },
-                            }
-                        }
-                    </div>
-                </div>
+            <div class="container-fluid mt-3 px-3 px-md-4">
+                {
+                    match *active_view {
+                        TagView::Chart => html! {
+                            <TagChartCard
+                                canvas_ref={canvas_ref.clone()}
+                                tag_counts={tag_counts.clone()}
+                            />
+                        },
+                        TagView::Graph => html! {
+                            <TagRelationGraphCard
+                                found_user={selected_user.clone()}
+                                api_base={cfg.backend_domain.clone()}
+                            />
+                        },
+                    }
+                }
             </div>
         </div>
     }
