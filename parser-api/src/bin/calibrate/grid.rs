@@ -1,11 +1,12 @@
 //! `run_grid` orchestrator: adaptive line search + paired sweep + categorical sweep.
 
+use chrono::DateTime;
 use chrono::Utc;
 
 use e621_account_parser_api::models::cfg;
 
 use crate::cache::{score_with_cache, M_ALL, ScoreCache};
-use crate::dataset::prepare_eval_dataset;
+use crate::dataset::EvalDataset;
 use crate::knobs::{KnobSpec, CATEGORICAL_KNOBS, PAIRED_KNOBS, PASS_SCALES};
 use crate::log::{print_diff, write_grid_log};
 use crate::metrics::print_metrics;
@@ -15,18 +16,19 @@ fn knob_by_name<'a>(knobs: &'a [KnobSpec], name: &str) -> Option<&'a KnobSpec> {
     knobs.iter().find(|k| k.name == name)
 }
 
-pub(crate) fn run_grid(knobs: &[KnobSpec], opts: GridOptions) -> anyhow::Result<()> {
+/// Run the grid against a pre-hydrated dataset. `t0` is the caller-side
+/// start time so the final "[grid] total time" line includes prep cost
+/// when a single invocation chains `eval grid`.
+pub(crate) fn run_grid_with_dataset(
+    knobs: &[KnobSpec],
+    opts: GridOptions,
+    dataset: &EvalDataset,
+    now: DateTime<Utc>,
+    t0: std::time::Instant,
+) -> anyhow::Result<()> {
     let cfg_arc = cfg();
     let top_k_ndcg = cfg_arc.backtest.top_k_ndcg;
     let top_k_recall = cfg_arc.backtest.top_k_recall;
-
-    let t0 = std::time::Instant::now();
-    eprintln!("[grid] preparing dataset...");
-    let dataset = prepare_eval_dataset(&opts)?;
-    eprintln!("[grid] dataset ready in {:.1}s", t0.elapsed().as_secs_f32());
-
-    // Frozen wall-clock for the entire run.
-    let now = Utc::now();
 
     let total_probes: usize = knobs.iter().map(|k| k.probes.len()).sum();
     eprintln!(

@@ -47,6 +47,24 @@
    * `grid with-diversify` — run `diversify_scored_posts` before NDCG so
      `diversity_*` knobs become measurable
 
+### Chaining modes (shared hydration)
+
+Hydration (loading IDF, the global tag-relation graph, eligible accounts,
+posts, and per-post cached features) is the dominant fixed cost of a run.
+Modes can be **chained on the command line** so a single invocation pays
+that cost once and runs every requested mode against the same dataset:
+
+```bash
+./target/release/calibrate eval grid              # prep once → eval, then grid
+./target/release/calibrate eval grid mix-only     # same, but grid restricted to mix_*
+./target/release/calibrate grid                   # grid only (still preps internally)
+```
+
+The first line of a chained run prints
+`[run] preparing dataset (shared across N mode(s))...`. Each mode's
+output (`[eval]…`, `[grid]…`) follows in order against that single
+hydrated dataset.
+
 ## Quickstart
 
 ```bash
@@ -68,39 +86,47 @@ cargo build --release --bin seed --bin calibrate
 # 5. Re-probe to see what you got.
 ./target/release/calibrate probe
 
-# 6. Run the baseline (current config.toml priors).
-./target/release/calibrate eval split=random with-diversify
-
-# 7. Search for better priors.
-./target/release/calibrate grid split=random with-diversify
+# 6. Run baseline + full grid in one go (single hydration).
+./target/release/calibrate eval grid split=random with-diversify
 ```
+
+(If you only want one mode, swap step 6 for `calibrate eval ...` or
+`calibrate grid ...`. Hydration cost is identical.)
 
 ## Time and disk budget
 
-| Step | N=100 users | N=300 users |
-|---|---|---|
-| `seed` (8 pages/user) | ~15-20 min | ~45-60 min |
-| Catalog growth | ~+150 MB | ~+400 MB |
-| `calibrate eval` (cached prep) | ~3 min | ~10-15 min |
-| `calibrate grid` (after prep) | ~3-5 min extra | ~15-30 min extra |
+| Step | N=100 users | N=300 users | N=1000 users |
+|---|---|---|---|
+| `seed` (8 pages/user) | ~15-20 min | ~45-60 min | ~3-4 h |
+| Catalog growth | ~+150 MB | ~+400 MB | ~+1.2 GB |
+| Hydration (`[run] preparing dataset…`) | ~3 min | ~8-12 min | ~25-40 min |
+| `eval` over hydrated dataset | ~30-60 s | ~2-3 min | ~5-8 min |
+| `grid` over hydrated dataset | ~5-10 min | ~20-40 min | **~2-3 h** |
 
-Hydration is the dominant cost; the in-memory cache means a full grid
-search after prep is essentially free. The on-disk catalog is shared with
-the production DB but is additive — existing accounts and feed history
-aren't touched. CPU build parallelism is capped via
-[`parser-api/.cargo/config.toml`](../parser-api/.cargo/config.toml) so
-the box stays usable while a multi-hour run is in flight.
+The on-disk catalog is shared with the production DB but is additive —
+existing accounts and feed history aren't touched. CPU build parallelism
+is capped via [`parser-api/.cargo/config.toml`](../parser-api/.cargo/config.toml)
+so the box stays usable while a multi-hour run is in flight.
+
+The grid runtime above includes the per-channel score cache + pre-resolved
+post-tag features added in v5.4 — without those, full-grid wall-clock at
+N=1000 was ~8 hours. See "Performance" for what each layer costs.
 
 ## Reading the output
 
 ```text
-[grid] 26 knobs × ~4 probes/pass = up to 104 evals/pass
-[baseline] N=150  NDCG@20=0.0368  Recall@50=0.0092  MRR=0.0698
-pass 1: mix_sim +0.100        NDCG@20 0.037 -> 0.066
-pass 1: mix_recency -0.100    NDCG@20 0.066 -> 0.142
-pass 1: idf_alpha +0.050      NDCG@20 0.142 -> 0.155
+[run] preparing dataset (shared across 2 mode(s))...
+[run] dataset ready in 412.3s
+[eval] scoring 915 accounts under config.toml priors...
+[baseline] N=915  NDCG@20=0.0368  Recall@50=0.0092  MRR=0.0698
+[grid] 52 knobs × ~4 probes/pass × 3 passes = up to 624 evals + paired sweep
+[grid] adaptive step: [1.0, 0.5, 0.25]
+[grid] running baseline eval...
+pass 1(×1.00): mix_sim +0.100        NDCG@20 0.037 -> 0.066
+pass 1(×1.00): mix_recency -0.100    NDCG@20 0.066 -> 0.142
+pass 1(×1.00): idf_alpha +0.050      NDCG@20 0.142 -> 0.155
 ...
-[best] N=150  NDCG@20=0.2034
+[best] N=915  NDCG@20=0.2034
 [best priors — non-default values]
 mix_sim                         = 0.730    (was 0.480)
 mix_recency                     = 0.000    (was 0.070)
@@ -234,10 +260,26 @@ than as an unconditional rollout.
 
 - [`parser-api/src/bin/seed.rs`](../parser-api/src/bin/seed.rs) —
   discovery, probing, import. Single-threaded by design.
-- [`parser-api/src/bin/calibrate.rs`](../parser-api/src/bin/calibrate.rs)
-  — holdout split, NDCG/Recall/MRR, grid search.
-- [`parser-api/src/utils/scorer.rs`](../parser-api/src/utils/scorer.rs) —
-  the scoring math being calibrated; same code paths in production.
+- [`parser-api/src/bin/calibrate/`](../parser-api/src/bin/calibrate/) —
+  the calibrate harness, split into:
+  * `main.rs` — CLI parsing, mode chaining, dataset hand-off.
+  * `dataset.rs` — eligible-account selection, train/test split,
+    post hydration, per-post `CachedPostFeatures` build.
+  * `sampling.rs` — train/test split + uniform/mixed-hard negatives.
+  * `metrics.rs` — NDCG / Recall / MRR + uncached `score_with_progress`.
+  * `cache.rs` — `ChannelMask`, `ScoreCache`, `score_with_cache` (the
+    grid hot path).
+  * `knobs.rs` — `KnobSpec` registry + per-knob invalidation masks.
+  * `grid.rs` — line search + paired sweep + categorical sweep.
+  * `log.rs`, `options.rs`, `probe.rs` — printing, CLI options, DB probe.
+- [`parser-api/src/utils/scorer/`](../parser-api/src/utils/scorer/) —
+  the scoring math being calibrated; same code paths in production. The
+  cached entry points (`tag_similarity_cached`, `tag_relation_fit_cached`,
+  `interaction_fit_cached`) live in `channels_cached.rs` and are a math-
+  identical mirror of their `&Post` counterparts in `channels.rs`.
+- [`parser-api/src/utils/scorer/cached.rs`](../parser-api/src/utils/scorer/cached.rs) —
+  `CachedPostFeatures` / `CachedTag`: pre-resolved (group, lc, df_raw,
+  global_tag_id) for every post in the eval set.
 - [`parser-api/.cargo/config.toml`](../parser-api/.cargo/config.toml) —
   build parallelism cap.
 
@@ -254,10 +296,55 @@ Override via `backtest.calibrate_threads` in `config.toml`:
 calibrate_threads = 0   # 0 = auto (nproc/2). Set explicitly to e.g. 4 to be more conservative.
 ```
 
-Per-eval cost without rayon was ~4 min on a 12-core box at N=150 (single
-core, dominated by `tag_relation_fit`'s O(T²) pair loop). With the default
-6-thread pool, expect ~40 sec/eval, so a full grid (104 evals/pass × ~3
-passes) lands around 30-45 min instead of 4-6 hours.
+### Two grid-time speedups (v5.4)
+
+1. **Pre-resolved post tags** ([`scorer/cached.rs`](../parser-api/src/utils/scorer/cached.rs)).
+   At hydration time each post's tags are walked once and stored as a flat
+   `Vec<CachedTag>` carrying `(group, lc, df_raw, global_tag_id)` already
+   resolved. The hot scoring loop then skips two HashMap-by-string probes
+   per tag per post per probe (`IdfIndex::df_for` and
+   `TagRelationGraph::tag_id`), which on a full grid is the difference
+   between billions and zero.
+
+2. **Per-channel score cache** ([`bin/calibrate/cache.rs`](../parser-api/src/bin/calibrate/cache.rs)).
+   Every `KnobSpec` declares an `invalidates: u16` bitmask naming which of
+   the 8 scoring channels its delta affects. The baseline run computes all
+   channels and stores them per (account, post). Each subsequent probe
+   recomputes only the invalidated channels and reuses the rest from the
+   cache; the final mix-blend / temperature / strong-negative-penalty
+   shape is always reapplied. Effects on common probe categories:
+
+   | Knob class (typical examples) | Channels recomputed | Probe cost vs uncached |
+   |---|---|---|
+   | `mix_*` (8) / `score_temperature` / `mmr_redundancy_exp` (no diversify) / `strong_negative_penalty` | none — final blend only | ~3% |
+   | `quality_*`, `popularity_*`, `recency_*`, `interaction_ctr_*`, single-channel TR knobs | one channel | ~5–40% |
+   | `idf_*`, `df_floor`, `idf_max`, `bm25_k`, `freq_alpha`, `idf_rsj_smoothing`, `tag_sim_jaccard_blend` | sim only | ~30% |
+   | `tag_relation_*` (PMI / cooc_ref) | tag_relation only | ~40% |
+   | `coldstart_n0` / `confidence_steepness` (drives personal_confidence) | rating + media + recency + tag_relation | ~50% |
+   | `group_w_*` | sim + interaction + tag_relation | ~80% |
+   | `with-diversify` (any knob) | full rebuild forced | 100% |
+
+   Knob → mask wiring lives next to each `KnobSpec` in
+   [`knobs.rs`](../parser-api/src/bin/calibrate/knobs.rs); if a knob's
+   semantics shift (e.g. quality_a starts depending on group_wts), update
+   the mask there.
+
+### Dataset memory budget (calibrate-only)
+
+- `Post` objects: ~3.5 KB / post → ~770 MB at N=1000 × ~220 posts/account.
+- `CachedPostFeatures`: ~2 KB / post (avg 25 tags × ~80 B/tag) → ~450 MB.
+- `ScoreCache` (channels per post + transient trial cache): ~16 MB peak.
+- Global graph + IDF index: same as production server (~3-5 GB).
+
+Total calibrate peak at N=1000 sits around 6.5 GB on a 15 GB box.
+Production server memory is **unaffected** — none of the cached types
+are constructed by the prod scoring path.
+
+### Historical context
+
+Before v5.4, a full grid at N=1000 was ~8 hours. Cached tags + per-channel
+invalidation pull that to ~2-3 hours; the `eval grid` chain saves the
+duplicated hydration pass when running both back to back.
 
 ## Tunable knobs
 

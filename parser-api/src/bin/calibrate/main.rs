@@ -4,10 +4,14 @@
 //! paired sweep + categorical sweep over every measurable knob.
 //!
 //! See `docs/calibration.md` for the full guide.
+//!
+//! Modes can be chained on the command line so a single invocation
+//! shares one hydration pass: `calibrate eval grid` preps the dataset
+//! once, runs the eval, then runs the grid.
 
 use std::env;
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 
 use e621_account_parser_api::db;
 use e621_account_parser_api::models::{cfg, default_path, reload_from};
@@ -22,8 +26,9 @@ mod options;
 mod probe;
 mod sampling;
 
-use crate::grid::run_grid;
-use crate::knobs::{GRID_KNOBS, MIX_ONLY_KNOBS};
+use crate::dataset::{prepare_eval_dataset, EvalDataset};
+use crate::grid::run_grid_with_dataset;
+use crate::knobs::{GRID_KNOBS, KnobSpec, MIX_ONLY_KNOBS};
 use crate::metrics::{print_metrics, score_with_progress};
 use crate::options::{GridOptions, NegMode, SplitStrategy};
 use crate::probe::run_probe;
@@ -33,79 +38,136 @@ pub(crate) const NEG_SAMPLE_SEED: u64 = 0xE621_CA118;
 /// Deterministic seed for `split_strategy = random`.
 pub(crate) const SPLIT_SEED: u64 = 0xE621_5917;
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum Mode {
+    Eval,
+    Grid,
+    Probe,
+}
+
 fn main() -> anyhow::Result<()> {
     let path = default_path()?;
     reload_from(&path)?;
     db::ensure_sqlite().map_err(|e| anyhow::anyhow!("migrate: {e}"))?;
 
-    let mode = env::args().nth(1).unwrap_or_else(|| "eval".into());
+    // Parse leading positional args until we hit a flag-shaped arg.
+    // Modes can chain (e.g. `eval grid`); `mix-only` is a positional
+    // grid-modifier that must follow `grid`.
+    let raw_args: Vec<String> = env::args().skip(1).collect();
+    if raw_args.is_empty() {
+        return run_modes(&[Mode::Eval], false, GridOptions::default());
+    }
 
-    match mode.as_str() {
-        "eval" => {
-            let cfg_arc = cfg();
-            let top_k_ndcg = cfg_arc.backtest.top_k_ndcg;
-            let top_k_recall = cfg_arc.backtest.top_k_recall;
-            let opts = parse_grid_flags(env::args().skip(2));
-
-            let t_total = std::time::Instant::now();
-            let t_prep = std::time::Instant::now();
-            let dataset = crate::dataset::prepare_eval_dataset(&opts)?;
-            let prep_secs = t_prep.elapsed().as_secs_f32();
-
-            let priors = cfg_arc.priors.clone();
-            let now = Utc::now();
-            eprintln!(
-                "[eval] scoring {} accounts under config.toml priors...",
-                dataset.accounts.len()
-            );
-            let t_score = std::time::Instant::now();
-            let m = score_with_progress(
-                &dataset,
-                &priors,
-                now,
-                top_k_ndcg,
-                top_k_recall,
-                opts.diversify,
-            )
-            .average();
-            let score_secs = t_score.elapsed().as_secs_f32();
-            print_metrics("baseline", &m, top_k_ndcg, top_k_recall);
-            eprintln!(
-                "[eval] timings: prep={:.1}s, score={:.1}s, total={:.1}s",
-                prep_secs,
-                score_secs,
-                t_total.elapsed().as_secs_f32()
-            );
-        }
-        "grid" => {
-            // Default: full grid of measurable knobs.
-            // Flags (any order):
-            //   mix-only        — restrict to the 8 mix_* weights
-            //   pairs-only      — skip single-knob passes
-            //   no-pairs        — skip the paired sweep
-            //   with-diversify  — apply diversify_scored_posts before NDCG
-            //   split=random    — uniform-random train/test
-            //   neg=uniform     — pure uniform negative sampling (legacy)
-            //   neg=mixed       — popularity-/time-matched mix (default)
-            let mut args = env::args().skip(2).peekable();
-            let knobs = if matches!(args.peek().map(|s| s.as_str()), Some("mix-only")) {
-                args.next();
-                MIX_ONLY_KNOBS
-            } else {
-                GRID_KNOBS
-            };
-            let opts = parse_grid_flags(args);
-            run_grid(knobs, opts)?;
-        }
-        "probe" => run_probe()?,
-        other => {
-            eprintln!(
-                "unknown mode: {other}. Use 'eval', 'grid [mix-only] [flags]', or 'probe'.\n\
-                 grid flags: pairs-only, no-pairs, with-diversify, split=random|post_id, neg=uniform|mixed"
-            );
-            std::process::exit(2);
+    let mut modes: Vec<Mode> = Vec::new();
+    let mut mix_only = false;
+    let mut tail: Vec<String> = Vec::new();
+    let mut consuming_modes = true;
+    for arg in raw_args {
+        if consuming_modes {
+            match arg.as_str() {
+                "eval" => {
+                    modes.push(Mode::Eval);
+                    continue;
+                }
+                "grid" => {
+                    modes.push(Mode::Grid);
+                    continue;
+                }
+                "probe" => {
+                    modes.push(Mode::Probe);
+                    continue;
+                }
+                "mix-only" if modes.contains(&Mode::Grid) => {
+                    mix_only = true;
+                    continue;
+                }
+                _ => {
+                    consuming_modes = false;
+                    tail.push(arg);
+                }
+            }
+        } else {
+            tail.push(arg);
         }
     }
+    if modes.is_empty() {
+        eprintln!(
+            "no mode given. Use 'eval', 'grid [mix-only]', 'probe', or chain them \
+             (e.g. 'eval grid'). Flags: pairs-only, no-pairs, with-diversify, \
+             split=random|post_id, neg=uniform|mixed"
+        );
+        std::process::exit(2);
+    }
+
+    let opts = parse_grid_flags(tail.into_iter());
+    run_modes(&modes, mix_only, opts)
+}
+
+fn run_modes(modes: &[Mode], mix_only: bool, opts: GridOptions) -> anyhow::Result<()> {
+    let needs_dataset = modes.iter().any(|m| matches!(m, Mode::Eval | Mode::Grid));
+
+    let t_total = std::time::Instant::now();
+    let dataset_pair = if needs_dataset {
+        let t_prep = std::time::Instant::now();
+        eprintln!("[run] preparing dataset (shared across {} mode(s))...", modes.len());
+        let ds = prepare_eval_dataset(&opts)?;
+        eprintln!(
+            "[run] dataset ready in {:.1}s",
+            t_prep.elapsed().as_secs_f32()
+        );
+        Some((ds, Utc::now()))
+    } else {
+        None
+    };
+
+    for mode in modes {
+        match mode {
+            Mode::Eval => {
+                let (dataset, now) = dataset_pair
+                    .as_ref()
+                    .expect("eval requires a hydrated dataset");
+                run_eval_with_dataset(dataset, &opts, *now)?;
+            }
+            Mode::Grid => {
+                let (dataset, now) = dataset_pair
+                    .as_ref()
+                    .expect("grid requires a hydrated dataset");
+                let knobs: &[KnobSpec] = if mix_only { MIX_ONLY_KNOBS } else { GRID_KNOBS };
+                run_grid_with_dataset(knobs, opts, dataset, *now, t_total)?;
+            }
+            Mode::Probe => run_probe()?,
+        }
+    }
+    Ok(())
+}
+
+fn run_eval_with_dataset(
+    dataset: &EvalDataset,
+    opts: &GridOptions,
+    now: DateTime<Utc>,
+) -> anyhow::Result<()> {
+    let cfg_arc = cfg();
+    let top_k_ndcg = cfg_arc.backtest.top_k_ndcg;
+    let top_k_recall = cfg_arc.backtest.top_k_recall;
+    let priors = cfg_arc.priors.clone();
+
+    eprintln!(
+        "[eval] scoring {} accounts under config.toml priors...",
+        dataset.accounts.len()
+    );
+    let t_score = std::time::Instant::now();
+    let m = score_with_progress(
+        dataset,
+        &priors,
+        now,
+        top_k_ndcg,
+        top_k_recall,
+        opts.diversify,
+    )
+    .average();
+    let score_secs = t_score.elapsed().as_secs_f32();
+    print_metrics("baseline", &m, top_k_ndcg, top_k_recall);
+    eprintln!("[eval] timings: score={:.1}s", score_secs);
     Ok(())
 }
 
@@ -120,7 +182,7 @@ fn parse_grid_flags(args: impl Iterator<Item = String>) -> GridOptions {
             "split=post_id" => opts.split = SplitStrategy::PostId,
             "neg=uniform" => opts.neg_mode = NegMode::Uniform,
             "neg=mixed" => opts.neg_mode = NegMode::Mixed,
-            other => eprintln!("[grid] unknown flag: {other} (ignored)"),
+            other => eprintln!("[run] unknown flag: {other} (ignored)"),
         }
     }
     opts
