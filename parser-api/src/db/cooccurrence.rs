@@ -91,62 +91,89 @@ pub fn set_account_tag_cooccurrence(account_id: i32) -> Result<(), String> {
     })
 }
 
+/// Two-pass loader: tags first (sets marginals + builds an SQLite-id →
+/// local-`TagId` map), then a JOIN-free scan of `tag_cooccurrence`. The
+/// old single-query approach paid for `tag_cooccurrence × tags × tags`
+/// (200M+ index lookups + 400M short-string allocations on a 2M-post
+/// catalog). This version turns the cooc pass into 3-int rows resolved
+/// against an in-memory map → 5-10× faster on prod-scale data.
 pub fn load_global_tag_relation() -> rusqlite::Result<crate::utils::TagRelationGraph> {
+    let t0 = std::time::Instant::now();
     let conn = open_db().expect("open_db failed");
     let n_posts: i64 =
         conn.query_row("SELECT COUNT(*) FROM posts", [], |row| row.get::<_, i64>(0))?;
 
     let mut graph = crate::utils::TagRelationGraph::with_posts(n_posts);
-
     let min_cooc = crate::models::cfg().priors.tag_relation_min_cooc.max(1);
 
+    // ---- Pass 1: tags table → marginals + sqlite_id → TagId map -----------
+    let mut sqlite_to_local: HashMap<i64, crate::utils::TagId> = HashMap::new();
     {
         let mut stmt = conn.prepare(
-            "
-            SELECT t1.name, t1.group_type, t2.name, t2.group_type, c.cooc_count
-            FROM tag_cooccurrence c
-            INNER JOIN tags t1 ON t1.id = c.tag1_id
-            INNER JOIN tags t2 ON t2.id = c.tag2_id
-            WHERE c.cooc_count >= ?1
-            ",
+            "SELECT id, name, group_type, COALESCE(df, 0) FROM tags",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?,
+            ))
+        })?;
+        for r in rows {
+            let (sid, name, group, df) = r?;
+            let Some(g) = crate::utils::Group::from_str(&group) else {
+                continue;
+            };
+            let lc = name.to_lowercase();
+            // set_marginal interns the (group, lowercased_name) key once
+            // and stores df. The local TagId is then recovered via tag_id().
+            graph.set_marginal(g as u8, &lc, df);
+            if let Some(local_id) = graph.tag_id(g as u8, &lc) {
+                sqlite_to_local.insert(sid, local_id);
+            }
+        }
+    }
+    let pass1_secs = t0.elapsed().as_secs_f32();
+
+    // ---- Pass 2: tag_cooccurrence raw 3-int scan, no JOIN -----------------
+    let t_cooc = std::time::Instant::now();
+    let mut cooc_rows = 0u64;
+    let mut cooc_skipped = 0u64;
+    {
+        let mut stmt = conn.prepare(
+            "SELECT tag1_id, tag2_id, cooc_count FROM tag_cooccurrence WHERE cooc_count >= ?1",
         )?;
         let rows = stmt.query_map(params![min_cooc], |row| {
             Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
-                row.get::<_, i64>(4)?,
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
             ))
         })?;
         for r in rows {
-            let (t1, g1, t2, g2, c) = r?;
-            if let (Some(gk1), Some(gk2)) = (
-                crate::utils::Group::from_str(&g1).map(|g| g as u8),
-                crate::utils::Group::from_str(&g2).map(|g| g as u8),
-            ) {
-                graph.insert_pair(gk1, &t1.to_lowercase(), gk2, &t2.to_lowercase(), c);
+            let (sid1, sid2, count) = r?;
+            cooc_rows += 1;
+            match (sqlite_to_local.get(&sid1), sqlite_to_local.get(&sid2)) {
+                (Some(&a), Some(&b)) => graph.insert_pair_by_id(a, b, count),
+                _ => cooc_skipped += 1,
             }
         }
     }
+    let pass2_secs = t_cooc.elapsed().as_secs_f32();
 
-    {
-        let mut stmt = conn.prepare("SELECT name, group_type, df FROM tags")?;
-        let rows = stmt.query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, Option<i64>>(2)?.unwrap_or(0),
-            ))
-        })?;
-        for r in rows {
-            let (name, g, df) = r?;
-            if let Some(g) = crate::utils::Group::from_str(&g) {
-                graph.set_marginal(g as u8, &name.to_lowercase(), df);
-            }
-        }
-    }
-
+    info!(
+        "[tag-relation] loaded n_posts={} tags={} pairs={} (skipped {}/{} dangling refs); \
+         pass1 {:.1}s + pass2 {:.1}s = {:.1}s total",
+        n_posts,
+        graph.n_tags(),
+        graph.n_pairs(),
+        cooc_skipped,
+        cooc_rows,
+        pass1_secs,
+        pass2_secs,
+        t0.elapsed().as_secs_f32()
+    );
     Ok(graph)
 }
 

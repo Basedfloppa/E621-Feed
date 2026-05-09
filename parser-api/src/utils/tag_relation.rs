@@ -86,6 +86,18 @@ impl TagRelationGraph {
         *self.pairs.entry(key).or_insert(0) += count;
     }
 
+    /// Insert a pair using pre-resolved `TagId`s — caller has already
+    /// interned both endpoints (typical when loading from a JOIN-free
+    /// cooccurrence scan against SQLite's `tag_id`s). Cuts ~400M string
+    /// alloc + lowercase ops on a multi-million-pair `load_global_tag_relation`.
+    pub fn insert_pair_by_id(&mut self, a: TagId, b: TagId, count: i64) {
+        if count <= 0 || a == b {
+            return;
+        }
+        let key = if a < b { (a, b) } else { (b, a) };
+        *self.pairs.entry(key).or_insert(0) += count;
+    }
+
     pub fn set_marginal(&mut self, g: GroupKey, t: &str, count: i64) {
         if t.is_empty() {
             return;

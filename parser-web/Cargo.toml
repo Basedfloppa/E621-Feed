@@ -5,7 +5,6 @@ path = "src/main.rs"
 [package]
 name = "e621-account-parser-web"
 version = "0.1.0"
-edition = "2024"
 
 [dependencies]
 wasm-bindgen-futures = "0.4"
