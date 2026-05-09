@@ -84,17 +84,14 @@ pub fn record_page_done(account_id: i32) {
     }
 }
 
-/// How long a Done/Failed job state stays queryable after `finish()`.
-/// The frontend polls /process/<id>/status briefly after kicking off a
-/// job; an hour is generous and keeps memory bounded.
-const FINISHED_JOB_RETAIN_SECS: i64 = 3600;
-
 /// Drop old Done/Failed entries. Running jobs are never evicted.
-/// Returns `(before, after)` for logging.
+/// Retention comes from `runtime.jobs_finished_retain_secs`. Returns
+/// `(before, after)` for logging.
 pub fn prune_finished_jobs() -> (usize, usize) {
+    let retain_secs = crate::models::cfg().runtime.jobs_finished_retain_secs.max(0);
     let mut map = registry().write().unwrap_or_else(|e| e.into_inner());
     let before = map.len();
-    let cutoff = Utc::now() - ChronoDuration::seconds(FINISHED_JOB_RETAIN_SECS);
+    let cutoff = Utc::now() - ChronoDuration::seconds(retain_secs);
     map.retain(|_, s| {
         if matches!(s.phase, ProcessJobPhase::Running) {
             return true;

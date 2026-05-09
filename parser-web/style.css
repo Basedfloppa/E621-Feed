@@ -70,6 +70,15 @@ main#main-content {
     cursor: not-allowed;
 }
 
+.btn-outline-secondary {
+    --bs-btn-color: #565e64;
+    --bs-btn-border-color: #565e64;
+}
+[data-bs-theme="dark"] .btn-outline-secondary {
+    --bs-btn-color: var(--bs-secondary-color);
+    --bs-btn-border-color: var(--bs-secondary-color);
+}
+
 .btn:focus-visible,
 .btn-group > .btn:focus-visible {
     outline: 2px solid var(--bs-primary);

@@ -57,6 +57,8 @@ pub(crate) async fn get_recommendations(
     affinity_threshold: Option<f32>,
 ) -> Result<Json<Vec<ScoredPost>>, ApiError> {
     validation::validate_account_id(account_id)?;
+    validation::validate_recommendations_page(page)?;
+    let affinity_threshold = validation::validate_affinity_threshold(affinity_threshold)?;
     let owner_token = owner.0;
     // Cap per device — admin-authenticated round-trip per request, so an
     // infinite-scroll loop must not burn through the admin quota.

@@ -99,9 +99,10 @@ pub fn user_search_form(props: &UserSearchProps) -> Html {
 
     html! {
         <div class="mb-3">
-            <label class="form-label">{"Search by Username or ID"}</label>
+            <label for="user-search-input" class="form-label">{"Search by Username or ID"}</label>
             <div class="input-group">
                 <input
+                    id="user-search-input"
                     type="text"
                     class="form-control"
                     value={(*user_query).clone()}

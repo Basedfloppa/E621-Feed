@@ -90,9 +90,25 @@ pub struct RuntimeConfig {
     #[serde(default = "default_cleanup_interval_secs")]
     pub cleanup_interval_secs: u64,
     /// Catalog cleanup retention. Posts not in any user's favs and not
-    /// touched within this many days are pruned.
+    /// touched within this many days are pruned. Belt-and-suspenders bound;
+    /// the per-tick orphan prune (`orphan_retention_secs`) catches the
+    /// short-term `/recommendations` browse churn far sooner.
     #[serde(default = "default_catalog_retention_days")]
     pub catalog_retention_days: i64,
+    /// Aggressive orphan-candidate retention. Posts that aren't in any
+    /// user's favs and haven't been re-touched within this many seconds
+    /// are dropped on every `cache-pruner` tick. Browse-time posts
+    /// pulled in by `/recommendations` go to disk immediately, bloating
+    /// the catalog → IDF → tag-relation graph; this knob keeps them out
+    /// of memory once the user moves on. Default 1 h.
+    #[serde(default = "default_orphan_retention_secs")]
+    pub orphan_retention_secs: u64,
+    /// `/process` job state retention for Done/Failed entries. Pruned
+    /// by `cache-pruner` on its tick; the frontend polls
+    /// `/process/<id>/status` only briefly after kicking off a job, so
+    /// keeping these for an hour was overkill. Default 10 min.
+    #[serde(default = "default_jobs_finished_retain_secs")]
+    pub jobs_finished_retain_secs: i64,
     /// Prefetcher only targets accounts that interacted with the feed
     /// within this window.
     #[serde(default = "default_prefetch_active_window_days")]
@@ -118,6 +134,19 @@ pub struct RuntimeConfig {
     /// burning a thread; 0 disables the worker entirely.
     #[serde(default = "default_cache_validate_interval_secs")]
     pub cache_validate_interval_secs: u64,
+
+    /// Idle-eviction window for the two heavy in-memory recommendation
+    /// caches: `IDF_CACHE` (per-tag document frequency) and `GLOBAL_CACHE`
+    /// (co-occurrence graph). On a cold box these can hold 500 MB–1 GB of
+    /// HashMap state extracted from the SQLite catalog. The cache-pruner
+    /// worker tracks each cache's last-touch timestamp; if no read or
+    /// dirty-mark has happened within this many seconds, the loaded
+    /// graph/index is swapped back to empty and the next access lazily
+    /// rebuilds (same code path as cold startup → first post-eviction
+    /// request runs against empty data while the async rebuild
+    /// completes). Set to 0 to keep the caches resident forever.
+    #[serde(default = "default_cache_idle_eviction_secs")]
+    pub cache_idle_eviction_secs: u64,
 }
 
 impl Default for RuntimeConfig {
@@ -132,10 +161,13 @@ impl Default for RuntimeConfig {
             prefetch_interval_secs: default_prefetch_interval_secs(),
             cleanup_interval_secs: default_cleanup_interval_secs(),
             catalog_retention_days: default_catalog_retention_days(),
+            orphan_retention_secs: default_orphan_retention_secs(),
+            jobs_finished_retain_secs: default_jobs_finished_retain_secs(),
             prefetch_active_window_days: default_prefetch_active_window_days(),
             prefetch_breaker_threshold: default_prefetch_breaker_threshold(),
             prefetch_breaker_pause_secs: default_prefetch_breaker_pause_secs(),
             cache_validate_interval_secs: default_cache_validate_interval_secs(),
+            cache_idle_eviction_secs: default_cache_idle_eviction_secs(),
         }
     }
 }
@@ -186,6 +218,12 @@ fn default_cleanup_interval_secs() -> u64 {
 fn default_catalog_retention_days() -> i64 {
     90
 }
+fn default_orphan_retention_secs() -> u64 {
+    3600
+}
+fn default_jobs_finished_retain_secs() -> i64 {
+    600
+}
 fn default_prefetch_active_window_days() -> i64 {
     14
 }
@@ -197,6 +235,9 @@ fn default_prefetch_breaker_pause_secs() -> u64 {
 }
 fn default_cache_validate_interval_secs() -> u64 {
     300 // 5 min
+}
+fn default_cache_idle_eviction_secs() -> u64 {
+    1800 // 30 min — idle-evict IDF + tag-relation graph
 }
 
 #[derive(Debug, Clone, Deserialize)]

@@ -416,7 +416,7 @@ pub fn feed_page() -> Html {
 
     html! {
         <div class="container my-4 gap-2 feed-page">
-            <h2 class="mb-3">{ "Latest Posts" }</h2>
+            <h1 class="h2 mb-3">{ "Latest Posts" }</h1>
 
             <div id="feed-account">
                 <SavedAccountsSelect

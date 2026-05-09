@@ -1,18 +1,16 @@
 //! Owner-token request guard with sliding-refresh cookie.
 //!
-//! Audit #3: the device token used to travel in `?owner_token=…`
-//! (leaked into nginx access logs and browser history) and live in
-//! `localStorage` (readable by any XSS / browser extension). It now
-//! lives in an `HttpOnly; Secure; SameSite=Lax` cookie that the
-//! server refreshes on every authenticated request, so as long as
-//! the user comes back inside the browser-imposed 400-day cap their
-//! saved accounts persist indefinitely.
+//! The device token lives in an `HttpOnly; Secure; SameSite=Lax` cookie
+//! that the server refreshes on every authenticated request. Saved
+//! accounts persist as long as the user comes back inside the browser's
+//! 400-day cap.
 //!
 //! `SameSite=Lax` is sufficient CSRF protection here because every
-//! mutating route is `POST/PATCH/DELETE`, and Lax does not attach
-//! cookies to cross-origin requests of those methods. GET routes are
-//! all read-only. We intentionally skip a separate CSRF token to
-//! avoid the migration overhead it would impose.
+//! mutating route is `POST/PATCH/DELETE` (Lax does not attach cookies to
+//! cross-origin requests of those methods) and GET routes are read-only.
+
+use std::collections::HashSet;
+use std::sync::{OnceLock, RwLock};
 
 use rocket::http::{Cookie, SameSite, Status};
 use rocket::request::{FromRequest, Outcome, Request};
@@ -20,14 +18,52 @@ use rocket::time::Duration;
 use rocket_okapi::r#gen::OpenApiGenerator;
 use rocket_okapi::request::{OpenApiFromRequest, RequestHeaderInput};
 
+use crate::db;
 use crate::errors::ApiError;
 use crate::validation;
 
 pub const OWNER_TOKEN_COOKIE: &str = "owner_token";
-/// Hard cap that all major browsers enforce on cookie lifetime
-/// (Chromium, Firefox, Safari ≥ 2022). Setting anything larger gets
-/// silently clamped to this value.
+/// Browser-enforced hard cap on cookie lifetime (Chromium/Firefox/Safari ≥ 2022).
 pub const OWNER_TOKEN_MAX_AGE_DAYS: i64 = 400;
+/// Retention for the revocation denylist; buffer absorbs clock skew.
+pub const REVOKED_TOKEN_RETENTION_SECS: i64 = (OWNER_TOKEN_MAX_AGE_DAYS + 10) * 86_400;
+
+/// Hot in-memory mirror of `revoked_tokens` for O(1) per-request lookup.
+/// Reloaded on startup and after every prune cycle.
+static REVOKED_TOKENS: OnceLock<RwLock<HashSet<String>>> = OnceLock::new();
+
+fn revoked_set() -> &'static RwLock<HashSet<String>> {
+    REVOKED_TOKENS.get_or_init(|| RwLock::new(HashSet::new()))
+}
+
+/// (Re)load the in-memory denylist from disk. Idempotent.
+pub fn reload_revocation_set() -> Result<(), String> {
+    let tokens = db::load_all_revoked_tokens()?;
+    let mut guard = revoked_set()
+        .write()
+        .map_err(|e| format!("revocation set lock poisoned: {e}"))?;
+    *guard = tokens.into_iter().collect();
+    Ok(())
+}
+
+/// Persist a revocation and update the hot set. Idempotent.
+pub fn revoke(token: &str) -> Result<(), String> {
+    db::revoke_token_in_db(token)?;
+    let mut guard = revoked_set()
+        .write()
+        .map_err(|e| format!("revocation set lock poisoned: {e}"))?;
+    guard.insert(token.to_string());
+    Ok(())
+}
+
+fn is_revoked(token: &str) -> bool {
+    // Fail closed on poisoned lock — refusing one request beats accepting
+    // a token that may have been logged out.
+    match revoked_set().read() {
+        Ok(g) => g.contains(token),
+        Err(_) => true,
+    }
+}
 
 pub struct OwnerToken(pub String);
 
@@ -37,16 +73,12 @@ impl OwnerToken {
     }
 }
 
-/// Build the canonical `Set-Cookie` for the owner token. Centralised so
-/// the bootstrap endpoint and the per-request sliding refresh stay in
-/// sync — flipping `Secure` or changing `SameSite` only needs to happen
-/// in one place.
+/// Canonical `Set-Cookie` for the owner token. Centralised so bootstrap
+/// and the per-request sliding refresh stay in sync.
 pub fn build_owner_cookie(token: String) -> Cookie<'static> {
     Cookie::build((OWNER_TOKEN_COOKIE, token))
         .http_only(true)
-        // `Secure` would block the cookie over plain HTTP in `trunk
-        // serve` (dev). Tie it to release builds so dev still works
-        // without a self-signed certificate.
+        // `Secure` would block the cookie over plain HTTP in `trunk serve`.
         .secure(cfg!(not(debug_assertions)))
         .same_site(SameSite::Lax)
         .path("/api")
@@ -54,9 +86,8 @@ pub fn build_owner_cookie(token: String) -> Cookie<'static> {
         .build()
 }
 
-/// Build a `Set-Cookie` that immediately expires the token. Used by
-/// `DELETE /api/session` and on validation failure of an inbound
-/// cookie value (so a bad cookie can't pin a 400 forever).
+/// `Set-Cookie` that immediately expires the token. Used by
+/// `DELETE /api/session` and on validation failure of an inbound cookie.
 pub fn build_owner_cookie_clear() -> Cookie<'static> {
     Cookie::build((OWNER_TOKEN_COOKIE, String::new()))
         .http_only(true)
@@ -84,27 +115,26 @@ impl<'r> FromRequest<'r> for OwnerToken {
         };
 
         if let Err(e) = validation::validate_owner_token(&token) {
-            // Drop the bad cookie so the next request gets a clean
-            // 401 + bootstrap rather than another 400 against the
-            // same value.
+            // Drop the bad cookie so the next request gets a clean 401.
             req.cookies().add(build_owner_cookie_clear());
             return Outcome::Error((Status::BadRequest, e));
         }
 
-        // Sliding refresh: rewrite the cookie on every authenticated
-        // request so the 400-day expiry resets while the user is
-        // active. This costs a single `Set-Cookie` header per
-        // response — the browser silently no-ops if the value is
-        // unchanged.
+        if is_revoked(&token) {
+            req.cookies().add(build_owner_cookie_clear());
+            return Outcome::Error((
+                Status::Unauthorized,
+                ApiError::Unauthorized("session revoked; please log in again".into()),
+            ));
+        }
+
+        // Sliding refresh: reset the 400-day expiry while the user is active.
         req.cookies().add(build_owner_cookie(token.clone()));
 
         Outcome::Success(OwnerToken(token))
     }
 }
 
-/// Tell rocket-okapi that this guard is consumed implicitly (cookie
-/// header) — no OpenAPI parameter to surface, but routes that use it
-/// can still document a 401 response.
 impl<'r> OpenApiFromRequest<'r> for OwnerToken {
     fn from_request_input(
         _gen: &mut OpenApiGenerator,

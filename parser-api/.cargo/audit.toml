@@ -1,0 +1,7 @@
+[advisories]
+ignore = [
+    # rand 0.8.5 — unsoundness with a custom global logger. Pulled in
+    # transitively by rocket 0.5.1; no rocket 0.6 yet (March 2026). We
+    # don't install a custom logger, so the path is unreachable.
+    "RUSTSEC-2026-0097",
+]

@@ -1,3 +1,12 @@
 [serve]
 addresses = ["127.0.0.1"]
 port = 8000
+
+# Pre-compress static assets (.br + .gz next to each file) so nginx with
+# brotli_static / gzip_static can serve them without on-the-fly cost.
+# Hook is no-op outside `--release` so dev rebuilds stay fast — see the
+# script for the profile gate.
+[[hooks]]
+stage = "post_build"
+command = "bash"
+command_arguments = ["scripts/compress-dist.sh"]

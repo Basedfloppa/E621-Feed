@@ -33,10 +33,9 @@ use rocket_okapi::swagger_ui::{make_swagger_ui, SwaggerUIConfig};
 
 mod routes;
 
-/// Run a blocking rusqlite closure on the spawn_blocking pool so it doesn't
-/// park the request's Tokio worker for the duration of the SQLite call.
-/// Returns the closure's `Result<T, String>` flat, plus a panic-to-Err
-/// translation for the JoinHandle.
+/// Run a blocking rusqlite closure on `spawn_blocking` so the SQLite
+/// call doesn't park the request's Tokio worker. Translates JoinHandle
+/// panics to `Err`.
 pub(crate) async fn db_blocking<F, T>(f: F) -> Result<T, String>
 where
     F: FnOnce() -> Result<T, String> + Send + 'static,
@@ -60,8 +59,9 @@ async fn process_posts(
 ) -> Result<Json<ProcessJobState>, ApiError> {
     validation::validate_account_id(account_id)?;
     let owner_token = owner.0;
-    // /process is the most expensive route. Cap it hard per device
-    ratelimit::check(&format!("process:owner:{owner_token}"), 1, 1)?;
+    // /process kicks off a long-running e621 fetch loop on the admin
+    // token; cap per-owner and per-IP so click-storms can't lap us.
+    ratelimit::check(&format!("process:owner:{owner_token}"), 3, 3)?;
     ratelimit::check(&format!("process:ip:{}", client_ip.0), 5, 5)?;
     let owner_for_check = owner_token.clone();
     db_blocking(move || get_account_by_id(&owner_for_check, account_id).map_err(|e| e.to_string()))
@@ -115,8 +115,7 @@ async fn run_process(account_id: i32, owner_token: String) -> Result<(), String>
     })
     .await?;
 
-    // Fetch pages in parallel; writes stay serial because SQLite is
-    // single-writer anyway.
+    // Fetch pages in parallel; writes stay serial (SQLite is single-writer).
     let account_for_fetch = account.clone();
     let blacklist_for_fetch = blacklist.clone();
     let mut stream = rocket::futures::stream::iter(1..=pages)
@@ -178,45 +177,54 @@ fn get_default_blacklist() -> Json<serde_json::Value> {
     Json(serde_json::json!({ "blacklist": cfg().default_account_blacklist }))
 }
 
-/// Refreshes the cookie's 400-day expiry if one is already attached,
-/// or mints a fresh 256-bit CSPRNG token and installs it. Always
-/// returns 200 — the SPA can call this on every load and rely on the
-/// cookie being valid afterwards.
+/// Refresh the cookie's 400-day expiry, or mint a fresh 256-bit CSPRNG
+/// token if absent. The per-IP cap stops bootstrap from being a free
+/// token-mint primitive that XFF rotation could combo into amplification
+/// of admin-authenticated e621 calls.
 #[openapi(tag = "Session")]
 #[post("/session/bootstrap")]
-fn session_bootstrap(cookies: &CookieJar<'_>) -> Json<serde_json::Value> {
+fn session_bootstrap(
+    cookies: &CookieJar<'_>,
+    client_ip: ClientIp,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    ratelimit::check(&format!("bootstrap:ip:{}", client_ip.0), 5, 5)?;
+
     if let Some(c) = cookies.get(auth::OWNER_TOKEN_COOKIE) {
         if validation::validate_owner_token(c.value()).is_ok() {
             cookies.add(auth::build_owner_cookie(c.value().to_string()));
-            return Json(serde_json::json!({ "minted": false }));
+            return Ok(Json(serde_json::json!({ "minted": false })));
         }
         cookies.add(auth::build_owner_cookie_clear());
     }
 
-    // 32 random bytes → base64url ≈ 43 chars, well within the
-    // validator's 16..=128 window and ~256 bits of entropy.
+    // 32 random bytes → base64url ≈ 43 chars (≈256 bits entropy).
     let token = mint_owner_token();
     cookies.add(auth::build_owner_cookie(token));
-    Json(serde_json::json!({ "minted": true }))
+    Ok(Json(serde_json::json!({ "minted": true })))
 }
 
-/// Explicit logout — clear the cookie. Idempotent.
+/// Explicit logout — clear the cookie AND record the revocation
+/// server-side so a leaked cookie can't be replayed. Idempotent.
 #[openapi(tag = "Session")]
 #[delete("/session")]
-fn session_clear(cookies: &CookieJar<'_>) -> Json<serde_json::Value> {
+async fn session_clear(cookies: &CookieJar<'_>) -> Result<Json<serde_json::Value>, ApiError> {
+    if let Some(c) = cookies.get(auth::OWNER_TOKEN_COOKIE) {
+        let token = c.value().to_string();
+        if validation::validate_owner_token(&token).is_ok() {
+            db_blocking(move || auth::revoke(&token)).await.map_err(|e| {
+                warn!("session revoke failed: {e}");
+                ApiError::Internal("Failed to revoke session".into())
+            })?;
+        }
+    }
     cookies.add(auth::build_owner_cookie_clear());
-    Json(serde_json::json!({ "cleared": true }))
+    Ok(Json(serde_json::json!({ "cleared": true })))
 }
 
 fn mint_owner_token() -> String {
     let mut buf = [0u8; 32];
-    // OS CSPRNG (getrandom(2) on Linux). The only failure mode here is
-    // a fundamentally broken kernel/syscall — if that happens, exit so
-    // we don't accidentally hand out a deterministic token.
+    // OS CSPRNG. Fail loud rather than risk handing out a deterministic token.
     getrandom::getrandom(&mut buf).expect("OS CSPRNG unavailable");
-    // URL-safe base64 without padding — same alphabet the frontend
-    // uses, so a token minted here is indistinguishable from one the
-    // browser would have produced via `crypto.getRandomValues`.
     base64_url_encode(&buf)
 }
 
@@ -254,10 +262,9 @@ fn openapi_json(spec: &State<OpenApi>) -> Json<OpenApi> {
     Json(spec.inner().clone())
 }
 
-// Catchers — uniform JSON error envelope for everything Rocket would
-// otherwise serve as a default HTML page (S-3 in the audit). These are
-// registered on the `/api` scope only, so the SPA fallback for `/`
-// keeps returning index.html instead of a JSON 404 to a browser.
+// Catchers — uniform JSON error envelope on `/api`. Rocket's default
+// HTML pages would break the frontend's `resp.ok() && resp.json()` flow.
+// Registered on `/api` only so the SPA fallback for `/` still serves index.html.
 #[catch(404)]
 fn catch_404(_req: &Request<'_>) -> ApiError {
     ApiError::NotFound("Resource not found".into())
@@ -275,12 +282,9 @@ fn catch_500(_req: &Request<'_>) -> ApiError {
 
 #[cfg(debug_assertions)]
 fn attach_cors(rocket: rocket::Rocket<rocket::Build>) -> rocket::Rocket<rocket::Build> {
-    // Cookie-based auth requires `credentials: "include"` from the
-    // browser, which in turn requires `Access-Control-Allow-Credentials:
-    // true` on the response *and* an explicit (non-wildcard) origin
-    // list. In `trunk serve` the SPA lives on :8000 and the API on :8080
-    // — different origins, so we whitelist the dev hosts. Production
-    // skips this fairing entirely (single origin behind nginx).
+    // Cookie auth needs `credentials: "include"`, which requires an
+    // explicit (non-wildcard) origin list. `trunk serve` splits SPA
+    // (:8000) and API (:8080); production has one origin behind nginx.
     let exact = rocket_cors::AllowedOrigins::some_exact(&[
         "http://localhost:8000",
         "http://127.0.0.1:8000",
@@ -327,13 +331,8 @@ async fn rocket() -> _ {
         session_clear
     ];
 
-    // Rocket's default Shield fairing emits `X-Frame-Options: SAMEORIGIN`,
-    // `X-Content-Type-Options: nosniff`, and `Permissions-Policy:
-    // interest-cohort=()`. nginx already sets stricter values for all three
-    // (DENY, nosniff, full Permissions-Policy list), and the audit (#4)
-    // flagged the resulting duplicate/conflicting headers — `XFO: SAMEORIGIN`
-    // and `XFO: DENY` arriving together leaves browser behavior to chance.
-    // Attach an empty Shield so nginx remains the single source of truth.
+    // Empty Shield: nginx already sets stricter security headers. Rocket's
+    // defaults (`XFO: SAMEORIGIN`, etc.) would conflict with nginx's `DENY`.
     let r = rocket::build()
         .manage(Mutex::new(watcher))
         .manage(spec)
@@ -343,12 +342,8 @@ async fn rocket() -> _ {
         .attach(Shield::new())
         .attach(DbInit);
 
-    // Swagger UI and the OpenAPI document leak a complete map of every
-    // route, parameter, and request shape — useful in dev, an
-    // amplification target for an attacker mapping the surface in prod.
-    // nginx already returns 404 for these paths in the prod template
-    // (defense-in-depth), but skipping the mount altogether means the
-    // bytes never even reach the proxy. Audit #25 / hardening 2.5.
+    // Swagger UI / OpenAPI doc leak the full route map; mount only in
+    // dev. nginx 404s these paths in prod as defense-in-depth.
     #[cfg(debug_assertions)]
     let r = r
         .mount("/api", routes![openapi_json])

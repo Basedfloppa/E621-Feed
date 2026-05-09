@@ -72,6 +72,17 @@ impl IdfIndex {
         self.n_posts
     }
 
+    /// True if the index holds nothing — used by the idle-eviction path so
+    /// we don't churn-evict an already-empty cache every tick.
+    pub fn is_empty(&self) -> bool {
+        self.df.is_empty() && self.n_posts == 0
+    }
+
+    /// Number of distinct (lowercased) tag names in the index. Diagnostic only.
+    pub fn n_tags(&self) -> usize {
+        self.df.len()
+    }
+
     #[inline]
     fn lookup_df(&self, tag: &str) -> i64 {
         let v = if tag.bytes().any(|b| b.is_ascii_uppercase()) {
@@ -160,7 +171,19 @@ static IDF_REBUILDING: AtomicBool = AtomicBool::new(false);
 static BUMP_LOCK: Mutex<()> = Mutex::new(());
 static BUMP_DRIFT_COUNT: AtomicI64 = AtomicI64::new(0);
 
+/// Wall-clock of the most recent interaction with this cache (read, bump,
+/// or dirty-mark). The cache-pruner reads this on each tick and, if the
+/// idle window has elapsed, swaps the index back to empty so the working
+/// set returns to the OS. Initialised lazily to process-start.
+static LAST_ACCESS: LazyLock<Mutex<Instant>> = LazyLock::new(|| Mutex::new(Instant::now()));
+
+fn touch_access() {
+    let mut g = LAST_ACCESS.lock().unwrap_or_else(|p| p.into_inner());
+    *g = Instant::now();
+}
+
 pub fn mark_idf_dirty() {
+    touch_access();
     IDF_DIRTY.store(true, Ordering::Release);
     spawn_rebuild_if_needed();
 }
@@ -169,6 +192,7 @@ pub fn bump_idf(df_delta: HashMap<String, i64>, n_posts_delta: i64) {
     if df_delta.is_empty() && n_posts_delta == 0 {
         return;
     }
+    touch_access();
     let _guard = BUMP_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let current = IDF_CACHE.load_full();
     let mut next = (*current).clone();
@@ -242,8 +266,54 @@ fn spawn_rebuild_if_needed() {
 }
 
 pub fn current_idf() -> Arc<IdfIndex> {
+    touch_access();
     if IDF_DIRTY.load(Ordering::Acquire) {
         spawn_rebuild_if_needed();
     }
     IDF_CACHE.load_full()
+}
+
+/// Drop the loaded IDF index if no caller has touched it for at least
+/// `idle_secs` seconds. Returns `(prev_n_tags, prev_n_posts)` if eviction
+/// happened, or `(0, 0)` otherwise.
+///
+/// After eviction, `IDF_DIRTY` is set so the next `current_idf()` call
+/// schedules a fresh rebuild — same code path as cold startup. The first
+/// post-eviction request therefore sees an empty index (df=0 → max IDF
+/// cap) until the rebuild thread completes; this matches existing
+/// startup behaviour and avoids blocking the request thread on a
+/// multi-second DB scan.
+///
+/// `idle_secs == 0` disables eviction.
+pub fn evict_if_idle(idle_secs: u64) -> (usize, i64) {
+    if idle_secs == 0 {
+        return (0, 0);
+    }
+    // Snapshot last-access under the lock, but drop the guard before
+    // touching ArcSwap to keep the critical section short.
+    let elapsed = {
+        let g = LAST_ACCESS.lock().unwrap_or_else(|p| p.into_inner());
+        g.elapsed()
+    };
+    if elapsed.as_secs() < idle_secs {
+        return (0, 0);
+    }
+    let current = IDF_CACHE.load_full();
+    if current.is_empty() {
+        return (0, 0);
+    }
+    let prev_tags = current.n_tags();
+    let prev_posts = current.n_posts();
+    drop(current);
+    IDF_CACHE.store(Arc::new(IdfIndex::empty()));
+    BUMP_DRIFT_COUNT.store(0, Ordering::Release);
+    IDF_DIRTY.store(true, Ordering::Release);
+    // Bump LAST_ACCESS so the next cache-pruner tick (every 30s on a
+    // tight cadence) doesn't see "still idle, evict again" against the
+    // empty cache and log spurious evictions.
+    {
+        let mut g = LAST_ACCESS.lock().unwrap_or_else(|p| p.into_inner());
+        *g = Instant::now();
+    }
+    (prev_tags, prev_posts)
 }

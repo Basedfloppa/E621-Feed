@@ -37,12 +37,23 @@ Make sure you have [Rust](https://www.rust-lang.org/tools/install) and `cargo` i
 ```bash
 cargo install cargo-watch
 cargo install --locked trunk
+cargo install --locked cargo-audit
 ```
->cargo-watch enables hot-reload for the backend, and trunk serves/builds the frontend.
 
-# Running Locally
+`cargo-watch` enables hot-reload for the backend, `trunk` serves/builds the frontend, and `cargo-audit` is required by the pre-commit hook.
+
+### Pre-commit hook
+There is no CI on this repo. The pre-commit hook in [`.githooks/`](.githooks/) runs `cargo audit --deny warnings` against `parser-api/` before any commit that touches it. Activate once per clone:
+
+```bash
+git config core.hooksPath .githooks
+```
+
+If a new RUSTSEC advisory blocks a commit, fix the dependency (`cargo update -p <crate>`) or — if it's a transitive warning you can't fix today — add it to `parser-api/.cargo/audit.toml` with a one-line justification. Use `git commit --no-verify` only for emergencies.
 
 ---
+
+# Running Locally
 
 ## Backend
 
@@ -119,8 +130,14 @@ trunk serve
 
 ---
 
+## Production deployment
+
+Hosting the app behind nginx with release-mode pre-compression is
+covered separately in [docs/deployment.md](docs/deployment.md).
+
+---
+
 ## License
 
 [MIT-0 (MIT No Attribution)](LICENCE) — use, modify, and redistribute
 freely, no attribution required.
-

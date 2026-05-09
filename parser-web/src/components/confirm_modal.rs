@@ -1,15 +1,11 @@
 //! Themed replacement for `window.confirm()`.
 //!
-//! Audit #17 flagged the native confirm dialog: it ignores the dark
-//! theme, can't be styled, and on iOS blocks the entire UI thread. This
-//! is a Bootstrap modal driven entirely by Yew state — no Bootstrap JS
-//! API call, no global modal stack — so it themes correctly via the
-//! same `data-bs-theme` attribute as the rest of the page.
+//! Native confirm ignores dark theme, can't be styled, and blocks the
+//! UI thread on iOS. This is a Bootstrap modal driven by Yew state —
+//! no Bootstrap JS, no modal stack — themed via `data-bs-theme`.
 //!
-//! The component is presentational: parents control visibility through
-//! a `bool` and supply `on_confirm` / `on_cancel` callbacks. The first
-//! action button receives focus on open; Esc cancels via the backdrop
-//! click handler so keyboard users aren't stranded.
+//! Presentational: parents pass `open: bool` plus `on_confirm` /
+//! `on_cancel`. Backdrop click cancels.
 
 use yew::{Callback, Children, Html, MouseEvent, Properties, function_component, html};
 

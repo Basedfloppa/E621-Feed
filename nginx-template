@@ -28,6 +28,7 @@ server {
     http2 on;
     server_name domain.com;
     server_tokens off;
+    charset utf-8;
 
     # --- TLS ---
     ssl_certificate     /etc/letsencrypt/live/domain.com/fullchain.pem;
@@ -37,7 +38,13 @@ server {
     ssl_protocols TLSv1.2 TLSv1.3;
     ssl_prefer_server_ciphers off;
 
-    # --- Security headers         -----------------------------
+    # --- Security headers ---
+    # NOTE (nginx footgun): add_header is NOT inherited into a child location
+    # if that location declares its OWN add_header. So the server-level block
+    # below covers ONLY locations that have no add_header of their own
+    # (currently: /api/, /robots.txt, the swagger-block).
+    # Every location that declares add_header MUST re-declare these 8 lines,
+    # otherwise it ships with zero security headers. See the duplicates below.
     add_header Strict-Transport-Security "max-age=31536000; includeSubDomains; preload" always;
     add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'wasm-unsafe-eval' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data: https://*.e621.net; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'" always;
     add_header Referrer-Policy "no-referrer" always;
@@ -59,6 +66,15 @@ server {
         add_header Pragma "no-cache" always;         # for older proxies
         add_header Expires "0" always;
 
+        add_header Strict-Transport-Security "max-age=31536000; includeSubDomains; preload" always;
+        add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'wasm-unsafe-eval' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data: https://*.e621.net; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'" always;
+        add_header Referrer-Policy "no-referrer" always;
+        add_header X-Content-Type-Options "nosniff" always;
+        add_header X-Frame-Options "DENY" always;
+        add_header Cross-Origin-Opener-Policy "same-origin" always;
+        add_header Cross-Origin-Resource-Policy "same-origin" always;
+        add_header Permissions-Policy "geolocation=(), microphone=(), camera=(), payment=(), usb=(), interest-cohort=()" always;
+
         etag off;
         expires off;
     }
@@ -66,6 +82,16 @@ server {
     # Dont cache index to preserve sha integirty
     location = /index.html {
         add_header Cache-Control "no-cache, must-revalidate" always;
+
+        add_header Strict-Transport-Security "max-age=31536000; includeSubDomains; preload" always;
+        add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'wasm-unsafe-eval' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data: https://*.e621.net; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'" always;
+        add_header Referrer-Policy "no-referrer" always;
+        add_header X-Content-Type-Options "nosniff" always;
+        add_header X-Frame-Options "DENY" always;
+        add_header Cross-Origin-Opener-Policy "same-origin" always;
+        add_header Cross-Origin-Resource-Policy "same-origin" always;
+        add_header Permissions-Policy "geolocation=(), microphone=(), camera=(), payment=(), usb=(), interest-cohort=()" always;
+
         etag on;
         try_files $uri =404;
     }
@@ -76,6 +102,16 @@ server {
         default_type "application/wasm";
         access_log off;
         add_header Cache-Control "public, max-age=31536000, immutable";
+
+        add_header Strict-Transport-Security "max-age=31536000; includeSubDomains; preload" always;
+        add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'wasm-unsafe-eval' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data: https://*.e621.net; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'" always;
+        add_header Referrer-Policy "no-referrer" always;
+        add_header X-Content-Type-Options "nosniff" always;
+        add_header X-Frame-Options "DENY" always;
+        add_header Cross-Origin-Opener-Policy "same-origin" always;
+        add_header Cross-Origin-Resource-Policy "same-origin" always;
+        add_header Permissions-Policy "geolocation=(), microphone=(), camera=(), payment=(), usb=(), interest-cohort=()" always;
+
         try_files $uri =404;
     }
 
@@ -85,6 +121,16 @@ server {
         default_type "application/javascript";
         access_log off;
         add_header Cache-Control "public, max-age=31536000, immutable";
+
+        add_header Strict-Transport-Security "max-age=31536000; includeSubDomains; preload" always;
+        add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'wasm-unsafe-eval' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data: https://*.e621.net; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'" always;
+        add_header Referrer-Policy "no-referrer" always;
+        add_header X-Content-Type-Options "nosniff" always;
+        add_header X-Frame-Options "DENY" always;
+        add_header Cross-Origin-Opener-Policy "same-origin" always;
+        add_header Cross-Origin-Resource-Policy "same-origin" always;
+        add_header Permissions-Policy "geolocation=(), microphone=(), camera=(), payment=(), usb=(), interest-cohort=()" always;
+
         try_files $uri =404;
     }
 
@@ -92,12 +138,32 @@ server {
     location ~* \.(js|css|png|jpg|jpeg|gif|svg|ico|woff2?)$ {
         access_log off;
         add_header Cache-Control "public, max-age=31536000, immutable";
+
+        add_header Strict-Transport-Security "max-age=31536000; includeSubDomains; preload" always;
+        add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'wasm-unsafe-eval' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data: https://*.e621.net; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'" always;
+        add_header Referrer-Policy "no-referrer" always;
+        add_header X-Content-Type-Options "nosniff" always;
+        add_header X-Frame-Options "DENY" always;
+        add_header Cross-Origin-Opener-Policy "same-origin" always;
+        add_header Cross-Origin-Resource-Policy "same-origin" always;
+        add_header Permissions-Policy "geolocation=(), microphone=(), camera=(), payment=(), usb=(), interest-cohort=()" always;
+
         try_files $uri =404;
     }
 
     # Service worker & manifest (lighter caching)
     location ~* /(manifest\.json|manifest\.webmanifest|service-worker\.js)$ {
         add_header Cache-Control "public, max-age=3600, must-revalidate";
+
+        add_header Strict-Transport-Security "max-age=31536000; includeSubDomains; preload" always;
+        add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'wasm-unsafe-eval' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data: https://*.e621.net; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'" always;
+        add_header Referrer-Policy "no-referrer" always;
+        add_header X-Content-Type-Options "nosniff" always;
+        add_header X-Frame-Options "DENY" always;
+        add_header Cross-Origin-Opener-Policy "same-origin" always;
+        add_header Cross-Origin-Resource-Policy "same-origin" always;
+        add_header Permissions-Policy "geolocation=(), microphone=(), camera=(), payment=(), usb=(), interest-cohort=()" always;
+
         try_files $uri =404;
     }
 
@@ -107,23 +173,81 @@ server {
         return 200 "User-agent: *\nDisallow: /api/\nDisallow: /static/snippets/\nDisallow: /admin\nDisallow: /login\nDisallow: /openapi.json\nDisallow: /swagger-ui\n";
     }
 
+    # security.txt — RFC 9116 responsible-disclosure contact.
+    # Source: copy parser-web/.well-known/security.example.txt to
+    # security.txt (gitignored), fill TODO_CONTACT + TODO_EXPIRES, then
+    # `trunk build --release` puts it under dist/.well-known/security.txt.
+    # Until then this returns 404, which is honest — placeholder content
+    # would mislead scanners.
+    location = /.well-known/security.txt {
+        default_type "text/plain; charset=utf-8";
+        try_files $uri =404;
+    }
+    # Hide the template itself — Trunk's copy-dir hauls security.example.txt
+    # into dist/.well-known/ alongside the real file, but it's a developer
+    # artefact, not a public document. Returning 404 keeps it out of any
+    # `.well-known/` enumerator's results.
+    location = /.well-known/security.example.txt {
+        return 404;
+    }
+
     # SPA fallback for client-side routes.
     location / {
         if ($request_method = OPTIONS) { return 204; }
         add_header Cache-Control "no-cache, must-revalidate" always;
+
+        add_header Strict-Transport-Security "max-age=31536000; includeSubDomains; preload" always;
+        add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'wasm-unsafe-eval' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data: https://*.e621.net; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'" always;
+        add_header Referrer-Policy "no-referrer" always;
+        add_header X-Content-Type-Options "nosniff" always;
+        add_header X-Frame-Options "DENY" always;
+        add_header Cross-Origin-Opener-Policy "same-origin" always;
+        add_header Cross-Origin-Resource-Policy "same-origin" always;
+        add_header Permissions-Policy "geolocation=(), microphone=(), camera=(), payment=(), usb=(), interest-cohort=()" always;
+
         try_files $uri =404;
     }
 
     location = / {
         add_header Cache-Control "no-cache, must-revalidate" always;
+
+        add_header Strict-Transport-Security "max-age=31536000; includeSubDomains; preload" always;
+        add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'wasm-unsafe-eval' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data: https://*.e621.net; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'" always;
+        add_header Referrer-Policy "no-referrer" always;
+        add_header X-Content-Type-Options "nosniff" always;
+        add_header X-Frame-Options "DENY" always;
+        add_header Cross-Origin-Opener-Policy "same-origin" always;
+        add_header Cross-Origin-Resource-Policy "same-origin" always;
+        add_header Permissions-Policy "geolocation=(), microphone=(), camera=(), payment=(), usb=(), interest-cohort=()" always;
+
         try_files /index.html =404;
     }
     location ^~ /account {
         add_header Cache-Control "no-cache, must-revalidate" always;
+
+        add_header Strict-Transport-Security "max-age=31536000; includeSubDomains; preload" always;
+        add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'wasm-unsafe-eval' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data: https://*.e621.net; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'" always;
+        add_header Referrer-Policy "no-referrer" always;
+        add_header X-Content-Type-Options "nosniff" always;
+        add_header X-Frame-Options "DENY" always;
+        add_header Cross-Origin-Opener-Policy "same-origin" always;
+        add_header Cross-Origin-Resource-Policy "same-origin" always;
+        add_header Permissions-Policy "geolocation=(), microphone=(), camera=(), payment=(), usb=(), interest-cohort=()" always;
+
         try_files /index.html =404;
     }
     location ^~ /feed {
         add_header Cache-Control "no-cache, must-revalidate" always;
+
+        add_header Strict-Transport-Security "max-age=31536000; includeSubDomains; preload" always;
+        add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'wasm-unsafe-eval' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data: https://*.e621.net; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'" always;
+        add_header Referrer-Policy "no-referrer" always;
+        add_header X-Content-Type-Options "nosniff" always;
+        add_header X-Frame-Options "DENY" always;
+        add_header Cross-Origin-Opener-Policy "same-origin" always;
+        add_header Cross-Origin-Resource-Policy "same-origin" always;
+        add_header Permissions-Policy "geolocation=(), microphone=(), camera=(), payment=(), usb=(), interest-cohort=()" always;
+
         try_files /index.html =404;
     }
 
@@ -139,7 +263,11 @@ server {
         proxy_http_version 1.1;
         proxy_set_header Host              $host;
         proxy_set_header X-Real-IP         $remote_addr;
-        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        # IMPORTANT: use $remote_addr (replace), not $proxy_add_x_forwarded_for (append).
+        # The append form lets clients inject a leftmost spoofed IP, bypassing per-IP
+        # rate-limiters that read XFF leftmost. nginx terminates TLS here and is the
+        # single trusted hop, so $remote_addr IS the real client IP.
+        proxy_set_header X-Forwarded-For   $remote_addr;
         proxy_set_header X-Forwarded-Proto $scheme;
 
         # WebSocket support (just in case)
@@ -152,8 +280,30 @@ server {
         client_max_body_size 50m;
     }
 
-    # Compression — include WASM explicitly.
+    # ----------------------------------------------------------------
+    # Compression
+    # ----------------------------------------------------------------
+    # parser-web's `trunk build --release` runs `scripts/compress-dist.sh`
+    # which writes `<asset>.br` and `<asset>.gz` next to every JS / WASM /
+    # CSS / HTML / JSON / SVG / TXT / XML over 1 KiB. The *_static
+    # directives below tell nginx to serve those instead of compressing
+    # at request time.
+    #
+    # gzip_static is built into stock nginx (the Debian/Ubuntu package
+    # ships --with-http_gzip_static_module) so it works out of the box.
+    # The brotli_* directives need the ngx_brotli module — see the
+    # "Production deployment → Compression" section in the README for the
+    # 3-step activation flow. Until the module is loaded the brotli block
+    # below MUST stay commented or `nginx -t` fails with "unknown
+    # directive brotli".
+
+    # Pre-compressed assets (built into nginx by default).
+    gzip_static on;
+
+    # On-the-fly gzip — covers /api JSON responses and any asset that
+    # Trunk didn't pre-compress.
     gzip on;
+    gzip_vary on;
     gzip_min_length 1024;
     gzip_types
         text/html
@@ -162,7 +312,26 @@ server {
         application/wasm
         application/javascript
         application/json
+        image/svg+xml
         application/octet-stream;
+
+    # ---- Brotli — uncomment the whole block AFTER installing the module
+    # ---- (see note above). All four directives belong to ngx_brotli,
+    # ---- so they must come uncommented together.
+    #
+    # brotli_static on;            # serve `.br` siblings written by Trunk
+    # brotli on;                   # on-the-fly fallback for /api JSON, etc.
+    # brotli_comp_level 6;         # 6 = good ratio without burning CPU live
+    # brotli_min_length 1024;
+    # brotli_types
+    #     text/html
+    #     text/css
+    #     text/plain
+    #     application/wasm
+    #     application/javascript
+    #     application/json
+    #     image/svg+xml
+    #     application/octet-stream;
 }
 
 # ------------------------------------------------------------

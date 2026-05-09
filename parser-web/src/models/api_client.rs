@@ -1,12 +1,7 @@
-//! Thin wrappers around `reqwasm::http::Request` so every API call
-//! sends cookies (audit #3 — owner-token now lives in an HttpOnly
-//! cookie set by the server).
-//!
-//! `RequestCredentials::Include` is required because in `trunk serve`
-//! the SPA (port 8000) and the API (port 8080) are different origins,
-//! so the browser would otherwise drop the cookie. In production both
-//! sit behind the same nginx so it's redundant — but a single shared
-//! call site means we can't accidentally forget it on a new endpoint.
+//! Thin wrappers around `reqwasm::http::Request` that always send
+//! cookies. `RequestCredentials::Include` is required in `trunk serve`
+//! (SPA :8000, API :8080 are different origins); redundant behind nginx
+//! but keeping the wrapper prevents new endpoints from forgetting it.
 
 use reqwasm::http::Request;
 use web_sys::RequestCredentials;

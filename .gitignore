@@ -6,3 +6,8 @@ config.toml
 config.js
 .idea/*
 .vscode/*
+
+# Real security.txt — contains the deploy contact email + expiry, generated
+# from .well-known/security.example.txt during deploy. Keep it local so the
+# repo doesn't leak personal contact info.
+parser-web/.well-known/security.txt

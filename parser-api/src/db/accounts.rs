@@ -185,12 +185,10 @@ pub fn get_account_by_id(owner_token: &str, id: i32) -> Result<TruncatedAccount,
     }
 }
 
-/// Sever the device → account link without touching the underlying
-/// `accounts` row, since other devices may still legitimately point at
-/// it. Returns the number of links removed; 0 means the device never
-/// owned this account in the first place (caller should map this to a
-/// 404 so the user knows the click was a no-op rather than silently
-/// "succeeding"). Audit M-6 / L-7.
+/// Sever the device → account link, leaving the `accounts` row alone
+/// since other devices may still own it. Returns the number of links
+/// removed; 0 means this device never owned the account (callers should
+/// map to 404 so the click isn't silently a no-op).
 pub fn delete_device_link(owner_token: &str, account_id: i32) -> Result<usize, String> {
     super::with_write_tx(|tx| {
         let n = tx

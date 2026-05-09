@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# pre-commit hook — runs cargo audit on parser-api when Rust source or
+# Cargo.lock is staged. We have no CI, so this is the only line of defence
+# against landing a commit that re-introduces a known-vulnerable dep.
+#
+# Activate once per clone:
+#   git config core.hooksPath .githooks
+#
+# Bypass for a single commit (use sparingly, e.g. emergency revert):
+#   git commit --no-verify
+#
+# Configuration: parser-api/.cargo/audit.toml lists explicit ignores
+# (transitive advisories we can't fix without a parent-crate bump).
+
+set -euo pipefail
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+
+# Skip if nothing under parser-api/ is staged. Doc-only / nginx-only /
+# frontend-only commits don't change the Rust dependency graph.
+if ! git diff --cached --name-only | grep -qE '^parser-api/'; then
+    exit 0
+fi
+
+if ! command -v cargo-audit >/dev/null 2>&1; then
+    cat >&2 <<'EOF'
+  pre-commit: cargo-audit is required but not installed.
+  install: cargo install cargo-audit --locked
+  bypass once: git commit --no-verify
+EOF
+    exit 1
+fi
+
+echo "pre-commit: cargo audit --deny warnings (parser-api/)..."
+cd "$REPO_ROOT/parser-api"
+cargo audit --deny warnings

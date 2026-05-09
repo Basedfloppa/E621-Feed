@@ -227,13 +227,25 @@ pub fn fetch_analyze_button(props: &AnalyzeButtonProps) -> Html {
         .filter(|s| s.pages_total > 0 && phase_running)
         .map(|s| (s.pages_done as f32 / s.pages_total as f32 * 100.0).clamp(0.0, 100.0));
 
+    let no_user = props.found_user.is_none();
+    let disabled = *props.is_loading || no_user;
+    let title = if no_user {
+        "Pick or look up an account first"
+    } else if *props.is_loading {
+        "A request is already in flight"
+    } else {
+        ""
+    };
+
     html! {
         <div class="d-grid gap-2 mb-4">
             <button
                 class="btn btn-warning"
                 onclick={analyze_tags}
-                disabled={*props.is_loading || props.found_user.is_none()}
+                disabled={disabled}
+                aria-disabled={disabled.to_string()}
                 aria-busy={busy.to_string()}
+                title={title}
             >
                 { if busy {
                     html! {

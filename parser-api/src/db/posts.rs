@@ -6,6 +6,64 @@ use crate::models::Post;
 
 use super::{open_db, parse_db_datetime};
 
+/// Delete catalog posts that aren't favourited by anyone and haven't been
+/// re-touched within `retention_secs`. Used by the cache-validator worker
+/// to keep `/recommendations` browse-time inserts (called "candidates"
+/// because they're shown but not chosen) from bloating the catalog and,
+/// transitively, the IDF + global tag-relation graphs they feed.
+///
+/// Returns `(before, after)`: the count of orphan posts before/after the
+/// prune. `before` is computed via a separate COUNT so the caller can log
+/// "dropped N entries" without instrumenting the DELETE itself.
+///
+/// Marks `IDF` and `GLOBAL` caches dirty when anything was deleted, so the
+/// in-memory graphs shrink on the next worker tick. Mirror of the longer-
+/// lived `run_catalog_cleanup` in prefetch.rs.
+pub fn prune_orphan_candidates(retention_secs: u64) -> Result<(usize, usize), String> {
+    let conn = open_db().map_err(|e| format!("prune_orphan_candidates open: {e}"))?;
+    let cutoff = (Utc::now() - chrono::Duration::seconds(retention_secs as i64)).to_rfc3339();
+
+    let before: i64 = conn
+        .query_row(
+            "
+            SELECT COUNT(*)
+            FROM posts p
+            WHERE p.last_seen_at < ?1
+              AND NOT EXISTS (SELECT 1 FROM accounts_post ap WHERE ap.post_id = p.id)
+            ",
+            params![cutoff],
+            |r| r.get(0),
+        )
+        .map_err(|e| format!("prune_orphan_candidates count: {e}"))?;
+
+    if before == 0 {
+        return Ok((0, 0));
+    }
+    drop(conn);
+
+    let deleted = super::with_write_tx(|tx| {
+        let n = tx
+            .execute(
+                "
+                DELETE FROM posts
+                WHERE last_seen_at < ?1
+                  AND NOT EXISTS (SELECT 1 FROM accounts_post ap WHERE ap.post_id = posts.id)
+                ",
+                params![cutoff],
+            )
+            .map_err(|e| format!("prune_orphan_candidates delete: {e}"))?;
+        Ok(n as usize)
+    })?;
+
+    if deleted > 0 {
+        crate::utils::mark_idf_dirty();
+        crate::utils::mark_global_relation_dirty();
+    }
+
+    let after = (before as usize).saturating_sub(deleted);
+    Ok((before as usize, after))
+}
+
 pub fn drop_account_posts(account_id: i32) -> Result<(), String> {
     super::with_write_tx(|tx| {
         let mut clear_account_post = tx

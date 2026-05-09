@@ -4,13 +4,24 @@
 //! Caches owned by this worker:
 //!  * `api::API_CACHE` — outbound e621 GET cache, TTL-driven
 //!  * `jobs::JOBS` — /process job state map; finished entries past
-//!    `FINISHED_JOB_RETAIN_SECS`
+//!    `runtime.jobs_finished_retain_secs`
 //!  * `ratelimit::BUCKETS` — token-bucket map; idle and oversized entries
+//!  * `db::posts` orphan candidates — catalog posts pulled in by
+//!    `/recommendations` browse traffic that nobody favourited and that
+//!    haven't been re-touched within `runtime.orphan_retention_secs`.
+//!    Marks IDF + global graph dirty after deletion so the in-memory
+//!    graphs shrink on the next worker tick.
+//!  * `IDF_CACHE` / `GLOBAL_CACHE` — heavy recommendation caches loaded
+//!    from the catalog (HashMap<(u32,u32),i64> of co-occurrence pairs +
+//!    HashMap<String,i64> of per-tag document frequencies). On a 7 GB
+//!    SQLite catalog these inflate to 500 MB–1 GB resident. Each cache
+//!    tracks its last-touch wall-clock; if untouched for
+//!    `runtime.cache_idle_eviction_secs`, the graph/index is swapped
+//!    back to empty so the working set returns to the OS. The next
+//!    request lazily rebuilds (same as cold startup).
 //!
 //! Each module exposes a `prune_*` fn returning `(before, after)` so the
-//! worker can log a single summary line per tick. `IDF_CACHE` and
-//! `GLOBAL_CACHE` are NOT pruned here — they're versioned via ArcSwap +
-//! dirty flags and replaced wholesale on rebuild.
+//! worker can log a single summary line per tick.
 //!
 //! Cadence comes from `runtime.cache_validate_interval_secs`. Values
 //! below 30 are clamped (a 5-second tick on a quiet box just burns a
@@ -18,7 +29,12 @@
 
 use std::time::Duration;
 
-use crate::{api, jobs, models::cfg, ratelimit};
+use crate::{
+    api, auth, db, jobs,
+    models::cfg,
+    ratelimit,
+    utils::{evict_global_relation_if_idle, evict_idf_if_idle},
+};
 
 const MIN_INTERVAL_SECS: u64 = 30;
 
@@ -40,21 +56,71 @@ pub fn spawn_cache_pruner() {
             let api_diff = api::prune_api_cache();
             let jobs_diff = jobs::prune_finished_jobs();
             let rl_diff = ratelimit::prune_buckets();
+            let orphan_retention = cfg().runtime.orphan_retention_secs;
+            let candidate_diff = if orphan_retention > 0 {
+                match db::prune_orphan_candidates(orphan_retention) {
+                    Ok((before, after)) => (before, after),
+                    Err(e) => {
+                        warn!("[cache-pruner] orphan-candidate prune failed: {e}");
+                        (0, 0)
+                    }
+                }
+            } else {
+                (0, 0)
+            };
+            let revoked_diff = match db::prune_revoked_tokens(auth::REVOKED_TOKEN_RETENTION_SECS) {
+                Ok((before, after)) => {
+                    // If we actually trimmed anything, the in-memory hot
+                    // set is now ahead of the DB. Reload so the two stay
+                    // in sync (the set never grows past what's on disk).
+                    if before != after
+                        && let Err(e) = auth::reload_revocation_set()
+                    {
+                        warn!("[cache-pruner] revoked-token reload failed: {e}");
+                    }
+                    (before, after)
+                }
+                Err(e) => {
+                    warn!("[cache-pruner] revoked-token prune failed: {e}");
+                    (0, 0)
+                }
+            };
+
+            let idle_evict_secs = cfg().runtime.cache_idle_eviction_secs;
+            let idf_evicted = evict_idf_if_idle(idle_evict_secs);
+            let relation_evicted = evict_global_relation_if_idle(idle_evict_secs);
+            if idf_evicted.0 > 0 || idf_evicted.1 > 0 {
+                info!(
+                    "[cache-pruner] idle-evict IDF after {}s: dropped {} tags / {} posts",
+                    idle_evict_secs, idf_evicted.0, idf_evicted.1
+                );
+            }
+            if relation_evicted.0 > 0 || relation_evicted.1 > 0 {
+                info!(
+                    "[cache-pruner] idle-evict tag-relation after {}s: dropped {} pairs / {} tags",
+                    idle_evict_secs, relation_evicted.0, relation_evicted.1
+                );
+            }
+
             let total_dropped = (api_diff.0 - api_diff.1)
                 + (jobs_diff.0 - jobs_diff.1)
-                + (rl_diff.0 - rl_diff.1);
+                + (rl_diff.0 - rl_diff.1)
+                + (candidate_diff.0 - candidate_diff.1)
+                + (revoked_diff.0 - revoked_diff.1);
             if total_dropped > 0 {
                 info!(
-                    "[cache-pruner] dropped {} entries (api {}->{}, jobs {}->{}, ratelimit {}->{})",
+                    "[cache-pruner] dropped {} entries (api {}->{}, jobs {}->{}, ratelimit {}->{}, candidates {}->{}, revoked {}->{})",
                     total_dropped,
                     api_diff.0, api_diff.1,
                     jobs_diff.0, jobs_diff.1,
                     rl_diff.0, rl_diff.1,
+                    candidate_diff.0, candidate_diff.1,
+                    revoked_diff.0, revoked_diff.1,
                 );
             } else {
                 debug!(
-                    "[cache-pruner] tick clean (api={}, jobs={}, ratelimit={})",
-                    api_diff.1, jobs_diff.1, rl_diff.1
+                    "[cache-pruner] tick clean (api={}, jobs={}, ratelimit={}, candidates={}, revoked={})",
+                    api_diff.1, jobs_diff.1, rl_diff.1, candidate_diff.1, revoked_diff.1
                 );
             }
         })

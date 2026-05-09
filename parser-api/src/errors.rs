@@ -2,16 +2,11 @@
 //!
 //! Every API route returns `Result<T, ApiError>` so failures land as
 //! `application/json` with a real 4xx/5xx status — not the Rocket default
-//! that silently turns `Err(String)` into a `200 OK` plain-text body. The
-//! frontend can therefore branch on `resp.ok()` and still parse JSON in
-//! both arms instead of the SyntaxError path described in the audit
-//! (M-1, S-3).
+//! that turns `Err(String)` into a `200 OK` plain-text body.
 //!
-//! `From<String>` is wired so existing call-sites that produce
-//! `format!("Failed to …: {e}")` upgrade transparently when the route
-//! signature changes — and a small heuristic over the message text
-//! promotes "no row" misses to 404 so the frontend can distinguish
-//! "doesn't exist" from "the server fell over".
+//! `From<String>` upgrades existing `format!("Failed to …: {e}")`
+//! call-sites transparently; a small heuristic promotes "no row" misses
+//! to 404.
 
 use std::io::Cursor;
 
@@ -69,11 +64,7 @@ impl ApiError {
 }
 
 impl From<String> for ApiError {
-    /// Heuristic: existing call-sites bubble up rusqlite/db errors as
-    /// strings, and "no row found" is by far the most common false-500.
-    /// Match the small set of phrases used inside `db::accounts` so those
-    /// land as a real 404 — anything else stays an opaque 500 since we
-    /// can't tell from a string what went wrong.
+    /// Promote "no row found" rusqlite errors to 404; anything else stays 500.
     fn from(s: String) -> Self {
         let l = s.to_ascii_lowercase();
         if l.contains("no account found") || l.contains("query returned no rows") {
@@ -97,10 +88,6 @@ impl<'r> Responder<'r, 'static> for ApiError {
             error: self.message().to_string(),
             code: status.code,
         };
-        // serde_json::to_vec on this tiny shape can only fail in OOM
-        // territory, which is not a recoverable error path; if it ever
-        // does, fall back to a static byte string so the client at least
-        // sees a JSON-shaped response rather than a hang.
         let bytes =
             serde_json::to_vec(&body).unwrap_or_else(|_| br#"{"error":"serialize failed","code":500}"#.to_vec());
         Response::build()
@@ -111,11 +98,6 @@ impl<'r> Responder<'r, 'static> for ApiError {
     }
 }
 
-/// Tell rocket_okapi which status codes a route returning `ApiError`
-/// can produce, so the generated OpenAPI spec is honest about 4xx/5xx
-/// shapes. We don't bother attaching a body schema to each — a single
-/// `ApiErrorBody` shape covers all of them and is documented separately
-/// if anyone ever needs it.
 impl OpenApiResponderInner for ApiError {
     fn responses(_gen: &mut OpenApiGenerator) -> rocket_okapi::Result<Responses> {
         let mut responses = Responses::default();

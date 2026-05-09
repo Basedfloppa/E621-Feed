@@ -135,7 +135,6 @@ pub(crate) async fn create_account(
     let acc = account.into_inner();
     let owner_token = owner.0;
     validation::validate_device_scoped_account(&acc)?;
-    // Per-IP cap on account creation: see audit H-1.
     ratelimit::check(&format!("acct_create:ip:{}", client_ip.0), 5, 5)?;
     ratelimit::check(&format!("acct_create:owner:{owner_token}"), 10, 10)?;
 

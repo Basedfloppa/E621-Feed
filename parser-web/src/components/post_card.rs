@@ -32,7 +32,11 @@ pub fn post_card(props: &PostCardProps) -> Html {
     let card_width = use_state(|| 0.0f64);
     let current_img_url = {
         let url = fallback_image_url(post);
-        let initial = Some(AttrValue::from(url.clone()));
+        let initial = if url.is_empty() {
+            None
+        } else {
+            Some(AttrValue::from(url))
+        };
         use_state(|| initial)
     };
 
@@ -513,9 +517,16 @@ fn send_interaction(backend_url: String, payload: FeedInteractionRequest) {
 fn is_supported_image(url: &str) -> bool {
     const ALLOWED: [&str; 7] = [".gif", ".png", ".jpg", ".jpeg", ".webp", ".avif", ".apng"];
 
-    ALLOWED
-        .iter()
-        .any(|ext| url.to_ascii_lowercase().ends_with(ext))
+    // Require an absolute URL — e621 hands back relative paths such as
+    // "/images/download-deleted-preview.png" / ".../download-preview.png"
+    // for deleted or preview-less posts, and the browser would resolve
+    // those against *our* origin (`/images/...` 404). Anything that
+    // isn't an http(s) URL is unusable as a remote thumbnail.
+    let lower = url.to_ascii_lowercase();
+    if !(lower.starts_with("http://") || lower.starts_with("https://")) {
+        return false;
+    }
+    ALLOWED.iter().any(|ext| lower.ends_with(ext))
 }
 
 fn fallback_image_url(post: &Post) -> String {

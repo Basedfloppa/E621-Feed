@@ -1,26 +1,12 @@
 //! Input validation for HTTP-facing structs.
 //!
-//! All routes that accept a `DeviceScopedAccount`, an `owner_token`, or
-//! an `account_id` push their input through here before any DB work. The
-//! audit (H-1) showed that without this layer anonymous POSTs could
-//! create rows with `id = -1`, 100 KB names, 50 KB blacklists, and even
-//! null-byte tokens — and once a row exists the prefetcher will start
-//! making admin-authenticated e621 requests on its behalf.
-//!
-//! Limits are deliberately loose enough to accept any real e621 user
-//! while rejecting obvious abuse:
-//! * `id`        — strictly positive, capped above e621's current id
-//!                 space with margin.
-//! * `name`      — ≤ 64 chars; e621 caps usernames at much less but
-//!                 we don't want to track that exactly. Restricts to
-//!                 a printable ASCII subset that covers historical
-//!                 username conventions.
-//! * `blacklist` — ≤ 16 KB. e621's own UI caps it at a similar size;
-//!                 anything larger is almost certainly a flood.
-//! * `owner_token` — 16..=128 chars from `[A-Za-z0-9_-]`. The current
-//!                 generator (`owner-<ts>-<r>-<r>`) lands at ~38 chars
-//!                 so existing tokens pass, but null bytes / massive
-//!                 strings are rejected.
+//! Routes accepting `DeviceScopedAccount`, `owner_token`, or `account_id`
+//! push input through here before any DB work. Limits are loose enough
+//! to accept any real e621 user while rejecting obvious abuse:
+//! * `id`        — strictly positive, capped above e621's current id space.
+//! * `name`      — ≤ 64 chars, printable ASCII subset.
+//! * `blacklist` — ≤ 16 KB.
+//! * `owner_token` — 16..=128 chars from `[A-Za-z0-9_-]`.
 
 use crate::errors::ApiError;
 use crate::models::{BlacklistPayload, DeviceScopedAccount, FeedInteractionRequest};
@@ -31,6 +17,9 @@ const MAX_BLACKLIST_LEN: usize = 16 * 1024;
 const MIN_OWNER_TOKEN_LEN: usize = 16;
 const MAX_OWNER_TOKEN_LEN: usize = 128;
 const MAX_SESSION_ID_LEN: usize = 128;
+/// e621 caps `posts.json?page=` at 750 for non-staff. Anything past that
+/// returns `410 Gone`; reject locally first.
+pub const MAX_RECOMMENDATIONS_PAGE: i32 = 750;
 
 pub fn validate_account_id(id: i32) -> Result<(), ApiError> {
     if id <= 0 || id > MAX_ACCOUNT_ID {
@@ -71,10 +60,8 @@ fn validate_account_name(name: &str) -> Result<(), ApiError> {
             "name too long ({char_len} chars, max {MAX_NAME_LEN})"
         )));
     }
-    // Allow the printable ASCII subset that covers e621 historical
-    // usernames: letters/digits, the punctuation users often pick, and
-    // space. Reject control bytes (incl. NUL — H-1 PoC #6) and anything
-    // outside ASCII to keep storage / display predictable.
+    // Printable ASCII subset covering historical e621 usernames; reject
+    // control bytes and non-ASCII to keep storage / display predictable.
     let allowed = |c: char| {
         c.is_ascii_alphanumeric()
             || matches!(
@@ -166,6 +153,30 @@ pub fn validate_blacklist_payload(payload: &BlacklistPayload) -> Result<(), ApiE
         validate_blacklist_text(bl)?;
     }
     Ok(())
+}
+
+/// Bound the `page` query param on `/recommendations`. `None` (caller
+/// omitted the param) is the route's default, accepted as-is.
+pub fn validate_recommendations_page(page: Option<i32>) -> Result<(), ApiError> {
+    let Some(p) = page else { return Ok(()); };
+    if !(0..=MAX_RECOMMENDATIONS_PAGE).contains(&p) {
+        return Err(ApiError::BadRequest(format!(
+            "page {p} out of range [0, {MAX_RECOMMENDATIONS_PAGE}]"
+        )));
+    }
+    Ok(())
+}
+
+/// Reject NaN / ±Infinity (any comparison against them is always false,
+/// silently dropping every post), then clamp into `[0.0, 1.0]`.
+pub fn validate_affinity_threshold(t: Option<f32>) -> Result<Option<f32>, ApiError> {
+    let Some(t) = t else { return Ok(None); };
+    if !t.is_finite() {
+        return Err(ApiError::BadRequest(
+            "affinity_threshold must be a finite number".into(),
+        ));
+    }
+    Ok(Some(t.clamp(0.0, 1.0)))
 }
 
 pub fn validate_feed_interaction(req: &FeedInteractionRequest) -> Result<(), ApiError> {

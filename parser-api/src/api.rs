@@ -11,12 +11,9 @@ use crate::models::{
     Post, PostsApiResponse, TruncatedAccount, UserApiResponse, UserSearchResult, cfg,
 };
 
-/// Global rate gate. Every outbound HTTP send takes this lock and waits until
-/// `next_send_at` arrives, ensuring background prefetchers and live request
-/// fetches share the same token-bucket budget rather than each enforcing
-/// `rps_delay_ms` independently. The lock is held only across the wait, not
-/// across the network round-trip — so 250 ms cadence is preserved without
-/// serializing the requests themselves.
+/// Global rate gate. Outbound sends share one token-bucket budget so
+/// prefetchers and live fetches don't each enforce `rps_delay_ms`
+/// independently. Held only across the wait, preserving FIFO order.
 static RATE_GATE: LazyLock<Mutex<Instant>> = LazyLock::new(|| Mutex::new(Instant::now()));
 
 async fn rate_gate_wait() {
@@ -25,27 +22,18 @@ async fn rate_gate_wait() {
     let mut next = RATE_GATE.lock().await;
     let now = Instant::now();
     if *next > now {
-        let wait = *next - now;
-        // Bound the held-lock window: drop the guard, sleep, reacquire would
-        // re-order callers. Holding through the sleep keeps order FIFO and
-        // sleeps are at most rps_delay_ms (~250ms typical).
-        sleep(wait).await;
+        sleep(*next - now).await;
     }
     *next = Instant::now() + delay;
 }
 
-/// In-memory TTL cache for successful GET responses to e621. The hot
-/// case is `/recommendations` — two devices on the same account, or two
-/// accounts with the same default blacklist, otherwise turn into
-/// duplicate `posts.json` round-trips against the admin's API key. The
-/// audit (C-3, C-4) showed the same admin key under Cloudflare scrutiny
-/// already, so deduping outbound traffic also reduces ban risk.
+/// In-memory TTL cache for successful GET responses to e621. Dedupes
+/// `/recommendations` round-trips that share an account or default
+/// blacklist, reducing admin-key load and ban risk.
 ///
-/// Stored bodies are raw text — re-parsing on hit is cheap relative to
-/// a network round-trip, and avoids an `Any`-typed cache value. Only
-/// 2xx responses are cached: 4xx/5xx (especially Cloudflare 403/520)
-/// must be re-tried so a transient block doesn't pin itself for the
-/// full TTL.
+/// Bodies are stored as raw text (cheap re-parse, avoids `Any`-typed
+/// values). Only 2xx is cached: 4xx/5xx must be retried so transient
+/// Cloudflare blocks don't pin themselves for a full TTL.
 struct CachedBody {
     body: String,
     inserted_at: std::time::Instant,
@@ -67,11 +55,8 @@ fn api_cache_get(url: &str, ttl: Duration) -> Option<String> {
     }
 }
 
-/// Drop every cache entry past TTL. Used by the periodic cache-validator
-/// worker so stale bodies don't sit in memory after a traffic burst —
-/// `api_cache_put` only evicts on insert, which leaves the cache
-/// frozen at peak size when the request volume drops. Returns
-/// `(before, after)` for logging.
+/// Drop every cache entry past TTL. Called by the periodic worker since
+/// `api_cache_put` only evicts on insert.
 pub fn prune_api_cache() -> (usize, usize) {
     let ttl = Duration::from_secs(cfg().e621_cache_ttl_secs);
     if ttl.is_zero() {
@@ -91,10 +76,8 @@ fn api_cache_put(url: &str, body: String, ttl: Duration, max_entries: usize) {
     }
     let mut map = API_CACHE.lock().expect("api cache poisoned");
     if map.len() >= max_entries {
-        // Drop the oldest 10% in one pass — cheap O(n) compared to
-        // bookkeeping a strict LRU list, and the threshold gets hit
-        // rarely (only past `max_entries`). Stale-by-TTL entries that
-        // have been idle for a while are also caught here.
+        // Drop oldest 10% in one O(n) pass — strict LRU bookkeeping isn't
+        // worth it given how rarely we cross `max_entries`.
         let now = std::time::Instant::now();
         let mut keys_by_age: Vec<(String, std::time::Instant)> = map
             .iter()
@@ -118,10 +101,8 @@ fn api_cache_put(url: &str, body: String, ttl: Duration, max_entries: usize) {
     );
 }
 
-/// Authenticated GET with cache + rate-gate + retry. Returns the body
-/// text on 2xx, or a formatted error string for callers to log/wrap.
-/// All call sites that hit e621 funnel through here so the cache and
-/// rate limits stay consistent.
+/// Authenticated GET with cache + rate-gate + retry. All e621 calls
+/// funnel through here so cache and rate limits stay consistent.
 async fn fetch_authed_text(url: String) -> Result<String, String> {
     let cfg = cfg();
     let ttl = Duration::from_secs(cfg.e621_cache_ttl_secs);
@@ -148,8 +129,7 @@ async fn fetch_authed_text(url: String) -> Result<String, String> {
         .map_err(|e| format!("body read failed: {e}"))?;
 
     if !status.is_success() {
-        // Don't poison the cache with a Cloudflare/rate-limit page —
-        // that would pin a 10-minute outage even after upstream recovers.
+        // Don't cache Cloudflare/rate-limit pages — would pin an outage past recovery.
         let preview = body_preview(&body);
         return Err(format!("returned {status}: {preview}"));
     }
@@ -158,14 +138,9 @@ async fn fetch_authed_text(url: String) -> Result<String, String> {
     Ok(body)
 }
 
-/// Trim a non-success response body down to one short line for logs and
-/// error-string propagation. The audit (S-7) flagged that Cloudflare's
-/// `<!DOCTYPE html>... <!--[if lt IE 7]> ...` walls were being copied
-/// verbatim into both stderr and the user-facing 500 string, blowing up
-/// log volume and shipping ~120 bytes of useless markup down to the
-/// frontend on every failure. First non-empty line, capped to 160
-/// characters, is enough to recognise "CF block page" vs "rate limit"
-/// vs "JSON error envelope" without dragging the rest along.
+/// First non-empty line, capped to 160 chars — keeps Cloudflare HTML
+/// walls out of logs and error strings while preserving enough text to
+/// distinguish block page vs rate limit vs JSON error envelope.
 fn body_preview(body: &str) -> String {
     body.lines()
         .map(str::trim)
@@ -362,9 +337,7 @@ pub async fn get_account(account: &TruncatedAccount) -> Result<UserApiResponse, 
 }
 
 /// Page through the e621 user list, ordered by `order` (e.g.
-/// `post_upload_count`, `name`, `date`). Returns up to ~320 results per page.
-/// Used by the `seed` binary to bootstrap calibration data without going
-/// through the regular account-creation flow.
+/// `post_upload_count`, `name`, `date`). Up to ~320 results per page.
 pub async fn search_users(order: &str, page: i32) -> Result<Vec<UserSearchResult>, String> {
     let url = build_url(
         "users.json",
@@ -377,8 +350,7 @@ pub async fn search_users(order: &str, page: i32) -> Result<Vec<UserSearchResult
     let body = fetch_authed_text(url)
         .await
         .map_err(|e| format!("users search {e}"))?;
-    // The endpoint occasionally responds with `{ "users": [...] }` and
-    // occasionally with a bare array. Handle both.
+    // Endpoint returns either `{ "users": [...] }` or a bare array.
     if let Ok(arr) = json::from_str::<Vec<UserSearchResult>>(&body) {
         return Ok(arr);
     }
@@ -391,10 +363,8 @@ pub async fn search_users(order: &str, page: i32) -> Result<Vec<UserSearchResult
     Ok(wrapped.users)
 }
 
-/// Returns the full `UserApiResponse` for a given user id (used to read
-/// `favorite_count`, which the search endpoint does not include). Public
-/// counterpart to `get_account` — that one needs a `TruncatedAccount`, this
-/// one only needs an id.
+/// `UserApiResponse` for a given user id; needed for `favorite_count`
+/// which the search endpoint does not include.
 pub async fn get_user_by_id(uid: i32) -> Result<UserApiResponse, String> {
     let cfg = cfg();
     let url = format!("{}/users/{}.json", cfg.posts_domain, uid);
@@ -404,12 +374,8 @@ pub async fn get_user_by_id(uid: i32) -> Result<UserApiResponse, String> {
     json::from_str::<UserApiResponse>(&body).map_err(|e| format!("user-by-id parse failed: {e}"))
 }
 
-/// Resolve a user by name. e621's `/users/<x>.json` endpoint accepts
-/// either a numeric id or a name string, so the shape mirrors
-/// `get_user_by_id`. Used by the `/api/user/name/<name>` route as a
-/// fallback when the username isn't linked to the device yet — the
-/// audit (M-2) called out that the previous "search only finds
-/// already-linked accounts" UX trapped first-time visitors.
+/// Resolve a user by name via `/users/<name>.json`. Lets first-time
+/// visitors look up accounts before they're linked to a device.
 pub async fn get_user_by_name(name: &str) -> Result<UserApiResponse, String> {
     let cfg = cfg();
     let url = format!("{}/users/{}.json", cfg.posts_domain, encode(name));
@@ -420,9 +386,8 @@ pub async fn get_user_by_name(name: &str) -> Result<UserApiResponse, String> {
         .map_err(|e| format!("user-by-name parse failed: {e}"))
 }
 
-/// Same as `get_posts` but with a caller-supplied `tags` query — used by the
-/// background prefetcher to warm the catalog with content matched to specific
-/// users' top tags. The blacklist still applies, prepended to the query.
+/// `get_posts` with a caller-supplied `tags` query — used by the
+/// prefetcher to warm the catalog. Blacklist still applied.
 pub async fn get_posts_by_tags(
     blacklist_tags: &str,
     tags_query: &str,

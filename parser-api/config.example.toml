@@ -156,18 +156,21 @@ idf_rebuild_cooldown_secs        = 15
 idf_bump_drift_threshold         = 200    # full IDF rebuild after this many incremental bumps
 tag_relation_rebuild_cooldown_secs = 15
 prefetch_interval_secs           = 180    # background catalog prefetcher cadence
-cleanup_interval_secs            = 21600  # 6h — stale-catalog pruning cadence
+cleanup_interval_secs            = 21600  # 6h — long-tail catalog pruning cadence (prefetch worker)
 catalog_retention_days           = 90     # prune posts older than this if no user owns them
+orphan_retention_secs            = 3600   # 1h — aggressive orphan-candidate prune (cache-pruner worker)
+jobs_finished_retain_secs        = 600    # 10 min — Done/Failed /process job state retained in memory
 prefetch_active_window_days      = 14     # only prefetch for accounts active in this window
 prefetch_breaker_threshold       = 3      # open circuit breaker after N consecutive e621 failures (0 = disabled)
 prefetch_breaker_pause_secs      = 600    # how long to pause when the breaker is open (10m)
 cache_validate_interval_secs     = 300    # 5 min
+cache_idle_eviction_secs         = 1800   # 30 min — drop IDF + tag-relation graph if no requests within this window (0 = keep resident)
 
 # --- Calibration / seed knobs (see ../docs/calibration.md) ------------------
 [backtest]
 min_favs           = 100
 test_fraction      = 0.20
-negative_ratio     = 10                  # ~max_accounts × 256 × NEG × 5 KB cached RAM — don't exceed free RAM
+negative_ratio     = 10                  # cached RAM ≈ max_accounts × test_count × (1+NEG) × 7 KB (Post + CachedPostFeatures); + ~4 GB globals
 top_k_ndcg         = 20
 top_k_recall       = 50
 max_accounts       = 150

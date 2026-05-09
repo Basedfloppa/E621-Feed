@@ -14,6 +14,7 @@ mod cooccurrence_backfill;
 mod feed;
 mod posts;
 mod profiles;
+mod sessions;
 mod tags;
 
 pub use accounts::*;
@@ -22,6 +23,7 @@ pub use cooccurrence_backfill::*;
 pub use feed::*;
 pub use posts::*;
 pub use profiles::*;
+pub use sessions::*;
 pub use tags::*;
 
 mod embedded {
@@ -45,6 +47,13 @@ impl Fairing for DbInit {
             Ok(_) => {
                 println!("SQLite DB Initialized");
                 spawn_tag_cooccurrence_backfill_if_needed();
+                // Hot-cache the revocation denylist before any request can
+                // hit the auth guard — otherwise the first few requests
+                // race with the load and could silently bypass revocation.
+                if let Err(e) = crate::auth::reload_revocation_set() {
+                    println!("Failed to load revocation denylist: {e}");
+                    return Err(rocket);
+                }
                 Ok(rocket)
             }
             Err(e) => {

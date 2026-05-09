@@ -1,14 +1,9 @@
 //! Cross-component window events.
 //!
-//! The dropdown of saved accounts (`SavedAccountsSelect`) is mounted on
-//! /home and /feed, while account creation/removal happens on /account.
-//! Routing remounts the dropdown on navigation, but a user who deletes
-//! an account and stays on the same route would see stale data — the
-//! audit (#16) called this out. Rather than threading a global store
-//! through every component, we publish a `CustomEvent` on `window` and
-//! let the dropdown subscribe.
-//!
-//! Keep the constant centralised so emitter and listener can't drift.
+//! `SavedAccountsSelect` mounts on /home and /feed; mutations happen on
+//! /account. Without a notification, deleting an account and staying on
+//! the same route shows stale data. Instead of a global store, we
+//! publish a `CustomEvent` on `window` and let the dropdown subscribe.
 
 use wasm_bindgen::JsCast;
 

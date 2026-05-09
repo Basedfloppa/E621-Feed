@@ -1,15 +1,11 @@
-//! Bootstraps the device session against the cookie-based auth.
+//! Bootstraps the device session.
 //!
-//! Audit #3: the owner token lives in an `HttpOnly` cookie that the
-//! server sets/refreshes on each request. Calling
-//! `POST /api/session/bootstrap` once at app start guarantees the
-//! cookie is in place before any component fires its first
-//! authenticated request — the server either refreshes an existing
-//! cookie or mints a fresh one and installs it.
+//! `POST /api/session/bootstrap` once at app start ensures the
+//! `HttpOnly` cookie is in place before any component fires its first
+//! authenticated request — the server refreshes or mints as needed.
 //!
-//! Failures are logged and silently swallowed: the user lands in an
-//! unauthenticated state and the next API call surfaces the real
-//! error. We do not block app render forever on a network blip.
+//! Failures are logged and swallowed: the next API call surfaces the
+//! real error rather than blocking app render on a network blip.
 
 use super::api_client::api_post;
 use super::config::read_config_from_head;

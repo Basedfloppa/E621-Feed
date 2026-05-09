@@ -1,0 +1,58 @@
+# =========================================================================
+# THIS FILE IS A TEMPLATE.
+#   1. Copy it:    cp security.example.txt security.txt
+#   2. Edit:       replace the two TODO_* values at the bottom.
+#   3. Build:      `trunk build --release` will copy your security.txt
+#                  into dist/.well-known/ alongside this template.
+# nginx serves /.well-known/security.txt; without the rename, scanners
+# get a 404 (the template itself is hidden by an explicit nginx 404).
+# =========================================================================
+#
+# RFC 9116 — security.txt reference
+# Lines starting with "#" are comments and ignored by parsers, so the
+# examples below stay safely in the file once you copy it.
+#
+# ---- Required fields ----------------------------------------------------
+#
+# Contact:  How to reach you for vuln reports. URI form (mailto:/https:/tel:).
+#           Multiple Contact: lines allowed; list in priority order.
+#   examples:
+#     Contact: mailto:security@your.domain
+#     Contact: mailto:you@example.com
+#     Contact: https://github.com/<owner>/<repo>/security/advisories/new
+#     Contact: https://t.me/<your_handle>
+#
+# Expires:  ISO-8601 UTC timestamp after which this file is considered stale.
+#           Recommendation: <= 1 year out, re-bump every 6 months.
+#   examples (suppose today is 2026-05-09):
+#     Expires: 2026-11-09T00:00:00Z   ← +6 months (recommended)
+#     Expires: 2027-05-09T00:00:00Z   ← +12 months (max)
+#
+# ---- Optional fields ----------------------------------------------------
+#
+# Preferred-Languages: comma-separated BCP-47 tags, in priority order.
+#   example: Preferred-Languages: en, ru
+#
+# Canonical: the URL where THIS file lives. Lets reporters confirm authenticity
+#            if they found the file mirrored elsewhere.
+#   example: Canonical: https://your.domain/.well-known/security.txt
+#
+# Encryption: link to your PGP key (https: or dns: or openpgp4fpr:).
+#   example: Encryption: https://your.domain/.well-known/pgp-key.txt
+#
+# Acknowledgments: page thanking past reporters.
+#   example: Acknowledgments: https://github.com/<owner>/<repo>/security/hall-of-fame
+#
+# Policy: link to your disclosure policy / scope / SLA.
+#   example: Policy: https://github.com/<owner>/<repo>/blob/master/SECURITY.md
+#
+# Hiring: link to security-related job openings (cute, optional).
+#   example: Hiring: https://your.domain/jobs
+#
+# -------------------------------------------------------------------------
+# Live fields below — replace TODO_* and uncomment any optionals you want.
+
+Contact: TODO_CONTACT
+Expires: TODO_EXPIRES
+Preferred-Languages: en, ru
+# Canonical: https://your.domain/.well-known/security.txt
