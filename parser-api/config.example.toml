@@ -161,6 +161,7 @@ catalog_retention_days           = 90     # prune posts older than this if no us
 prefetch_active_window_days      = 14     # only prefetch for accounts active in this window
 prefetch_breaker_threshold       = 3      # open circuit breaker after N consecutive e621 failures (0 = disabled)
 prefetch_breaker_pause_secs      = 600    # how long to pause when the breaker is open (10m)
+cache_validate_interval_secs     = 300    # 5 min
 
 # --- Calibration / seed knobs (see ../docs/calibration.md) ------------------
 [backtest]

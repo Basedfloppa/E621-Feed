@@ -67,6 +67,24 @@ fn api_cache_get(url: &str, ttl: Duration) -> Option<String> {
     }
 }
 
+/// Drop every cache entry past TTL. Used by the periodic cache-validator
+/// worker so stale bodies don't sit in memory after a traffic burst —
+/// `api_cache_put` only evicts on insert, which leaves the cache
+/// frozen at peak size when the request volume drops. Returns
+/// `(before, after)` for logging.
+pub fn prune_api_cache() -> (usize, usize) {
+    let ttl = Duration::from_secs(cfg().e621_cache_ttl_secs);
+    if ttl.is_zero() {
+        return (0, 0);
+    }
+    let mut map = API_CACHE.lock().expect("api cache poisoned");
+    let before = map.len();
+    let now = std::time::Instant::now();
+    map.retain(|_, v| now.duration_since(v.inserted_at) < ttl);
+    let after = map.len();
+    (before, after)
+}
+
 fn api_cache_put(url: &str, body: String, ttl: Duration, max_entries: usize) {
     if ttl.is_zero() || max_entries == 0 {
         return;

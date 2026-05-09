@@ -361,6 +361,7 @@ async fn rocket() -> _ {
         );
 
     prefetch::spawn_prefetch_workers();
+    e621_account_parser_api::cache_pruner::spawn_cache_pruner();
 
     attach_cors(r)
 }

@@ -109,6 +109,15 @@ pub struct RuntimeConfig {
     /// before resetting the counter and resuming normal cadence.
     #[serde(default = "default_prefetch_breaker_pause_secs")]
     pub prefetch_breaker_pause_secs: u64,
+
+    /// Cadence for the unified cache-validator background worker. Walks
+    /// every in-process cache (e621 outbound TTL cache, /process job
+    /// state, ratelimit buckets) and drops entries whose validity
+    /// window has expired. Runs in a single dedicated thread; cost is
+    /// O(N) over each map. Values < 30s are clamped to 30 to avoid
+    /// burning a thread; 0 disables the worker entirely.
+    #[serde(default = "default_cache_validate_interval_secs")]
+    pub cache_validate_interval_secs: u64,
 }
 
 impl Default for RuntimeConfig {
@@ -126,6 +135,7 @@ impl Default for RuntimeConfig {
             prefetch_active_window_days: default_prefetch_active_window_days(),
             prefetch_breaker_threshold: default_prefetch_breaker_threshold(),
             prefetch_breaker_pause_secs: default_prefetch_breaker_pause_secs(),
+            cache_validate_interval_secs: default_cache_validate_interval_secs(),
         }
     }
 }
@@ -184,6 +194,9 @@ fn default_prefetch_breaker_threshold() -> u32 {
 }
 fn default_prefetch_breaker_pause_secs() -> u64 {
     600
+}
+fn default_cache_validate_interval_secs() -> u64 {
+    300 // 5 min
 }
 
 #[derive(Debug, Clone, Deserialize)]

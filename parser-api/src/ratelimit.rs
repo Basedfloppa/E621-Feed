@@ -100,6 +100,32 @@ pub fn check(key: &str, per_min: u32, burst: u32) -> Result<(), ApiError> {
     }
 }
 
+/// Force a prune cycle bypassing `LAST_GC` interval. Called by the
+/// periodic cache-validator worker — `maybe_gc` only fires inside a
+/// `check()` call, so a quiet period leaves the bucket map static.
+pub fn prune_buckets() -> (usize, usize) {
+    let now = Instant::now();
+    let mut map = BUCKETS.lock().expect("ratelimit map poisoned");
+    let before = map.len();
+    let oversized = map.len() > MAX_BUCKETS;
+    if oversized {
+        let mut entries: Vec<(String, Instant)> =
+            map.iter().map(|(k, v)| (k.clone(), v.last_refill)).collect();
+        entries.sort_by_key(|(_, t)| *t);
+        for (k, _) in entries.into_iter().take(map.len() / 2) {
+            map.remove(&k);
+        }
+    } else {
+        map.retain(|_, b| {
+            !(b.tokens >= b.burst && now.duration_since(b.last_refill) > GC_IDLE_THRESHOLD)
+        });
+    }
+    let mut last_gc = LAST_GC.lock().expect("ratelimit gc poisoned");
+    *last_gc = now;
+    let after = map.len();
+    (before, after)
+}
+
 fn maybe_gc(map: &mut HashMap<String, Bucket>, now: Instant) {
     let mut last_gc = LAST_GC.lock().expect("ratelimit gc poisoned");
     let due = now.duration_since(*last_gc) >= GC_INTERVAL;
