@@ -115,9 +115,9 @@ pub(crate) fn print_diff(baseline: &Priors, best: &Priors) -> Vec<String> {
     }
 
     // Clamp-saturation: mirrors the clamps in knobs::GRID_KNOBS.
-    check_clamp!("idf_lambda", idf_lambda, 0.0_f32, 1.0_f32);
-    check_clamp!("idf_alpha", idf_alpha, 0.0_f32, 1.0_f32);
-    check_clamp!("freq_alpha", freq_alpha, 0.0_f32, 1.0_f32);
+    check_clamp!("idf_lambda", idf_lambda, 0.0_f32, 1.5_f32);
+    check_clamp!("idf_alpha", idf_alpha, 0.0_f32, 1.5_f32);
+    check_clamp!("freq_alpha", freq_alpha, 0.0_f32, 1.5_f32);
     check_clamp!("df_floor", df_floor, 0.05_f32, 5.0_f32);
     check_clamp!("idf_max", idf_max, 1.0_f32, 200.0_f32);
     check_clamp!("bm25_k", bm25_k, 0.1_f32, 10.0_f32);
@@ -129,7 +129,7 @@ pub(crate) fn print_diff(baseline: &Priors, best: &Priors) -> Vec<String> {
     check_clamp!("mmr_redundancy_exp", mmr_redundancy_exp, 0.1_f32, 5.0_f32);
     check_clamp!("tag_sim_jaccard_blend", tag_sim_jaccard_blend, 0.0_f32, 1.0_f32);
     if !best.idf_lambda_meta.is_nan() {
-        check_clamp!("idf_lambda_meta", idf_lambda_meta, 0.0_f32, 1.0_f32);
+        check_clamp!("idf_lambda_meta", idf_lambda_meta, 0.0_f32, 1.5_f32);
     }
 
     saturated

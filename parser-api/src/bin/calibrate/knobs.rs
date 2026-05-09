@@ -142,19 +142,19 @@ pub(crate) const GRID_KNOBS: &[KnobSpec] = &[
     // -- IDF / freq shaping (7) — all touch tag_similarity --
     KnobSpec {
         name: "idf_lambda",
-        apply: |p, v| p.idf_lambda = (p.idf_lambda + v).clamp(0.0, 1.0),
+        apply: |p, v| p.idf_lambda = (p.idf_lambda + v).clamp(0.0, 1.5),
         probes: PROBES_FRACTION,
         invalidates: M_SIM,
     },
     KnobSpec {
         name: "idf_alpha",
-        apply: |p, v| p.idf_alpha = (p.idf_alpha + v).clamp(0.0, 1.0),
+        apply: |p, v| p.idf_alpha = (p.idf_alpha + v).clamp(0.0, 1.5),
         probes: PROBES_FRACTION,
         invalidates: M_SIM,
     },
     KnobSpec {
         name: "freq_alpha",
-        apply: |p, v| p.freq_alpha = (p.freq_alpha + v).clamp(0.0, 1.0),
+        apply: |p, v| p.freq_alpha = (p.freq_alpha + v).clamp(0.0, 1.5),
         probes: PROBES_FRACTION,
         invalidates: M_SIM,
     },
@@ -407,7 +407,7 @@ pub(crate) const GRID_KNOBS: &[KnobSpec] = &[
             if p.idf_lambda_meta.is_nan() {
                 p.idf_lambda_meta = p.idf_lambda;
             }
-            p.idf_lambda_meta = (p.idf_lambda_meta + v).clamp(0.0, 1.0);
+            p.idf_lambda_meta = (p.idf_lambda_meta + v).clamp(0.0, 1.5);
         },
         probes: PROBES_FRACTION,
         invalidates: M_SIM,

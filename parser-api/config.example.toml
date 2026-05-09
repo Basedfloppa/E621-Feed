@@ -52,32 +52,32 @@ quality_a        = 0.50
 quality_b        = 0.20
 quality_log_bias = -3.0
 
-mix_sim          = 0.60
-mix_quality      = 0.05
-mix_recency      = 0.04
-mix_rating       = 0.07
+mix_sim          = 0.65
+mix_quality      = 0.04
+mix_recency      = 0.03
+mix_rating       = 0.05
 mix_media        = 0.05
-mix_popularity   = 0.04
+mix_popularity   = 0.03
 mix_interaction  = 0.10
 mix_tag_relation = 0.08
 
 # IDF / frequency shaping
-df_floor          = 0.70   # promoted to [priors] in v5.2
+df_floor          = 0.40
 idf_max           = 100.0  # IDF saturation cap
-idf_lambda        = 0.70
-idf_alpha         = 0.92
-freq_alpha        = 0.80
-bm25_k            = 1.6    # BM25 saturation k for per-tag user-profile saturation
+idf_lambda        = 0.85
+idf_alpha         = 0.96
+freq_alpha        = 0.90
+bm25_k            = 2.0
 one_sided_ratio_exp = 0.5  # exponent in quality/popularity overshoot shape; 0.5 = legacy sqrt
-idf_rsj_smoothing = 0.5    # Robertson-Sparck-Jones IDF smoothing (was hardcoded pre-v5.3)
+idf_rsj_smoothing = 0.4
 
 # Per-group multipliers (v5.3 — promoted from the old [group_weights] section)
-group_w_artist    = 2.0
-group_w_character = 1.6
-group_w_copyright = 1.2
-group_w_species   = 1.1
-group_w_general   = 1.0
-group_w_lore      = 0.45
+group_w_artist    = 2.25
+group_w_character = 1.85
+group_w_copyright = 1.35
+group_w_species   = 1.20
+group_w_general   = 0.85
+group_w_lore      = 0.40
 
 # Cold-start / Bayesian priors (v5.3 — promoted from hardcoded constants)
 coldstart_smoothing_boost   = 2.0
