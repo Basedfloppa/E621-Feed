@@ -46,12 +46,15 @@ impl Group {
     }
 }
 
+mod cached;
 mod channels;
+mod channels_cached;
 mod context;
 mod diversify;
 mod priors;
 mod util;
 
+pub use cached::{CachedPostFeatures, CachedTag};
 pub use context::ScoringContext;
 pub use diversify::diversify_scored_posts;
 pub use priors::Priors;

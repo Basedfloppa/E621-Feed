@@ -145,6 +145,42 @@ impl<'a> ScoringContext<'a> {
         }
     }
 
+    /// Apply the final mix+temperature+veto blend to a set of per-channel
+    /// scores. Used by the calibrate cache path: channels can be reused
+    /// across probes that don't invalidate them, and only this final step
+    /// is rerun under the new mix/temperature/penalty priors.
+    pub fn final_blend(
+        &self,
+        sim: f32,
+        quality: f32,
+        recency: f32,
+        rating: f32,
+        media: f32,
+        popularity: f32,
+        interaction: f32,
+        tag_relation: f32,
+        veto: bool,
+    ) -> f32 {
+        let mix = self.mix;
+        let raw = mix.sim * sim
+            + mix.quality * quality
+            + mix.recency * recency
+            + mix.rating * rating
+            + mix.media * media
+            + mix.popularity * popularity
+            + mix.interaction * interaction
+            + mix.tag_relation * tag_relation;
+        let mut score = raw.clamp(0.0, 1.0);
+        let temp = self.priors.score_temperature;
+        if temp > 1e-3 {
+            score = sigmoid((score - 0.5) * temp).clamp(0.0, 1.0);
+        }
+        if veto {
+            score *= 1.0 - self.priors.strong_negative_penalty.clamp(0.0, 1.0);
+        }
+        score.clamp(0.0, 1.0)
+    }
+
     pub fn score(&self, post: &Post) -> (f32, ScoreBreakdown) {
         let sim = self.tag_similarity(post);
         let age_days = (self.priors.now - post.created_at).num_seconds() as f32 / 86_400.0;

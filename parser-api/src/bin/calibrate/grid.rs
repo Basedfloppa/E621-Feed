@@ -4,10 +4,11 @@ use chrono::Utc;
 
 use e621_account_parser_api::models::cfg;
 
+use crate::cache::{score_with_cache, M_ALL, ScoreCache};
 use crate::dataset::prepare_eval_dataset;
 use crate::knobs::{KnobSpec, CATEGORICAL_KNOBS, PAIRED_KNOBS, PASS_SCALES};
 use crate::log::{print_diff, write_grid_log};
-use crate::metrics::{print_metrics, score_with};
+use crate::metrics::print_metrics;
 use crate::options::GridOptions;
 
 fn knob_by_name<'a>(knobs: &'a [KnobSpec], name: &str) -> Option<&'a KnobSpec> {
@@ -44,8 +45,18 @@ pub(crate) fn run_grid(knobs: &[KnobSpec], opts: GridOptions) -> anyhow::Result<
     eprintln!("[grid] running baseline eval...");
     let t_baseline = std::time::Instant::now();
     let baseline = cfg_arc.priors.clone();
-    let baseline_m =
-        score_with(&dataset, &baseline, now, top_k_ndcg, top_k_recall, opts.diversify).average();
+    // Baseline = full rebuild → seeds the channel cache for subsequent probes.
+    let (baseline_m, baseline_cache) = score_with_cache(
+        &dataset,
+        &baseline,
+        now,
+        top_k_ndcg,
+        top_k_recall,
+        opts.diversify,
+        None,
+        M_ALL,
+    );
+    let baseline_m = baseline_m.average();
     eprintln!(
         "[grid] baseline eval took {:.1}s",
         t_baseline.elapsed().as_secs_f32()
@@ -54,6 +65,7 @@ pub(crate) fn run_grid(knobs: &[KnobSpec], opts: GridOptions) -> anyhow::Result<
 
     let mut best = baseline.clone();
     let mut best_score = baseline_m.ndcg_at_k;
+    let mut best_cache: ScoreCache = baseline_cache;
     let mut evals_done: usize = 0;
 
     // Single-knob passes with adaptive scaling.
@@ -71,15 +83,18 @@ pub(crate) fn run_grid(knobs: &[KnobSpec], opts: GridOptions) -> anyhow::Result<
                     let delta = raw_delta * scale;
                     let mut trial = best.clone();
                     (k.apply)(&mut trial, delta);
-                    let m = score_with(
+                    let prev_cache = if opts.diversify { None } else { Some(&best_cache) };
+                    let (m_raw, trial_cache) = score_with_cache(
                         &dataset,
                         &trial,
                         now,
                         top_k_ndcg,
                         top_k_recall,
                         opts.diversify,
-                    )
-                    .average();
+                        prev_cache,
+                        k.invalidates,
+                    );
+                    let m = m_raw.average();
                     pass_evals += 1;
                     evals_done += 1;
                     if m.ndcg_at_k > best_score + 1e-4 {
@@ -89,6 +104,7 @@ pub(crate) fn run_grid(knobs: &[KnobSpec], opts: GridOptions) -> anyhow::Result<
                         );
                         best = trial;
                         best_score = m.ndcg_at_k;
+                        best_cache = trial_cache;
                         pass_changed = true;
                     }
                     if pass_evals % heartbeat_every == 0 {
@@ -112,7 +128,7 @@ pub(crate) fn run_grid(knobs: &[KnobSpec], opts: GridOptions) -> anyhow::Result<
         }
     }
 
-    // Paired sweep over known-correlated knobs.
+    // Paired sweep over known-correlated knobs. Two knobs together → union mask.
     if opts.run_paired || opts.pairs_only {
         eprintln!("\n[grid] paired sweep over {} known-correlated pairs", PAIRED_KNOBS.len());
         let pair_scale = if opts.pairs_only { 1.0 } else { 0.5 };
@@ -123,19 +139,23 @@ pub(crate) fn run_grid(knobs: &[KnobSpec], opts: GridOptions) -> anyhow::Result<
             };
             let da = ka.probes.iter().map(|v| v.abs()).fold(f32::INFINITY, f32::min);
             let db = kb.probes.iter().map(|v| v.abs()).fold(f32::INFINITY, f32::min);
+            let pair_mask = ka.invalidates | kb.invalidates;
             for (sa, sb) in [(1.0, 1.0), (1.0, -1.0), (-1.0, 1.0), (-1.0, -1.0)] {
                 let mut trial = best.clone();
                 (ka.apply)(&mut trial, sa * da * pair_scale);
                 (kb.apply)(&mut trial, sb * db * pair_scale);
-                let m = score_with(
+                let prev_cache = if opts.diversify { None } else { Some(&best_cache) };
+                let (m_raw, trial_cache) = score_with_cache(
                     &dataset,
                     &trial,
                     now,
                     top_k_ndcg,
                     top_k_recall,
                     opts.diversify,
-                )
-                .average();
+                    prev_cache,
+                    pair_mask,
+                );
+                let m = m_raw.average();
                 if m.ndcg_at_k > best_score + 1e-4 {
                     eprintln!(
                         "pair: ({} {:+.3}, {} {:+.3})  NDCG@{top_k_ndcg} {:.4} -> {:.4}",
@@ -148,6 +168,7 @@ pub(crate) fn run_grid(knobs: &[KnobSpec], opts: GridOptions) -> anyhow::Result<
                     );
                     best = trial;
                     best_score = m.ndcg_at_k;
+                    best_cache = trial_cache;
                 }
             }
         }
@@ -165,15 +186,18 @@ pub(crate) fn run_grid(knobs: &[KnobSpec], opts: GridOptions) -> anyhow::Result<
             }
             let mut trial = best.clone();
             (ck.apply)(&mut trial, cand);
-            let m = score_with(
+            let prev_cache = if opts.diversify { None } else { Some(&best_cache) };
+            let (m_raw, trial_cache) = score_with_cache(
                 &dataset,
                 &trial,
                 now,
                 top_k_ndcg,
                 top_k_recall,
                 opts.diversify,
-            )
-            .average();
+                prev_cache,
+                ck.invalidates,
+            );
+            let m = m_raw.average();
             if m.ndcg_at_k > best_score + 1e-4 {
                 eprintln!(
                     "categorical: {} = \"{cand}\"  NDCG@{top_k_ndcg} {:.4} -> {:.4}",
@@ -181,12 +205,23 @@ pub(crate) fn run_grid(knobs: &[KnobSpec], opts: GridOptions) -> anyhow::Result<
                 );
                 best = trial;
                 best_score = m.ndcg_at_k;
+                best_cache = trial_cache;
             }
         }
     }
 
-    let final_m =
-        score_with(&dataset, &best, now, top_k_ndcg, top_k_recall, opts.diversify).average();
+    // Final eval — use the cached path (or full rebuild on diversify).
+    let (final_m_raw, _) = score_with_cache(
+        &dataset,
+        &best,
+        now,
+        top_k_ndcg,
+        top_k_recall,
+        opts.diversify,
+        None,
+        M_ALL,
+    );
+    let final_m = final_m_raw.average();
     println!();
     print_metrics("best", &final_m, top_k_ndcg, top_k_recall);
     println!("\n[best priors — non-default values]");

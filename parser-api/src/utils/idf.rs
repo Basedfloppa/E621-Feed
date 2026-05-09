@@ -84,6 +84,31 @@ impl IdfIndex {
         v.unwrap_or(0)
     }
 
+    /// Raw document-frequency for a tag — used by calibrate to pre-resolve
+    /// post features once at prep time so the hot scoring loop doesn't
+    /// HashMap-lookup the same tag repeatedly across grid probes.
+    #[inline]
+    pub fn df_for(&self, tag: &str) -> i64 {
+        self.lookup_df(tag)
+    }
+
+    /// Apply the IDF transform from a pre-resolved raw DF count. Mirrors
+    /// `idf_tempered` exactly but skips the `lookup_df` HashMap probe.
+    #[inline]
+    pub fn idf_tempered_from_df(
+        &self,
+        df_raw: i64,
+        df_floor: f32,
+        idf_max: f32,
+        rsj: f32,
+        lambda: f32,
+        alpha: f32,
+    ) -> f32 {
+        let raw = Self::compute_idf(df_raw, self.n_posts, df_floor, idf_max, rsj);
+        let blended = 1.0 + lambda.clamp(0.0, 1.0) * (raw - 1.0);
+        blended.powf(alpha.clamp(0.0, 1.0))
+    }
+
     /// Raw IDF — debug/inspection only; scoring goes through `idf_tempered`.
     #[inline]
     pub fn idf_raw(&self, tag: &str, df_floor: f32, idf_max: f32, rsj: f32) -> f32 {

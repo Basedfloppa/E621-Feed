@@ -10,17 +10,25 @@ use e621_account_parser_api::models::{
     cfg, AccountMediaStat, AccountPreferenceProfile, AccountQualityProfile, AccountRatingStat,
     AccountRecencyProfile, Post, TagCount,
 };
-use e621_account_parser_api::utils::{IdfIndex, TagRelationGraph};
+use e621_account_parser_api::utils::{CachedPostFeatures, IdfIndex, TagRelationGraph};
 
 use crate::options::{GridOptions, NegMode};
 use crate::sampling::{sample_negatives_mixed, sample_negatives_uniform, split_train_test};
 
 /// Per-account state needed to score (test ∪ negatives) under any priors.
+///
+/// `test_posts` / `neg_posts` are kept for the diversify pass (which
+/// needs full `Post` data) and as the source for `test_features` /
+/// `neg_features`. The cached features array is the hot input the grid
+/// scoring loop reads — pre-resolved tag IDs / df values shave HashMap
+/// lookups out of every probe.
 pub(crate) struct AccountFixture {
     pub(crate) profile: AccountPreferenceProfile,
     pub(crate) tags: Vec<TagCount>,
     pub(crate) test_posts: Vec<Post>,
     pub(crate) neg_posts: Vec<Post>,
+    pub(crate) test_features: Vec<CachedPostFeatures>,
+    pub(crate) neg_features: Vec<CachedPostFeatures>,
     pub(crate) test_count: usize,
 }
 
@@ -209,11 +217,26 @@ pub(crate) fn prepare_eval_dataset(opts: &GridOptions) -> anyhow::Result<EvalDat
         let test_count = test_posts.len();
 
         posts_hydrated += test_posts.len() + neg_posts.len();
+
+        // Pre-resolve post tags once so the grid scoring loop reads
+        // (group, lc, df_raw, global_tid) directly without HashMap
+        // lookups against IDF / global_relation per probe.
+        let test_features: Vec<CachedPostFeatures> = test_posts
+            .iter()
+            .map(|p| CachedPostFeatures::from_post(p, &idf, &global_relation))
+            .collect();
+        let neg_features: Vec<CachedPostFeatures> = neg_posts
+            .iter()
+            .map(|p| CachedPostFeatures::from_post(p, &idf, &global_relation))
+            .collect();
+
         fixtures.push(AccountFixture {
             profile,
             tags,
             test_posts,
             neg_posts,
+            test_features,
+            neg_features,
             test_count,
         });
 

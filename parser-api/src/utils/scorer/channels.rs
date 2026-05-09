@@ -11,7 +11,7 @@ use super::util::{
 use super::Group;
 
 impl<'a> ScoringContext<'a> {
-    pub(super) fn tag_similarity(&self, post: &Post) -> f32 {
+    pub fn tag_similarity(&self, post: &Post) -> f32 {
         let mut dot = 0.0f32;
         let mut p_norm_sq = 0.0f32;
         let mut overlap = 0u32;
@@ -82,7 +82,7 @@ impl<'a> ScoringContext<'a> {
         ((1.0 - blend) * cosine + blend * jaccard).clamp(0.0, 1.0)
     }
 
-    pub(super) fn quality_fit(&self, post: &Post) -> f32 {
+    pub fn quality_fit(&self, post: &Post) -> f32 {
         let p = self.priors;
         let exp = p.one_sided_ratio_exp;
         let absolute = sigmoid(
@@ -110,7 +110,7 @@ impl<'a> ScoringContext<'a> {
         )
     }
 
-    pub(super) fn popularity_fit(&self, post: &Post) -> f32 {
+    pub fn popularity_fit(&self, post: &Post) -> f32 {
         let p = self.priors;
         let exp = p.one_sided_ratio_exp;
         let fav_fit = one_sided_ratio(
@@ -133,7 +133,7 @@ impl<'a> ScoringContext<'a> {
         )
     }
 
-    pub(super) fn rating_fit(&self, post: &Post) -> f32 {
+    pub fn rating_fit(&self, post: &Post) -> f32 {
         let rating = post.rating.to_string();
         let matched = self
             .profile
@@ -155,7 +155,7 @@ impl<'a> ScoringContext<'a> {
         )
     }
 
-    pub(super) fn media_fit(&self, post: &Post) -> f32 {
+    pub fn media_fit(&self, post: &Post) -> f32 {
         let media = post.media_type();
         let matched = self
             .profile
@@ -177,7 +177,7 @@ impl<'a> ScoringContext<'a> {
         )
     }
 
-    pub(super) fn interaction_fit(&self, post: &Post) -> (f32, bool) {
+    pub fn interaction_fit(&self, post: &Post) -> (f32, bool) {
         let mut total_weight = 0.0f32;
         let mut weighted = 0.0f32;
         let mut strong_neg = false;
@@ -241,7 +241,7 @@ impl<'a> ScoringContext<'a> {
         (score, strong_neg)
     }
 
-    pub(super) fn tag_relation_fit(&self, post: &Post) -> f32 {
+    pub fn tag_relation_fit(&self, post: &Post) -> f32 {
         let w_g_cfg = self.priors.tag_relation_w_global.max(0.0);
         let w_u_cfg = self.priors.tag_relation_w_personal.max(0.0);
         if w_g_cfg + w_u_cfg <= 0.0 {
@@ -393,7 +393,7 @@ impl<'a> ScoringContext<'a> {
         }
     }
 
-    pub(super) fn recency_fit(&self, age_days: f32) -> f32 {
+    pub fn recency_fit(&self, age_days: f32) -> f32 {
         let p = self.priors;
         // Class D v5.3: 2-piece kernel.
         let tau = if !p.recency_tau_recent.is_nan()

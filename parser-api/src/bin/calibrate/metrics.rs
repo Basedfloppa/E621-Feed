@@ -38,7 +38,7 @@ impl Metrics {
 
 /// Bounded rayon pool. `0 = auto = nproc/2`, configurable via
 /// `backtest.calibrate_threads`. Built once on first call.
-fn pool() -> &'static ThreadPool {
+pub(crate) fn pool() -> &'static ThreadPool {
     static POOL: OnceLock<ThreadPool> = OnceLock::new();
     POOL.get_or_init(|| {
         let cores = std::thread::available_parallelism()
@@ -60,31 +60,13 @@ fn pool() -> &'static ThreadPool {
 }
 
 /// Score every cached fixture under `priors`. `now` is supplied by the
-/// caller so a grid run can freeze the wall-clock once and have all
-/// probes see identical post-ages.
+/// caller so a single eval run can freeze the wall-clock and have all
+/// posts see identical ages.
 ///
-/// `progress = true` enables per-batch heartbeats to stderr — useful for
-/// `eval` (single long-running call). The grid loop passes `false` to
-/// avoid drowning the per-probe output in heartbeats.
-pub(crate) fn score_with(
-    dataset: &EvalDataset,
-    priors: &Priors,
-    now: DateTime<Utc>,
-    top_k_ndcg: usize,
-    top_k_recall: usize,
-    diversify: bool,
-) -> Metrics {
-    score_with_opts(
-        dataset,
-        priors,
-        now,
-        top_k_ndcg,
-        top_k_recall,
-        diversify,
-        false,
-    )
-}
-
+/// `progress = true` enables per-batch heartbeats to stderr — used by
+/// `eval` (single long-running call). The grid loop calls
+/// [`crate::cache::score_with_cache`] instead so probes can skip
+/// recomputing channels they don't invalidate.
 pub(crate) fn score_with_progress(
     dataset: &EvalDataset,
     priors: &Priors,
@@ -219,6 +201,22 @@ pub(crate) fn print_metrics(label: &str, m: &Metrics, top_k_ndcg: usize, top_k_r
         "[{label}] N={}  NDCG@{top_k_ndcg}={:.4}  Recall@{top_k_recall}={:.4}  MRR={:.4}",
         m.n_accounts, m.ndcg_at_k, m.recall_at_k, m.mrr
     );
+}
+
+pub(crate) fn ndcg_at_k_pub(ranked: &[(i64, f32, bool)], k: usize) -> f64 {
+    ndcg_at_k(ranked, k)
+}
+
+pub(crate) fn recall_at_k_pub(
+    ranked: &[(i64, f32, bool)],
+    k: usize,
+    total_positives: usize,
+) -> f64 {
+    recall_at_k(ranked, k, total_positives)
+}
+
+pub(crate) fn mrr_pub(ranked: &[(i64, f32, bool)]) -> f64 {
+    mrr(ranked)
 }
 
 fn ndcg_at_k(ranked: &[(i64, f32, bool)], k: usize) -> f64 {

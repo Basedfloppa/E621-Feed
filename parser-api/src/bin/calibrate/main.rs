@@ -12,6 +12,7 @@ use chrono::Utc;
 use e621_account_parser_api::db;
 use e621_account_parser_api::models::{cfg, default_path, reload_from};
 
+mod cache;
 mod dataset;
 mod grid;
 mod knobs;
