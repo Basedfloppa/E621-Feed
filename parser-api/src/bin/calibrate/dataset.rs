@@ -19,6 +19,33 @@ use crate::sampling::{
     sample_negatives_mixed, sample_negatives_uniform, split_train_test, split_train_test_time,
 };
 
+/// Best-effort current RSS in MB. Returns `None` on platforms without
+/// `/proc/self/statm` (i.e. anything but Linux). Two values come back:
+///   * `rss_mb` — resident set size (what the kernel actually has us
+///     using right now).
+///   * `vsz_mb` — virtual size (allocator + mapped files; useful to
+///     spot huge un-touched HashMap capacity).
+fn rss_mb() -> Option<(f64, f64)> {
+    let s = std::fs::read_to_string("/proc/self/statm").ok()?;
+    let mut it = s.split_whitespace();
+    let vsz_pages: u64 = it.next()?.parse().ok()?;
+    let rss_pages: u64 = it.next()?.parse().ok()?;
+    let page_kb = 4.0; // Linux default; close enough for the log line.
+    Some((
+        (rss_pages as f64) * page_kb / 1024.0,
+        (vsz_pages as f64) * page_kb / 1024.0,
+    ))
+}
+
+/// Print one `[mem]` line with the current RSS at this point in prep.
+/// Cheap enough to call at every major step; `/proc/self/statm` is a
+/// single 5-byte read.
+fn log_mem(label: &str) {
+    if let Some((rss, vsz)) = rss_mb() {
+        eprintln!("[mem] {label}: RSS={rss:.0} MB, VSZ={vsz:.0} MB");
+    }
+}
+
 /// Per-account state needed to score (test ∪ negatives) under any priors.
 ///
 /// `test_features` / `neg_features` are the hot scoring input — tag IDs
@@ -116,10 +143,13 @@ pub(crate) fn prepare_eval_dataset(opts: &GridOptions) -> anyhow::Result<EvalDat
         negative_ratio,
     );
 
+    log_mem("prep start");
+
     let t = std::time::Instant::now();
     eprintln!("[prep] loading IDF index...");
     let idf = IdfIndex::from_db().map_err(|e| anyhow::anyhow!("idf load: {e}"))?;
     eprintln!("[prep]   IDF loaded in {:.1}s", t.elapsed().as_secs_f32());
+    log_mem("after IDF load");
 
     let t = std::time::Instant::now();
     eprintln!("[prep] loading global tag-relation graph...");
@@ -131,6 +161,7 @@ pub(crate) fn prepare_eval_dataset(opts: &GridOptions) -> anyhow::Result<EvalDat
         global_relation.n_tags(),
         global_relation.n_pairs(),
     );
+    log_mem("after global graph load");
     let t = std::time::Instant::now();
     let catalog: CatalogIndex = match opts.neg_mode {
         NegMode::Mixed => {
@@ -317,6 +348,7 @@ pub(crate) fn prepare_eval_dataset(opts: &GridOptions) -> anyhow::Result<EvalDat
                 posts_hydrated,
                 t.elapsed().as_secs_f32()
             );
+            log_mem(&format!("after {} accounts", fixtures.len()));
         }
     }
 
@@ -326,6 +358,7 @@ pub(crate) fn prepare_eval_dataset(opts: &GridOptions) -> anyhow::Result<EvalDat
         posts_hydrated,
         t.elapsed().as_secs_f32()
     );
+    log_mem("after all fixtures hydrated");
 
     // Freeze the global tag-relation graph. After this, only id-keyed
     // queries (`cooc_by_id` / `marginal_by_id`) are made against it
@@ -356,6 +389,8 @@ pub(crate) fn prepare_eval_dataset(opts: &GridOptions) -> anyhow::Result<EvalDat
         t_freeze.elapsed().as_secs_f32(),
         global_queryable.len()
     );
+    drop(global_queryable);
+    log_mem("after global graph freeze");
 
     Ok(EvalDataset {
         idf,

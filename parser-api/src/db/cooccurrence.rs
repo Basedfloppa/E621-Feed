@@ -137,9 +137,17 @@ pub fn load_global_tag_relation() -> rusqlite::Result<crate::utils::TagRelationG
     let pass1_secs = t0.elapsed().as_secs_f32();
 
     // ---- Pass 2: tag_cooccurrence raw 3-int scan, no JOIN -----------------
+    // Build pairs directly into a Vec and hand them to TagRelationGraph
+    // as a frozen sorted slice — the alternative (insert_pair_by_id into
+    // a Hot HashMap, then maybe freeze later) holds ~2× the memory peak
+    // for the same data because each `HashMap` slot is ~32 B vs ~12 B
+    // for a `(u32,u32,u32)` tuple. On a multi-million-pair catalog
+    // graph that's the difference between fitting and OOM-killing the
+    // calibrate prep step.
     let t_cooc = std::time::Instant::now();
     let mut cooc_rows = 0u64;
     let mut cooc_skipped = 0u64;
+    let mut staged: Vec<(crate::utils::TagId, crate::utils::TagId, u32)> = Vec::new();
     {
         let mut stmt = conn.prepare(
             "SELECT tag1_id, tag2_id, cooc_count FROM tag_cooccurrence WHERE cooc_count >= ?1",
@@ -155,11 +163,15 @@ pub fn load_global_tag_relation() -> rusqlite::Result<crate::utils::TagRelationG
             let (sid1, sid2, count) = r?;
             cooc_rows += 1;
             match (sqlite_to_local.get(&sid1), sqlite_to_local.get(&sid2)) {
-                (Some(&a), Some(&b)) => graph.insert_pair_by_id(a, b, count),
+                (Some(&a), Some(&b)) if a != b => {
+                    let c = count.max(0).min(u32::MAX as i64) as u32;
+                    staged.push((a, b, c));
+                }
                 _ => cooc_skipped += 1,
             }
         }
     }
+    graph.set_pairs_frozen_vec(staged);
     let pass2_secs = t_cooc.elapsed().as_secs_f32();
 
     info!(

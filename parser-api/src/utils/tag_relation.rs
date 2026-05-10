@@ -241,32 +241,86 @@ impl TagRelationGraph {
         self.freeze_inner(min_cooc, Some(queryable_tids));
     }
 
+    /// Bypass the Hot HashMap entirely: take ownership of a `Vec` of
+    /// pre-resolved `(TagId, TagId, count)` triples and store them
+    /// directly as `PairStorage::Frozen`. Pairs may arrive in any
+    /// order; this method canonicalises endpoints, sorts, and
+    /// in-place coalesces adjacent duplicates without re-allocating.
+    ///
+    /// Used by `db::load_global_tag_relation` to skip the multi-GB
+    /// HashMap allocation peak when loading a multi-million-pair
+    /// catalog graph — prod doesn't need string-keyed lookups against
+    /// the global graph after dataset prep, only id-keyed cooc/marginal
+    /// queries.
+    pub fn set_pairs_frozen_vec(&mut self, mut v: Vec<(TagId, TagId, u32)>) {
+        v.retain(|&(a, b, _)| a != b);
+        for entry in v.iter_mut() {
+            if entry.0 > entry.1 {
+                let (a, b, c) = (entry.1, entry.0, entry.2);
+                entry.0 = a;
+                entry.1 = b;
+                entry.2 = c;
+            }
+        }
+        v.sort_by_key(|&(a, b, _)| (a, b));
+        // In-place coalesce of adjacent duplicate pairs (sum counts).
+        let mut write = 0usize;
+        for read in 0..v.len() {
+            if write > 0 && v[write - 1].0 == v[read].0 && v[write - 1].1 == v[read].1 {
+                v[write - 1].2 = v[write - 1].2.saturating_add(v[read].2);
+            } else {
+                v[write] = v[read];
+                write += 1;
+            }
+        }
+        v.truncate(write);
+        v.shrink_to_fit();
+        self.pairs = PairStorage::Frozen(v);
+    }
+
     fn freeze_inner(
         &mut self,
         min_cooc: i64,
         queryable: Option<&std::collections::HashSet<TagId>>,
     ) {
-        let min_cooc = min_cooc.max(1);
-        if let PairStorage::Hot(map) = std::mem::take(&mut self.pairs) {
-            let mut v: Vec<(TagId, TagId, u32)> = map
+        let min_cooc = min_cooc.max(1) as u32;
+        // Pull both shapes through one filtering pass — lets calibrate
+        // call freeze a second time after the global graph was already
+        // loaded directly into Frozen (e.g. to apply the cross-account
+        // queryable filter).
+        let existing = std::mem::take(&mut self.pairs);
+        let mut filtered: Vec<(TagId, TagId, u32)> = match existing {
+            PairStorage::Hot(map) => map
                 .into_iter()
-                .filter(|&((a, b), c)| {
+                .filter_map(|((a, b), c)| {
+                    if c < min_cooc as i64 {
+                        return None;
+                    }
+                    if let Some(q) = queryable {
+                        if !q.contains(&a) || !q.contains(&b) {
+                            return None;
+                        }
+                    }
+                    Some((a, b, c.max(0).min(u32::MAX as i64) as u32))
+                })
+                .collect(),
+            PairStorage::Frozen(v) => v
+                .into_iter()
+                .filter(|&(a, b, c)| {
                     if c < min_cooc {
                         return false;
                     }
                     if let Some(q) = queryable {
-                        if !q.contains(&a) || !q.contains(&b) {
-                            return false;
-                        }
+                        return q.contains(&a) && q.contains(&b);
                     }
                     true
                 })
-                .map(|((a, b), c)| (a, b, c.min(u32::MAX as i64) as u32))
-                .collect();
-            v.sort_by_key(|&(a, b, _)| (a, b));
-            v.shrink_to_fit();
-            self.pairs = PairStorage::Frozen(v);
-        }
+                .collect(),
+        };
+        filtered.sort_by_key(|&(a, b, _)| (a, b));
+        filtered.shrink_to_fit();
+        self.pairs = PairStorage::Frozen(filtered);
+
         for bucket in &mut self.tag_to_id {
             bucket.clear();
             bucket.shrink_to_fit();
