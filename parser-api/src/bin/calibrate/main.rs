@@ -9,6 +9,18 @@
 //! shares one hydration pass: `calibrate eval grid` preps the dataset
 //! once, runs the eval, then runs the grid.
 
+// Switch to jemalloc on Linux. The calibrate hydration path churns
+// hundreds of small `String` allocations per Post (tags / description /
+// sources / pools) and frees them once the per-account fixture is
+// extracted. ptmalloc (glibc's default) holds those freed pages in
+// per-arena free lists rather than returning them to the OS, so RSS
+// climbs ~20 MB per account even though steady-state per-fixture data
+// is < 1 MB. jemalloc trims arenas aggressively and brings RSS down
+// to within ~1.5× of the actual data footprint.
+#[cfg(target_os = "linux")]
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 use std::env;
 
 use chrono::{DateTime, Utc};
