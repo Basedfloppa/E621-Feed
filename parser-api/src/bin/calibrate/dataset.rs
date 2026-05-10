@@ -123,7 +123,7 @@ pub(crate) fn prepare_eval_dataset(opts: &GridOptions) -> anyhow::Result<EvalDat
 
     let t = std::time::Instant::now();
     eprintln!("[prep] loading global tag-relation graph...");
-    let global_relation =
+    let mut global_relation =
         db::load_global_tag_relation().map_err(|e| anyhow::anyhow!("global relation: {e}"))?;
     eprintln!(
         "[prep]   global relation loaded in {:.1}s ({} tags, {} pairs)",
@@ -325,6 +325,36 @@ pub(crate) fn prepare_eval_dataset(opts: &GridOptions) -> anyhow::Result<EvalDat
         fixtures.len(),
         posts_hydrated,
         t.elapsed().as_secs_f32()
+    );
+
+    // Freeze the global tag-relation graph. After this, only id-keyed
+    // queries (`cooc_by_id` / `marginal_by_id`) are made against it
+    // (the cached scoring path); `tag_id(g, &str)` is no longer needed
+    // because every fixture's CachedPostFeatures already carries its
+    // pre-resolved `global_tid`. The queryable set is the union of
+    // every (test ∪ neg) tag's `global_tid` across all fixtures —
+    // pairs unreachable from that set are dead weight.
+    let t_freeze = std::time::Instant::now();
+    let pairs_before = global_relation.n_pairs();
+    let mut global_queryable: std::collections::HashSet<
+        e621_account_parser_api::utils::TagId,
+    > = std::collections::HashSet::new();
+    for fx in &fixtures {
+        for cf in fx.test_features.iter().chain(fx.neg_features.iter()) {
+            for ct in &cf.tags {
+                if let Some(tid) = ct.global_tid {
+                    global_queryable.insert(tid);
+                }
+            }
+        }
+    }
+    global_relation.freeze_with_query_set(&global_queryable, 2);
+    eprintln!(
+        "[prep] global graph frozen: {} → {} pairs ({:.1}s, queryable tids={})",
+        pairs_before,
+        global_relation.n_pairs(),
+        t_freeze.elapsed().as_secs_f32(),
+        global_queryable.len()
     );
 
     Ok(EvalDataset {
