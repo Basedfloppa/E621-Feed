@@ -28,12 +28,66 @@ const GROUP_COUNT: usize = 7;
 /// `tag_to_id` is a per-group array of `HashMap<String, TagId>` (rather than a
 /// single `HashMap<(GroupKey, String), TagId>`) so lookups can pass a borrowed
 /// `&str` directly — no transient `(u8, String)` tuple per call.
+///
+/// `pairs` has two shapes. While the graph is being built it sits in a
+/// `HashMap<(TagId, TagId), i64>` for O(1) accumulation. After
+/// [`Self::freeze`] is called (calibrate calls it once per per-account
+/// graph after `CachedPostFeatures` are resolved), pairs are compacted
+/// into a sorted `Vec<(TagId, TagId, i64)>` — 16 B/pair vs ~32-48 B in
+/// the HashMap, which cut per-account memory ~3× and let 1000-account
+/// runs fit in 15 GB again. The query method handles both shapes.
 #[derive(Debug, Clone, Default)]
 pub struct TagRelationGraph {
     tag_to_id: [HashMap<String, TagId>; GROUP_COUNT],
-    pairs: HashMap<(TagId, TagId), i64>,
+    pairs: PairStorage,
     marginals: Vec<i64>,
     n_posts: i64,
+}
+
+#[derive(Debug, Clone)]
+enum PairStorage {
+    /// Build-time / mutable form. All inserts go here.
+    Hot(HashMap<(TagId, TagId), i64>),
+    /// Query-only form. Sorted by `(a, b)`; lookup is binary search.
+    /// Created by [`TagRelationGraph::freeze`]; inserts after freeze panic.
+    Frozen(Vec<(TagId, TagId, i64)>),
+}
+
+impl Default for PairStorage {
+    fn default() -> Self {
+        PairStorage::Hot(HashMap::new())
+    }
+}
+
+impl PairStorage {
+    fn len(&self) -> usize {
+        match self {
+            PairStorage::Hot(m) => m.len(),
+            PairStorage::Frozen(v) => v.len(),
+        }
+    }
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+    fn get(&self, key: (TagId, TagId)) -> i64 {
+        match self {
+            PairStorage::Hot(m) => *m.get(&key).unwrap_or(&0),
+            PairStorage::Frozen(v) => v
+                .binary_search_by(|&(a, b, _)| (a, b).cmp(&key))
+                .map(|i| v[i].2)
+                .unwrap_or(0),
+        }
+    }
+    fn entry_add(&mut self, key: (TagId, TagId), delta: i64) {
+        match self {
+            PairStorage::Hot(m) => {
+                *m.entry(key).or_insert(0) += delta;
+            }
+            PairStorage::Frozen(_) => {
+                panic!("insert on frozen TagRelationGraph; freeze() is one-way");
+            }
+        }
+    }
 }
 
 impl TagRelationGraph {
@@ -44,7 +98,7 @@ impl TagRelationGraph {
     pub fn with_posts(n_posts: i64) -> Self {
         Self {
             tag_to_id: Default::default(),
-            pairs: HashMap::new(),
+            pairs: PairStorage::default(),
             marginals: Vec::new(),
             n_posts: n_posts.max(0),
         }
@@ -83,7 +137,7 @@ impl TagRelationGraph {
             return;
         }
         let key = if a < b { (a, b) } else { (b, a) };
-        *self.pairs.entry(key).or_insert(0) += count;
+        self.pairs.entry_add(key, count);
     }
 
     /// Insert a pair using pre-resolved `TagId`s — caller has already
@@ -95,7 +149,7 @@ impl TagRelationGraph {
             return;
         }
         let key = if a < b { (a, b) } else { (b, a) };
-        *self.pairs.entry(key).or_insert(0) += count;
+        self.pairs.entry_add(key, count);
     }
 
     pub fn set_marginal(&mut self, g: GroupKey, t: &str, count: i64) {
@@ -112,7 +166,7 @@ impl TagRelationGraph {
             return self.marginal_by_id(a);
         }
         let key = if a < b { (a, b) } else { (b, a) };
-        *self.pairs.get(&key).unwrap_or(&0)
+        self.pairs.get(key)
     }
 
     #[inline]
@@ -142,6 +196,42 @@ impl TagRelationGraph {
     #[inline]
     pub fn is_empty(&self) -> bool {
         self.pairs.is_empty() && self.marginals.is_empty() && self.n_posts == 0
+    }
+
+    /// Compact mutable build state into query-only form. After this call:
+    ///  * pairs occupy `Vec<(TagId, TagId, i64)>` (16 B/entry) instead
+    ///    of `HashMap<(TagId, TagId), i64>` (~32–48 B/entry incl.
+    ///    bucket overhead) — ~2× memory drop on large per-account graphs;
+    ///  * pairs with `count < min_cooc` are **dropped**. The default
+    ///    production `tag_relation_min_cooc = 2` already filters
+    ///    singleton pairs at scoring time, so passing `min_cooc = 2`
+    ///    here is a no-op for the prod pipeline and prunes the long
+    ///    tail of one-off cooccurrences (~30-50% of pair count on
+    ///    typical user graphs). Pass `min_cooc = 1` to keep everything;
+    ///  * `tag_to_id` is cleared because the typical post-build call
+    ///    pattern goes through `marginal_by_id` / `cooc_by_id` (callers
+    ///    pre-resolved every `TagId` they need before freeze).
+    ///
+    /// Inserts after freeze panic. The global tag-relation graph in
+    /// production is **not** frozen — its prod scoring path needs
+    /// `tag_id(g, &str)` per request.
+    pub fn freeze(&mut self, min_cooc: i64) {
+        let min_cooc = min_cooc.max(1);
+        if let PairStorage::Hot(map) = std::mem::take(&mut self.pairs) {
+            let mut v: Vec<(TagId, TagId, i64)> = map
+                .into_iter()
+                .filter(|&(_, c)| c >= min_cooc)
+                .map(|((a, b), c)| (a, b, c))
+                .collect();
+            v.sort_by_key(|&(a, b, _)| (a, b));
+            v.shrink_to_fit();
+            self.pairs = PairStorage::Frozen(v);
+        }
+        for bucket in &mut self.tag_to_id {
+            bucket.clear();
+            bucket.shrink_to_fit();
+        }
+        self.marginals.shrink_to_fit();
     }
 
     /// Build a per-account graph from a slice of posts (e.g. the train

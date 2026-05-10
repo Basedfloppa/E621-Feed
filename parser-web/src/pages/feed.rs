@@ -15,7 +15,7 @@ use crate::pages::UserInfo;
 
 const PIXELS_BEFORE_REFETCH: f64 = 1000.0;
 /// Stop auto-fetching after this many consecutive empty/all-duplicate pages,
-/// so an exhausted catalog or a strict affinity filter can't loop forever.
+/// so an exhausted catalog or a strict per-page cutoff can't loop forever.
 const MAX_CONSECUTIVE_EMPTY_PAGES: u32 = 10;
 /// Stop auto-fetching after this many consecutive backend errors. Without
 /// this, a scrolling user whose first request 500'd would re-trigger the
@@ -79,12 +79,17 @@ pub fn feed_page() -> Html {
             (js_sys::Math::random() * 1_000_000_000.0) as u64
         )
     });
-    let affinity = use_state(|| {
+    // Per-page bottom-cutoff in percent (0..=95). 0 = show everything,
+    // 30 = drop the bottom 30% of each fetched page by raw score, 95 =
+    // keep only the top 5%. Decoupled from the model's raw `score` so
+    // future scoring changes don't shift what the slider means.
+    let cutoff_pct = use_state(|| {
         window()
             .and_then(|w| w.local_storage().ok().flatten())
-            .and_then(|s| s.get_item("affinity_threshold").ok().flatten())
+            .and_then(|s| s.get_item("page_cutoff_pct").ok().flatten())
             .and_then(|v| v.parse::<f32>().ok())
             .unwrap_or(0.0)
+            .clamp(0.0, 95.0)
     });
     let grid = use_state(|| {
         let stored = window()
@@ -94,10 +99,10 @@ pub fn feed_page() -> Html {
     });
 
     {
-        let affinity = affinity.clone();
-        use_effect_with(*affinity, move |a: &f32| {
+        let cutoff_pct = cutoff_pct.clone();
+        use_effect_with(*cutoff_pct, move |a: &f32| {
             if let Some(store) = window().and_then(|w| w.local_storage().ok().flatten()) {
-                let _ = store.set_item("affinity_threshold", &a.to_string());
+                let _ = store.set_item("page_cutoff_pct", &a.to_string());
             }
             || ()
         });
@@ -119,7 +124,7 @@ pub fn feed_page() -> Html {
         let is_loading = is_loading.clone();
         let error = error.clone();
         let selected_user = selected_user.clone();
-        let affinity = affinity.clone();
+        let cutoff_pct = cutoff_pct.clone();
         let inflight = inflight.clone();
         let exhausted = exhausted.clone();
         let consecutive_empty = consecutive_empty.clone();
@@ -144,15 +149,13 @@ pub fn feed_page() -> Html {
                 ));
                 return;
             };
-            let mut url = format!(
+            let url = format!(
                 "{}/recommendations/{}?page={}",
                 cfg.backend_domain, user.id, *page
             );
 
-            let value = *affinity;
-            if value > 0.0 {
-                url.push_str(&format!("&affinity_threshold={value}"));
-            }
+            // Captured for the per-page cutoff filter that runs after fetch.
+            let cutoff_value = *cutoff_pct;
 
             inflight.borrow().set(true);
             is_loading.set(true);
@@ -176,8 +179,23 @@ pub fn feed_page() -> Html {
                 match fetch_json::<Vec<ScoredPost>>(&url).await {
                     Ok(mut new_items) => {
                         use std::collections::HashSet;
-                        if value > 0.0 {
-                            new_items.retain(|p| p.score >= value);
+                        // Per-page bottom cutoff: drop the bottom
+                        // `cutoff_value`% of this page by raw score.
+                        // Computed against this page's distribution
+                        // only, so the slider stays meaningful even
+                        // when the model gets more discriminative and
+                        // pushes scores towards the extremes.
+                        if cutoff_value > 0.0 && new_items.len() >= 2 {
+                            let mut sorted: Vec<f32> =
+                                new_items.iter().map(|p| p.score).collect();
+                            sorted.sort_by(|a, b| {
+                                a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+                            });
+                            let frac = (cutoff_value / 100.0).clamp(0.0, 0.99);
+                            let idx =
+                                ((sorted.len() as f32 - 1.0) * frac).round() as usize;
+                            let threshold = sorted[idx.min(sorted.len() - 1)];
+                            new_items.retain(|p| p.score >= threshold);
                         }
                         let mut merged: Vec<ScoredPost> = (*posts).clone();
                         let mut seen: HashSet<i64> = merged.iter().map(|p| p.post.id).collect();
@@ -255,14 +273,15 @@ pub fn feed_page() -> Html {
         );
     }
 
-    // Lowering the affinity threshold should let scrolling fetch again even
-    // if we previously hit the empty-page cap with a stricter filter.
+    // Lowering the per-page cutoff should let scrolling fetch again
+    // even if we previously hit the empty-page cap with a stricter
+    // filter setting.
     {
         let exhausted = exhausted.clone();
         let consecutive_empty = consecutive_empty.clone();
         let consecutive_errors = consecutive_errors.clone();
         let error = error.clone();
-        use_effect_with(*affinity, move |_| {
+        use_effect_with(*cutoff_pct, move |_| {
             exhausted.set(false);
             consecutive_empty.borrow().set(0);
             consecutive_errors.borrow().set(0);
@@ -428,9 +447,9 @@ pub fn feed_page() -> Html {
             <div class="row g-3 align-items-center feed-toolbar">
                 <div class="col-auto feed-affinity-col" id="feed-affinity">
                     <label for="feed-affinity-input" class="form-label mb-1 d-block">
-                        {"Minimum affinity"}
+                        {"Per-page cutoff"}
                         <small class="text-muted ms-1">
-                            { "(0 = show everything, 1 = only perfect matches)" }
+                            { "(% of each page to drop from the bottom by score; 0 = show all)" }
                         </small>
                     </label>
                     <div class="d-flex align-items-center gap-2 flex-wrap">
@@ -439,40 +458,40 @@ pub fn feed_page() -> Html {
                             type="number"
                             class="form-control"
                             style="max-width: 8rem"
-                            value={affinity.to_string()}
-                            step="0.01"
+                            value={cutoff_pct.to_string()}
+                            step="5"
                             min="0"
-                            max="1"
+                            max="95"
                             oninput={{
-                                let affinity = affinity.clone();
+                                let cutoff_pct = cutoff_pct.clone();
                                 Callback::from(move |e: InputEvent| {
                                     if let Some(target) = e.target() {
                                         if let Ok(input) = target.dyn_into::<HtmlInputElement>() {
                                             if let Ok(v) = input.value().parse::<f32>() {
-                                                affinity.set(v.clamp(0.0, 1.0));
+                                                cutoff_pct.set(v.clamp(0.0, 95.0));
                                             }
                                         }
                                     }
                                 })
                             }}
                         />
-                        <div class="btn-group btn-group-sm" role="group" aria-label="Affinity preset">
+                        <div class="btn-group btn-group-sm" role="group" aria-label="Cutoff preset">
                             {
                                 [
-                                    ("Wide", 0.05f32, "Show most posts — good for discovery."),
-                                    ("Balanced", 0.20f32, "Recommended starting point — filters out the least relevant posts."),
-                                    ("Strict", 0.40f32, "Only posts that match your profile well."),
+                                    ("Wide", 0.0f32, "Show every post on the page — good for discovery."),
+                                    ("Balanced", 30.0f32, "Drop the weakest 30% per page — recommended starting point."),
+                                    ("Strict", 60.0f32, "Drop the weakest 60% per page — keep only the top matches."),
                                 ].iter().map(|(label, value, tip)| {
                                     let val = *value;
-                                    let active = (*affinity - val).abs() < 0.005;
-                                    let affinity = affinity.clone();
+                                    let active = (*cutoff_pct - val).abs() < 0.5;
+                                    let cutoff_pct = cutoff_pct.clone();
                                     html! {
                                         <button
                                             type="button"
                                             class={classes!("btn", "btn-outline-secondary", active.then_some("active"))}
                                             title={ *tip }
                                             aria-pressed={active.to_string()}
-                                            onclick={Callback::from(move |_| affinity.set(val))}
+                                            onclick={Callback::from(move |_| cutoff_pct.set(val))}
                                         >
                                             { *label }
                                         </button>
@@ -556,7 +575,7 @@ pub fn feed_page() -> Html {
                 {
                     if !(*is_loading) && (*error).is_none() {
                         let label = if *exhausted {
-                            format!("Loaded {} posts — no more matches above the affinity threshold", posts.len())
+                            format!("Loaded {} posts — nothing left to fetch above the per-page cutoff", posts.len())
                         } else {
                             format!("Loaded {} posts", posts.len())
                         };

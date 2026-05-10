@@ -506,11 +506,14 @@ pub(crate) const GRID_KNOBS: &[KnobSpec] = &[
     // (skipped: `strong_negative_*`, `feedback_decay_*`,
     //  `meta_interaction_weight` — no `feed_interactions` rows in the
     //  synthetic split; tune online once real feedback flows in.)
+    // Lower clamp = 2: per-account user_relation prunes cooc<2 pairs at
+    // build time (memory diet). Probing min_cooc=1 would lie — the graph
+    // simply doesn't have those pairs anymore.
     KnobSpec {
         name: "tag_relation_min_cooc",
         apply: |p, v| {
             let next = (p.tag_relation_min_cooc as f32 + v).round();
-            p.tag_relation_min_cooc = next.clamp(1.0, 20.0) as i64;
+            p.tag_relation_min_cooc = next.clamp(2.0, 20.0) as i64;
         },
         probes: PROBES_INT_TINY,
         invalidates: M_TAG_RELATION,
@@ -521,7 +524,7 @@ pub(crate) const GRID_KNOBS: &[KnobSpec] = &[
         name: "tag_relation_user_min_cooc",
         apply: |p, v| {
             let next = (p.tag_relation_user_min_cooc as f32 + v).round();
-            p.tag_relation_user_min_cooc = next.clamp(1.0, 10.0) as i64;
+            p.tag_relation_user_min_cooc = next.clamp(2.0, 10.0) as i64;
         },
         probes: PROBES_INT_TINY,
         invalidates: M_TAG_RELATION,

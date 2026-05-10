@@ -111,7 +111,7 @@ cargo build --release --bin seed --bin calibrate
 ./target/release/calibrate probe
 
 # 6. Run baseline + full grid in one go (single hydration).
-./target/release/calibrate eval grid split=random with-diversify
+./target/release/calibrate eval grid split=time_causal
 ```
 
 (If you only want one mode, swap step 6 for `calibrate eval ...` or
@@ -320,12 +320,21 @@ calibrate_threads = 0   # 0 = auto (nproc/2). Set explicitly to e.g. 4 to be mor
 
 ### Dataset memory budget (calibrate-only)
 
-- `Post` objects: ~3.5 KB / post → ~770 MB at N=1000 × ~220 posts/account.
-- `CachedPostFeatures`: ~2 KB / post (avg 25 tags × ~80 B/tag) → ~450 MB.
+- `Post` objects (transient, per-iteration): ~3.5 KB / post; dropped at
+  the end of each account's hydration so they don't accumulate.
+- `CachedPostFeatures`: ~2 KB / post (avg 25 tags × ~80 B/tag) → ~450 MB
+  at N=1000 × ~220 posts/account.
+- `DiversityFeatures` (only when `--with-diversify`): ~120 B / post →
+  ~25 MB. Skipped on default no-diversify runs.
+- Per-account `user_relation` tag-relation graph (added v5.7): pairs
+  stored as a sorted `Vec<(u32,u32,i64)>` after `freeze(min_cooc=2)` —
+  16 B / pair, with cooc=1 pairs pruned. Typical: 20-50 K pairs/account
+  → ~0.4-0.8 MB / account → ~400-800 MB at N=1000. (Pre-freeze HashMap
+  form is ~3× larger and lives only during hydration.)
 - `ScoreCache` (channels per post + transient trial cache): ~16 MB peak.
 - Global graph + IDF index: same as production server (~3-5 GB).
 
-Total calibrate peak at N=1000 sits around 6.5 GB on a 15 GB box.
+Total calibrate peak at N=1000 sits around 5-7 GB on a 15 GB box.
 Production server memory is **unaffected** — none of the cached types
 are constructed by the prod scoring path.
 

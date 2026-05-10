@@ -243,7 +243,12 @@ pub(crate) fn prepare_eval_dataset(opts: &GridOptions) -> anyhow::Result<EvalDat
 
         // Per-account user tag-relation graph (cooccurrence on train_posts).
         // Built before features so each cached tag carries a `user_tid`.
-        let user_relation = TagRelationGraph::from_train_posts(&train_posts);
+        let mut user_relation = TagRelationGraph::from_train_posts(&train_posts);
+        // Drop the heavy train-side `Post` structs — graph + profile +
+        // tag-counts already extracted everything we need from them.
+        // Cuts per-iteration peak by the size of `train_posts` while
+        // we still hold test/neg in scope.
+        drop(train_posts);
 
         // Pre-resolve post tags once so the grid scoring loop reads
         // (group, lc, df_raw, global_tid, user_tid) directly without
@@ -260,6 +265,11 @@ pub(crate) fn prepare_eval_dataset(opts: &GridOptions) -> anyhow::Result<EvalDat
                 CachedPostFeatures::from_post_with_user(p, &idf, &global_relation, Some(&user_relation))
             })
             .collect();
+        // Compact pair-storage HashMap → sorted Vec, drop tag_to_id,
+        // prune singleton (cooc=1) pairs. The prod `tag_relation_min_cooc=2`
+        // already discards them at scoring time, so this is a no-op for
+        // the default pipeline; saves ~3-4× per-account graph memory.
+        user_relation.freeze(2);
         // MMR features only when actually needed — they double the per-post
         // memory footprint and the non-diversify path never reads them.
         let diversity_features: Vec<DiversityFeatures> = if opts.diversify {
