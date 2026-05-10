@@ -34,17 +34,24 @@ schemars = { version = "0.8.21", features = ["chrono"] }
 rayon = "1"
 getrandom = "0.2"
 
-# jemalloc — wired in only by the calibrate binary (see
-# `src/bin/calibrate/main.rs`). glibc's default ptmalloc holds many
-# small-allocation arenas hostage on the calibrate hydration path
-# (each account churns ~10K small `String` allocations from `Post`
-# tags/description/sources), pushing RSS to ~20 MB per fixture even
-# though steady-state fixture data is < 1 MB. jemalloc returns memory
-# to the OS far more aggressively and brings RSS within ~1.5× of the
-# data footprint. The crate is dependency-only on Linux because we
-# don't need it elsewhere.
+# jemalloc — opt-in via `--features jemalloc`. glibc's default
+# ptmalloc holds many small-allocation arenas hostage on the calibrate
+# hydration path (each account churns ~10K small `String` allocations
+# from `Post` tags/description/sources), pushing RSS to ~20 MB per
+# fixture. jemalloc trims arenas aggressively and brings RSS within
+# ~1.5× of the actual data footprint.
+#
+# Default-off because building jemalloc-sys needs `make` + a C
+# toolchain on the build host. Enable with:
+#   cargo build --release --bin calibrate --features jemalloc
+# If that's not an option, `MALLOC_ARENA_MAX=2 ./calibrate ...` cuts
+# glibc fragmentation roughly in half at runtime without a rebuild.
+[features]
+default = []
+jemalloc = ["dep:tikv-jemallocator"]
+
 [target.'cfg(target_os = "linux")'.dependencies]
-tikv-jemallocator = "0.6"
+tikv-jemallocator = { version = "0.6", optional = true }
 
 [target.'cfg(debug_assertions)'.dependencies]
 rocket_cors = "0.6.0"

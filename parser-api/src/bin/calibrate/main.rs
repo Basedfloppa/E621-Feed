@@ -9,15 +9,20 @@
 //! shares one hydration pass: `calibrate eval grid` preps the dataset
 //! once, runs the eval, then runs the grid.
 
-// Switch to jemalloc on Linux. The calibrate hydration path churns
-// hundreds of small `String` allocations per Post (tags / description /
-// sources / pools) and frees them once the per-account fixture is
-// extracted. ptmalloc (glibc's default) holds those freed pages in
-// per-arena free lists rather than returning them to the OS, so RSS
-// climbs ~20 MB per account even though steady-state per-fixture data
-// is < 1 MB. jemalloc trims arenas aggressively and brings RSS down
-// to within ~1.5× of the actual data footprint.
-#[cfg(target_os = "linux")]
+// Switch to jemalloc on Linux when the `jemalloc` feature is enabled.
+// Build with `cargo build --release --bin calibrate --features jemalloc`
+// to get it. If your build host lacks `make` / a C toolchain (jemalloc
+// is a C library), leave it off and try `MALLOC_ARENA_MAX=2` /
+// `MALLOC_TRIM_THRESHOLD_=131072` env vars at runtime instead — they
+// cut glibc fragmentation by ~30-50% without a rebuild.
+//
+// Why bother: the calibrate hydration path churns hundreds of small
+// `String` allocations per Post (tags / description / sources) and
+// frees them once the per-account fixture is extracted. ptmalloc holds
+// those freed pages in per-arena free lists rather than returning them
+// to the OS, so RSS climbs ~20 MB per account even though steady-state
+// per-fixture data is < 1 MB.
+#[cfg(all(target_os = "linux", feature = "jemalloc"))]
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
