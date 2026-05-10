@@ -327,10 +327,15 @@ calibrate_threads = 0   # 0 = auto (nproc/2). Set explicitly to e.g. 4 to be mor
 - `DiversityFeatures` (only when `--with-diversify`): ~120 B / post →
   ~25 MB. Skipped on default no-diversify runs.
 - Per-account `user_relation` tag-relation graph (added v5.7): pairs
-  stored as a sorted `Vec<(u32,u32,i64)>` after `freeze(min_cooc=2)` —
-  16 B / pair, with cooc=1 pairs pruned. Typical: 20-50 K pairs/account
-  → ~0.4-0.8 MB / account → ~400-800 MB at N=1000. (Pre-freeze HashMap
-  form is ~3× larger and lives only during hydration.)
+  stored as a sorted `Vec<(u32,u32,u32)>` after
+  `freeze_with_query_set(min_cooc=2)` — 12 B / pair. The freeze drops:
+    1. pairs with `count < min_cooc` (singleton noise),
+    2. pairs whose endpoints don't appear in any (test ∪ neg) post —
+       they would never be queried by `tag_relation_fit_cached` since
+       it walks the *current* post's tags.
+  Typical: 5-20 K pairs / account → ~60-250 KB / account → ~60-250 MB
+  at N=1000. (Pre-freeze HashMap form is ~5-10× larger and lives only
+  during hydration of one account.)
 - `ScoreCache` (channels per post + transient trial cache): ~16 MB peak.
 - Global graph + IDF index: same as production server (~3-5 GB).
 

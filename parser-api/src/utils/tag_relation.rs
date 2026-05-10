@@ -46,11 +46,17 @@ pub struct TagRelationGraph {
 
 #[derive(Debug, Clone)]
 enum PairStorage {
-    /// Build-time / mutable form. All inserts go here.
+    /// Build-time / mutable form. All inserts go here. i64 retained
+    /// because the global graph accumulates from multi-million-row SQL
+    /// scans where intermediate sums could exceed u32.
     Hot(HashMap<(TagId, TagId), i64>),
     /// Query-only form. Sorted by `(a, b)`; lookup is binary search.
-    /// Created by [`TagRelationGraph::freeze`]; inserts after freeze panic.
-    Frozen(Vec<(TagId, TagId, i64)>),
+    /// Counts narrowed to `u32` (12 B/entry vs 16 B with `i64`); the
+    /// final per-pair PMI math casts back to `f32` anyway, and even a
+    /// 6 M-post catalog can't push a single pair's cooc past `u32::MAX`.
+    /// Created by [`TagRelationGraph::freeze`] / `freeze_with_query_set`;
+    /// inserts after freeze panic.
+    Frozen(Vec<(TagId, TagId, u32)>),
 }
 
 impl Default for PairStorage {
@@ -74,7 +80,7 @@ impl PairStorage {
             PairStorage::Hot(m) => *m.get(&key).unwrap_or(&0),
             PairStorage::Frozen(v) => v
                 .binary_search_by(|&(a, b, _)| (a, b).cmp(&key))
-                .map(|i| v[i].2)
+                .map(|i| v[i].2 as i64)
                 .unwrap_or(0),
         }
     }
@@ -199,15 +205,15 @@ impl TagRelationGraph {
     }
 
     /// Compact mutable build state into query-only form. After this call:
-    ///  * pairs occupy `Vec<(TagId, TagId, i64)>` (16 B/entry) instead
-    ///    of `HashMap<(TagId, TagId), i64>` (~32–48 B/entry incl.
-    ///    bucket overhead) — ~2× memory drop on large per-account graphs;
-    ///  * pairs with `count < min_cooc` are **dropped**. The default
-    ///    production `tag_relation_min_cooc = 2` already filters
-    ///    singleton pairs at scoring time, so passing `min_cooc = 2`
-    ///    here is a no-op for the prod pipeline and prunes the long
-    ///    tail of one-off cooccurrences (~30-50% of pair count on
-    ///    typical user graphs). Pass `min_cooc = 1` to keep everything;
+    ///  * pairs occupy `Vec<(TagId, TagId, u32)>` (12 B/entry) instead
+    ///    of `HashMap<(TagId, TagId), i64>` (~32-48 B/entry incl.
+    ///    bucket overhead) — ~3× memory drop on large per-account graphs;
+    ///  * pairs with `count < min_cooc` are **dropped**. Production's
+    ///    default `tag_relation_min_cooc = 2` already filters singleton
+    ///    pairs at scoring time, so passing `min_cooc = 2` here is
+    ///    a no-op for the prod pipeline and prunes the long tail of
+    ///    one-off cooccurrences (~30-50% of pair count on typical
+    ///    user graphs). Pass `min_cooc = 1` to keep everything;
     ///  * `tag_to_id` is cleared because the typical post-build call
     ///    pattern goes through `marginal_by_id` / `cooc_by_id` (callers
     ///    pre-resolved every `TagId` they need before freeze).
@@ -216,12 +222,46 @@ impl TagRelationGraph {
     /// production is **not** frozen — its prod scoring path needs
     /// `tag_id(g, &str)` per request.
     pub fn freeze(&mut self, min_cooc: i64) {
+        self.freeze_inner(min_cooc, None);
+    }
+
+    /// Stricter variant of [`Self::freeze`]: only retain pairs whose
+    /// **both** endpoints are in `queryable_tids`. The calibrate harness
+    /// passes the union of `user_tid`s on (test ∪ neg) cached features
+    /// — pairs with at least one endpoint outside that set will never
+    /// be queried by `tag_relation_fit_cached` (it walks pairs of tags
+    /// from the *current* post being scored), so they're dead weight.
+    /// Cuts another 50–80% off per-account pair counts on typical
+    /// fixtures where train tags far outnumber (test ∪ neg) tags.
+    pub fn freeze_with_query_set(
+        &mut self,
+        queryable_tids: &std::collections::HashSet<TagId>,
+        min_cooc: i64,
+    ) {
+        self.freeze_inner(min_cooc, Some(queryable_tids));
+    }
+
+    fn freeze_inner(
+        &mut self,
+        min_cooc: i64,
+        queryable: Option<&std::collections::HashSet<TagId>>,
+    ) {
         let min_cooc = min_cooc.max(1);
         if let PairStorage::Hot(map) = std::mem::take(&mut self.pairs) {
-            let mut v: Vec<(TagId, TagId, i64)> = map
+            let mut v: Vec<(TagId, TagId, u32)> = map
                 .into_iter()
-                .filter(|&(_, c)| c >= min_cooc)
-                .map(|((a, b), c)| (a, b, c))
+                .filter(|&((a, b), c)| {
+                    if c < min_cooc {
+                        return false;
+                    }
+                    if let Some(q) = queryable {
+                        if !q.contains(&a) || !q.contains(&b) {
+                            return false;
+                        }
+                    }
+                    true
+                })
+                .map(|((a, b), c)| (a, b, c.min(u32::MAX as i64) as u32))
                 .collect();
             v.sort_by_key(|&(a, b, _)| (a, b));
             v.shrink_to_fit();

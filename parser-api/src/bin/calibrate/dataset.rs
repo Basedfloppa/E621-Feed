@@ -266,10 +266,23 @@ pub(crate) fn prepare_eval_dataset(opts: &GridOptions) -> anyhow::Result<EvalDat
             })
             .collect();
         // Compact pair-storage HashMap → sorted Vec, drop tag_to_id,
-        // prune singleton (cooc=1) pairs. The prod `tag_relation_min_cooc=2`
-        // already discards them at scoring time, so this is a no-op for
-        // the default pipeline; saves ~3-4× per-account graph memory.
-        user_relation.freeze(2);
+        // prune singleton (cooc=1) pairs and pairs neither endpoint of
+        // which appears in (test ∪ neg). The prod `tag_relation_min_cooc=2`
+        // already discards singletons at scoring time; pairs unreachable
+        // from the scoring set will never be queried by
+        // `tag_relation_fit_cached` (it iterates pairs of tags from the
+        // current post). Combined: ~10-20× per-account graph memory drop.
+        let mut queryable: std::collections::HashSet<
+            e621_account_parser_api::utils::TagId,
+        > = std::collections::HashSet::new();
+        for cf in test_features.iter().chain(neg_features.iter()) {
+            for ct in &cf.tags {
+                if let Some(tid) = ct.user_tid {
+                    queryable.insert(tid);
+                }
+            }
+        }
+        user_relation.freeze_with_query_set(&queryable, 2);
         // MMR features only when actually needed — they double the per-post
         // memory footprint and the non-diversify path never reads them.
         let diversity_features: Vec<DiversityFeatures> = if opts.diversify {
