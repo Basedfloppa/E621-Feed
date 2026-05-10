@@ -12,8 +12,8 @@ use crate::log::{print_diff, write_grid_log};
 use crate::metrics::print_metrics;
 use crate::options::GridOptions;
 
-fn knob_by_name<'a>(knobs: &'a [KnobSpec], name: &str) -> Option<&'a KnobSpec> {
-    knobs.iter().find(|k| k.name == name)
+fn knob_by_name<'a>(knobs: &[&'a KnobSpec], name: &str) -> Option<&'a KnobSpec> {
+    knobs.iter().find(|k| k.name == name).copied()
 }
 
 /// Run the grid against a pre-hydrated dataset. `t0` is the caller-side
@@ -30,17 +30,30 @@ pub(crate) fn run_grid_with_dataset(
     let top_k_ndcg = cfg_arc.backtest.top_k_ndcg;
     let top_k_recall = cfg_arc.backtest.top_k_recall;
 
-    let total_probes: usize = knobs.iter().map(|k| k.probes.len()).sum();
+    // Skip diversify-only knobs when MMR is off — they don't enter
+    // scoring and would just churn no-op probes.
+    let active_knobs: Vec<&KnobSpec> = knobs
+        .iter()
+        .filter(|k| opts.diversify || !k.diversify_only)
+        .collect();
+    let skipped = knobs.len() - active_knobs.len();
+
+    let total_probes: usize = active_knobs.iter().map(|k| k.probes.len()).sum();
     eprintln!(
-        "[grid] {} knobs × ~{} probes/pass × {} passes = up to {} evals + paired sweep",
-        knobs.len(),
-        if knobs.is_empty() {
+        "[grid] {} knobs × ~{} probes/pass × {} passes = up to {} evals + paired sweep{}",
+        active_knobs.len(),
+        if active_knobs.is_empty() {
             0
         } else {
-            total_probes / knobs.len()
+            total_probes / active_knobs.len()
         },
         PASS_SCALES.len(),
-        total_probes * PASS_SCALES.len()
+        total_probes * PASS_SCALES.len(),
+        if skipped > 0 {
+            format!(" (skipping {skipped} diversify-only knobs)")
+        } else {
+            String::new()
+        }
     );
     eprintln!("[grid] adaptive step: {:?}", PASS_SCALES);
 
@@ -76,11 +89,11 @@ pub(crate) fn run_grid_with_dataset(
             let pass = pass_idx + 1;
             let pass_t = std::time::Instant::now();
             let mut pass_changed = false;
-            let total_pass_evals: usize = knobs.iter().map(|k| k.probes.len()).sum();
+            let total_pass_evals: usize = active_knobs.iter().map(|k| k.probes.len()).sum();
             let mut pass_evals = 0usize;
             // Heartbeat every ~10% of the pass so 8h silent runs aren't a thing.
             let heartbeat_every = (total_pass_evals / 10).max(20);
-            for k in knobs {
+            for k in &active_knobs {
                 for &raw_delta in k.probes {
                     let delta = raw_delta * scale;
                     let mut trial = best.clone();
@@ -135,8 +148,10 @@ pub(crate) fn run_grid_with_dataset(
         eprintln!("\n[grid] paired sweep over {} known-correlated pairs", PAIRED_KNOBS.len());
         let pair_scale = if opts.pairs_only { 1.0 } else { 0.5 };
         for &(name_a, name_b) in PAIRED_KNOBS {
-            let (Some(ka), Some(kb)) = (knob_by_name(knobs, name_a), knob_by_name(knobs, name_b))
-            else {
+            let (Some(ka), Some(kb)) = (
+                knob_by_name(&active_knobs, name_a),
+                knob_by_name(&active_knobs, name_b),
+            ) else {
                 continue;
             };
             let da = ka.probes.iter().map(|v| v.abs()).fold(f32::INFINITY, f32::min);
@@ -146,7 +161,7 @@ pub(crate) fn run_grid_with_dataset(
                 let mut trial = best.clone();
                 (ka.apply)(&mut trial, sa * da * pair_scale);
                 (kb.apply)(&mut trial, sb * db * pair_scale);
-                let prev_cache = if opts.diversify { None } else { Some(&best_cache) };
+                let prev_cache = Some(&best_cache);
                 let (m_raw, trial_cache) = score_with_cache(
                     &dataset,
                     &trial,
@@ -188,7 +203,7 @@ pub(crate) fn run_grid_with_dataset(
             }
             let mut trial = best.clone();
             (ck.apply)(&mut trial, cand);
-            let prev_cache = if opts.diversify { None } else { Some(&best_cache) };
+            let prev_cache = Some(&best_cache);
             let (m_raw, trial_cache) = score_with_cache(
                 &dataset,
                 &trial,

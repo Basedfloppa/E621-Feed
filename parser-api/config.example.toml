@@ -52,31 +52,32 @@ quality_a        = 0.50
 quality_b        = 0.20
 quality_log_bias = -3.0
 
-mix_sim          = 0.65
-mix_quality      = 0.04
-mix_recency      = 0.03
-mix_rating       = 0.05
+mix_sim          = 0.72
+mix_quality      = 0.03
+mix_recency      = 0.02
+mix_rating       = 0.04
 mix_media        = 0.05
-mix_popularity   = 0.03
+mix_popularity   = 0.02
 mix_interaction  = 0.10
 mix_tag_relation = 0.08
 
 # IDF / frequency shaping
-df_floor          = 0.40
-idf_max           = 100.0  # IDF saturation cap
-idf_lambda        = 0.85
-idf_alpha         = 0.96
-freq_alpha        = 0.90
-bm25_k            = 2.0
+df_floor          = 0.40   # noise-dominated under mixed-hard negatives — held
+idf_max           = 100.0
+idf_lambda        = 1.00   # v5.5: N=915 grid landed on 1.012 in 4/4 runs
+idf_alpha         = 1.05   # v5.5: N=915 grid consensus ≈ 1.07
+freq_alpha        = 0.95   # v5.5: noisier (0.84–1.09); modest bump
+bm25_k            = 2.25   # v5.5: N=915 grid 2.20–2.65
 one_sided_ratio_exp = 0.5  # exponent in quality/popularity overshoot shape; 0.5 = legacy sqrt
-idf_rsj_smoothing = 0.4
+idf_rsj_smoothing = 0.35   # v5.5: 3/4 runs at 0.30
 
 # Per-group multipliers (v5.3 — promoted from the old [group_weights] section)
-group_w_artist    = 2.25
-group_w_character = 1.85
-group_w_copyright = 1.35
-group_w_species   = 1.20
-group_w_general   = 0.85
+# v5.5: artist/character/general identical across 4 N=915 runs — high-confidence step.
+group_w_artist    = 2.40
+group_w_character = 2.00
+group_w_copyright = 1.45
+group_w_species   = 1.30
+group_w_general   = 0.80
 group_w_lore      = 0.40
 
 # Cold-start / Bayesian priors (v5.3 — promoted from hardcoded constants)
