@@ -14,8 +14,10 @@ use e621_account_parser_api::utils::{
     CachedPostFeatures, DiversityFeatures, IdfIndex, TagRelationGraph,
 };
 
-use crate::options::{GridOptions, NegMode};
-use crate::sampling::{sample_negatives_mixed, sample_negatives_uniform, split_train_test};
+use crate::options::{GridOptions, NegMode, SplitStrategy};
+use crate::sampling::{
+    sample_negatives_mixed, sample_negatives_uniform, split_train_test, split_train_test_time,
+};
 
 /// Per-account state needed to score (test ∪ negatives) under any priors.
 ///
@@ -24,21 +26,24 @@ use crate::sampling::{sample_negatives_mixed, sample_negatives_uniform, split_tr
 /// lookups, and they carry everything the cached channel variants in
 /// `ScoringContext` read (score, fav_count, rating, media_type, …).
 /// `diversity_features` is the parallel MMR input, stored concatenated
-/// `[test ‖ neg]`. The original `Post` structs are dropped at the end
-/// of hydration; nothing in the scoring loop needs them.
+/// `[test ‖ neg]`. `user_relation` is the per-account tag-relation
+/// graph built from train_posts; it gives the personal `tag_relation`
+/// channel real signal under the synthetic split (otherwise `*_user_*`
+/// knobs and `tag_relation_w_personal` are gradient-dead). The original
+/// `Post` structs are dropped at the end of hydration.
 pub(crate) struct AccountFixture {
     pub(crate) profile: AccountPreferenceProfile,
     pub(crate) tags: Vec<TagCount>,
     pub(crate) test_features: Vec<CachedPostFeatures>,
     pub(crate) neg_features: Vec<CachedPostFeatures>,
     pub(crate) diversity_features: Vec<DiversityFeatures>,
+    pub(crate) user_relation: TagRelationGraph,
     pub(crate) test_count: usize,
 }
 
 pub(crate) struct EvalDataset {
     pub(crate) idf: IdfIndex,
     pub(crate) global_relation: TagRelationGraph,
-    pub(crate) empty_user_relation: TagRelationGraph,
     pub(crate) accounts: Vec<AccountFixture>,
 }
 
@@ -126,8 +131,6 @@ pub(crate) fn prepare_eval_dataset(opts: &GridOptions) -> anyhow::Result<EvalDat
         global_relation.n_tags(),
         global_relation.n_pairs(),
     );
-    let empty_user_relation = TagRelationGraph::empty();
-
     let t = std::time::Instant::now();
     let catalog: CatalogIndex = match opts.neg_mode {
         NegMode::Mixed => {
@@ -174,12 +177,19 @@ pub(crate) fn prepare_eval_dataset(opts: &GridOptions) -> anyhow::Result<EvalDat
     let mut posts_hydrated: usize = 0;
 
     for (i, account_id) in account_ids.into_iter().enumerate() {
-        let fav_ids = account_favorite_ids(account_id)?;
-        if fav_ids.len() < min_favs {
-            continue;
-        }
-        let (train_ids, test_ids) =
-            split_train_test(account_id, &fav_ids, test_fraction, opts.split);
+        let (train_ids, test_ids) = if matches!(opts.split, SplitStrategy::TimeCausal) {
+            let favs = account_favorite_ids_with_ts(account_id)?;
+            if favs.len() < min_favs {
+                continue;
+            }
+            split_train_test_time(&favs, test_fraction)
+        } else {
+            let fav_ids = account_favorite_ids(account_id)?;
+            if fav_ids.len() < min_favs {
+                continue;
+            }
+            split_train_test(account_id, &fav_ids, test_fraction, opts.split)
+        };
         if test_ids.is_empty() {
             continue;
         }
@@ -208,11 +218,21 @@ pub(crate) fn prepare_eval_dataset(opts: &GridOptions) -> anyhow::Result<EvalDat
         let test_id_set: std::collections::HashSet<i64> =
             test_posts.iter().map(|p| p.id).collect();
         let target_negs = test_posts.len() * negative_ratio;
+        // Negatives must avoid both train and test (the user already favourited them).
+        let mut excluded_ids: Vec<i64> = Vec::with_capacity(train_ids.len() + test_ids.len());
+        excluded_ids.extend_from_slice(&train_ids);
+        excluded_ids.extend_from_slice(&test_ids);
         let neg_ids = match opts.neg_mode {
-            NegMode::Uniform => sample_negatives_uniform(&catalog.ids, &fav_ids, target_negs),
-            NegMode::Mixed => {
-                sample_negatives_mixed(&catalog, &fav_ids, &test_posts, target_negs, account_id)
+            NegMode::Uniform => {
+                sample_negatives_uniform(&catalog.ids, &excluded_ids, target_negs)
             }
+            NegMode::Mixed => sample_negatives_mixed(
+                &catalog,
+                &excluded_ids,
+                &test_posts,
+                target_negs,
+                account_id,
+            ),
         };
         let mut candidate_ids = neg_ids;
         candidate_ids.retain(|id| !test_id_set.contains(id));
@@ -221,16 +241,24 @@ pub(crate) fn prepare_eval_dataset(opts: &GridOptions) -> anyhow::Result<EvalDat
 
         posts_hydrated += test_posts.len() + neg_posts.len();
 
+        // Per-account user tag-relation graph (cooccurrence on train_posts).
+        // Built before features so each cached tag carries a `user_tid`.
+        let user_relation = TagRelationGraph::from_train_posts(&train_posts);
+
         // Pre-resolve post tags once so the grid scoring loop reads
-        // (group, lc, df_raw, global_tid) directly without HashMap
-        // lookups against IDF / global_relation per probe.
+        // (group, lc, df_raw, global_tid, user_tid) directly without
+        // HashMap lookups against IDF / relation graphs per probe.
         let test_features: Vec<CachedPostFeatures> = test_posts
             .iter()
-            .map(|p| CachedPostFeatures::from_post(p, &idf, &global_relation))
+            .map(|p| {
+                CachedPostFeatures::from_post_with_user(p, &idf, &global_relation, Some(&user_relation))
+            })
             .collect();
         let neg_features: Vec<CachedPostFeatures> = neg_posts
             .iter()
-            .map(|p| CachedPostFeatures::from_post(p, &idf, &global_relation))
+            .map(|p| {
+                CachedPostFeatures::from_post_with_user(p, &idf, &global_relation, Some(&user_relation))
+            })
             .collect();
         // MMR features only when actually needed — they double the per-post
         // memory footprint and the non-diversify path never reads them.
@@ -254,6 +282,7 @@ pub(crate) fn prepare_eval_dataset(opts: &GridOptions) -> anyhow::Result<EvalDat
             test_features,
             neg_features,
             diversity_features,
+            user_relation,
             test_count,
         });
 
@@ -278,7 +307,6 @@ pub(crate) fn prepare_eval_dataset(opts: &GridOptions) -> anyhow::Result<EvalDat
     Ok(EvalDataset {
         idf,
         global_relation,
-        empty_user_relation,
         accounts: fixtures,
     })
 }
@@ -388,4 +416,31 @@ fn account_favorite_ids(account_id: i32) -> anyhow::Result<Vec<i64>> {
     let mut stmt = conn.prepare("SELECT post_id FROM accounts_post WHERE account_id = ?1")?;
     let rows = stmt.query_map(params![account_id], |r| r.get::<_, i64>(0))?;
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
+/// Same as `account_favorite_ids` but returns `(post_id, created_at_epoch)`
+/// tuples — needed by `SplitStrategy::TimeCausal` to sort favourites
+/// chronologically rather than by post-id.
+fn account_favorite_ids_with_ts(account_id: i32) -> anyhow::Result<Vec<(i64, i64)>> {
+    let conn = db::open_db_for_calibration().map_err(|e| anyhow::anyhow!(e))?;
+    let mut stmt = conn.prepare(
+        "SELECT ap.post_id, COALESCE(p.created_at, '')
+         FROM accounts_post ap
+         JOIN posts p ON p.id = ap.post_id
+         WHERE ap.account_id = ?1",
+    )?;
+    let rows = stmt.query_map(params![account_id], |r| {
+        let id: i64 = r.get(0)?;
+        let ca: String = r.get(1)?;
+        Ok((id, ca))
+    })?;
+    let mut out: Vec<(i64, i64)> = Vec::new();
+    for r in rows {
+        let (id, ca) = r?;
+        let ts = DateTime::parse_from_rfc3339(&ca)
+            .map(|dt| dt.timestamp())
+            .unwrap_or(0);
+        out.push((id, ts));
+    }
+    Ok(out)
 }

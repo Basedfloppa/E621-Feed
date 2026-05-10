@@ -59,6 +59,7 @@ pub(crate) const PAIRED_KNOBS: &[(&str, &str)] = &[
     ("bm25_k", "freq_alpha"),
     // v5.6 additions:
     ("tag_relation_min_cooc", "tag_relation_cooc_ref"),
+    ("tag_relation_user_min_cooc", "tag_relation_user_cooc_ref"), // v5.7
     ("recency_tau_recent", "recency_split_age_days"),
     // diversity-only — only swept when --with-diversify is on; the grid
     // helper skips paired probes whose components aren't in the active set.
@@ -501,9 +502,7 @@ pub(crate) const GRID_KNOBS: &[KnobSpec] = &[
         invalidates: M_TAG_RELATION,
         diversify_only: false,
     },
-    // -- v5.6: tag-relation global co-occurrence threshold --
-    // (skipped: `tag_relation_user_min_cooc`, `*_user_*` — empty user
-    //  graph by construction in the synthetic harness; zero gradient.)
+    // -- v5.6: tag-relation co-occurrence thresholds --
     // (skipped: `strong_negative_*`, `feedback_decay_*`,
     //  `meta_interaction_weight` — no `feed_interactions` rows in the
     //  synthetic split; tune online once real feedback flows in.)
@@ -512,6 +511,17 @@ pub(crate) const GRID_KNOBS: &[KnobSpec] = &[
         apply: |p, v| {
             let next = (p.tag_relation_min_cooc as f32 + v).round();
             p.tag_relation_min_cooc = next.clamp(1.0, 20.0) as i64;
+        },
+        probes: PROBES_INT_TINY,
+        invalidates: M_TAG_RELATION,
+        diversify_only: false,
+    },
+    // v5.7: re-enabled now that fixtures carry a per-account user-graph.
+    KnobSpec {
+        name: "tag_relation_user_min_cooc",
+        apply: |p, v| {
+            let next = (p.tag_relation_user_min_cooc as f32 + v).round();
+            p.tag_relation_user_min_cooc = next.clamp(1.0, 10.0) as i64;
         },
         probes: PROBES_INT_TINY,
         invalidates: M_TAG_RELATION,

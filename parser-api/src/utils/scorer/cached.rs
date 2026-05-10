@@ -38,6 +38,10 @@ pub struct CachedTag {
     /// graph at prep time. `None` → tag is unknown to the global graph
     /// (typically a brand-new tag) and PMI contribution will be skipped.
     pub global_tid: Option<TagId>,
+    /// Pre-resolved per-account user-graph TagId. `None` for the prod
+    /// fast path (no user graph supplied) or when the tag wasn't in the
+    /// caller's train_posts.
+    pub user_tid: Option<TagId>,
 }
 
 /// Pre-resolved scoring features for one post in the eval dataset.
@@ -57,7 +61,24 @@ pub struct CachedPostFeatures {
 }
 
 impl CachedPostFeatures {
+    /// Build per-post features against a global tag-relation graph and
+    /// no personal graph (`user_tid = None` for every tag). Used by
+    /// callers that don't have a per-account graph available.
     pub fn from_post(post: &Post, idf: &IdfIndex, global_relation: &TagRelationGraph) -> Self {
+        Self::from_post_with_user(post, idf, global_relation, None)
+    }
+
+    /// Build per-post features with both global and per-account
+    /// (personal) tag-relation graphs pre-resolved into TagIds. The
+    /// calibrate harness builds one fixture per account with its own
+    /// `user_relation` from train_posts; pass that here to give the
+    /// personal `tag_relation_fit` channel real signal.
+    pub fn from_post_with_user(
+        post: &Post,
+        idf: &IdfIndex,
+        global_relation: &TagRelationGraph,
+        user_relation: Option<&TagRelationGraph>,
+    ) -> Self {
         let mut tags = Vec::with_capacity(32);
         let groups: [(Group, &Vec<String>); 7] = [
             (Group::Artist, &post.tags.artist),
@@ -82,11 +103,13 @@ impl CachedPostFeatures {
                 };
                 let df_raw = idf.df_for(&lc);
                 let global_tid = global_relation.tag_id(g, lc.as_str());
+                let user_tid = user_relation.and_then(|gr| gr.tag_id(g, lc.as_str()));
                 tags.push(CachedTag {
                     group: g,
                     lc,
                     df_raw,
                     global_tid,
+                    user_tid,
                 });
             }
         }

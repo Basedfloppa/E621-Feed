@@ -50,7 +50,31 @@ pub(crate) fn split_train_test(
             }
             (train, test)
         }
+        SplitStrategy::TimeCausal => {
+            // Caller must use `split_train_test_time` for this variant —
+            // we only have post ids here, no created_at to sort by.
+            panic!("SplitStrategy::TimeCausal requires split_train_test_time; bug in dispatch");
+        }
     }
+}
+
+/// TimeCausal split: take `(post_id, created_at_epoch)` tuples, sort by
+/// timestamp ascending, and hold the newest `test_frac` as test. Mirrors
+/// the production "predict next favourite" task more honestly than the
+/// post-id-based split when post ids aren't strictly monotonic with time.
+pub(crate) fn split_train_test_time(
+    favs: &[(i64, i64)],
+    test_frac: f32,
+) -> (Vec<i64>, Vec<i64>) {
+    let mut sorted: Vec<(i64, i64)> = favs.to_vec();
+    sorted.sort_by_key(|(id, ts)| (*ts, *id));
+    let n = sorted.len();
+    let n_test = ((n as f32) * test_frac).round() as usize;
+    let n_test = n_test.min(n.saturating_sub(1)).max(1.min(n));
+    let split_at = n.saturating_sub(n_test).max(1);
+    let train = sorted[..split_at].iter().map(|(id, _)| *id).collect();
+    let test = sorted[split_at..].iter().map(|(id, _)| *id).collect();
+    (train, test)
 }
 
 /// Uniform random sampling without replacement (legacy).

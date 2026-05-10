@@ -143,6 +143,60 @@ impl TagRelationGraph {
     pub fn is_empty(&self) -> bool {
         self.pairs.is_empty() && self.marginals.is_empty() && self.n_posts == 0
     }
+
+    /// Build a per-account graph from a slice of posts (e.g. the train
+    /// half of a calibrate split). Tag pairs across all groups except
+    /// `meta` are interned, with marginals = per-tag occurrence counts
+    /// and pair counts = how many train posts hold both tags.
+    ///
+    /// Used by the calibrate harness to give the personal tag-relation
+    /// channel an actual gradient (the production path builds these
+    /// graphs from the user's full favourite history; under the
+    /// synthetic split, the train-half is the analogue).
+    pub fn from_train_posts(posts: &[crate::models::Post]) -> Self {
+        let mut g = Self::with_posts(posts.len() as i64);
+        // Same group set tag_relation_fit operates on (no `meta`).
+        let groups: [(GroupKey, fn(&crate::models::Post) -> &Vec<String>); 6] = [
+            (0, |p| &p.tags.artist),
+            (1, |p| &p.tags.character),
+            (2, |p| &p.tags.copyright),
+            (3, |p| &p.tags.species),
+            (4, |p| &p.tags.general),
+            (5, |p| &p.tags.lore),
+        ];
+        // Per-post: gather (group, lc) tuples, intern, bump marginals,
+        // then walk pairs upper-triangular and bump cooccurrences.
+        let mut scratch: Vec<(GroupKey, TagId)> = Vec::with_capacity(64);
+        for post in posts {
+            scratch.clear();
+            for (gk, getter) in groups.iter() {
+                for raw in getter(post) {
+                    let trimmed = raw.trim();
+                    if trimmed.is_empty() {
+                        continue;
+                    }
+                    let lc: String = if trimmed.bytes().any(|b| b.is_ascii_uppercase()) {
+                        trimmed.to_ascii_lowercase()
+                    } else {
+                        trimmed.to_owned()
+                    };
+                    let id = g.intern(*gk, &lc);
+                    if let Some(slot) = g.marginals.get_mut(id as usize) {
+                        *slot += 1;
+                    }
+                    scratch.push((*gk, id));
+                }
+            }
+            for i in 0..scratch.len() {
+                let (_, ai) = scratch[i];
+                for j in (i + 1)..scratch.len() {
+                    let (_, bj) = scratch[j];
+                    g.insert_pair_by_id(ai, bj, 1);
+                }
+            }
+        }
+        g
+    }
 }
 
 static GLOBAL_CACHE: LazyLock<ArcSwap<TagRelationGraph>> =

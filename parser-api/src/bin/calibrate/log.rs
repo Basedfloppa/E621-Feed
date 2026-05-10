@@ -45,6 +45,31 @@ pub(crate) fn print_diff(baseline: &Priors, best: &Priors) -> Vec<String> {
     diff!("mix_popularity", mix_popularity, "{:.3}");
     diff!("mix_interaction", mix_interaction, "{:.3}");
     diff!("mix_tag_relation", mix_tag_relation, "{:.3}");
+
+    // L1-normalised mix block — actual scoring uses ratios, not absolute
+    // values, so 0.945+0.013+...=1.07 in the grid is equivalent to
+    // 0.883/0.012/... after normalisation. Print both for clarity.
+    let mix_sum: f32 = best.mix_sim
+        + best.mix_quality
+        + best.mix_recency
+        + best.mix_rating
+        + best.mix_media
+        + best.mix_popularity
+        + best.mix_interaction
+        + best.mix_tag_relation;
+    if mix_sum > 1e-6 && (mix_sum - 1.0).abs() > 0.01 {
+        println!(
+            "[mix L1-normalised, sum was {mix_sum:.3}]                                                  "
+        );
+        println!("  mix_sim          = {:.3}", best.mix_sim / mix_sum);
+        println!("  mix_quality      = {:.3}", best.mix_quality / mix_sum);
+        println!("  mix_recency      = {:.3}", best.mix_recency / mix_sum);
+        println!("  mix_rating       = {:.3}", best.mix_rating / mix_sum);
+        println!("  mix_media        = {:.3}", best.mix_media / mix_sum);
+        println!("  mix_popularity   = {:.3}", best.mix_popularity / mix_sum);
+        println!("  mix_interaction  = {:.3}", best.mix_interaction / mix_sum);
+        println!("  mix_tag_relation = {:.3}", best.mix_tag_relation / mix_sum);
+    }
     diff!("idf_lambda", idf_lambda, "{:.3}");
     diff!("idf_alpha", idf_alpha, "{:.3}");
     diff!("freq_alpha", freq_alpha, "{:.3}");

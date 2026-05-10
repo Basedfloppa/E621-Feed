@@ -13,18 +13,27 @@ use e621_account_parser_api::utils::{diversify_indices, Priors, ScoringContext};
 
 use crate::dataset::EvalDataset;
 
-#[derive(Default, Clone, Copy, Debug)]
+#[derive(Default, Clone, Debug)]
 pub(crate) struct Metrics {
     pub(crate) ndcg_at_k: f64,
     pub(crate) recall_at_k: f64,
     pub(crate) mrr: f64,
     pub(crate) n_accounts: usize,
+    /// Per-account NDCG@K, parallel to `recall_per_account` /
+    /// `mrr_per_account`. Populated during scoring; consumed by the SE /
+    /// CI helpers below. Cheap (~22 KB at N=915) and lets the grid
+    /// distinguish real improvements from sample noise.
+    pub(crate) ndcg_per_account: Vec<f64>,
+    pub(crate) recall_per_account: Vec<f64>,
+    pub(crate) mrr_per_account: Vec<f64>,
 }
 
 impl Metrics {
+    /// Mean of each metric. Per-account vectors are kept for downstream
+    /// CI / SE computation but are not modified here.
     pub(crate) fn average(&self) -> Self {
         if self.n_accounts == 0 {
-            return *self;
+            return self.clone();
         }
         let n = self.n_accounts as f64;
         Self {
@@ -32,8 +41,67 @@ impl Metrics {
             recall_at_k: self.recall_at_k / n,
             mrr: self.mrr / n,
             n_accounts: self.n_accounts,
+            ndcg_per_account: self.ndcg_per_account.clone(),
+            recall_per_account: self.recall_per_account.clone(),
+            mrr_per_account: self.mrr_per_account.clone(),
         }
     }
+
+    /// Standard error of the per-account NDCG@K mean. Used by the grid
+    /// loop to gate probe acceptance: `m.ndcg_at_k > best + Z * se` is a
+    /// 1-sided test that the new mean is meaningfully above baseline,
+    /// not just better-by-noise.
+    pub(crate) fn ndcg_se(&self) -> f64 {
+        se_of_mean(&self.ndcg_per_account)
+    }
+
+    /// 95% CI on the NDCG@K mean via percentile bootstrap with
+    /// `n_resamples` resamples. ~5–10 ms at N=915, n_resamples=1000.
+    /// Used at print-time only (`[baseline]`, `[best]`); the grid loop
+    /// uses the cheaper SE test for per-probe acceptance.
+    pub(crate) fn ndcg_ci95(&self, n_resamples: usize) -> (f64, f64) {
+        bootstrap_ci_95(&self.ndcg_per_account, n_resamples)
+    }
+}
+
+/// Standard error of the sample mean. Clamps n=0/1 to 0.
+fn se_of_mean(xs: &[f64]) -> f64 {
+    let n = xs.len();
+    if n < 2 {
+        return 0.0;
+    }
+    let mean = xs.iter().sum::<f64>() / n as f64;
+    let var = xs.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (n - 1) as f64;
+    (var / n as f64).sqrt()
+}
+
+/// Percentile bootstrap 95% CI of the mean. Linear-congruential RNG —
+/// cheap, deterministic, and good enough for ranking-stat resamples.
+fn bootstrap_ci_95(xs: &[f64], n_resamples: usize) -> (f64, f64) {
+    let n = xs.len();
+    if n < 2 || n_resamples == 0 {
+        let mean = if n > 0 { xs.iter().sum::<f64>() / n as f64 } else { 0.0 };
+        return (mean, mean);
+    }
+    let mut means: Vec<f64> = Vec::with_capacity(n_resamples);
+    let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
+    let n_u = n as u64;
+    for _ in 0..n_resamples {
+        let mut sum = 0.0f64;
+        for _ in 0..n {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            let idx = ((state >> 33) % n_u) as usize;
+            sum += xs[idx];
+        }
+        means.push(sum / n as f64);
+    }
+    means.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let lo_idx = ((n_resamples as f64) * 0.025).floor() as usize;
+    let hi_idx = ((n_resamples as f64) * 0.975).floor() as usize;
+    (
+        means[lo_idx.min(n_resamples - 1)],
+        means[hi_idx.min(n_resamples - 1)],
+    )
 }
 
 /// Bounded rayon pool. `0 = auto = nproc/2`, configurable via
@@ -115,7 +183,7 @@ fn score_with_opts(
                     &dataset.idf,
                     &fx.profile,
                     &dataset.global_relation,
-                    &dataset.empty_user_relation,
+                    &fx.user_relation,
                 );
 
                 let n_test = fx.test_features.len();
@@ -172,11 +240,17 @@ fn score_with_opts(
     });
 
     let mut totals = Metrics::default();
+    totals.ndcg_per_account.reserve(per_account.len());
+    totals.recall_per_account.reserve(per_account.len());
+    totals.mrr_per_account.reserve(per_account.len());
     for (n, r, m) in per_account {
         totals.ndcg_at_k += n;
         totals.recall_at_k += r;
         totals.mrr += m;
         totals.n_accounts += 1;
+        totals.ndcg_per_account.push(n);
+        totals.recall_per_account.push(r);
+        totals.mrr_per_account.push(m);
     }
     if progress {
         eprintln!(
@@ -189,9 +263,17 @@ fn score_with_opts(
 }
 
 pub(crate) fn print_metrics(label: &str, m: &Metrics, top_k_ndcg: usize, top_k_recall: usize) {
+    let (ndcg_lo, ndcg_hi) = m.ndcg_ci95(1000);
     println!(
-        "[{label}] N={}  NDCG@{top_k_ndcg}={:.4}  Recall@{top_k_recall}={:.4}  MRR={:.4}",
-        m.n_accounts, m.ndcg_at_k, m.recall_at_k, m.mrr
+        "[{label}] N={}  NDCG@{top_k_ndcg}={:.4} (95% CI {:.4}–{:.4}, SE={:.4})  \
+         Recall@{top_k_recall}={:.4}  MRR={:.4}",
+        m.n_accounts,
+        m.ndcg_at_k,
+        ndcg_lo,
+        ndcg_hi,
+        m.ndcg_se(),
+        m.recall_at_k,
+        m.mrr
     );
 }
 

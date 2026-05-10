@@ -140,11 +140,10 @@ impl<'a> ScoringContext<'a> {
         (score, strong_neg)
     }
 
-    /// Cached counterpart of `tag_relation_fit`. Big win: the per-tag
-    /// `global_relation.tag_id(...)` HashMap probe is pre-resolved into
-    /// `CachedTag.global_tid`, dropping ~2T HashMap-by-string lookups
-    /// to zero. The user-relation graph is per-account / empty in the
-    /// calibrate dataset, so we skip it entirely on the fast path.
+    /// Cached counterpart of `tag_relation_fit`. Math mirrors the
+    /// `&Post` variant — both global and per-account graphs are queried
+    /// via pre-resolved `TagId`s on the cached features, eliminating
+    /// the per-pair HashMap-by-string lookups.
     pub fn tag_relation_fit_cached(&self, post: &CachedPostFeatures) -> f32 {
         let w_g_cfg = self.priors.tag_relation_w_global.max(0.0);
         let w_u_cfg = self.priors.tag_relation_w_personal.max(0.0);
@@ -152,18 +151,14 @@ impl<'a> ScoringContext<'a> {
             return FEEDBACK_NEUTRAL;
         }
 
-        // Personal weight is shrunk by confidence; with an empty user
-        // graph the personal channel never has signal, but we still
-        // honour the cold-start re-routing of weight toward global.
-        // (The user-side `w_u` is therefore folded into `w_g`.)
+        // Cold-start re-routing: shrink personal weight by confidence.
         let conf = self.personal_confidence;
+        let w_u = w_u_cfg * conf;
         let w_g = w_g_cfg + w_u_cfg * (1.0 - conf);
 
-        // Same scratch layout as the &Post variant: (group_weight, global_tid).
-        // User-side TagId is always None on the calibrate fast path.
-        let mut entries: Vec<(f32, Option<TagId>)> = Vec::with_capacity(post.tags.len());
+        let mut entries: Vec<(f32, Option<TagId>, Option<TagId>)> =
+            Vec::with_capacity(post.tags.len());
         for ct in &post.tags {
-            // tag_relation excludes meta — mirror channels.rs
             if ct.group == Group::Meta as u8 {
                 continue;
             }
@@ -171,29 +166,41 @@ impl<'a> ScoringContext<'a> {
             if gw <= 0.0 {
                 continue;
             }
-            entries.push((gw, ct.global_tid));
+            entries.push((gw, ct.global_tid, ct.user_tid));
         }
         if entries.len() < 2 {
             return FEEDBACK_NEUTRAL;
         }
 
         let ng = self.global_relation.n_posts().max(1) as f32;
+        let nu = self.user_relation.n_posts().max(0) as f32;
         let pmi_scale = self.priors.tag_relation_pmi_scale.max(1e-3);
+        let pmi_scale_user = if self.priors.tag_relation_pmi_scale_user.is_nan() {
+            pmi_scale
+        } else {
+            self.priors.tag_relation_pmi_scale_user.max(1e-3)
+        };
         let min_cooc_global = self.priors.tag_relation_min_cooc.max(1);
+        let min_cooc_user = self.priors.tag_relation_user_min_cooc.max(1);
         let cooc_ref = self.priors.tag_relation_cooc_ref.max(1.0);
+        let user_cooc_ref = self.priors.tag_relation_user_cooc_ref.max(1.0);
         let cooc_ref_log = (cooc_ref + 1.0).ln().max(1e-3);
+        let user_cooc_ref_log = (user_cooc_ref + 1.0).ln().max(1e-3);
 
         let mut num = 0.0f32;
         let mut den = 0.0f32;
 
         for (i, entry_i) in entries.iter().enumerate() {
-            let (gi_w, gi_global) = *entry_i;
+            let (gi_w, gi_global, gi_user) = *entry_i;
             let gi_df = gi_global
                 .map(|id| self.global_relation.marginal_by_id(id).max(0) as f32)
                 .unwrap_or(0.0);
+            let gi_um = gi_user
+                .map(|id| self.user_relation.marginal_by_id(id).max(0) as f32)
+                .unwrap_or(0.0);
 
             for entry_j in &entries[i + 1..] {
-                let (gj_w, gj_global) = *entry_j;
+                let (gj_w, gj_global, gj_user) = *entry_j;
                 let pair_w = (gi_w * gj_w).sqrt();
                 if pair_w <= 0.0 {
                     continue;
@@ -221,20 +228,44 @@ impl<'a> ScoringContext<'a> {
                     _ => (0.0, false),
                 };
 
+                let (user_score, user_has_signal) = match (gi_user, gj_user) {
+                    (Some(a), Some(b)) if nu > 0.0 => {
+                        let c = self.user_relation.cooc_by_id(a, b);
+                        let gj_um = self.user_relation.marginal_by_id(b).max(0) as f32;
+                        if c >= min_cooc_user && gi_um > 0.0 && gj_um > 0.0 {
+                            let denom = gi_um * gj_um / nu;
+                            if denom > 0.0 {
+                                let lift = (c as f32) / denom;
+                                let signed_pmi =
+                                    (lift.max(1e-6).ln() / pmi_scale_user).clamp(-1.0, 1.0);
+                                let conf_user =
+                                    ((c as f32 + 1.0).ln() / user_cooc_ref_log).clamp(0.0, 1.0);
+                                let mapped = (signed_pmi * conf_user + 1.0) * 0.5;
+                                (mapped.clamp(0.0, 1.0), true)
+                            } else {
+                                (0.0, false)
+                            }
+                        } else {
+                            (0.0, false)
+                        }
+                    }
+                    _ => (0.0, false),
+                };
+
                 let active_g = if global_has_signal { w_g } else { 0.0 };
-                let active_u = 0.0; // empty user graph on the calibrate fast path
+                let active_u = if user_has_signal { w_u } else { 0.0 };
                 let active_sum = active_g + active_u;
                 if active_sum <= 0.0 {
                     continue;
                 }
                 let pair_score = match self.pair_aggregator {
                     PairAggregator::Mean => {
-                        (active_g * global_score) / active_sum
+                        (active_g * global_score + active_u * user_score) / active_sum
                     }
-                    PairAggregator::Max => global_score,
+                    PairAggregator::Max => global_score.max(user_score),
                     PairAggregator::GeoMean => {
                         let g = if global_has_signal { global_score } else { 0.5_f32 };
-                        let u = 0.5_f32;
+                        let u = if user_has_signal { user_score } else { 0.5_f32 };
                         (g.max(0.0) * u.max(0.0)).sqrt()
                     }
                 };

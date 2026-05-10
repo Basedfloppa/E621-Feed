@@ -94,7 +94,7 @@ fn main() -> anyhow::Result<()> {
         eprintln!(
             "no mode given. Use 'eval', 'grid [mix-only]', 'probe', or chain them \
              (e.g. 'eval grid'). Flags: pairs-only, no-pairs, with-diversify, \
-             split=random|post_id, neg=uniform|mixed"
+             split=random|post_id|time_causal, neg=uniform|mixed, verbose"
         );
         std::process::exit(2);
     }
@@ -180,8 +180,10 @@ fn parse_grid_flags(args: impl Iterator<Item = String>) -> GridOptions {
             "with-diversify" => opts.diversify = true,
             "split=random" => opts.split = SplitStrategy::Random,
             "split=post_id" => opts.split = SplitStrategy::PostId,
+            "split=time_causal" | "split=time" => opts.split = SplitStrategy::TimeCausal,
             "neg=uniform" => opts.neg_mode = NegMode::Uniform,
             "neg=mixed" => opts.neg_mode = NegMode::Mixed,
+            "verbose" | "--verbose" => opts.verbose = true,
             other => eprintln!("[run] unknown flag: {other} (ignored)"),
         }
     }

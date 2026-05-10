@@ -6,6 +6,10 @@ pub(crate) enum SplitStrategy {
     PostId,
     /// Uniform-random hold-out (deterministic per-account seed).
     Random,
+    /// Time-causal: sort favourites by `created_at` and hold out the
+    /// newest 20% — closer to the "predict the user's *next*
+    /// favourite" task and less id-aliasing-sensitive than `PostId`.
+    TimeCausal,
 }
 
 impl SplitStrategy {
@@ -13,6 +17,7 @@ impl SplitStrategy {
         match self {
             SplitStrategy::PostId => "post_id",
             SplitStrategy::Random => "random",
+            SplitStrategy::TimeCausal => "time_causal",
         }
     }
 }
@@ -41,6 +46,10 @@ pub(crate) struct GridOptions {
     pub(crate) diversify: bool,
     pub(crate) split: SplitStrategy,
     pub(crate) neg_mode: NegMode,
+    /// Log every probe (kept/rejected) instead of only those that
+    /// improved baseline. Useful for post-hoc analysis of why a knob
+    /// did/didn't move. Set via the `verbose` CLI keyword.
+    pub(crate) verbose: bool,
 }
 
 impl Default for GridOptions {
@@ -51,6 +60,7 @@ impl Default for GridOptions {
             diversify: false,
             split: SplitStrategy::PostId,
             neg_mode: NegMode::Mixed,
+            verbose: false,
         }
     }
 }

@@ -195,7 +195,7 @@ pub(crate) fn score_with_cache(
                     &dataset.idf,
                     &fx.profile,
                     &dataset.global_relation,
-                    &dataset.empty_user_relation,
+                    &fx.user_relation,
                 );
 
                 let n_test = fx.test_features.len();
@@ -268,6 +268,9 @@ pub(crate) fn score_with_cache(
     });
 
     let mut totals = Metrics::default();
+    totals.ndcg_per_account.reserve(per_account.len());
+    totals.recall_per_account.reserve(per_account.len());
+    totals.mrr_per_account.reserve(per_account.len());
     let mut accounts_out: Vec<AccountChannelCache> = Vec::with_capacity(total);
     for (acc, (n, r, m)) in per_account {
         accounts_out.push(acc);
@@ -275,6 +278,9 @@ pub(crate) fn score_with_cache(
         totals.recall_at_k += r;
         totals.mrr += m;
         totals.n_accounts += 1;
+        totals.ndcg_per_account.push(n);
+        totals.recall_per_account.push(r);
+        totals.mrr_per_account.push(m);
     }
 
     (totals, ScoreCache { accounts: accounts_out })

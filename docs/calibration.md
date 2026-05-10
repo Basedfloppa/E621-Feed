@@ -6,11 +6,27 @@
    public e621 users (ranked by `favorite_count`). Pure read-only against
    e621; no public side effects.
 2. **`calibrate`** builds a holdout-based evaluation harness from those
-   favourites: per user, splits favs into train/test (default: oldest 80%
-   → synthetic profile, newest 20% → test set; switchable to uniform-random
-   via `split=random`). Negatives are sampled from the catalog (default:
-   mixed hard-negatives — popularity- and time-matched; switchable to
-   pure-random via `neg=uniform`). Reports **NDCG@20**, **Recall@50**, **MRR**.
+   favourites: per user, splits favs into train/test. Three split
+   strategies:
+   - `split=post_id` (default) — sort by `post_id`, oldest 80% → synthetic
+     profile, newest 20% → test set. Cheap; biases recency.
+   - `split=random` — deterministic uniform-random hold-out. Easier task
+     because positives can pre-date training items.
+   - `split=time_causal` — sort favourites by `created_at`, hold the
+     newest 20% as test. Closer to the production "predict next
+     favourite" task and resilient to id-aliasing on imported data.
+
+   Negatives are sampled from the catalog (default: mixed hard-negatives
+   — popularity- and time-matched; switchable to pure-random via
+   `neg=uniform`). Each test fixture also carries a **per-account
+   tag-relation graph** built from `train_posts` cooccurrences, so the
+   personal `tag_relation` channel and its `*_user_*` knobs see real
+   signal under the synthetic split (added in v5.7).
+
+   Reports **NDCG@20**, **Recall@50**, **MRR** with **bootstrap 95% CI**
+   on NDCG. Probe acceptance during grid uses an SE-aware threshold
+   (`new > best + 1.645·SE_NDCG`) so 4th-decimal noise no longer
+   pollutes the search.
 3. **`calibrate grid`** runs a multi-pass greedy line search with adaptive
    probe steps (×1.0 / ×0.5 / ×0.25 across passes), followed by a paired
    sweep over known-correlated knob pairs and a categorical sweep for
@@ -40,12 +56,20 @@
      `recency_tau_recent`, `tag_relation_pmi_scale_user`
    * Categorical (1): `tag_relation_pair_aggregator` ∈ {mean, max, geomean}
 
-   Subsets:
+   Subsets / flags:
    * `grid mix-only` — only the 8 mix weights (fastest)
    * `grid pairs-only` — skip the single-knob sweep, only the paired moves
    * `grid no-pairs` — skip the paired sweep
    * `grid with-diversify` — run `diversify_scored_posts` before NDCG so
      `diversity_*` knobs become measurable
+   * `verbose` — log every probe (including rejected ones) plus
+     per-knob early-exit notices
+
+   Per-knob early exit: after 2 consecutive non-improving probes inside
+   a knob's probe list, the rest of that knob's probes are skipped for
+   the current pass. Saves 30–50% of probe budget on converged knobs.
+   NaN/Inf probe results are flagged + dropped (don't promote to
+   `[best]` via `partial_cmp` Equal fallback).
 
 ### Chaining modes (shared hydration)
 
@@ -162,9 +186,15 @@ not move the same way in a real A/B test:
    feedback — `meta_interaction_weight`, `feedback_decay_*`,
    `strong_negative_*` — none are in the grid because they have zero
    gradient here. Tune online.
-4. **Diversity knobs (`diversity_*`) aren't in the grid.** Calibrate
-   doesn't run `diversify_scored_posts`; it just scores + ranks. Tune by
-   hand or measure online.
+4. **Diversity knobs (`diversity_*`)** are in the grid only under
+   `--with-diversify` (gated via `diversify_only`). Even there ΔNDCG@20
+   is 0.001–0.003 — MMR is a UX feature, not an offline-metric tuning
+   knob. Tune online or measure UX directly.
+5. **Personal `tag_relation` channel** has signal as of v5.7: each
+   fixture builds its own user-graph from train_posts. `tag_relation_
+   w_personal`, `tag_relation_pmi_scale_user`, `tag_relation_user_min_
+   cooc`, `tag_relation_user_cooc_ref` will all move when the grid
+   finds gain there.
 
 What **is** trustworthy from the offline grid: the **direction** of knobs
 that don't depend on those biases — `mix_sim`, `mix_rating`,

@@ -83,18 +83,48 @@ pub(crate) fn run_grid_with_dataset(
     let mut best_cache: ScoreCache = baseline_cache;
     let mut evals_done: usize = 0;
 
-    // Single-knob passes with adaptive scaling.
+    // Acceptance: SE-aware threshold instead of a fixed 1e-4. A probe
+    // counts as an improvement only if the mean NDCG climbed past the
+    // baseline by ≥ Z·SE (1-sided 95% confidence). Floors at 1e-4 so
+    // pathological small-N samples still need *some* movement.
+    const ACCEPT_Z: f64 = 1.645; // 1-sided 95%
+    let acceptance = |new_mean: f64, baseline: f64, se: f64| -> bool {
+        let threshold = baseline + (ACCEPT_Z * se).max(1e-4);
+        new_mean > threshold
+    };
+    // Skipped/rejected probes — printed only under `verbose`.
+    let mut skipped_nan: usize = 0;
+    let mut skipped_early: usize = 0;
+    let mut total_evals_planned: usize = 0;
+
+    // Single-knob passes with adaptive scaling + per-knob early exit.
     if !opts.pairs_only {
         for (pass_idx, &scale) in PASS_SCALES.iter().enumerate() {
             let pass = pass_idx + 1;
             let pass_t = std::time::Instant::now();
             let mut pass_changed = false;
             let total_pass_evals: usize = active_knobs.iter().map(|k| k.probes.len()).sum();
+            total_evals_planned += total_pass_evals;
             let mut pass_evals = 0usize;
-            // Heartbeat every ~10% of the pass so 8h silent runs aren't a thing.
             let heartbeat_every = (total_pass_evals / 10).max(20);
             for k in &active_knobs {
+                // Per-knob early exit: after 2 consecutive non-improving
+                // probes inside this knob, skip the rest of its probe
+                // list for this pass. Saves 30–50% of probe budget on
+                // converged knobs.
+                let mut consecutive_misses = 0u8;
                 for &raw_delta in k.probes {
+                    if consecutive_misses >= 2 {
+                        let remaining = k.probes.len() - (k.probes.iter().position(|&d| d == raw_delta).unwrap_or(0));
+                        skipped_early += remaining;
+                        if opts.verbose {
+                            eprintln!(
+                                "[grid]   pass {pass}(×{scale:.2}) early-exit on {} after 2 misses (skip {remaining})",
+                                k.name
+                            );
+                        }
+                        break;
+                    }
                     let delta = raw_delta * scale;
                     let mut trial = best.clone();
                     (k.apply)(&mut trial, delta);
@@ -112,15 +142,47 @@ pub(crate) fn run_grid_with_dataset(
                     let m = m_raw.average();
                     pass_evals += 1;
                     evals_done += 1;
-                    if m.ndcg_at_k > best_score + 1e-4 {
+
+                    // Defensive: drop NaN/Inf probes (extreme priors can
+                    // overflow) so they don't accidentally count as
+                    // improvements via partial_cmp's Equal fallback.
+                    if !m.ndcg_at_k.is_finite() {
+                        skipped_nan += 1;
                         eprintln!(
-                            "pass {pass}(×{scale:.2}): {} {delta:+.3}  NDCG@{top_k_ndcg} {:.4} -> {:.4}",
-                            k.name, best_score, m.ndcg_at_k
+                            "[grid]   WARN pass {pass}(×{scale:.2}): {} {delta:+.3} produced NaN/Inf NDCG, treating as fail",
+                            k.name
+                        );
+                        consecutive_misses = consecutive_misses.saturating_add(1);
+                        continue;
+                    }
+
+                    let new_mean = m.ndcg_at_k;
+                    let new_se = m.ndcg_se();
+                    if acceptance(new_mean, best_score, new_se) {
+                        eprintln!(
+                            "pass {pass}(×{scale:.2}): {} {delta:+.3}  NDCG@{top_k_ndcg} {:.4} -> {:.4} (Δ={:+.4}, SE={:.4})",
+                            k.name,
+                            best_score,
+                            new_mean,
+                            new_mean - best_score,
+                            new_se,
                         );
                         best = trial;
-                        best_score = m.ndcg_at_k;
+                        best_score = new_mean;
                         best_cache = trial_cache;
                         pass_changed = true;
+                        consecutive_misses = 0;
+                    } else {
+                        consecutive_misses = consecutive_misses.saturating_add(1);
+                        if opts.verbose {
+                            eprintln!(
+                                "[probe] pass {pass}(×{scale:.2}): {} {delta:+.3}  NDCG {:.4} (Δ={:+.4}, threshold={:+.4})",
+                                k.name,
+                                new_mean,
+                                new_mean - best_score,
+                                (ACCEPT_Z * new_se).max(1e-4),
+                            );
+                        }
                     }
                     if pass_evals % heartbeat_every == 0 {
                         eprintln!(
@@ -132,7 +194,7 @@ pub(crate) fn run_grid_with_dataset(
                 }
             }
             eprintln!(
-                "[grid] pass {pass}(×{scale:.2}) done in {:.1}s ({pass_evals} probes; {} so far total)",
+                "[grid] pass {pass}(×{scale:.2}) done in {:.1}s ({pass_evals}/{total_pass_evals} probes; {} so far total)",
                 pass_t.elapsed().as_secs_f32(),
                 evals_done
             );
@@ -173,15 +235,24 @@ pub(crate) fn run_grid_with_dataset(
                     pair_mask,
                 );
                 let m = m_raw.average();
-                if m.ndcg_at_k > best_score + 1e-4 {
+                if !m.ndcg_at_k.is_finite() {
+                    skipped_nan += 1;
                     eprintln!(
-                        "pair: ({} {:+.3}, {} {:+.3})  NDCG@{top_k_ndcg} {:.4} -> {:.4}",
+                        "[grid]   WARN paired probe ({}, {}) produced NaN/Inf NDCG, skipping",
+                        name_a, name_b
+                    );
+                    continue;
+                }
+                if acceptance(m.ndcg_at_k, best_score, m.ndcg_se()) {
+                    eprintln!(
+                        "pair: ({} {:+.3}, {} {:+.3})  NDCG@{top_k_ndcg} {:.4} -> {:.4} (SE={:.4})",
                         name_a,
                         sa * da * pair_scale,
                         name_b,
                         sb * db * pair_scale,
                         best_score,
-                        m.ndcg_at_k
+                        m.ndcg_at_k,
+                        m.ndcg_se(),
                     );
                     best = trial;
                     best_score = m.ndcg_at_k;
@@ -215,10 +286,21 @@ pub(crate) fn run_grid_with_dataset(
                 ck.invalidates,
             );
             let m = m_raw.average();
-            if m.ndcg_at_k > best_score + 1e-4 {
+            if !m.ndcg_at_k.is_finite() {
+                skipped_nan += 1;
                 eprintln!(
-                    "categorical: {} = \"{cand}\"  NDCG@{top_k_ndcg} {:.4} -> {:.4}",
-                    ck.name, best_score, m.ndcg_at_k
+                    "[grid]   WARN categorical {} = \"{cand}\" produced NaN/Inf NDCG, skipping",
+                    ck.name
+                );
+                continue;
+            }
+            if acceptance(m.ndcg_at_k, best_score, m.ndcg_se()) {
+                eprintln!(
+                    "categorical: {} = \"{cand}\"  NDCG@{top_k_ndcg} {:.4} -> {:.4} (SE={:.4})",
+                    ck.name,
+                    best_score,
+                    m.ndcg_at_k,
+                    m.ndcg_se(),
                 );
                 best = trial;
                 best_score = m.ndcg_at_k;
@@ -252,6 +334,9 @@ pub(crate) fn run_grid_with_dataset(
     if let Err(e) = write_grid_log(&best, &final_m, &opts, t0.elapsed(), &saturated) {
         eprintln!("[grid] failed to write result log: {e}");
     }
-    eprintln!("[grid] total time: {:.1}s", t0.elapsed().as_secs_f32());
+    eprintln!(
+        "[grid] total time: {:.1}s; evals={evals_done}, skipped (early-exit)={skipped_early}, skipped (NaN/Inf)={skipped_nan}, planned={total_evals_planned}",
+        t0.elapsed().as_secs_f32()
+    );
     Ok(())
 }
