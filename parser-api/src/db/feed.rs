@@ -112,9 +112,16 @@ pub fn record_feed_interaction(
     })
 }
 
-/// Posts the user has already qualified-impressed within the last `days`.
-/// Used to drop them from the candidate pool before scoring so the same post
-/// doesn't surface across sessions.
+/// Posts the user has already interacted with in any way (qualified
+/// impression, explicit hide, or open-through to e621) within the last
+/// `days`. Used to drop them from the candidate pool before scoring so
+/// the same post doesn't surface across sessions.
+///
+/// `hide` is the load-bearing addition: without it, a hidden post would
+/// reappear on the very next page request because the dedup query
+/// previously only matched `qualified_impression`. `open` is included
+/// because the user has already seen the post in full and likely
+/// doesn't need it surfaced again so soon.
 pub fn get_recently_seen_post_ids(account_id: i32, days: i64) -> Result<HashSet<i64>, String> {
     let conn = open_db()?;
     let cutoff = (Utc::now() - chrono::Duration::days(days.max(1))).to_rfc3339();
@@ -123,7 +130,7 @@ pub fn get_recently_seen_post_ids(account_id: i32, days: i64) -> Result<HashSet<
             "
             SELECT DISTINCT post_id FROM feed_interactions
             WHERE account_id = ?1
-              AND event_type = 'qualified_impression'
+              AND event_type IN ('qualified_impression', 'hide', 'open')
               AND created_at >= ?2
             ",
         )

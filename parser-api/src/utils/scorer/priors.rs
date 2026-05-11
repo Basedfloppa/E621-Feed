@@ -214,19 +214,19 @@ fn default_discrete_pref_floor() -> f32 {
     0.05
 }
 fn default_diversity_max_penalty() -> f32 {
-    0.45
+    0.20
 }
 fn default_diversity_interaction_damp() -> f32 {
     0.35
 }
 fn default_df_floor() -> f32 {
-    0.2
+    0.4
 }
 fn default_idf_max() -> f32 {
     100.0
 }
 fn default_bm25_k() -> f32 {
-    2.40
+    2.25
 }
 fn default_one_sided_ratio_exp() -> f32 {
     0.5
@@ -238,22 +238,22 @@ fn default_interaction_ctr_prior_alpha() -> f32 {
     4.0
 }
 fn default_idf_rsj_smoothing() -> f32 {
-    0.25
+    0.35
 }
 fn default_group_w_artist() -> f32 {
-    2.65
+    2.40
 }
 fn default_group_w_character() -> f32 {
-    2.15
+    2.00
 }
 fn default_group_w_copyright() -> f32 {
-    1.30
+    1.45
 }
 fn default_group_w_species() -> f32 {
-    1.20
+    1.30
 }
 fn default_group_w_general() -> f32 {
-    0.65
+    0.70
 }
 fn default_group_w_lore() -> f32 {
     0.40

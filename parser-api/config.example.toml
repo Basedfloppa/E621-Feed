@@ -52,33 +52,35 @@ quality_a        = 0.50
 quality_b        = 0.20
 quality_log_bias = -3.0
 
-mix_sim          = 0.80
+mix_sim          = 0.72
 mix_quality      = 0.02
 mix_recency      = 0.02
-mix_rating       = 0.03
-mix_media        = 0.04
+mix_rating       = 0.04
+mix_media        = 0.05
 mix_popularity   = 0.02
 mix_interaction  = 0.10
 mix_tag_relation = 0.08
 
 # IDF / frequency shaping
-df_floor          = 0.20   # v5.7: 5/6 N=915 runs at 0.10 (one hit lower clamp)
+df_floor          = 0.40   # v5.8: time_causal grid confirms 0.40 (v5.7's 0.20 was post_id-noise)
 idf_max           = 100.0
-idf_lambda        = 1.00   # v5.5: N=915 grid stable at 1.0–1.012
-idf_alpha         = 1.05   # stable across runs
-freq_alpha        = 1.00   # v5.7: 6-run consensus ≈ 1.0
-bm25_k            = 2.40   # v5.7: 6-run mean 2.43
+idf_lambda        = 1.00   # stable across N=915 runs
+idf_alpha         = 1.05   # stable
+freq_alpha        = 0.95   # v5.8 reverted from v5.7 1.00; time_causal best is 0.95
+bm25_k            = 2.25   # v5.8 reverted from v5.7 2.40; time_causal best is 2.25
 one_sided_ratio_exp = 0.5  # exponent in quality/popularity overshoot shape; 0.5 = legacy sqrt
-idf_rsj_smoothing = 0.25   # v5.7: bimodal (0.15 / 0.35), midpoint
+idf_rsj_smoothing = 0.35   # v5.8 reverted from v5.7 0.25; time_causal best is 0.35
 
 # Per-group multipliers (v5.3 — promoted from the old [group_weights] section)
-# v5.7: artist/character climb further, copyright/species/general step DOWN
-# (v5.5 over-shot up; new N=915 data says general≈0.55 not 0.80).
-group_w_artist    = 2.65
-group_w_character = 2.15
-group_w_copyright = 1.30
-group_w_species   = 1.20
-group_w_general   = 0.65
+# v5.8: copyright/species/general moves rolled back to v5.5 levels —
+# v5.7 took those up/down too aggressively based on post_id-only data;
+# the more honest time_causal grid pulls them back. group_w_general
+# took a half-step from 0.80 to 0.75 toward the time_causal best (0.70).
+group_w_artist    = 2.40
+group_w_character = 2.00
+group_w_copyright = 1.45
+group_w_species   = 1.30
+group_w_general   = 0.70   # v5.9: 3 independent time_causal grids agree on 0.70
 group_w_lore      = 0.40
 
 # Cold-start / Bayesian priors (v5.3 — promoted from hardcoded constants)
@@ -146,7 +148,13 @@ meta_interaction_weight       = 0.3
 # Cold-start + diversity caps
 coldstart_n0               = 25.0
 discrete_pref_floor        = 0.05
-diversity_max_penalty      = 0.45
+# v5.9: lowered 0.45 → 0.20. The previous value caused user-visible
+# "feed jumps": a high-score post penalised by tag-redundancy could
+# drop by up to 0.45, letting a much-lower-score-but-different post
+# slot in between two strong recommendations. Offline NDCG@20 barely
+# notices (Δ ≤ 0.003 across calibrate diversify runs), so this is a
+# free UX improvement.
+diversity_max_penalty      = 0.20
 diversity_interaction_damp = 0.35
 
 # --- Runtime / worker tuning ------------------------------------------------

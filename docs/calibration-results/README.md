@@ -19,34 +19,35 @@ grid winner, and the matching `default` column shows what was actually
 copied into prod (typically a partial step toward `[best]` to hedge
 against holdout artifacts described in [`../calibration.md`](../calibration.md)).
 
-| Knob | v5.1 default | v5.4 default | v5.5 default | N=915 post_v5.5 best (post_id, n=3) | **v5.7 default** |
+| Knob | v5.5 | v5.7 (rolled back) | post_id best (N=915) | time_causal best (N=915, n=3) | **v5.9 default** |
 |---|---|---|---|---|---|
-| `mix_sim` | 0.60 | 0.65 | 0.72 | 0.945 (3/3) | **0.80** |
-| `mix_quality` | 0.05 | 0.04 | 0.03 | 0 | **0.02** |
-| `mix_recency` | 0.04 | 0.03 | 0.02 | 0 | **0.02** |
-| `mix_rating` | 0.07 | 0.05 | 0.04 | 0.013 | **0.03** |
-| `mix_media` | 0.05 | 0.05 | 0.05 | 0.013–0.025 | **0.04** |
-| `mix_popularity` | 0.04 | 0.03 | 0.02 | 0 | **0.02** |
+| `mix_sim` | 0.72 | 0.80 | 0.945 | 0.720 (3/3) | **0.72** |
+| `mix_quality` | 0.03 | 0.02 | 0 | 0 (3/3) | **0.02** |
+| `mix_recency` | 0.02 | 0.02 | 0 | 0 (3/3) | **0.02** |
+| `mix_rating` | 0.04 | 0.03 | 0.013 | 0.040 (3/3) | **0.04** |
+| `mix_media` | 0.05 | 0.04 | 0.013–0.025 | 0.050 (3/3) | **0.05** |
+| `mix_popularity` | 0.02 | 0.02 | 0 | 0 (3/3) | **0.02** |
 | `mix_interaction` | 0.10 | 0.10 | 0.10 | 0.10 | **0.10** |
 | `mix_tag_relation` | 0.08 | 0.08 | 0.08 | 0.08 | **0.08** |
-| `idf_lambda` | 0.70 | 0.85 | 1.00 | 1.00 (3/3) | **1.00** |
-| `idf_alpha` | 0.92 | 0.96 | 1.05 | 1.05 (mostly) | **1.05** |
-| `freq_alpha` | 0.80 | 0.90 | 0.95 | 1.025–1.075 | **1.00** |
-| `df_floor` | 0.70 | 0.40 | 0.40 | 0.10 (5/6) | **0.20** |
-| `bm25_k` | 1.6 | 2.0 | 2.25 | 2.40–2.95 | **2.40** |
-| `idf_rsj_smoothing` | 0.5 | 0.4 | 0.35 | 0.15 / 0.35 (bimodal) | **0.25** |
-| `group_w_artist` | 2.0 | 2.25 | 2.40 | 2.85 (4/4) | **2.65** |
-| `group_w_character` | 1.6 | 1.85 | 2.00 | 2.20–2.35 | **2.15** |
-| `group_w_copyright` | 1.2 | 1.35 | 1.45 | 1.05–1.25 | **1.30** ⬇ |
-| `group_w_species` | 1.1 | 1.20 | 1.30 | 0.975–1.30 | **1.20** ⬇ |
-| `group_w_general` | 1.0 | 0.85 | 0.80 | 0.55 (4/4) | **0.65** ⬇ |
-| `group_w_lore` | 0.45 | 0.40 | 0.40 | 0.40 | **0.40** |
-| `tag_relation_pmi_scale` | 3.5 | 3.5 | 3.5 | 3.5 | **3.5** |
-| `tag_relation_cooc_ref` | 16.0 | 16.0 | 16.0 | 16.0 | **16.0** |
-| `tag_relation_min_cooc` *(v5.6)* | — | — | — | 2 (6/6, did not move) | **2** |
+| `idf_lambda` | 1.00 | 1.00 | 1.00 | 1.000 | **1.00** |
+| `idf_alpha` | 1.05 | 1.05 | 1.05 | 1.050 | **1.05** |
+| `freq_alpha` | 0.95 | 1.00 | 1.025–1.075 | 0.950 (3/3) | **0.95** |
+| `df_floor` | 0.40 | 0.20 | 0.10 (5/6) | 0.400 (3/3) | **0.40** |
+| `bm25_k` | 2.25 | 2.40 | 2.40–2.95 | 2.250 (3/3) | **2.25** |
+| `idf_rsj_smoothing` | 0.35 | 0.25 | 0.15 / 0.35 | 0.350 (3/3) | **0.35** |
+| `group_w_artist` | 2.40 | 2.65 | 2.85 (4/4) | 2.400 (3/3) | **2.40** |
+| `group_w_character` | 2.00 | 2.15 | 2.20–2.35 | 2.000 (3/3) | **2.00** |
+| `group_w_copyright` | 1.45 | 1.30 | 1.05–1.25 | 1.450 (3/3) | **1.45** |
+| `group_w_species` | 1.30 | 1.20 | 0.975–1.30 | 1.300 (3/3) | **1.30** |
+| `group_w_general` | 0.80 | 0.65 | 0.55 (4/4) | 0.700 (3/3) | **0.70** ⬇ |
+| `group_w_lore` | 0.40 | 0.40 | 0.40 | 0.400 | **0.40** |
+| `diversity_max_penalty` *(UX)* | 0.45 | 0.45 | 0.45 | 0.450 | **0.20** ⬇ |
+| `tag_relation_pmi_scale` | 3.5 | 3.5 | 3.5 | 3.500 | **3.5** |
+| `tag_relation_cooc_ref` | 16.0 | 16.0 | 16.0 | 16.00 | **16.0** |
+| `tag_relation_min_cooc` *(v5.6)* | — | — | 2 | 2 | **2** |
 
-(Pre-v5 / N=150 / N=500 / N=915 v5.1 / v5.4-best columns trimmed for
-readability; preserved in git history.)
+(Pre-v5 / v5.1 / v5.4 / N=150 / N=500 / N=915 v5.4-best columns trimmed
+for readability; preserved in git history.)
 
 ### v5.4 grid context (May 2026)
 
@@ -93,6 +94,65 @@ the v5.1 number (0.7274 / 0.1475 / 0.8871) but most of that lift is
 from the v5.4 group-weight bumps and (now extended) IDF parameters
 already shipping in prod. Real production gain v5.4 → v5.5 will be
 small; copy via the bucket A/B mechanism, not unconditional rollout.
+
+### v5.9 — stability run + UX fixes (May 2026, N=915)
+
+Two follow-up runs on the v5.8 baseline plus a diversify counterpart:
+
+- [`grid_20260510_174257.toml`](grid_20260510_174257.toml) — time_causal,
+  no diversify (NDCG@20 0.8024, basically identical to 133817's 0.8026)
+- [`grid_20260510_184616.toml`](grid_20260510_184616.toml) — time_causal,
+  with diversify, N=800 (NDCG@20 0.8116, ΔRecall@50 -0.022)
+
+**Stability confirmed.** Three independent `time_causal` runs all
+converged to the same `[best]` (down to the 3rd decimal). Drift between
+runs 174257 and 133817 is 0.0002 NDCG@20 — well below the SE-based
+acceptance threshold (~0.0066). v5.9 takes the only consistent grid
+move: `group_w_general` 0.75 → 0.70 (full step; all 3 runs agree).
+
+**Diversify still doesn't pay offline** but does cause real UX problems
+flagged by users — "feed jumps" between adjacent slots, hidden posts
+reappearing on next page. Out-of-band fixes shipped with v5.9:
+
+- `diversity_max_penalty` 0.45 → **0.20**. The previous value let MMR
+  drop a high-score post by up to 0.45, letting a far-weaker post slot
+  in between two strong recommendations. Offline ΔNDCG@20 ≤ 0.003
+  across calibrate runs, so this is a free UX win.
+- `get_recently_seen_post_ids` now matches `event_type IN
+  ('qualified_impression', 'hide', 'open')`, not just qualified
+  impressions. Hidden posts no longer reappear on the next page; the
+  previous behaviour was a real bug not caught by any offline metric.
+
+### v5.8 — time_causal split + memory diet (May 2026, N=915)
+
+First successful full-N=915 run on the `time_causal` split after the
+calibrate-side memory diet (`TagRelationGraph::freeze`/`freeze_with_query_set`,
+direct-to-Vec global-graph load, jemalloc as the global allocator on
+Linux). Earlier attempts OOM-killed around 720 accounts due to glibc
+arena fragmentation across hundreds of thousands of small `String`
+allocations during `Post` hydration.
+
+- [`grid_20260510_133817.toml`](grid_20260510_133817.toml) — time_causal,
+  no diversify (NDCG@20 0.8026, Recall@50 0.1668, MRR 0.9185, 35 min)
+
+Headlines:
+
+- **time_causal is ~4 pp NDCG@20 harder than post_id (0.80 vs 0.84)**
+  by construction. It mirrors the production "predict the user's next
+  favourite" task more honestly. Real production gain expectations
+  should be calibrated against this number, not the easier post_id /
+  random splits.
+- **`[best]` matched v5.5 defaults almost exactly.** v5.7 over-shot
+  several knobs (`mix_sim`, `df_floor`, `bm25_k`, `idf_rsj_smoothing`,
+  group weights) based on post_id-only data; the more honest
+  time_causal grid pulls them all back. v5.8 reverts those moves.
+- **Only meaningful drift from v5.5:** `group_w_general` 0.80 → 0.70
+  (grid net move). v5.8 takes a half-step from 0.80 to 0.75 toward
+  the time_causal best.
+- **Memory after diet:** N=915 hydrates and runs to completion well
+  inside 15 GB. Per-account RSS growth dropped from ~20 MB (glibc) to
+  the expected ~1-2 MB after enabling jemalloc via the `--features
+  jemalloc` flag.
 
 ### v5.7 grid context (May 2026, N=915 follow-up after v5.5/v5.6)
 
