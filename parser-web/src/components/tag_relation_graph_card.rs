@@ -65,10 +65,20 @@ const WARMUP_TICKS: u32 = 240;
 /// Floor on inter-node distance for the repulsion calculation. Prevents
 /// `K_REPEL / d²` from blowing up when two nodes momentarily overlap.
 const REPEL_MIN_DIST: f64 = 14.0;
+/// Hard padding enforced *after* force integration: every pair is pushed
+/// apart so their centres are at least `r_i + r_j + COLLISION_PAD` apart.
+/// Repulsion alone can lose to combined spring/gravity forces in dense
+/// hubs — this guarantees circles never visibly touch.
+const COLLISION_PAD: f64 = 4.0;
+/// Synchronous physics iterations run inside `sync()` before the first
+/// visible frame. Combined with the community-aware seed below, this
+/// lands the graph on a near-final layout the moment data arrives — no
+/// visible "settling" churn on top of the user's first sight of the graph.
+const PRESETTLE_STEPS: usize = 60;
 
 const ZOOM_STEP: f64 = 1.15;
-const MIN_SCALE: f64 = 0.2;
-const MAX_SCALE: f64 = 6.0;
+const MIN_SCALE: f64 = 0.1;
+const MAX_SCALE: f64 = 2.0;
 
 /// Click-vs-drag threshold (viewBox units of cumulative cursor motion).
 /// Below this, mouseup on a held node is treated as a click → open e621
@@ -165,13 +175,6 @@ impl LayoutState {
     fn sync(&mut self, graph: &TagRelationGraphPayload, edges_per_tag: usize) {
         let backbone = select_backbone(graph, edges_per_tag);
         let n = graph.nodes.len();
-        let max_count = graph
-            .nodes
-            .iter()
-            .map(|n| n.count)
-            .max()
-            .unwrap_or(1)
-            .max(1) as f64;
 
         let mut s_min = f64::INFINITY;
         let mut s_max = f64::NEG_INFINITY;
@@ -200,31 +203,76 @@ impl LayoutState {
         self.pinned = None;
         self.ticks_since_sync = 0;
 
-        // Seed with a deterministic-but-jittered radial layout near the
-        // centre. The first-tick repulsion then has a non-degenerate
-        // gradient and clusters resolve quickly under warmup-speed.
-        self.nodes.clear();
-        self.nodes.reserve(n);
-        let r_max = smooth_r_max(n);
-        let log_max = max_count.max(1.0).ln().max(1e-3);
-        for (i, node) in graph.nodes.iter().enumerate() {
-            let mut h: u64 = 1469598103934665603;
-            for b in node.name.as_bytes() {
-                h = h.wrapping_mul(1099511628211);
-                h ^= *b as u64;
+        // Uniform radius for every node — per UX request. Slight smoothstep
+        // shrink as the graph density grows so a 250-tag layout doesn't
+        // stuff oversized circles into a tight viewport.
+        let radius = node_radius(n);
+
+        // Group node indices by community so we can seed each community in
+        // its own angular sector around the canvas. This is dramatically
+        // closer to the eventual equilibrium than uniform random seeding
+        // and lets the presettle loop finish in far fewer iterations.
+        let n_communities = self
+            .communities
+            .iter()
+            .copied()
+            .max()
+            .map(|c| c as usize + 1)
+            .unwrap_or(0);
+        let mut by_community: Vec<Vec<usize>> = vec![Vec::new(); n_communities];
+        for (i, &c) in self.communities.iter().enumerate() {
+            if (c as usize) < by_community.len() {
+                by_community[c as usize].push(i);
             }
-            h = h.wrapping_add((i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
-            let seed_a = ((h & 0xffff) as f64 / 0xffff as f64) * std::f64::consts::TAU;
-            let seed_r = (((h >> 16) & 0xff) as f64 / 0xff as f64) * 220.0 + 80.0;
-            let normalized = (node.count as f64).max(1.0).ln() / log_max;
-            let radius = 4.5 + (normalized * r_max).clamp(0.0, r_max);
-            self.nodes.push(PhysNode {
-                x: CENTER_X + seed_r * seed_a.cos(),
-                y: CENTER_Y + seed_r * seed_a.sin(),
-                vx: 0.0,
-                vy: 0.0,
-                radius,
-            });
+        }
+
+        self.nodes.clear();
+        self.nodes.resize_with(n, || PhysNode {
+            x: CENTER_X,
+            y: CENTER_Y,
+            vx: 0.0,
+            vy: 0.0,
+            radius,
+        });
+
+        // Outer radius for community centres. Scales with how many
+        // communities we have so big graphs still get well-separated
+        // sectors and small ones don't fly to the edges.
+        let outer_r = (260.0 + (n_communities as f64).sqrt() * 32.0).min(360.0);
+        for (c_idx, ids) in by_community.iter().enumerate() {
+            if ids.is_empty() {
+                continue;
+            }
+            let nc = n_communities.max(1) as f64;
+            let centre_angle = (c_idx as f64 / nc) * std::f64::consts::TAU;
+            let cx = CENTER_X + outer_r * centre_angle.cos();
+            let cy = CENTER_Y + outer_r * centre_angle.sin();
+            // Inner radius grows with community size; floor at ~28 so even
+            // pairs spread out a little instead of stacking on top of each
+            // other and immediately ejecting under repulsion.
+            let inner_r = 28.0 + (ids.len() as f64).sqrt() * 18.0;
+            let count = ids.len().max(1) as f64;
+            for (k, &i) in ids.iter().enumerate() {
+                let mut h: u64 = 1469598103934665603;
+                for b in graph.nodes[i].name.as_bytes() {
+                    h = h.wrapping_mul(1099511628211);
+                    h ^= *b as u64;
+                }
+                let jitter_r = 0.55 + ((h & 0xffff) as f64 / 0xffff as f64) * 0.45;
+                let jitter_a = ((h >> 16) & 0xff) as f64 / 0xff as f64 * 0.6;
+                let local_angle = (k as f64 / count) * std::f64::consts::TAU + jitter_a;
+                let node = &mut self.nodes[i];
+                node.x = cx + inner_r * jitter_r * local_angle.cos();
+                node.y = cy + inner_r * jitter_r * local_angle.sin();
+            }
+        }
+
+        // Presettle: run a batch of synchronous physics steps so the very
+        // first frame the user sees is already close to equilibrium. Warmup
+        // speed (gated by `ticks_since_sync < WARMUP_TICKS`) lets the
+        // remaining clusters resolve within these iterations.
+        for _ in 0..PRESETTLE_STEPS {
+            self.step();
         }
     }
 
@@ -329,6 +377,52 @@ impl LayoutState {
             }
         }
 
+        // Hard collision resolution. The continuous repulsion above keeps
+        // most pairs apart on its own, but high-degree hubs in dense
+        // graphs can have springs from many neighbours overpowering the
+        // 1/d² push and squashing circles together visibly. A direct
+        // position-based separation pass after integration guarantees
+        // there's always a `COLLISION_PAD`-wide gap between any two
+        // circles. The pinned node is treated as immovable so its
+        // partner absorbs the full overlap displacement; otherwise both
+        // sides move by half.
+        for i in 0..n {
+            for j in (i + 1)..n {
+                let xi = self.nodes[i].x;
+                let yi = self.nodes[i].y;
+                let ri = self.nodes[i].radius;
+                let xj = self.nodes[j].x;
+                let yj = self.nodes[j].y;
+                let rj = self.nodes[j].radius;
+                let dx = xj - xi;
+                let dy = yj - yi;
+                let min_d = ri + rj + COLLISION_PAD;
+                let d2 = dx * dx + dy * dy;
+                if d2 >= min_d * min_d {
+                    continue;
+                }
+                let d = d2.sqrt().max(0.001);
+                let overlap = min_d - d;
+                let ux = dx / d;
+                let uy = dy / d;
+                let (share_i, share_j) = if Some(i) == pinned_idx {
+                    (0.0, 1.0)
+                } else if Some(j) == pinned_idx {
+                    (1.0, 0.0)
+                } else {
+                    (0.5, 0.5)
+                };
+                if share_i > 0.0 {
+                    self.nodes[i].x -= ux * overlap * share_i;
+                    self.nodes[i].y -= uy * overlap * share_i;
+                }
+                if share_j > 0.0 {
+                    self.nodes[j].x += ux * overlap * share_j;
+                    self.nodes[j].y += uy * overlap * share_j;
+                }
+            }
+        }
+
         self.ticks_since_sync = self.ticks_since_sync.saturating_add(1);
     }
 }
@@ -412,8 +506,17 @@ fn community_summary(
         .filter(|(_, e)| e.2 > 1)
         .map(|(c, (name, _, size))| (c, name, size))
         .collect();
+    // Two-stage sort: pick the top 10 by size, then re-sort the survivors
+    // alphabetically for display. HashMap iteration is non-deterministic,
+    // so without the final alphabetic pass equal-sized communities would
+    // visually swap positions on every physics tick — the legend flickers.
     out.sort_by(|a, b| b.2.cmp(&a.2));
     out.truncate(10);
+    out.sort_by(|a, b| {
+        a.1.to_ascii_lowercase()
+            .cmp(&b.1.to_ascii_lowercase())
+            .then_with(|| a.0.cmp(&b.0))
+    });
     out
 }
 
@@ -664,112 +767,152 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
         })
     };
 
-    let on_svg_mousemove = {
+    // Window-level mousemove + mouseup so that drag (both node-pin and
+    // scene-pan) follows the cursor even when it leaves the SVG bounds.
+    // SVG-only handlers stop firing the moment the pointer crosses out of
+    // the element, which previously cut off any drag that wandered off
+    // the canvas — the node would snap back, the pan would freeze. Now
+    // the user can throw a node anywhere on the page and release it
+    // wherever; on release the pin clears regardless of cursor location.
+    {
         let pan = pan.clone();
+        let layout = layout.clone();
         let view = view.clone();
         let svg_ref = svg_ref.clone();
-        let layout = layout.clone();
-        Callback::from(move |e: WebMouseEvent| {
-            // Node drag takes priority: its mousedown set `layout.pinned`,
-            // and every mousemove updates the pin's target to follow the
-            // cursor in world coords. SVG pan only kicks in when no node
-            // is being dragged.
-            let pinned_active = layout.borrow().pinned.is_some();
-            if pinned_active {
-                let Some(svg) = svg_ref.cast::<web_sys::Element>() else {
-                    return;
-                };
-                let (vbx, vby) =
-                    client_to_viewbox(&svg, e.client_x() as f64, e.client_y() as f64);
-                let v = *view;
-                let world_x = (vbx - v.tx) / v.scale;
-                let world_y = (vby - v.ty) / v.scale;
-                let mut l = layout.borrow_mut();
-                if let Some(p) = l.pinned.as_mut() {
-                    let dx = world_x - p.target_x;
-                    let dy = world_y - p.target_y;
-                    p.distance += (dx * dx + dy * dy).sqrt();
-                    p.target_x = world_x;
-                    p.target_y = world_y;
-                }
-                return;
-            }
-
-            let (dx_px, dy_px) = {
-                let mut p = pan.borrow_mut();
-                if !p.active {
-                    return;
-                }
-                let dx = e.client_x() as f64 - p.last_client_x;
-                let dy = e.client_y() as f64 - p.last_client_y;
-                p.last_client_x = e.client_x() as f64;
-                p.last_client_y = e.client_y() as f64;
-                (dx, dy)
-            };
-            let Some(svg) = svg_ref.cast::<web_sys::Element>() else {
-                return;
-            };
-            let k = px_to_viewbox_scale(&svg);
-            let mut v = *view;
-            v.tx += dx_px * k;
-            v.ty += dy_px * k;
-            view.set(v);
-        })
-    };
-
-    let on_svg_mouseup = {
-        let pan = pan.clone();
-        let layout = layout.clone();
         let is_dragging = is_dragging.clone();
         let payload = payload.clone();
-        Callback::from(move |e: WebMouseEvent| {
-            if e.button() != 0 {
-                return;
-            }
-            let was_panning = pan.borrow().active;
-            pan.borrow_mut().active = false;
+        use_effect_with((), move |_| {
+            let Some(window) = web_sys::window() else {
+                return Box::new(|| {}) as Box<dyn FnOnce()>;
+            };
 
-            // Resolve a click vs drag on the pinned node: a small total
-            // distance and the user opens that tag's e621 search in a new
-            // tab; otherwise the node is just released to physics.
-            let pinned = layout.borrow().pinned.clone();
-            if let Some(p) = pinned {
-                if p.distance < CLICK_DRAG_THRESHOLD {
-                    if let (Some(graph), Some(cfg)) =
-                        (payload.as_ref(), read_config_from_head())
-                    {
-                        if let Some(node) = graph.nodes.get(p.node_idx) {
-                            let url = format!(
-                                "{}/posts?tags={}",
-                                cfg.posts_domain,
-                                urlencoding::encode(&node.name),
-                            );
-                            if let Some(win) = web_sys::window() {
-                                let _ = win.open_with_url_and_target(&url, "_blank");
+            let mousemove_cb = {
+                let pan = pan.clone();
+                let layout = layout.clone();
+                let view = view.clone();
+                let svg_ref = svg_ref.clone();
+                Closure::<dyn FnMut(WebMouseEvent)>::new(move |e: WebMouseEvent| {
+                    let Some(svg) = svg_ref.cast::<web_sys::Element>() else {
+                        return;
+                    };
+                    // Node drag takes priority: its mousedown set
+                    // `layout.pinned`, and every mousemove updates the
+                    // pin's target to follow the cursor in world coords.
+                    let pinned_active = layout.borrow().pinned.is_some();
+                    if pinned_active {
+                        let (vbx, vby) = client_to_viewbox(
+                            &svg,
+                            e.client_x() as f64,
+                            e.client_y() as f64,
+                        );
+                        let v = *view;
+                        let world_x = (vbx - v.tx) / v.scale;
+                        let world_y = (vby - v.ty) / v.scale;
+                        let mut l = layout.borrow_mut();
+                        if let Some(p) = l.pinned.as_mut() {
+                            let dx = world_x - p.target_x;
+                            let dy = world_y - p.target_y;
+                            p.distance += (dx * dx + dy * dy).sqrt();
+                            p.target_x = world_x;
+                            p.target_y = world_y;
+                        }
+                        return;
+                    }
+
+                    let (dx_px, dy_px) = {
+                        let mut p = pan.borrow_mut();
+                        if !p.active {
+                            return;
+                        }
+                        let dx = e.client_x() as f64 - p.last_client_x;
+                        let dy = e.client_y() as f64 - p.last_client_y;
+                        p.last_client_x = e.client_x() as f64;
+                        p.last_client_y = e.client_y() as f64;
+                        (dx, dy)
+                    };
+                    let k = px_to_viewbox_scale(&svg);
+                    let mut v = *view;
+                    v.tx += dx_px * k;
+                    v.ty += dy_px * k;
+                    view.set(v);
+                })
+            };
+
+            let mouseup_cb = {
+                let pan = pan.clone();
+                let layout = layout.clone();
+                let is_dragging = is_dragging.clone();
+                let payload = payload.clone();
+                Closure::<dyn FnMut(WebMouseEvent)>::new(move |e: WebMouseEvent| {
+                    if e.button() != 0 {
+                        return;
+                    }
+                    let was_panning = pan.borrow().active;
+                    pan.borrow_mut().active = false;
+
+                    // Click vs drag on the pinned node: small total
+                    // distance opens the tag's e621 search in a new tab;
+                    // otherwise the node is just released to physics.
+                    let pinned = layout.borrow().pinned.clone();
+                    if let Some(p) = pinned {
+                        if p.distance < CLICK_DRAG_THRESHOLD {
+                            if let (Some(graph), Some(cfg)) =
+                                (payload.as_ref(), read_config_from_head())
+                            {
+                                if let Some(node) = graph.nodes.get(p.node_idx) {
+                                    let url = format!(
+                                        "{}/posts?tags={}",
+                                        cfg.posts_domain,
+                                        urlencoding::encode(&node.name),
+                                    );
+                                    if let Some(win) = web_sys::window() {
+                                        let _ =
+                                            win.open_with_url_and_target(&url, "_blank");
+                                    }
+                                }
                             }
                         }
+                        layout.borrow_mut().pinned = None;
                     }
-                }
-                layout.borrow_mut().pinned = None;
-            }
-            if was_panning || *is_dragging {
-                is_dragging.set(false);
-            }
-        })
-    };
+                    if was_panning || *is_dragging {
+                        is_dragging.set(false);
+                    }
+                })
+            };
+
+            let _ = window.add_event_listener_with_callback(
+                "mousemove",
+                mousemove_cb.as_ref().unchecked_ref(),
+            );
+            let _ = window.add_event_listener_with_callback(
+                "mouseup",
+                mouseup_cb.as_ref().unchecked_ref(),
+            );
+
+            let window_for_cleanup = window;
+            Box::new(move || {
+                let _ = window_for_cleanup.remove_event_listener_with_callback(
+                    "mousemove",
+                    mousemove_cb.as_ref().unchecked_ref(),
+                );
+                let _ = window_for_cleanup.remove_event_listener_with_callback(
+                    "mouseup",
+                    mouseup_cb.as_ref().unchecked_ref(),
+                );
+                drop(mousemove_cb);
+                drop(mouseup_cb);
+            }) as Box<dyn FnOnce()>
+        });
+    }
 
     let on_svg_mouseleave = {
-        let pan = pan.clone();
-        let layout = layout.clone();
-        let is_dragging = is_dragging.clone();
         let hover_idx = hover_idx.clone();
         Callback::from(move |_: WebMouseEvent| {
-            let was_active = pan.borrow().active || layout.borrow().pinned.is_some();
-            pan.borrow_mut().active = false;
-            layout.borrow_mut().pinned = None;
-            if was_active && *is_dragging {
-                is_dragging.set(false);
-            }
+            // Pan/pin state is *not* cleared here on purpose — that's
+            // what enables dragging outside the SVG bounds. Window-level
+            // mouseup is the single source of truth for ending a drag.
+            // Hover is local to the SVG (no <circle> outside it), so we
+            // can safely drop it on leave.
             if hover_idx.is_some() {
                 hover_idx.set(None);
             }
@@ -894,6 +1037,33 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
         .collect();
 
     let graph_nodes_ref = payload.as_ref();
+
+    // Persistent labels: top-K tags by count. Previously this gate was
+    // `radius >= 9` since radius scaled with count; with uniform radius the
+    // signal is lost, so we pick the top-K explicitly. K tapers from "all"
+    // for sparse graphs to ~25 for dense so the canvas stays readable.
+    let label_always: std::collections::HashSet<usize> = if let Some(graph) = graph_nodes_ref {
+        let mut by_count: Vec<(usize, i64)> = graph
+            .nodes
+            .iter()
+            .enumerate()
+            .map(|(i, n)| (i, n.count))
+            .collect();
+        by_count.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        let total = by_count.len();
+        let target = if total <= 30 {
+            total
+        } else {
+            let t = ((total as f64 - 30.0) / (220.0 - 30.0)).clamp(0.0, 1.0);
+            let s = t * t * (3.0 - 2.0 * t);
+            (50.0 + (25.0 - 50.0) * s).round() as usize
+        };
+        by_count.truncate(target.max(1));
+        by_count.into_iter().map(|(i, _)| i).collect()
+    } else {
+        std::collections::HashSet::new()
+    };
+
     let mut circles_html: Vec<Html> = Vec::with_capacity(l.nodes.len());
     let mut labels_html: Vec<Html> = Vec::new();
 
@@ -1000,11 +1170,11 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
             </g>
         });
 
-        // Label policy: show the name on every node big enough to read in a
-        // dense layout (radius ≥ 9), on hovered nodes, and on direct
-        // neighbours of the hovered node. Smaller nodes stay anonymous until
-        // the user mouses over them — keeps the canvas readable at n=250.
-        let always_labelled = n.radius >= 9.0;
+        // Label policy: persistent labels on the top-K tags by count (set
+        // computed above), plus the hovered node and its direct neighbours.
+        // Other tags stay anonymous until the user mouses over them, which
+        // keeps the canvas readable even at n=250.
+        let always_labelled = label_always.contains(&i);
         let neighbour_labelled = hover_neighbour_set
             .as_ref()
             .map(|s| s.contains(&i))
@@ -1277,8 +1447,6 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
                         preserveAspectRatio="xMidYMid meet"
                         style={svg_style}
                         onmousedown={on_svg_mousedown}
-                        onmousemove={on_svg_mousemove}
-                        onmouseup={on_svg_mouseup}
                         onmouseleave={on_svg_mouseleave}
                         ondblclick={on_dblclick}
                     >
@@ -1504,12 +1672,14 @@ fn select_backbone(
 }
 
 #[inline]
-fn smooth_r_max(n: usize) -> f64 {
-    // Smoothstep from 18 (small graphs) down to 12 (dense), interpolated
-    // across n ∈ [60, 200]. No discontinuity at n = 120.
-    let t = ((n as f64 - 60.0) / (200.0 - 60.0)).clamp(0.0, 1.0);
+fn node_radius(n: usize) -> f64 {
+    // Uniform radius for every node in the graph — count-based sizing was
+    // dropped per UX request ("кружочки одного размера"). Smoothstep
+    // shrinks the value as density grows so a 250-tag layout doesn't
+    // stuff oversized circles into a tight viewport. n=40 → 11, n=250 → 6.5.
+    let t = ((n as f64 - 40.0) / (250.0 - 40.0)).clamp(0.0, 1.0);
     let s = t * t * (3.0 - 2.0 * t);
-    18.0 + (12.0 - 18.0) * s
+    11.0 + (6.5 - 11.0) * s
 }
 
 /// Label Propagation Algorithm: each node iteratively adopts the label of
