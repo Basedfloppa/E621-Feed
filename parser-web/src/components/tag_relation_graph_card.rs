@@ -1,14 +1,29 @@
+//! SVG force-directed tag-relation graph.
+//!
+//! Previous iteration was a Canvas + Barnes-Hut Fruchterman–Reingold one-shot
+//! simulation. That worked but was complex (chunked rAF runner, quadtree,
+//! bucketed paint, DPR scaling) and had no live interactivity beyond pan/zoom
+//! and hover. The new layout, inspired by `freenet/freenet-net-graph`, drops
+//! all that for a simple SVG scene driven by three continuous forces:
+//!
+//! * **Pairwise repulsion** — inverse-square Coulomb-style push.
+//! * **Edge attraction** — Hooke spring per backbone edge, with stronger
+//!   personal-PMI links pulling harder than the weakest.
+//! * **Mild centre gravity** — keeps the swarm in the viewport.
+//!
+//! Integration is plain Verlet with velocity damping at ~30 FPS. O(n²) per
+//! tick is trivial in WASM at n ≤ 250 (the tag-graph `top_n` cap). Nodes can
+//! be grabbed and dragged: the cursor pins one node's position while others
+//! reshape around it in real time. SVG `viewBox` handles pan/zoom natively.
+
 use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap};
 use std::rc::Rc;
 
+use gloo_timers::callback::Interval;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::Closure;
-use wasm_bindgen_futures::{JsFuture, spawn_local};
-use web_sys::{
-    CanvasRenderingContext2d, HtmlCanvasElement, MouseEvent as WebMouseEvent, MutationObserver,
-    MutationObserverInit, WheelEvent as WebWheelEvent, js_sys,
-};
+use web_sys::{MouseEvent as WebMouseEvent, WheelEvent as WebWheelEvent};
 use yew::prelude::*;
 
 use crate::models::{
@@ -16,90 +31,362 @@ use crate::models::{
 };
 use crate::pages::UserInfo;
 
+// =================== Coordinate space & physics tuning ====================
+
+/// SVG `viewBox` width / height. Coordinate space is fixed at 1600×900 so
+/// physics constants don't have to be retuned when the container resizes —
+/// `preserveAspectRatio="xMidYMid meet"` scales the canvas to fit whatever
+/// CSS sizes the SVG to. 16:9 aspect matches the typical card width better
+/// than a square viewBox would.
+const VIEWBOX_W: f64 = 1600.0;
+const VIEWBOX_H: f64 = 900.0;
+const CENTER_X: f64 = VIEWBOX_W / 2.0;
+const CENTER_Y: f64 = VIEWBOX_H / 2.0;
+
+/// Animation tick. 33 ms ≈ 30 FPS — same as freenet's default.
+const TICK_MS: u32 = 33;
+/// Inverse-square repulsion coefficient between every pair of nodes.
+const K_REPEL: f64 = 3600.0;
+/// Edge spring stiffness.
+const K_EDGE: f64 = 0.014;
+/// Natural resting length of every edge, in viewBox units.
+const EDGE_REST_LENGTH: f64 = 110.0;
+/// Linear pull toward the canvas centre.
+const K_GRAVITY: f64 = 0.005;
+/// Velocity damping per tick (0..1; closer to 1 = more inertia).
+const DAMPING: f64 = 0.85;
+/// Velocity cap so a runaway node can't fly across the canvas in one frame.
+const MAX_SPEED: f64 = 22.0;
+/// Higher cap during the warmup window so freshly-seeded clusters reach
+/// their resting position quickly without visible churn.
+const WARMUP_MAX_SPEED: f64 = 60.0;
+/// Ticks of warmup-speed after a topology sync. Roughly 8 s at 30 FPS.
+const WARMUP_TICKS: u32 = 240;
+/// Floor on inter-node distance for the repulsion calculation. Prevents
+/// `K_REPEL / d²` from blowing up when two nodes momentarily overlap.
+const REPEL_MIN_DIST: f64 = 14.0;
+
+const ZOOM_STEP: f64 = 1.15;
+const MIN_SCALE: f64 = 0.2;
+const MAX_SCALE: f64 = 6.0;
+
+/// Click-vs-drag threshold (viewBox units of cumulative cursor motion).
+/// Below this, mouseup on a held node is treated as a click → open e621
+/// search for that tag instead of just releasing the pin.
+const CLICK_DRAG_THRESHOLD: f64 = 6.0;
+
+const STORAGE_KEY_TOP_N: &str = "tag_graph_top_n";
+const STORAGE_KEY_MIN_COOC: &str = "tag_graph_min_cooc";
+const STORAGE_KEY_EDGES_PER_TAG: &str = "tag_graph_edges_per_tag";
+
+// =================== Layout state =========================================
+
 #[derive(Properties, PartialEq)]
 pub struct TagRelationGraphCardProps {
     pub found_user: UseStateHandle<Option<UserInfo>>,
     pub api_base: String,
 }
 
-#[derive(Clone, Copy, Default)]
-struct NodeState {
-    x: f64,
-    y: f64,
-    radius: f64,
-}
-
-#[derive(Default, Clone)]
-struct LayoutState {
-    nodes: Vec<NodeState>,
-    /// Backbone: for each kept edge, the original index in `payload.edges` plus
-    /// the score that earned it the slot. Both layout and rendering use only
-    /// these — full edge sets are visually opaque on dense graphs.
-    edges: Vec<(usize, usize, usize, f64)>,
-    /// Per-node community label (compact, contiguous ints). Drives the node
-    /// fill colour so cluster structure is visible at a glance.
-    communities: Vec<u32>,
-    /// Cached edge score min/max so `draw_graph` doesn't recompute on every
-    /// paint (drawn 60+ times/sec while panning).
-    score_min: f64,
-    score_max: f64,
-    width: f64,
-    height: f64,
-    /// Inputs the current layout was built from. Compared on every effect
-    /// re-run to decide whether to rebuild the backbone + restart the
-    /// simulation, or just redraw with the existing layout. Length-based
-    /// comparison was unreliable: `select_backbone` UNIONs MST + top-K
-    /// edges, so the post-union count is usually smaller than the
-    /// candidate sum, and a length check would falsely fire on every
-    /// hover.
-    built_for_node_count: usize,
-    built_for_edges_per_tag: usize,
-}
-
-#[derive(Clone, Copy, PartialEq)]
-struct ViewTransform {
-    offset_x: f64,
-    offset_y: f64,
+/// Affine transform applied to the entire scene `<g>`. Pure visual — the
+/// physics simulation runs in untransformed viewBox coords, so pan/zoom
+/// never disturbs node positions or springs.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ViewState {
+    tx: f64,
+    ty: f64,
     scale: f64,
 }
 
-impl Default for ViewTransform {
+impl Default for ViewState {
     fn default() -> Self {
         Self {
-            offset_x: 0.0,
-            offset_y: 0.0,
+            tx: 0.0,
+            ty: 0.0,
             scale: 1.0,
         }
     }
 }
 
-impl ViewTransform {
-    fn to_logical(&self, cx: f64, cy: f64) -> (f64, f64) {
-        (
-            (cx - self.offset_x) / self.scale,
-            (cy - self.offset_y) / self.scale,
-        )
+/// Cursor-drag bookkeeping for scene pan.
+#[derive(Default)]
+struct PanState {
+    active: bool,
+    last_client_x: f64,
+    last_client_y: f64,
+}
+
+/// Active node-drag. While `Some`, the physics step pins the named node to
+/// `(target_x, target_y)` and zeroes its velocity; surrounding nodes still
+/// react to it via their normal repulsion/spring forces.
+#[derive(Clone, Debug)]
+struct PinnedDrag {
+    node_idx: usize,
+    target_x: f64,
+    target_y: f64,
+    /// Accumulated cursor distance since mousedown. Used to disambiguate
+    /// click (small) from drag (large) on mouseup.
+    distance: f64,
+}
+
+struct PhysNode {
+    x: f64,
+    y: f64,
+    vx: f64,
+    vy: f64,
+    /// Visual radius in viewBox units. Driven by `node.count` at sync time.
+    radius: f64,
+}
+
+#[derive(Default)]
+struct LayoutState {
+    nodes: Vec<PhysNode>,
+    /// Backbone: `(source_idx, target_idx, score)`. Built by `select_backbone`
+    /// = MST ∪ per-node top-K. Both physics and rendering use only these.
+    edges: Vec<(usize, usize, f64)>,
+    /// Per-node community label, compact `[0, k)` ints. Drives fill hue.
+    communities: Vec<u32>,
+    /// Cached edge-score range so callers don't recompute on each render.
+    score_min: f64,
+    score_max: f64,
+    /// Currently-dragged node, if any.
+    pinned: Option<PinnedDrag>,
+    /// Ticks since the last `sync()`. Gates the warmup-speed window.
+    ticks_since_sync: u32,
+    /// Inputs the current layout was built from. Compared on every effect
+    /// re-run to decide whether to resync.
+    built_for_node_count: usize,
+    built_for_edges_per_tag: usize,
+}
+
+impl LayoutState {
+    /// Wipe positions and rebuild from a freshly-fetched payload. Called when
+    /// the node count or `edges_per_tag` changes — the backbone selection
+    /// and community labels depend on both, so we re-do everything together.
+    fn sync(&mut self, graph: &TagRelationGraphPayload, edges_per_tag: usize) {
+        let backbone = select_backbone(graph, edges_per_tag);
+        let n = graph.nodes.len();
+        let max_count = graph
+            .nodes
+            .iter()
+            .map(|n| n.count)
+            .max()
+            .unwrap_or(1)
+            .max(1) as f64;
+
+        let mut s_min = f64::INFINITY;
+        let mut s_max = f64::NEG_INFINITY;
+        for &(_, _, _, s) in &backbone {
+            if s < s_min {
+                s_min = s;
+            }
+            if s > s_max {
+                s_max = s;
+            }
+        }
+        if !s_min.is_finite() {
+            s_min = 0.0;
+            s_max = 1.0;
+        }
+        if s_max <= s_min {
+            s_max = s_min + 1e-3;
+        }
+
+        self.communities = label_propagation(n, &backbone, 12);
+        self.edges = backbone.into_iter().map(|(a, b, _, s)| (a, b, s)).collect();
+        self.score_min = s_min;
+        self.score_max = s_max;
+        self.built_for_node_count = n;
+        self.built_for_edges_per_tag = edges_per_tag;
+        self.pinned = None;
+        self.ticks_since_sync = 0;
+
+        // Seed with a deterministic-but-jittered radial layout near the
+        // centre. The first-tick repulsion then has a non-degenerate
+        // gradient and clusters resolve quickly under warmup-speed.
+        self.nodes.clear();
+        self.nodes.reserve(n);
+        let r_max = smooth_r_max(n);
+        let log_max = max_count.max(1.0).ln().max(1e-3);
+        for (i, node) in graph.nodes.iter().enumerate() {
+            let mut h: u64 = 1469598103934665603;
+            for b in node.name.as_bytes() {
+                h = h.wrapping_mul(1099511628211);
+                h ^= *b as u64;
+            }
+            h = h.wrapping_add((i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+            let seed_a = ((h & 0xffff) as f64 / 0xffff as f64) * std::f64::consts::TAU;
+            let seed_r = (((h >> 16) & 0xff) as f64 / 0xff as f64) * 220.0 + 80.0;
+            let normalized = (node.count as f64).max(1.0).ln() / log_max;
+            let radius = 4.5 + (normalized * r_max).clamp(0.0, r_max);
+            self.nodes.push(PhysNode {
+                x: CENTER_X + seed_r * seed_a.cos(),
+                y: CENTER_Y + seed_r * seed_a.sin(),
+                vx: 0.0,
+                vy: 0.0,
+                radius,
+            });
+        }
+    }
+
+    fn step(&mut self) {
+        let n = self.nodes.len();
+        if n == 0 {
+            return;
+        }
+
+        let positions: Vec<(f64, f64)> = self.nodes.iter().map(|p| (p.x, p.y)).collect();
+        let radii: Vec<f64> = self.nodes.iter().map(|p| p.radius).collect();
+        let mut forces: Vec<(f64, f64)> = vec![(0.0, 0.0); n];
+
+        // Centre gravity. Linear pull keeps the swarm cohesive without
+        // fighting the user when they pan the scene to look at a distant
+        // cluster (we apply gravity in *world* space and the pan transform
+        // is purely visual).
+        for (i, &(x, y)) in positions.iter().enumerate() {
+            forces[i].0 -= K_GRAVITY * (x - CENTER_X);
+            forces[i].1 -= K_GRAVITY * (y - CENTER_Y);
+        }
+
+        // Pairwise repulsion. n² is fine at our scale (≤ 250 → ≤ ~31k pair
+        // calcs at 30 Hz = ~940k ops/sec; trivial in WASM).
+        for i in 0..n {
+            for j in (i + 1)..n {
+                let dx = positions[j].0 - positions[i].0;
+                let dy = positions[j].1 - positions[i].1;
+                // Floor uses each pair's combined radius so big nodes
+                // never get sucked together by an artificially high force.
+                let min_d = (radii[i] + radii[j] + REPEL_MIN_DIST).max(REPEL_MIN_DIST);
+                let d = (dx * dx + dy * dy).sqrt().max(min_d);
+                let mag = K_REPEL / (d * d);
+                let ux = dx / d;
+                let uy = dy / d;
+                let fx = mag * ux;
+                let fy = mag * uy;
+                forces[i].0 -= fx;
+                forces[i].1 -= fy;
+                forces[j].0 += fx;
+                forces[j].1 += fy;
+            }
+        }
+
+        // Edge springs. High-score (strong PMI) edges pull harder so the
+        // backbone topology surfaces visually even when many weaker edges
+        // are also present.
+        let span = (self.score_max - self.score_min).max(1e-6);
+        for &(a, b, score) in &self.edges {
+            if a >= n || b >= n {
+                continue;
+            }
+            let w = (0.35 + 0.65 * ((score - self.score_min) / span)).clamp(0.35, 1.0);
+            let dx = positions[b].0 - positions[a].0;
+            let dy = positions[b].1 - positions[a].1;
+            let d = (dx * dx + dy * dy).sqrt().max(0.01);
+            let extension = d - EDGE_REST_LENGTH;
+            let mag = K_EDGE * extension * w;
+            let ux = dx / d;
+            let uy = dy / d;
+            let fx = mag * ux;
+            let fy = mag * uy;
+            forces[a].0 += fx;
+            forces[a].1 += fy;
+            forces[b].0 -= fx;
+            forces[b].1 -= fy;
+        }
+
+        let pinned_idx = self.pinned.as_ref().map(|p| p.node_idx);
+        let max_speed = if self.ticks_since_sync < WARMUP_TICKS {
+            WARMUP_MAX_SPEED
+        } else {
+            MAX_SPEED
+        };
+
+        for i in 0..n {
+            if Some(i) == pinned_idx {
+                continue;
+            }
+            let (fx, fy) = forces[i];
+            let node = &mut self.nodes[i];
+            node.vx = (node.vx + fx) * DAMPING;
+            node.vy = (node.vy + fy) * DAMPING;
+            let speed = (node.vx * node.vx + node.vy * node.vy).sqrt();
+            if speed > max_speed {
+                node.vx *= max_speed / speed;
+                node.vy *= max_speed / speed;
+            }
+            node.x += node.vx;
+            node.y += node.vy;
+        }
+
+        // Snap the pinned node to its drag target *after* the force pass so
+        // other nodes see it at the cursor position rather than at its
+        // pre-step location.
+        if let Some(p) = &self.pinned {
+            if let Some(node) = self.nodes.get_mut(p.node_idx) {
+                node.x = p.target_x;
+                node.y = p.target_y;
+                node.vx = 0.0;
+                node.vy = 0.0;
+            }
+        }
+
+        self.ticks_since_sync = self.ticks_since_sync.saturating_add(1);
     }
 }
 
-const ZOOM_MIN: f64 = 0.5;
-const ZOOM_MAX: f64 = 2.5;
-const ZOOM_STEP: f64 = 1.1;
+// =================== Coordinate transforms ================================
 
-/// Barnes-Hut θ. 0.9 is a good legibility/speed tradeoff for n ≤ 1000:
-/// distant clusters use centre-of-mass, nearby pairs are exact.
-const BH_THETA: f64 = 0.9;
+/// Convert client-space pixel coords into the SVG's `viewBox` units,
+/// accounting for `xMidYMid meet` letterboxing. Returns the canvas centre
+/// if the SVG isn't laid out yet.
+fn client_to_viewbox(svg: &web_sys::Element, client_x: f64, client_y: f64) -> (f64, f64) {
+    let rect = svg.get_bounding_client_rect();
+    let bw = rect.width();
+    let bh = rect.height();
+    if bw <= 0.0 || bh <= 0.0 {
+        return (CENTER_X, CENTER_Y);
+    }
+    let scale = (bw / VIEWBOX_W).min(bh / VIEWBOX_H);
+    let off_x = (bw - VIEWBOX_W * scale) * 0.5;
+    let off_y = (bh - VIEWBOX_H * scale) * 0.5;
+    let vbx = (client_x - rect.left() - off_x) / scale;
+    let vby = (client_y - rect.top() - off_y) / scale;
+    (vbx, vby)
+}
 
-/// Click-vs-drag threshold (in pixels of cumulative cursor motion). Below
-/// this, mouseup on a hovered node is treated as a click → open e621 search.
-const CLICK_DRAG_THRESHOLD_PX: f64 = 4.0;
+/// Multiplier that turns a one-pixel client-space delta into viewBox units.
+/// Same letterbox math as `client_to_viewbox`, just the scale component —
+/// used by pan so a 10 px drag moves the scene by exactly the same amount
+/// regardless of zoom.
+fn px_to_viewbox_scale(svg: &web_sys::Element) -> f64 {
+    let rect = svg.get_bounding_client_rect();
+    let bw = rect.width();
+    let bh = rect.height();
+    if bw <= 0.0 || bh <= 0.0 {
+        return 1.0;
+    }
+    let scale = (bw / VIEWBOX_W).min(bh / VIEWBOX_H);
+    if scale <= 0.0 { 1.0 } else { 1.0 / scale }
+}
 
-const STORAGE_KEY_TOP_N: &str = "tag_graph_top_n";
-const STORAGE_KEY_MIN_COOC: &str = "tag_graph_min_cooc";
-const STORAGE_KEY_EDGES_PER_TAG: &str = "tag_graph_edges_per_tag";
+// =================== Persistence helpers ==================================
 
-/// Produce a `(community_id, top_tag_name, node_count)` summary sorted by
-/// size desc, singletons dropped, capped to keep the legend compact.
+fn read_local<T: std::str::FromStr>(key: &str) -> Option<T> {
+    web_sys::window()
+        .and_then(|w| w.local_storage().ok().flatten())
+        .and_then(|s| s.get_item(key).ok().flatten())
+        .and_then(|v| v.parse::<T>().ok())
+}
+
+fn write_local(key: &str, value: &str) {
+    if let Some(store) = web_sys::window().and_then(|w| w.local_storage().ok().flatten()) {
+        let _ = store.set_item(key, value);
+    }
+}
+
+// =================== Community legend =====================================
+
+/// `(community_id, top_tag_name, node_count)` sorted by size desc, singletons
+/// dropped, capped to keep the legend compact.
 fn community_summary(
     payload: &UseStateHandle<Option<TagRelationGraphPayload>>,
     layout_ref: &Rc<RefCell<LayoutState>>,
@@ -130,18 +417,7 @@ fn community_summary(
     out
 }
 
-fn read_local<T: std::str::FromStr>(key: &str) -> Option<T> {
-    web_sys::window()
-        .and_then(|w| w.local_storage().ok().flatten())
-        .and_then(|s| s.get_item(key).ok().flatten())
-        .and_then(|v| v.parse::<T>().ok())
-}
-
-fn write_local(key: &str, value: &str) {
-    if let Some(store) = web_sys::window().and_then(|w| w.local_storage().ok().flatten()) {
-        let _ = store.set_item(key, value);
-    }
-}
+// =================== Component ============================================
 
 #[function_component(TagRelationGraphCard)]
 pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
@@ -152,30 +428,21 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
     let min_cooc = use_state(|| read_local::<i64>(STORAGE_KEY_MIN_COOC).unwrap_or(3).max(1));
     let edges_per_tag =
         use_state(|| read_local::<usize>(STORAGE_KEY_EDGES_PER_TAG).unwrap_or(6).clamp(2, 20));
-    let theme_trigger = use_state(|| 0u32);
-    let resize_trigger = use_state(|| 0u32);
     let hover_idx: UseStateHandle<Option<usize>> = use_state(|| None);
-
-    let canvas_ref = use_node_ref();
-    let layout_ref: Rc<RefCell<LayoutState>> = use_mut_ref(LayoutState::default);
-    let view: UseStateHandle<ViewTransform> = use_state(ViewTransform::default);
-    // Pan/drag mutates `view_ref` directly and redraws via rAF, bypassing
-    // Yew re-renders. Yew state catches up on drag-end.
-    let view_ref: Rc<RefCell<ViewTransform>> = use_mut_ref(ViewTransform::default);
-    let raf_id: Rc<RefCell<Option<i32>>> = use_mut_ref(|| None);
-    // Bumped every time a new simulation starts (or the previous effect
-    // unmounts). The async chunked runner captures the value at spawn and
-    // bails out as soon as it sees a different one — that's how the previous
-    // run gets cancelled when the user changes top_n / picks another account.
-    let sim_gen: Rc<RefCell<u64>> = use_mut_ref(|| 0u64);
-    // (start_cursor_x, start_cursor_y, start_offset_x, start_offset_y, total_dist)
-    let drag_ref: Rc<RefCell<Option<(f64, f64, f64, f64, f64)>>> = use_mut_ref(|| None);
-    // Reflected to Yew state only at drag start/end so the cursor flips, without
-    // forcing a re-render per mousemove.
-    let is_dragging = use_state(|| false);
-    // Click-to-isolate community: when Some(c), other communities dim.
     let isolated_community: UseStateHandle<Option<u32>> = use_state(|| None);
 
+    let svg_ref = use_node_ref();
+    let layout: Rc<RefCell<LayoutState>> = use_mut_ref(LayoutState::default);
+    // Re-render every physics tick. The component itself reads `layout` via
+    // `Rc<RefCell>` so we don't actually need the tick value — bumping it
+    // is just a signal to repaint the SVG.
+    let tick = use_state(|| 0u64);
+
+    let view = use_state(ViewState::default);
+    let pan: Rc<RefCell<PanState>> = use_mut_ref(PanState::default);
+    let is_dragging = use_state(|| false);
+
+    // -------- Fetch tag-relation graph ------------------------------------
     {
         let payload = payload.clone();
         let loading = loading.clone();
@@ -236,37 +503,7 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
         );
     }
 
-    {
-        let theme_trigger = theme_trigger.clone();
-        use_effect_with((), move |_| {
-            let document = web_sys::window().unwrap().document().unwrap();
-            let target = document.body().unwrap();
-            let trigger = theme_trigger.clone();
-            let callback = Closure::<dyn FnMut(js_sys::Array, _)>::new(
-                move |mutations: js_sys::Array, _obs: MutationObserver| {
-                    for i in 0..mutations.length() {
-                        let mutation = mutations.get(i).dyn_into::<web_sys::MutationRecord>().ok();
-                        if let Some(m) = mutation {
-                            let attr = m.attribute_name();
-                            if attr.as_deref() == Some("data-bs-theme")
-                                || attr.as_deref() == Some("class")
-                            {
-                                trigger.set(*trigger + 1);
-                                break;
-                            }
-                        }
-                    }
-                },
-            );
-            let observer = MutationObserver::new(callback.as_ref().unchecked_ref()).unwrap();
-            let options = MutationObserverInit::new();
-            options.set_attributes(true);
-            observer.observe_with_options(&target, &options).unwrap();
-            callback.forget();
-            move || observer.disconnect()
-        });
-    }
-
+    // -------- Persist settings to localStorage ----------------------------
     {
         let top_n_val = *top_n;
         use_effect_with(top_n_val, move |v: &usize| {
@@ -289,464 +526,116 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
         });
     }
 
-    // Reset community isolation when the underlying graph changes, otherwise
-    // a stale community-id from the previous topology could stay focused.
+    // -------- Sync layout from payload ------------------------------------
+    // Compares (graph identity, edges_per_tag) against the layout's stored
+    // inputs. Resyncs and clears isolation when either changes; otherwise
+    // leaves the running simulation untouched (so a hover/zoom doesn't
+    // trigger a reseed).
     {
+        let layout = layout.clone();
         let isolated_community = isolated_community.clone();
-        let nodes_len = payload.as_ref().map(|g| g.nodes.len()).unwrap_or(0);
-        use_effect_with(nodes_len, move |_| {
-            isolated_community.set(None);
-            || ()
-        });
-    }
-
-    {
-        let resize_trigger = resize_trigger.clone();
-        use_effect_with((), move |_| {
-            let closure = Closure::<dyn FnMut()>::new(move || {
-                resize_trigger.set(*resize_trigger + 1);
-            });
-            let window = web_sys::window().unwrap();
-            window
-                .add_event_listener_with_callback("resize", closure.as_ref().unchecked_ref())
-                .unwrap();
-            move || {
-                window
-                    .remove_event_listener_with_callback(
-                        "resize",
-                        closure.as_ref().unchecked_ref(),
-                    )
-                    .unwrap();
-            }
-        });
-    }
-
-    {
-        let canvas_ref = canvas_ref.clone();
-        let payload = payload.clone();
-        let layout_ref = layout_ref.clone();
-        let hover_idx_render = hover_idx.clone();
-        let view_ref_for_effect = view_ref.clone();
-        let sim_gen_for_effect = sim_gen.clone();
-        let isolated_community_for_effect = isolated_community.clone();
         let edges_per_tag_val = *edges_per_tag;
-        let view_render = *view;
-        let iso_render = *isolated_community;
-        // `view` is back in deps so zoom (Yew state path) repaints the canvas.
-        // Drag pan still bypasses this effect via view_ref + rAF.
         use_effect_with(
-            (
-                payload.clone(),
-                *theme_trigger,
-                *resize_trigger,
-                *hover_idx_render,
-                edges_per_tag_val,
-                view_render,
-                iso_render,
-            ),
-            move |(payload, _, _, hover_idx_val, k_val, view_render, iso_val)| {
-                // Mirror Yew view → view_ref so drag-pan (rAF) sees latest scale/offset.
-                *view_ref_for_effect.borrow_mut() = *view_render;
-                let view = *view_render;
-                let hover_idx_val = *hover_idx_val;
-                let iso_val = *iso_val;
-                let k_val = *k_val;
-
-                let cleanup_sim_gen = sim_gen_for_effect.clone();
-                // Closure for the no-canvas / no-graph paths.
-                let clear_or_skip = || -> Option<()> {
-                    let canvas = canvas_ref.cast::<HtmlCanvasElement>()?;
-                    if payload.is_none() {
-                        let logical_width = canvas.client_width().max(0) as f64;
-                        if logical_width > 0.0 {
-                            let _ = clear_canvas(&canvas, logical_width, 360.0);
-                        }
-                    }
-                    Some(())
-                };
-
-                let canvas = match canvas_ref.cast::<HtmlCanvasElement>() {
-                    Some(c) => c,
-                    None => {
-                        return Box::new(move || {
-                            cleanup_sim_gen.replace_with(|v| v.wrapping_add(1));
-                        }) as Box<dyn FnOnce()>;
-                    }
-                };
-
-                let Some(graph_arc) = payload.as_ref().cloned().map(Rc::new) else {
-                    let _ = clear_or_skip();
-                    return Box::new(move || {
-                        cleanup_sim_gen.replace_with(|v| v.wrapping_add(1));
-                    });
-                };
-
-                let logical_width = canvas.client_width().max(0) as f64;
-                if logical_width <= 0.0 {
-                    return Box::new(move || {
-                        cleanup_sim_gen.replace_with(|v| v.wrapping_add(1));
-                    });
-                }
-                let logical_height = (logical_width * 0.85).clamp(480.0, 900.0);
-
-                // Decide whether we need a fresh simulation. Compare against
-                // the actual inputs the cached layout was built from — using
-                // `expected_backbone_len` here is wrong because the upper
-                // bound it returns rarely matches the post-MST-union
-                // backbone size, so the check would fire on every hover.
-                let (nodes_changed, size_changed) = {
-                    let layout = layout_ref.borrow();
-                    (
-                        layout.built_for_node_count != graph_arc.nodes.len()
-                            || layout.built_for_edges_per_tag != k_val,
-                        (layout.width - logical_width).abs() > 0.5
-                            || (layout.height - logical_height).abs() > 0.5,
-                    )
-                };
-
-                if nodes_changed {
-                    let backbone = select_backbone(&graph_arc, k_val);
-                    let new_layout = initial_layout(
-                        &graph_arc.nodes,
-                        logical_width,
-                        logical_height,
-                        backbone,
-                        k_val,
-                    );
-                    *layout_ref.borrow_mut() = new_layout;
-
-                    // Initial draw shows the grid layout immediately so the
-                    // user gets feedback while the simulation chunks run.
+            (payload.clone(), edges_per_tag_val),
+            move |(payload, k_val)| {
+                if let Some(graph) = payload.as_ref() {
+                    let mut needs_sync = false;
                     {
-                        let layout = layout_ref.borrow();
-                        draw_graph(
-                            &canvas,
-                            &layout,
-                            &graph_arc,
-                            hover_idx_val,
-                            iso_val,
-                            view,
-                        );
-                    }
-
-                    // Bump the generation: any in-flight async runner from a
-                    // previous effect will see the change and bail.
-                    let my_gen = {
-                        let mut g = sim_gen_for_effect.borrow_mut();
-                        *g = g.wrapping_add(1);
-                        *g
-                    };
-
-                    let max_iter = simulation_iterations(graph_arc.nodes.len());
-                    let layout_ref_async = layout_ref.clone();
-                    let canvas_ref_async = canvas_ref.clone();
-                    let hover_idx_async = hover_idx_render.clone();
-                    let isolated_community_async = isolated_community_for_effect.clone();
-                    let view_ref_async = view_ref_for_effect.clone();
-                    let sim_gen_async = sim_gen_for_effect.clone();
-                    let graph_for_async = graph_arc.clone();
-
-                    spawn_local(async move {
-                        const CHUNK: usize = 30;
-
-                        let Some(mut ctx) = SimulationContext::new(
-                            &layout_ref_async.borrow(),
-                            max_iter,
-                        ) else {
-                            return;
-                        };
-
-                        loop {
-                            if *sim_gen_async.borrow() != my_gen {
-                                return;
-                            }
-
-                            let done = {
-                                let mut layout = layout_ref_async.borrow_mut();
-                                ctx.step(&mut layout, CHUNK)
-                            };
-
-                            if *sim_gen_async.borrow() != my_gen {
-                                return;
-                            }
-
-                            // Redraw between chunks for visible settling.
-                            if let Some(canvas) = canvas_ref_async.cast::<HtmlCanvasElement>() {
-                                let layout = layout_ref_async.borrow();
-                                let view = *view_ref_async.borrow();
-                                draw_graph(
-                                    &canvas,
-                                    &layout,
-                                    &graph_for_async,
-                                    *hover_idx_async,
-                                    *isolated_community_async,
-                                    view,
-                                );
-                            }
-
-                            if done {
-                                break;
-                            }
-
-                            next_animation_frame().await;
-                        }
-
-                        if *sim_gen_async.borrow() != my_gen {
-                            return;
-                        }
-
-                        // Final layout fixup + redraw.
+                        let l = layout.borrow();
+                        if l.built_for_node_count != graph.nodes.len()
+                            || l.built_for_edges_per_tag != *k_val
                         {
-                            let mut layout = layout_ref_async.borrow_mut();
-                            ctx.finalize(&mut layout);
-                            fit_to_viewport(&mut layout, 0.06);
+                            needs_sync = true;
                         }
-                        if let Some(canvas) = canvas_ref_async.cast::<HtmlCanvasElement>() {
-                            let layout = layout_ref_async.borrow();
-                            let view = *view_ref_async.borrow();
-                            draw_graph(
-                                &canvas,
-                                &layout,
-                                &graph_for_async,
-                                *hover_idx_async,
-                                *isolated_community_async,
-                                view,
-                            );
-                        }
-                    });
-                } else {
-                    if size_changed {
-                        let mut layout = layout_ref.borrow_mut();
-                        rescale_layout(&mut layout, logical_width, logical_height);
                     }
-                    let layout = layout_ref.borrow();
-                    draw_graph(&canvas, &layout, &graph_arc, hover_idx_val, iso_val, view);
+                    if needs_sync {
+                        layout.borrow_mut().sync(graph, *k_val);
+                        isolated_community.set(None);
+                    }
+                } else {
+                    let mut l = layout.borrow_mut();
+                    l.nodes.clear();
+                    l.edges.clear();
+                    l.communities.clear();
+                    l.pinned = None;
+                    l.built_for_node_count = 0;
+                    l.built_for_edges_per_tag = 0;
                 }
-
-                Box::new(move || {
-                    // Cancel any in-flight chunked simulation so it doesn't
-                    // race the next effect's borrow_mut on layout_ref.
-                    cleanup_sim_gen.replace_with(|v| v.wrapping_add(1));
-                })
+                || ()
             },
         );
     }
 
-    let on_mouse_move = {
-        let canvas_ref = canvas_ref.clone();
-        let layout_ref = layout_ref.clone();
-        let hover_idx = hover_idx.clone();
-        let view_ref = view_ref.clone();
-        let drag_ref = drag_ref.clone();
-        let raf_id = raf_id.clone();
-        let payload = payload.clone();
-        let isolated_community = isolated_community.clone();
-        Callback::from(move |evt: WebMouseEvent| {
-            let Some(canvas) = canvas_ref.cast::<HtmlCanvasElement>() else {
-                return;
-            };
-            let element: &web_sys::Element = canvas.as_ref();
-            let rect = element.get_bounding_client_rect();
-            let x = evt.client_x() as f64 - rect.left();
-            let y = evt.client_y() as f64 - rect.top();
-
-            // Drag → pan via rAF without Yew re-render.
-            let drag_active = drag_ref.borrow().is_some();
-            if drag_active {
-                let (new_off_x, new_off_y, dx, dy) = {
-                    let mut d = drag_ref.borrow_mut();
-                    let entry = d.as_mut().unwrap();
-                    let (start_cx, start_cy, start_off_x, start_off_y, _) = *entry;
-                    let new_off_x = start_off_x + (x - start_cx);
-                    let new_off_y = start_off_y + (y - start_cy);
-                    let cur = *view_ref.borrow();
-                    let dx = (cur.offset_x - new_off_x).abs();
-                    let dy = (cur.offset_y - new_off_y).abs();
-                    entry.4 += (dx * dx + dy * dy).sqrt();
-                    (new_off_x, new_off_y, dx, dy)
-                };
-                if dx > 0.5 || dy > 0.5 {
-                    let scale = view_ref.borrow().scale;
-                    *view_ref.borrow_mut() = ViewTransform {
-                        offset_x: new_off_x,
-                        offset_y: new_off_y,
-                        scale,
-                    };
-                    schedule_redraw(
-                        &canvas_ref,
-                        &layout_ref,
-                        &payload,
-                        &hover_idx,
-                        &isolated_community,
-                        &view_ref,
-                        &raf_id,
-                    );
-                }
-                return;
-            }
-
-            // Hover hit-test in transformed (logical) space (uses view_ref so
-            // it stays correct mid-drag flush, but drag isn't active here).
-            let view = *view_ref.borrow();
-            let (lx, ly) = view.to_logical(x, y);
-            let layout = layout_ref.borrow();
-            let mut found: Option<usize> = None;
-            let pick_pad = (3.0 / view.scale.max(0.1)).clamp(1.0, 12.0);
-            for (i, n) in layout.nodes.iter().enumerate() {
-                let dx = lx - n.x;
-                let dy = ly - n.y;
-                if (dx * dx + dy * dy).sqrt() <= n.radius + pick_pad {
-                    found = Some(i);
-                    break;
-                }
-            }
-            if *hover_idx != found {
-                hover_idx.set(found);
-            }
-        })
-    };
-
-    let on_mouse_leave = {
-        let hover_idx = hover_idx.clone();
-        let drag_ref = drag_ref.clone();
-        let is_dragging = is_dragging.clone();
-        Callback::from(move |_: WebMouseEvent| {
-            if hover_idx.is_some() {
-                hover_idx.set(None);
-            }
-            let was_dragging = drag_ref.borrow().is_some();
-            *drag_ref.borrow_mut() = None;
-            if was_dragging {
-                is_dragging.set(false);
-            }
-        })
-    };
-
-    let on_mouse_down = {
-        let canvas_ref = canvas_ref.clone();
-        let drag_ref = drag_ref.clone();
-        let view_ref = view_ref.clone();
-        let is_dragging = is_dragging.clone();
-        Callback::from(move |evt: WebMouseEvent| {
-            if evt.button() != 0 {
-                return;
-            }
-            let Some(canvas) = canvas_ref.cast::<HtmlCanvasElement>() else {
-                return;
-            };
-            let element: &web_sys::Element = canvas.as_ref();
-            let rect = element.get_bounding_client_rect();
-            let x = evt.client_x() as f64 - rect.left();
-            let y = evt.client_y() as f64 - rect.top();
-            let cur = *view_ref.borrow();
-            *drag_ref.borrow_mut() = Some((x, y, cur.offset_x, cur.offset_y, 0.0));
-            is_dragging.set(true);
-        })
-    };
-
-    let on_mouse_up = {
-        let drag_ref = drag_ref.clone();
-        let view_ref = view_ref.clone();
-        let view = view.clone();
-        let hover_idx = hover_idx.clone();
-        let payload = payload.clone();
-        let is_dragging = is_dragging.clone();
-        Callback::from(move |evt: WebMouseEvent| {
-            if evt.button() != 0 {
-                return;
-            }
-            let drag_dist = drag_ref.borrow().map(|(_, _, _, _, d)| d).unwrap_or(f64::INFINITY);
-            let was_dragging = drag_ref.borrow().is_some();
-            *drag_ref.borrow_mut() = None;
-            if was_dragging {
-                is_dragging.set(false);
-            }
-
-            // Click (not drag) on a hovered node → open e621 search for that tag.
-            if drag_dist < CLICK_DRAG_THRESHOLD_PX {
-                if let (Some(idx), Some(graph), Some(cfg)) =
-                    (*hover_idx, payload.as_ref(), read_config_from_head())
-                {
-                    if let Some(node) = graph.nodes.get(idx) {
-                        let url = format!(
-                            "{}/posts?tags={}",
-                            cfg.posts_domain,
-                            urlencoding::encode(&node.name),
-                        );
-                        if let Some(win) = web_sys::window() {
-                            let _ = win.open_with_url_and_target(&url, "_blank");
-                        }
-                    }
-                }
-            }
-
-            // Sync ref → Yew state once at drag end so toolbar/ effect see the final view.
-            let final_view = *view_ref.borrow();
-            if *view != final_view {
-                view.set(final_view);
-            }
-        })
-    };
-
-    // Wheel listener has to be attached non-passively or `preventDefault()`
-    // is silently ignored and the page scrolls under the cursor. Yew's
-    // `onwheel` registers as passive in modern browsers, hence the manual
-    // `addEventListener` below. Dep on `canvas_present` so we re-bind
-    // whenever the canvas first mounts (i.e. once data arrives).
+    // -------- Continuous physics tick -------------------------------------
     {
-        let canvas_ref_for_effect = canvas_ref.clone();
+        let layout = layout.clone();
+        let tick = tick.clone();
+        use_effect_with((), move |_| {
+            let interval = Interval::new(TICK_MS, move || {
+                layout.borrow_mut().step();
+                tick.set(*tick + 1);
+            });
+            move || drop(interval)
+        });
+    }
+
+    // -------- Non-passive wheel listener for cursor-anchored zoom ---------
+    // Yew's `onwheel` registers as passive in modern browsers, which
+    // silently no-ops `preventDefault()`. Without prevent_default, scrolling
+    // the wheel over the graph also scrolls the page — disorienting.
+    {
+        let svg_ref_for_effect = svg_ref.clone();
         let view = view.clone();
         let canvas_present = payload.is_some() || *loading;
         use_effect_with(canvas_present, move |_present| {
-            let canvas_ref = canvas_ref_for_effect;
-            let mut handle: Option<(HtmlCanvasElement, Closure<dyn FnMut(WebWheelEvent)>)> =
-                None;
+            let mut handle: Option<(web_sys::Element, Closure<dyn FnMut(WebWheelEvent)>)> = None;
 
-            if let Some(canvas) = canvas_ref.cast::<HtmlCanvasElement>() {
-                let canvas_for_cb = canvas.clone();
+            if let Some(svg) = svg_ref_for_effect.cast::<web_sys::Element>() {
+                let svg_for_cb = svg.clone();
                 let view = view.clone();
-                let cb = Closure::<dyn FnMut(WebWheelEvent)>::new(
-                    move |evt: WebWheelEvent| {
-                        evt.prevent_default();
-                        let element: &web_sys::Element = canvas_for_cb.as_ref();
-                        let rect = element.get_bounding_client_rect();
-                        let x = evt.client_x() as f64 - rect.left();
-                        let y = evt.client_y() as f64 - rect.top();
-                        let cur = *view;
-                        let direction = if evt.delta_y() < 0.0 {
-                            ZOOM_STEP
-                        } else {
-                            1.0 / ZOOM_STEP
-                        };
-                        let new_scale =
-                            (cur.scale * direction).clamp(ZOOM_MIN, ZOOM_MAX);
-                        if (new_scale - cur.scale).abs() < 1e-6 {
-                            return;
-                        }
-                        let real = new_scale / cur.scale;
-                        view.set(ViewTransform {
-                            offset_x: x - (x - cur.offset_x) * real,
-                            offset_y: y - (y - cur.offset_y) * real,
-                            scale: new_scale,
-                        });
-                    },
-                );
+                let cb = Closure::<dyn FnMut(WebWheelEvent)>::new(move |evt: WebWheelEvent| {
+                    evt.prevent_default();
+                    let direction = if evt.delta_y() < 0.0 {
+                        ZOOM_STEP
+                    } else {
+                        1.0 / ZOOM_STEP
+                    };
+                    let cur = *view;
+                    let new_scale = (cur.scale * direction).clamp(MIN_SCALE, MAX_SCALE);
+                    if (new_scale - cur.scale).abs() < 1e-6 {
+                        return;
+                    }
+                    let (vbx, vby) = client_to_viewbox(
+                        &svg_for_cb,
+                        evt.client_x() as f64,
+                        evt.client_y() as f64,
+                    );
+                    let f_eff = new_scale / cur.scale;
+                    // Anchor world-space point under the cursor: solving
+                    // `vb = new_tx + new_scale * world` for new_tx given the
+                    // pre-zoom mapping `world = (vb - tx) / scale`.
+                    let new_tx = vbx - f_eff * (vbx - cur.tx);
+                    let new_ty = vby - f_eff * (vby - cur.ty);
+                    view.set(ViewState {
+                        tx: new_tx,
+                        ty: new_ty,
+                        scale: new_scale,
+                    });
+                });
 
                 let opts = web_sys::AddEventListenerOptions::new();
                 opts.set_passive(false);
-                let _ = canvas
-                    .add_event_listener_with_callback_and_add_event_listener_options(
-                        "wheel",
-                        cb.as_ref().unchecked_ref(),
-                        &opts,
-                    );
-
-                handle = Some((canvas, cb));
+                let _ = svg.add_event_listener_with_callback_and_add_event_listener_options(
+                    "wheel",
+                    cb.as_ref().unchecked_ref(),
+                    &opts,
+                );
+                handle = Some((svg, cb));
             }
 
             move || {
-                if let Some((canvas, cb)) = handle {
-                    let _ = canvas.remove_event_listener_with_callback(
+                if let Some((svg, cb)) = handle {
+                    let _ = svg.remove_event_listener_with_callback(
                         "wheel",
                         cb.as_ref().unchecked_ref(),
                     );
@@ -756,36 +645,413 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
         });
     }
 
+    // -------- SVG-level pan handlers --------------------------------------
+    let on_svg_mousedown = {
+        let pan = pan.clone();
+        let is_dragging = is_dragging.clone();
+        Callback::from(move |e: WebMouseEvent| {
+            if e.button() != 0 {
+                return;
+            }
+            e.prevent_default();
+            let mut p = pan.borrow_mut();
+            p.active = true;
+            p.last_client_x = e.client_x() as f64;
+            p.last_client_y = e.client_y() as f64;
+            if !*is_dragging {
+                is_dragging.set(true);
+            }
+        })
+    };
+
+    let on_svg_mousemove = {
+        let pan = pan.clone();
+        let view = view.clone();
+        let svg_ref = svg_ref.clone();
+        let layout = layout.clone();
+        Callback::from(move |e: WebMouseEvent| {
+            // Node drag takes priority: its mousedown set `layout.pinned`,
+            // and every mousemove updates the pin's target to follow the
+            // cursor in world coords. SVG pan only kicks in when no node
+            // is being dragged.
+            let pinned_active = layout.borrow().pinned.is_some();
+            if pinned_active {
+                let Some(svg) = svg_ref.cast::<web_sys::Element>() else {
+                    return;
+                };
+                let (vbx, vby) =
+                    client_to_viewbox(&svg, e.client_x() as f64, e.client_y() as f64);
+                let v = *view;
+                let world_x = (vbx - v.tx) / v.scale;
+                let world_y = (vby - v.ty) / v.scale;
+                let mut l = layout.borrow_mut();
+                if let Some(p) = l.pinned.as_mut() {
+                    let dx = world_x - p.target_x;
+                    let dy = world_y - p.target_y;
+                    p.distance += (dx * dx + dy * dy).sqrt();
+                    p.target_x = world_x;
+                    p.target_y = world_y;
+                }
+                return;
+            }
+
+            let (dx_px, dy_px) = {
+                let mut p = pan.borrow_mut();
+                if !p.active {
+                    return;
+                }
+                let dx = e.client_x() as f64 - p.last_client_x;
+                let dy = e.client_y() as f64 - p.last_client_y;
+                p.last_client_x = e.client_x() as f64;
+                p.last_client_y = e.client_y() as f64;
+                (dx, dy)
+            };
+            let Some(svg) = svg_ref.cast::<web_sys::Element>() else {
+                return;
+            };
+            let k = px_to_viewbox_scale(&svg);
+            let mut v = *view;
+            v.tx += dx_px * k;
+            v.ty += dy_px * k;
+            view.set(v);
+        })
+    };
+
+    let on_svg_mouseup = {
+        let pan = pan.clone();
+        let layout = layout.clone();
+        let is_dragging = is_dragging.clone();
+        let payload = payload.clone();
+        Callback::from(move |e: WebMouseEvent| {
+            if e.button() != 0 {
+                return;
+            }
+            let was_panning = pan.borrow().active;
+            pan.borrow_mut().active = false;
+
+            // Resolve a click vs drag on the pinned node: a small total
+            // distance and the user opens that tag's e621 search in a new
+            // tab; otherwise the node is just released to physics.
+            let pinned = layout.borrow().pinned.clone();
+            if let Some(p) = pinned {
+                if p.distance < CLICK_DRAG_THRESHOLD {
+                    if let (Some(graph), Some(cfg)) =
+                        (payload.as_ref(), read_config_from_head())
+                    {
+                        if let Some(node) = graph.nodes.get(p.node_idx) {
+                            let url = format!(
+                                "{}/posts?tags={}",
+                                cfg.posts_domain,
+                                urlencoding::encode(&node.name),
+                            );
+                            if let Some(win) = web_sys::window() {
+                                let _ = win.open_with_url_and_target(&url, "_blank");
+                            }
+                        }
+                    }
+                }
+                layout.borrow_mut().pinned = None;
+            }
+            if was_panning || *is_dragging {
+                is_dragging.set(false);
+            }
+        })
+    };
+
+    let on_svg_mouseleave = {
+        let pan = pan.clone();
+        let layout = layout.clone();
+        let is_dragging = is_dragging.clone();
+        let hover_idx = hover_idx.clone();
+        Callback::from(move |_: WebMouseEvent| {
+            let was_active = pan.borrow().active || layout.borrow().pinned.is_some();
+            pan.borrow_mut().active = false;
+            layout.borrow_mut().pinned = None;
+            if was_active && *is_dragging {
+                is_dragging.set(false);
+            }
+            if hover_idx.is_some() {
+                hover_idx.set(None);
+            }
+        })
+    };
+
     let on_dblclick = {
         let view = view.clone();
         Callback::from(move |_: WebMouseEvent| {
-            view.set(ViewTransform::default());
+            view.set(ViewState::default());
         })
     };
 
-    let on_zoom_in = {
-        let canvas_ref = canvas_ref.clone();
-        let view = view.clone();
-        Callback::from(move |_: WebMouseEvent| {
-            zoom_around_centre(&canvas_ref, &view, ZOOM_STEP);
-        })
+    // -------- Render preparation ------------------------------------------
+    let l = layout.borrow();
+    let _ = *tick; // depend on tick so the component re-renders each frame
+    let view_now = *view;
+    let cur_hover = *hover_idx;
+    let cur_iso = *isolated_community;
+
+    // Hover focus set: when hovering a node, soften everything not directly
+    // connected to it. Community-isolation: only nodes/edges in that
+    // community render at full opacity. Both are independent; isolation
+    // wins if active.
+    let hover_neighbour_set: Option<std::collections::HashSet<usize>> =
+        if let Some(h) = cur_hover {
+            let mut set = std::collections::HashSet::with_capacity(8);
+            set.insert(h);
+            for &(a, b, _) in &l.edges {
+                if a == h {
+                    set.insert(b);
+                }
+                if b == h {
+                    set.insert(a);
+                }
+            }
+            Some(set)
+        } else {
+            None
+        };
+
+    let node_visible = |idx: usize| -> bool {
+        match cur_iso {
+            Some(c) => l.communities.get(idx).copied() == Some(c),
+            None => true,
+        }
+    };
+    let node_focus_full = |idx: usize| -> bool {
+        // Full opacity if: no hover-or-isolation context OR this node is in
+        // the active context.
+        match (&hover_neighbour_set, cur_iso) {
+            (Some(set), _) => set.contains(&idx),
+            (None, Some(c)) => l.communities.get(idx).copied() == Some(c),
+            (None, None) => true,
+        }
     };
 
-    let on_zoom_out = {
-        let canvas_ref = canvas_ref.clone();
-        let view = view.clone();
-        Callback::from(move |_: WebMouseEvent| {
-            zoom_around_centre(&canvas_ref, &view, 1.0 / ZOOM_STEP);
-        })
+    let span = (l.score_max - l.score_min).max(1e-6);
+    let max_community = l.communities.iter().copied().max().unwrap_or(0);
+    let mut community_size = vec![0u32; (max_community as usize) + 1];
+    for &c in &l.communities {
+        community_size[c as usize] += 1;
+    }
+    // Singleton communities fall back to a muted grey so isolated nodes
+    // don't add saturated noise to the palette.
+    let community_color = |c: u32| -> String {
+        if (c as usize) < community_size.len() && community_size[c as usize] <= 1 {
+            return "#6b7280".to_string();
+        }
+        let hue = ((c as f64) * 137.508_f64) % 360.0;
+        format!("hsl({:.0}, 60%, 55%)", hue)
     };
 
-    let on_zoom_reset = {
-        let view = view.clone();
-        Callback::from(move |_: WebMouseEvent| {
-            view.set(ViewTransform::default());
-        })
-    };
+    // -------- Build SVG layers (edges → circles → labels) -----------------
 
+    let edges_html: Vec<Html> = l
+        .edges
+        .iter()
+        .filter_map(|&(a, b, score)| {
+            if a >= l.nodes.len() || b >= l.nodes.len() {
+                return None;
+            }
+            if !(node_visible(a) && node_visible(b)) {
+                return None;
+            }
+            let strength = ((score - l.score_min) / span).clamp(0.0, 1.0);
+            let in_hover =
+                cur_hover.map(|h| h == a || h == b).unwrap_or(false);
+            let width = if in_hover {
+                2.6
+            } else {
+                0.6 + strength * 2.2
+            };
+            let opacity = if in_hover {
+                0.95
+            } else {
+                let base = 0.15 + strength * 0.55;
+                if hover_neighbour_set.is_some() {
+                    base * 0.25
+                } else {
+                    base
+                }
+            };
+            let stroke = if in_hover {
+                "var(--bs-body-color)"
+            } else {
+                "var(--bs-secondary)"
+            };
+            let na = &l.nodes[a];
+            let nb = &l.nodes[b];
+            Some(html! {
+                <line
+                    x1={format!("{:.2}", na.x)} y1={format!("{:.2}", na.y)}
+                    x2={format!("{:.2}", nb.x)} y2={format!("{:.2}", nb.y)}
+                    stroke={stroke}
+                    stroke-width={format!("{:.2}", width)}
+                    stroke-opacity={format!("{:.3}", opacity)}
+                    stroke-linecap="round"
+                />
+            })
+        })
+        .collect();
+
+    let graph_nodes_ref = payload.as_ref();
+    let mut circles_html: Vec<Html> = Vec::with_capacity(l.nodes.len());
+    let mut labels_html: Vec<Html> = Vec::new();
+
+    for (i, n) in l.nodes.iter().enumerate() {
+        if !node_visible(i) {
+            continue;
+        }
+        let community = l.communities.get(i).copied().unwrap_or(0);
+        let color = community_color(community);
+        let is_hover = cur_hover == Some(i);
+        let in_focus = node_focus_full(i);
+        let opacity: f64 = if in_focus { 1.0 } else { 0.25 };
+        let stroke_width = if is_hover { 2.4 } else { 0.9 };
+
+        let on_node_mousedown = {
+            let layout = layout.clone();
+            let svg_ref = svg_ref.clone();
+            let view_handle = view.clone();
+            let is_dragging = is_dragging.clone();
+            Callback::from(move |e: WebMouseEvent| {
+                if e.button() != 0 {
+                    return;
+                }
+                e.stop_propagation();
+                e.prevent_default();
+                let Some(svg) = svg_ref.cast::<web_sys::Element>() else {
+                    return;
+                };
+                let (vbx, vby) =
+                    client_to_viewbox(&svg, e.client_x() as f64, e.client_y() as f64);
+                let v = *view_handle;
+                let world_x = (vbx - v.tx) / v.scale;
+                let world_y = (vby - v.ty) / v.scale;
+                layout.borrow_mut().pinned = Some(PinnedDrag {
+                    node_idx: i,
+                    target_x: world_x,
+                    target_y: world_y,
+                    distance: 0.0,
+                });
+                if !*is_dragging {
+                    is_dragging.set(true);
+                }
+            })
+        };
+
+        let on_node_mouseenter = {
+            let hover_idx = hover_idx.clone();
+            Callback::from(move |_: WebMouseEvent| {
+                if *hover_idx != Some(i) {
+                    hover_idx.set(Some(i));
+                }
+            })
+        };
+
+        let on_node_mouseleave = {
+            let hover_idx = hover_idx.clone();
+            Callback::from(move |_: WebMouseEvent| {
+                if *hover_idx == Some(i) {
+                    hover_idx.set(None);
+                }
+            })
+        };
+
+        // Halo for the currently-hovered circle so a mouse pointer over a
+        // dense cluster has obvious feedback.
+        let halo = if is_hover {
+            Some(html! {
+                <circle
+                    cx={format!("{:.2}", n.x)} cy={format!("{:.2}", n.y)}
+                    r={format!("{:.2}", n.radius + 6.0)}
+                    fill="none"
+                    stroke="var(--bs-body-color)"
+                    stroke-width="1.4"
+                    stroke-opacity="0.55"
+                />
+            })
+        } else {
+            None
+        };
+
+        let tag_label_for_title = graph_nodes_ref
+            .and_then(|g| g.nodes.get(i))
+            .map(|node| format!("{} · {} · {}×", node.name, node.group_type, node.count))
+            .unwrap_or_default();
+
+        circles_html.push(html! {
+            <g key={i}>
+                { halo }
+                <circle
+                    cx={format!("{:.2}", n.x)} cy={format!("{:.2}", n.y)}
+                    r={format!("{:.2}", n.radius)}
+                    fill={color.clone()}
+                    fill-opacity={format!("{:.3}", opacity)}
+                    stroke="var(--bs-body-color)"
+                    stroke-width={format!("{:.2}", stroke_width)}
+                    stroke-opacity={format!("{:.3}", opacity)}
+                    style="cursor: pointer;"
+                    onmousedown={on_node_mousedown}
+                    onmouseenter={on_node_mouseenter}
+                    onmouseleave={on_node_mouseleave}
+                >
+                    <title>{ tag_label_for_title }</title>
+                </circle>
+            </g>
+        });
+
+        // Label policy: show the name on every node big enough to read in a
+        // dense layout (radius ≥ 9), on hovered nodes, and on direct
+        // neighbours of the hovered node. Smaller nodes stay anonymous until
+        // the user mouses over them — keeps the canvas readable at n=250.
+        let always_labelled = n.radius >= 9.0;
+        let neighbour_labelled = hover_neighbour_set
+            .as_ref()
+            .map(|s| s.contains(&i))
+            .unwrap_or(false);
+        if !(always_labelled || is_hover || neighbour_labelled) {
+            continue;
+        }
+        let Some(node_data) = graph_nodes_ref.and_then(|g| g.nodes.get(i)) else {
+            continue;
+        };
+        let label_anchor;
+        let label_dx;
+        if n.x >= CENTER_X {
+            label_anchor = "start";
+            label_dx = n.radius + 4.0;
+        } else {
+            label_anchor = "end";
+            label_dx = -(n.radius + 4.0);
+        }
+        let label_opacity: f64 = if is_hover {
+            1.0
+        } else if neighbour_labelled || hover_neighbour_set.is_none() {
+            if in_focus { 0.9 } else { 0.3 }
+        } else {
+            0.25
+        };
+        let weight = if is_hover { "600" } else { "500" };
+        let trimmed = trim_label(&node_data.name);
+        labels_html.push(html! {
+            <text
+                x={format!("{:.2}", n.x + label_dx)}
+                y={format!("{:.2}", n.y + 4.0)}
+                text-anchor={label_anchor}
+                fill="var(--bs-body-color)"
+                fill-opacity={format!("{:.3}", label_opacity)}
+                font-size="11"
+                font-weight={weight}
+                style="pointer-events: none; user-select: none;"
+            >
+                { trimmed }
+            </text>
+        });
+    }
+
+    drop(l);
+
+    // -------- Toolbar callbacks (controls + zoom) -------------------------
     let on_top_change = {
         let top_n = top_n.clone();
         Callback::from(move |e: Event| {
@@ -795,7 +1061,6 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
             }
         })
     };
-
     let on_min_cooc_change = {
         let min_cooc = min_cooc.clone();
         Callback::from(move |e: Event| {
@@ -805,7 +1070,6 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
             }
         })
     };
-
     let on_edges_per_tag_change = {
         let edges_per_tag = edges_per_tag.clone();
         Callback::from(move |e: Event| {
@@ -816,14 +1080,58 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
         })
     };
 
-    let hover_summary = (*hover_idx).and_then(|idx| {
-        payload.as_ref().and_then(|graph| graph.nodes.get(idx).map(|n| (idx, n.clone())))
+    let on_zoom_in = {
+        let view = view.clone();
+        Callback::from(move |_: WebMouseEvent| {
+            let cur = *view;
+            let new_scale = (cur.scale * ZOOM_STEP).clamp(MIN_SCALE, MAX_SCALE);
+            if (new_scale - cur.scale).abs() < 1e-6 {
+                return;
+            }
+            let f_eff = new_scale / cur.scale;
+            let cx = CENTER_X;
+            let cy = CENTER_Y;
+            view.set(ViewState {
+                tx: cx - f_eff * (cx - cur.tx),
+                ty: cy - f_eff * (cy - cur.ty),
+                scale: new_scale,
+            });
+        })
+    };
+    let on_zoom_out = {
+        let view = view.clone();
+        Callback::from(move |_: WebMouseEvent| {
+            let cur = *view;
+            let new_scale = (cur.scale / ZOOM_STEP).clamp(MIN_SCALE, MAX_SCALE);
+            if (new_scale - cur.scale).abs() < 1e-6 {
+                return;
+            }
+            let f_eff = new_scale / cur.scale;
+            let cx = CENTER_X;
+            let cy = CENTER_Y;
+            view.set(ViewState {
+                tx: cx - f_eff * (cx - cur.tx),
+                ty: cy - f_eff * (cy - cur.ty),
+                scale: new_scale,
+            });
+        })
+    };
+    let on_zoom_reset = {
+        let view = view.clone();
+        Callback::from(move |_: WebMouseEvent| view.set(ViewState::default()))
+    };
+
+    // -------- Hover summary + community legend ----------------------------
+    let hover_summary = cur_hover.and_then(|idx| {
+        payload
+            .as_ref()
+            .and_then(|graph| graph.nodes.get(idx).map(|n| (idx, n.clone())))
     });
-    let community_legend_data = community_summary(&payload, &layout_ref);
+
+    let community_legend_data = community_summary(&payload, &layout);
     let legend_html: Html = if community_legend_data.is_empty() {
         html! {}
     } else {
-        let cur_iso = *isolated_community;
         let on_show_all = {
             let isolated_community = isolated_community.clone();
             Callback::from(move |_: WebMouseEvent| isolated_community.set(None))
@@ -893,6 +1201,18 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
     let body = if let Some(err) = (*error).clone() {
         html! { <p class="text-danger mb-0">{err}</p> }
     } else {
+        let cursor = if *is_dragging { "grabbing" } else { "grab" };
+        let transform = format!(
+            "translate({:.2} {:.2}) scale({:.4})",
+            view_now.tx, view_now.ty, view_now.scale
+        );
+        let view_dirty = view_now.tx != 0.0
+            || view_now.ty != 0.0
+            || (view_now.scale - 1.0).abs() > 1e-6;
+        let svg_style = format!(
+            "display: block; width: 100%; height: 100%; touch-action: none; user-select: none; cursor: {};",
+            cursor
+        );
         html! {
             <>
                 <div class="row gx-2 align-items-center mb-3">
@@ -940,7 +1260,7 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
                     <div class="col-auto ms-auto">
                         <div class="btn-group btn-group-sm" role="group" aria-label="Zoom controls">
                             <button type="button" class="btn btn-outline-secondary" title="Zoom out" onclick={on_zoom_out}>{"−"}</button>
-                            <button type="button" class="btn btn-outline-secondary" title="Reset view (or double-click the graph)" onclick={on_zoom_reset}>{ format!("{:.0}%", view.scale * 100.0) }</button>
+                            <button type="button" class="btn btn-outline-secondary" title="Reset view (or double-click the graph)" onclick={on_zoom_reset.clone()}>{ format!("{:.0}%", view_now.scale * 100.0) }</button>
                             <button type="button" class="btn btn-outline-secondary" title="Zoom in" onclick={on_zoom_in}>{"+"}</button>
                         </div>
                     </div>
@@ -950,24 +1270,34 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
                         </div>
                     }
                 </div>
-                <div class="position-relative" style="user-select: none;">
-                    <canvas
-                        ref={canvas_ref.clone()}
-                        style={format!(
-                            "display: block; width: 100%; touch-action: none; cursor: {};",
-                            if *is_dragging { "grabbing" } else { "grab" }
-                        )}
-                        onmousemove={on_mouse_move}
-                        onmouseleave={on_mouse_leave}
-                        onmousedown={on_mouse_down}
-                        onmouseup={on_mouse_up}
+                <div class="position-relative" style="aspect-ratio: 16 / 9; min-height: 460px; max-height: 75vh; user-select: none;">
+                    <svg
+                        ref={svg_ref.clone()}
+                        viewBox={format!("0 0 {VIEWBOX_W} {VIEWBOX_H}")}
+                        preserveAspectRatio="xMidYMid meet"
+                        style={svg_style}
+                        onmousedown={on_svg_mousedown}
+                        onmousemove={on_svg_mousemove}
+                        onmouseup={on_svg_mouseup}
+                        onmouseleave={on_svg_mouseleave}
                         ondblclick={on_dblclick}
-                    />
+                    >
+                        <g transform={transform}>
+                            { for edges_html }
+                            { for circles_html }
+                            { for labels_html }
+                        </g>
+                    </svg>
                     if let Some((_, node)) = hover_summary.clone() {
                         <div class="position-absolute top-0 end-0 m-2 px-2 py-1 small rounded shadow-sm bg-body border" style="pointer-events: none;">
                             <strong>{ node.name.clone() }</strong>
                             { format!(" · {} · {}×", node.group_type, node.count) }
                         </div>
+                    }
+                    if view_dirty {
+                        <button type="button" class="btn btn-sm btn-outline-secondary position-absolute bottom-0 start-0 m-2" onclick={on_zoom_reset} title={format!("zoom {:.2}× — click to reset", view_now.scale)}>
+                            { format!("⟲ reset ({:.1}×)", view_now.scale) }
+                        </button>
                     }
                     if matches!(payload.as_ref(), Some(g) if !g.nodes.is_empty() && g.edges.is_empty()) {
                         <div class="position-absolute top-50 start-50 translate-middle text-center text-muted small px-3 py-2 rounded bg-body-tertiary" style="pointer-events: none; max-width: 280px;">
@@ -988,7 +1318,7 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
                         }
                     }
                 </p>
-                <p class="small text-muted mt-1 mb-0">{"Node colour = detected community. Hover for tag info, click a node to open its e621 search, click a community below to isolate it."}</p>
+                <p class="small text-muted mt-1 mb-0">{"Drag a node to reshape its neighbourhood · click a node to open its e621 search · drag empty space to pan · scroll to zoom · click a community below to isolate it."}</p>
                 { legend_html }
             </>
         }
@@ -998,7 +1328,7 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
         <div class="card mt-4">
             <div class="card-header bg-primary text-white d-flex justify-content-between align-items-center">
                 <h5 class="mb-0">{"Tag Relation Graph"}</h5>
-                <small class="opacity-75">{"hover a node for details · colour = community"}</small>
+                <small class="opacity-75">{"hover a node for details · drag to rearrange · colour = community"}</small>
             </div>
             <div class="card-body">
                 { body }
@@ -1006,6 +1336,13 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
         </div>
     }
 }
+
+// =================== Tag-specific business logic (preserved) ==============
+//
+// The backbone selector and community detector below are kept verbatim from
+// the previous implementation — they produce the meaningful structure that
+// the SVG renderer above visualises. Touch carefully: the score function
+// matches the server-side PMI formulation in `topology-contract`.
 
 fn default_scoring() -> crate::models::TagRelationScoring {
     crate::models::TagRelationScoring {
@@ -1028,7 +1365,15 @@ fn resolve_scoring(graph: &TagRelationGraphPayload) -> crate::models::TagRelatio
     }
 }
 
-fn pair_pmi_score(c: i64, m_a: f64, m_b: f64, n: f64, min_cooc: i64, scale: f64, cooc_ref: f64) -> f64 {
+fn pair_pmi_score(
+    c: i64,
+    m_a: f64,
+    m_b: f64,
+    n: f64,
+    min_cooc: i64,
+    scale: f64,
+    cooc_ref: f64,
+) -> f64 {
     if c < min_cooc || m_a <= 0.0 || m_b <= 0.0 || n <= 0.0 {
         return 0.0;
     }
@@ -1073,7 +1418,7 @@ fn edge_score(
             .clamp(0.0, 1.0);
         let cooc_ref_log = ((scoring.cooc_ref as f64 + 1.0).ln()).max(1e-3);
         let conf = ((edge.global_cooc.max(0) as f64 + 1.0).ln() / cooc_ref_log).clamp(0.0, 1.0);
-        let _ = nc; // n_catalog is captured via global_lift; keep param for parity.
+        let _ = nc; // n_catalog captured via global_lift; param kept for parity.
         raw_pmi * conf
     } else {
         0.0
@@ -1085,7 +1430,10 @@ fn edge_score(
     (w_g * global_score + w_u * user_score) / sum
 }
 
-fn select_backbone(graph: &TagRelationGraphPayload, k: usize) -> Vec<(usize, usize, usize, f64)> {
+fn select_backbone(
+    graph: &TagRelationGraphPayload,
+    k: usize,
+) -> Vec<(usize, usize, usize, f64)> {
     let n = graph.nodes.len();
     if n == 0 || graph.edges.is_empty() {
         return Vec::new();
@@ -1113,14 +1461,13 @@ fn select_backbone(graph: &TagRelationGraphPayload, k: usize) -> Vec<(usize, usi
 
     let mut keep = vec![false; graph.edges.len()];
 
-    // Phase 1: Kruskal MST over decreasing score (i.e., maximum spanning tree).
+    // Phase 1: Kruskal MST over decreasing score — a maximum spanning tree.
     let mut order: Vec<usize> = (0..graph.edges.len()).filter(|&i| valid[i]).collect();
     order.sort_by(|&a, &b| {
         scored[b]
             .partial_cmp(&scored[a])
             .unwrap_or(std::cmp::Ordering::Equal)
     });
-
     let mut parent: Vec<usize> = (0..n).collect();
     fn find(parent: &mut [usize], mut i: usize) -> usize {
         while parent[i] != i {
@@ -1156,92 +1503,19 @@ fn select_backbone(graph: &TagRelationGraphPayload, k: usize) -> Vec<(usize, usi
     out
 }
 
-fn simulation_iterations(n: usize) -> usize {
-    // Hard cap; convergence detection in `run_simulation` typically stops
-    // earlier on small graphs and runs longer on large ones.
-    let base = 600;
-    let extra = (n.saturating_sub(60) as f64 * 1.6).round() as usize;
-    (base + extra).min(1500)
-}
-
-fn initial_layout(
-    nodes: &[TagRelationNode],
-    width: f64,
-    height: f64,
-    backbone: Vec<(usize, usize, usize, f64)>,
-    edges_per_tag: usize,
-) -> LayoutState {
-    let mut state = LayoutState {
-        nodes: Vec::with_capacity(nodes.len()),
-        edges: backbone,
-        communities: Vec::new(),
-        score_min: 0.0,
-        score_max: 1.0,
-        width,
-        height,
-        built_for_node_count: nodes.len(),
-        built_for_edges_per_tag: edges_per_tag,
-    };
-    if nodes.is_empty() {
-        return state;
-    }
-
-    let max_count = nodes.iter().map(|n| n.count).max().unwrap_or(1).max(1) as f64;
-    let n = nodes.len();
-
-    // Grid + per-cell pseudo-random jitter. Scales cleanly to hundreds of
-    // nodes — a single circle ran out of circumference around N≈80 and
-    // stuffed every node on top of its neighbour.
-    let aspect = width / height.max(1.0);
-    let cols = ((n as f64 * aspect).sqrt().ceil() as usize).max(2);
-    let rows = ((n + cols - 1) / cols).max(1);
-    let inner_w = width * 0.86;
-    let inner_h = height * 0.86;
-    let dx = inner_w / cols as f64;
-    let dy = inner_h / rows as f64;
-    let off_x = (width - inner_w) * 0.5 + dx * 0.5;
-    let off_y = (height - inner_h) * 0.5 + dy * 0.5;
-
-    for (i, node) in nodes.iter().enumerate() {
-        let col = i % cols;
-        let row = i / cols;
-        // Two independent hash-ish jitter axes — keeps the seed deterministic
-        // (so re-renders don't reflow) without correlating x and y.
-        let h1 = ((i as f64) * 12.9898).sin().fract().abs();
-        let h2 = ((i as f64) * 78.233).sin().fract().abs();
-        let jx = (h1 - 0.5) * dx * 0.6;
-        let jy = (h2 - 0.5) * dy * 0.6;
-        let x = off_x + col as f64 * dx + jx;
-        let y = off_y + row as f64 * dy + jy;
-
-        let normalized = (node.count as f64).max(1.0).ln() / max_count.max(1.0).ln().max(1e-3);
-        // Smooth radius scaling: 60-node graph → r_max ≈ 14, 200+ → r_max ≈ 10.
-        // No more visible jump when the user nudges top_n past 120.
-        let r_max = smooth_r_max(n);
-        let r = 3.5 + (normalized * r_max).clamp(0.0, r_max);
-        state.nodes.push(NodeState { x, y, radius: r });
-    }
-
-    // Compute communities once layout is set up. Label propagation over the
-    // backbone — fast and good enough for the visual cue we're after.
-    state.communities = label_propagation(state.nodes.len(), &state.edges, 12);
-
-    state
-}
-
 #[inline]
 fn smooth_r_max(n: usize) -> f64 {
-    // Smoothstep from 14 (small graphs) down to 10 (dense), interpolated
+    // Smoothstep from 18 (small graphs) down to 12 (dense), interpolated
     // across n ∈ [60, 200]. No discontinuity at n = 120.
     let t = ((n as f64 - 60.0) / (200.0 - 60.0)).clamp(0.0, 1.0);
     let s = t * t * (3.0 - 2.0 * t);
-    14.0 + (10.0 - 14.0) * s
+    18.0 + (12.0 - 18.0) * s
 }
 
-/// Label Propagation Algorithm: each node iteratively adopts the label of the
-/// neighbour community with the largest summed edge weight. Converges in <15
-/// iterations for typical tag graphs and produces compact, contiguous
-/// community ids ready for a color palette lookup.
+/// Label Propagation Algorithm: each node iteratively adopts the label of
+/// the neighbour community with the largest summed edge weight. Converges
+/// in <15 iterations for typical tag graphs and produces compact, contiguous
+/// community ids ready for a colour palette lookup.
 fn label_propagation(
     n_nodes: usize,
     edges: &[(usize, usize, usize, f64)],
@@ -1263,7 +1537,6 @@ fn label_propagation(
         adj[b].push((a, score));
     }
 
-    // Fixed deterministic visit order based on a hash spread of the index.
     let mut order: Vec<usize> = (0..n_nodes).collect();
     order.sort_by_key(|&i| (i.wrapping_mul(2_654_435_761usize)) as u32);
 
@@ -1297,7 +1570,6 @@ fn label_propagation(
         }
     }
 
-    // Compact labels to dense [0..k) range so the palette index is small.
     let unique: BTreeSet<u32> = labels.iter().copied().collect();
     let map: HashMap<u32, u32> = unique
         .iter()
@@ -1308,934 +1580,13 @@ fn label_propagation(
     labels
 }
 
-// =============== Barnes-Hut quadtree =====================================
-// Flat-arena quadtree used for O(N log N) repulsion computation. Children are
-// referenced by index; index 0 is reserved for the root, and `QT_NIL` marks
-// "no child". The tree is rebuilt once per FR iteration.
-
-const QT_NIL: usize = usize::MAX;
-
-#[derive(Clone, Copy)]
-struct QtNode {
-    cx0: f64,
-    cy0: f64,
-    size: f64,
-    mass: f64,
-    com_x: f64,
-    com_y: f64,
-    children: [usize; 4],
-    body: usize,
-}
-
-impl QtNode {
-    fn empty(cx0: f64, cy0: f64, size: f64) -> Self {
-        Self {
-            cx0,
-            cy0,
-            size,
-            mass: 0.0,
-            com_x: 0.0,
-            com_y: 0.0,
-            children: [QT_NIL; 4],
-            body: QT_NIL,
-        }
-    }
-}
-
-struct QuadTree {
-    nodes: Vec<QtNode>,
-}
-
-impl QuadTree {
-    fn new(min_x: f64, min_y: f64, size: f64) -> Self {
-        Self {
-            nodes: vec![QtNode::empty(min_x, min_y, size)],
-        }
-    }
-
-    #[inline]
-    fn quadrant(&self, n: usize, x: f64, y: f64) -> usize {
-        let half = self.nodes[n].size * 0.5;
-        let mid_x = self.nodes[n].cx0 + half;
-        let mid_y = self.nodes[n].cy0 + half;
-        let east = (x >= mid_x) as usize;
-        let south = (y >= mid_y) as usize;
-        // 0=NW 1=NE 2=SW 3=SE
-        (south << 1) | east
-    }
-
-    fn ensure_child(&mut self, parent: usize, q: usize) -> usize {
-        let existing = self.nodes[parent].children[q];
-        if existing != QT_NIL {
-            return existing;
-        }
-        let half = self.nodes[parent].size * 0.5;
-        let cx0 = self.nodes[parent].cx0
-            + if q & 1 == 1 { half } else { 0.0 };
-        let cy0 = self.nodes[parent].cy0
-            + if q & 2 == 2 { half } else { 0.0 };
-        let new_idx = self.nodes.len();
-        self.nodes.push(QtNode::empty(cx0, cy0, half));
-        self.nodes[parent].children[q] = new_idx;
-        new_idx
-    }
-
-    /// Insert a body. Stops splitting at a minimum cell size to avoid infinite
-    /// recursion when two bodies coincide (which can happen on initial layout
-    /// before forces have separated them).
-    fn insert(&mut self, body_idx: usize, body_x: f64, body_y: f64, positions: &[(f64, f64)]) {
-        const MIN_CELL: f64 = 0.5;
-        let mut cur = 0usize;
-        loop {
-            let n = self.nodes[cur];
-            if n.mass == 0.0 {
-                let nm = &mut self.nodes[cur];
-                nm.com_x = body_x;
-                nm.com_y = body_y;
-                nm.mass = 1.0;
-                nm.body = body_idx;
-                return;
-            }
-
-            if n.body != QT_NIL {
-                // Leaf — split.
-                let existing = n.body;
-                let (ex, ey) = positions[existing];
-
-                if self.nodes[cur].size <= MIN_CELL {
-                    // Bottom of recursion: stack the new body's mass onto this
-                    // leaf without splitting further. Geometric centre is the
-                    // mean of the two — close enough for repulsion at this
-                    // resolution.
-                    let nm = &mut self.nodes[cur];
-                    nm.com_x = (nm.com_x * nm.mass + body_x) / (nm.mass + 1.0);
-                    nm.com_y = (nm.com_y * nm.mass + body_y) / (nm.mass + 1.0);
-                    nm.mass += 1.0;
-                    return;
-                }
-
-                // Mark as internal and migrate the existing body downward.
-                let q_existing = self.quadrant(cur, ex, ey);
-                let q_body = self.quadrant(cur, body_x, body_y);
-                {
-                    let nm = &mut self.nodes[cur];
-                    nm.body = QT_NIL;
-                    nm.com_x = (nm.com_x * nm.mass + body_x) / (nm.mass + 1.0);
-                    nm.com_y = (nm.com_y * nm.mass + body_y) / (nm.mass + 1.0);
-                    nm.mass += 1.0;
-                }
-
-                let c_e = self.ensure_child(cur, q_existing);
-                {
-                    let cn = &mut self.nodes[c_e];
-                    cn.com_x = ex;
-                    cn.com_y = ey;
-                    cn.mass = 1.0;
-                    cn.body = existing;
-                }
-
-                if q_existing == q_body {
-                    // Same quadrant — descend into it and split further.
-                    cur = c_e;
-                    continue;
-                } else {
-                    let c_b = self.ensure_child(cur, q_body);
-                    let cn = &mut self.nodes[c_b];
-                    cn.com_x = body_x;
-                    cn.com_y = body_y;
-                    cn.mass = 1.0;
-                    cn.body = body_idx;
-                    return;
-                }
-            }
-
-            // Internal: update COM and descend into appropriate quadrant.
-            {
-                let nm = &mut self.nodes[cur];
-                nm.com_x = (nm.com_x * nm.mass + body_x) / (nm.mass + 1.0);
-                nm.com_y = (nm.com_y * nm.mass + body_y) / (nm.mass + 1.0);
-                nm.mass += 1.0;
-            }
-            let q = self.quadrant(cur, body_x, body_y);
-            cur = self.ensure_child(cur, q);
-        }
-    }
-
-    /// Visit every body that lies within `radius` of (px, py), passing each
-    /// one's index and `(x, y)` to `f`. Used for the near-field core-overlap
-    /// correction without paying the O(N²) all-pairs cost. Cells whose AABB
-    /// can't intersect the query disc are skipped wholesale.
-    fn query_neighbours<F: FnMut(usize, f64, f64)>(
-        &self,
-        px: f64,
-        py: f64,
-        radius: f64,
-        positions: &[(f64, f64)],
-        mut f: F,
-    ) {
-        let r_sq = radius * radius;
-        let mut stack: Vec<usize> = Vec::with_capacity(64);
-        stack.push(0);
-        while let Some(idx) = stack.pop() {
-            let n = self.nodes[idx];
-            if n.mass <= 0.0 {
-                continue;
-            }
-            // AABB-vs-disc rejection: nearest point on cell to (px, py).
-            let nx = px.clamp(n.cx0, n.cx0 + n.size);
-            let ny = py.clamp(n.cy0, n.cy0 + n.size);
-            let dx = px - nx;
-            let dy = py - ny;
-            if dx * dx + dy * dy > r_sq {
-                continue;
-            }
-
-            let is_leaf = n.body != QT_NIL && n.children.iter().all(|&c| c == QT_NIL);
-            if is_leaf {
-                let (bx, by) = positions[n.body];
-                let ddx = bx - px;
-                let ddy = by - py;
-                if ddx * ddx + ddy * ddy <= r_sq {
-                    f(n.body, bx, by);
-                }
-                continue;
-            }
-            for &c in &n.children {
-                if c != QT_NIL {
-                    stack.push(c);
-                }
-            }
-        }
-    }
-
-    /// Accumulate repulsive force on a body at (px, py) from all other masses
-    /// in the tree. Cells satisfying `s/d < theta` are treated as a single
-    /// point at the centre of mass (Barnes-Hut approximation).
-    fn repulse(&self, px: f64, py: f64, k_sq: f64, theta: f64, body_idx: usize) -> (f64, f64) {
-        let mut fx = 0.0f64;
-        let mut fy = 0.0f64;
-        // Iterative depth-first traversal. Stack is bounded by depth ≈ log4(N).
-        let mut stack: Vec<usize> = Vec::with_capacity(64);
-        stack.push(0);
-        while let Some(idx) = stack.pop() {
-            let n = self.nodes[idx];
-            if n.mass <= 0.0 {
-                continue;
-            }
-            let dx = px - n.com_x;
-            let dy = py - n.com_y;
-            let dist_sq = (dx * dx + dy * dy).max(0.25);
-            let dist = dist_sq.sqrt();
-
-            let is_leaf = n.body != QT_NIL && n.children.iter().all(|&c| c == QT_NIL);
-            if is_leaf {
-                // Skip self when this is the singleton leaf for body_idx.
-                // For stacked-body leaves (rare, only on bodies within 0.5px),
-                // the contribution from "self" is at most 1/mass — close
-                // enough; explicit core-overlap correction handles the rest.
-                if n.body == body_idx && n.mass <= 1.5 {
-                    continue;
-                }
-                let force = (k_sq * n.mass) / dist;
-                fx += (dx / dist) * force;
-                fy += (dy / dist) * force;
-                continue;
-            }
-
-            // Internal cell: apply BH approximation if far enough.
-            if n.size / dist < theta {
-                let force = (k_sq * n.mass) / dist;
-                fx += (dx / dist) * force;
-                fy += (dy / dist) * force;
-            } else {
-                for &c in &n.children {
-                    if c != QT_NIL {
-                        stack.push(c);
-                    }
-                }
-            }
-        }
-        (fx, fy)
-    }
-}
-
-/// Persistent state for the FR simulation. Lives across rAF-yielded chunks so
-/// the loop can resume mid-run without re-initialising temperature, force
-/// buffers, or score normalisation.
-struct SimulationContext {
-    n: usize,
-    k: f64,
-    k_sq: f64,
-    s_min: f64,
-    s_max: f64,
-    span: f64,
-    t: f64,
-    cooling: f64,
-    max_iterations: usize,
-    iter: usize,
-    convergence_eps: f64,
-    forces: Vec<(f64, f64)>,
-    positions: Vec<(f64, f64)>,
-    pad: f64,
-    max_radius: f64,
-}
-
-impl SimulationContext {
-    fn new(layout: &LayoutState, max_iterations: usize) -> Option<Self> {
-        let n = layout.nodes.len();
-        if n < 2 {
-            return None;
-        }
-
-        let area = layout.width * layout.height;
-        let k = ((area / n as f64).sqrt() * 1.35).max(36.0);
-        let k_sq = k * k;
-
-        // Normalise edge scores into a (0.15..1.0) attraction multiplier so
-        // the strongest pair-specific links pull harder than the weakest.
-        let scores: Vec<f64> = layout.edges.iter().map(|(_, _, _, s)| *s).collect();
-        let s_min = scores.iter().cloned().fold(f64::INFINITY, f64::min);
-        let s_max = scores.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-        let span = (s_max - s_min).max(1e-6);
-
-        let max_radius = layout
-            .nodes
-            .iter()
-            .map(|m| m.radius)
-            .fold(0.0_f64, f64::max);
-
-        Some(Self {
-            n,
-            k,
-            k_sq,
-            s_min,
-            s_max,
-            span,
-            t: layout.width.max(layout.height) * 0.20,
-            cooling: 0.992,
-            max_iterations,
-            iter: 0,
-            // Convergence epsilon: stop when total motion is under ~0.5px per node.
-            convergence_eps: (n as f64) * 0.5,
-            forces: vec![(0.0, 0.0); n],
-            positions: layout.nodes.iter().map(|p| (p.x, p.y)).collect(),
-            pad: 4.0,
-            max_radius,
-        })
-    }
-
-    /// Run up to `n_iters` iterations; return `true` when the simulation is
-    /// finished (max iterations reached or motion below convergence ε).
-    fn step(&mut self, layout: &mut LayoutState, n_iters: usize) -> bool {
-        for _ in 0..n_iters {
-            if self.iter >= self.max_iterations {
-                return true;
-            }
-
-            for f in self.forces.iter_mut() {
-                *f = (0.0, 0.0);
-            }
-            for (i, p) in layout.nodes.iter().enumerate() {
-                self.positions[i] = (p.x, p.y);
-            }
-
-            let (mut min_x, mut min_y, mut max_x, mut max_y) = (
-                f64::INFINITY,
-                f64::INFINITY,
-                f64::NEG_INFINITY,
-                f64::NEG_INFINITY,
-            );
-            for &(x, y) in &self.positions {
-                if x < min_x {
-                    min_x = x;
-                }
-                if y < min_y {
-                    min_y = y;
-                }
-                if x > max_x {
-                    max_x = x;
-                }
-                if y > max_y {
-                    max_y = y;
-                }
-            }
-            let size = ((max_x - min_x).max(max_y - min_y)).max(1.0) + 8.0;
-            let mut tree = QuadTree::new(min_x - 4.0, min_y - 4.0, size);
-            for (i, &(x, y)) in self.positions.iter().enumerate() {
-                tree.insert(i, x, y, &self.positions);
-            }
-
-            // Repulsion via Barnes-Hut, plus a near-field overlap correction.
-            for i in 0..self.n {
-                let (px, py) = self.positions[i];
-                let (mut fx, mut fy) = tree.repulse(px, py, self.k_sq, BH_THETA, i);
-
-                let r_i = layout.nodes[i].radius;
-                let query_r = r_i + self.max_radius + self.pad;
-                let nodes = layout.nodes.as_slice();
-                let pad = self.pad;
-                tree.query_neighbours(px, py, query_r, &self.positions, |j, jx, jy| {
-                    if i == j {
-                        return;
-                    }
-                    let dx = px - jx;
-                    let dy = py - jy;
-                    let dist_sq = dx * dx + dy * dy;
-                    let min_dist = r_i + nodes[j].radius + pad;
-                    if dist_sq < min_dist * min_dist {
-                        let dist = dist_sq.sqrt().max(0.5);
-                        let core_boost = (min_dist - dist) * 8.0;
-                        fx += (dx / dist) * core_boost;
-                        fy += (dy / dist) * core_boost;
-                    }
-                });
-
-                self.forces[i].0 += fx;
-                self.forces[i].1 += fy;
-            }
-
-            // Attraction (backbone edges only).
-            for &(a, b, _, score) in &layout.edges {
-                let w = (0.15 + 0.85 * ((score - self.s_min) / self.span)).clamp(0.15, 1.0);
-                let dx = layout.nodes[a].x - layout.nodes[b].x;
-                let dy = layout.nodes[a].y - layout.nodes[b].y;
-                let dist = (dx * dx + dy * dy).sqrt().max(0.5);
-                let force = (dist * dist / self.k) * w;
-                let fx = (dx / dist) * force;
-                let fy = (dy / dist) * force;
-                self.forces[a].0 -= fx;
-                self.forces[a].1 -= fy;
-                self.forces[b].0 += fx;
-                self.forces[b].1 += fy;
-            }
-
-            // Integrate, capped by the current temperature, and tally motion.
-            let mut total_motion = 0.0f64;
-            for i in 0..self.n {
-                let (fx, fy) = self.forces[i];
-                let mag = (fx * fx + fy * fy).sqrt();
-                if mag <= 1e-6 {
-                    continue;
-                }
-                let mv = mag.min(self.t);
-                layout.nodes[i].x += (fx / mag) * mv;
-                layout.nodes[i].y += (fy / mag) * mv;
-                total_motion += mv;
-            }
-
-            self.t *= self.cooling;
-            let prev_iter = self.iter;
-            self.iter += 1;
-
-            // Convergence: motion small and enough iterations to settle.
-            if prev_iter > 60 && total_motion < self.convergence_eps {
-                return true;
-            }
-        }
-        false
-    }
-
-    fn finalize(&self, layout: &mut LayoutState) {
-        // Cache the edge-score range so `draw_graph` doesn't recompute on every
-        // paint (60+ paints/sec while panning).
-        layout.score_min = if self.s_min.is_finite() {
-            self.s_min
-        } else {
-            0.0
-        };
-        layout.score_max = if self.s_max.is_finite() {
-            self.s_max
-        } else {
-            1.0
-        };
-    }
-}
-
-/// Yields back to the browser for one paint frame. Used to chunk the FR
-/// simulation so the main thread isn't blocked for the entire run.
-async fn next_animation_frame() {
-    let promise = js_sys::Promise::new(&mut |resolve, _reject| {
-        if let Some(win) = web_sys::window() {
-            let _ = win.request_animation_frame(&resolve);
-        }
-    });
-    let _ = JsFuture::from(promise).await;
-}
-
-/// Rescale already-simulated positions to a new canvas size — used when the
-/// browser resizes but the topology hasn't changed. Avoids the full re-sim
-/// (hundreds of ms for n>100) and just maps the existing aspect into the new
-/// frame. Calls `fit_to_viewport` to re-centre.
-fn rescale_layout(layout: &mut LayoutState, new_width: f64, new_height: f64) {
-    if layout.width <= 0.0 || layout.height <= 0.0 {
-        layout.width = new_width;
-        layout.height = new_height;
-        return;
-    }
-    let sx = new_width / layout.width;
-    let sy = new_height / layout.height;
-    for node in layout.nodes.iter_mut() {
-        node.x *= sx;
-        node.y *= sy;
-    }
-    layout.width = new_width;
-    layout.height = new_height;
-    fit_to_viewport(layout, 0.06);
-}
-
-/// Re-centres and uniformly scales the laid-out nodes so the bounding box
-/// fills the canvas with a small margin. Without this, FR converges to
-/// whatever absolute size the forces happened to land on — usually a tight
-/// blob in the middle.
-fn fit_to_viewport(layout: &mut LayoutState, margin_frac: f64) {
-    if layout.nodes.is_empty() {
-        return;
-    }
-    let mut min_x = f64::INFINITY;
-    let mut max_x = f64::NEG_INFINITY;
-    let mut min_y = f64::INFINITY;
-    let mut max_y = f64::NEG_INFINITY;
-    for node in &layout.nodes {
-        let r = node.radius;
-        min_x = min_x.min(node.x - r);
-        max_x = max_x.max(node.x + r);
-        min_y = min_y.min(node.y - r);
-        max_y = max_y.max(node.y + r);
-    }
-    let bb_w = (max_x - min_x).max(1.0);
-    let bb_h = (max_y - min_y).max(1.0);
-
-    let m = (margin_frac * layout.width.min(layout.height)).max(16.0);
-    let target_w = (layout.width - 2.0 * m).max(1.0);
-    let target_h = (layout.height - 2.0 * m).max(1.0);
-    // Take the smaller scale so neither axis overflows.
-    let scale = (target_w / bb_w).min(target_h / bb_h);
-
-    let cx = (min_x + max_x) * 0.5;
-    let cy = (min_y + max_y) * 0.5;
-    let ncx = layout.width * 0.5;
-    let ncy = layout.height * 0.5;
-    for node in layout.nodes.iter_mut() {
-        node.x = ncx + (node.x - cx) * scale;
-        node.y = ncy + (node.y - cy) * scale;
-    }
-}
-
-fn clear_canvas(canvas: &HtmlCanvasElement, width: f64, height: f64) -> Option<()> {
-    let dpr = web_sys::window()?.device_pixel_ratio();
-    let pw = (width * dpr).round() as u32;
-    let ph = (height * dpr).round() as u32;
-    if canvas.width() != pw {
-        canvas.set_width(pw);
-    }
-    if canvas.height() != ph {
-        canvas.set_height(ph);
-    }
-    let ctx: CanvasRenderingContext2d = canvas.get_context("2d").ok()??.dyn_into().ok()?;
-    ctx.set_transform(1.0, 0.0, 0.0, 1.0, 0.0, 0.0).ok()?;
-    ctx.scale(dpr, dpr).ok()?;
-    ctx.clear_rect(0.0, 0.0, width, height);
-    Some(())
-}
-
-fn draw_graph(
-    canvas: &HtmlCanvasElement,
-    layout: &LayoutState,
-    graph: &TagRelationGraphPayload,
-    hover: Option<usize>,
-    isolated_community: Option<u32>,
-    view: ViewTransform,
-) {
-    let width = layout.width;
-    let height = layout.height;
-    if clear_canvas(canvas, width, height).is_none() {
-        return;
-    }
-    let ctx: CanvasRenderingContext2d = match canvas.get_context("2d").ok().flatten() {
-        Some(c) => match c.dyn_into() {
-            Ok(c) => c,
-            Err(_) => return,
-        },
-        None => return,
-    };
-
-    // The DPR scaling done in `clear_canvas` is already applied. Stack the
-    // user pan/zoom on top so all coordinates below are still in logical
-    // canvas space; the transform takes care of where they land.
-    let _ = ctx.translate(view.offset_x, view.offset_y);
-    let _ = ctx.scale(view.scale, view.scale);
-
-    let el: &web_sys::Element = canvas.as_ref();
-    let body_color = css_var(el, "--bs-body-color").unwrap_or_else(|| "#212529".into());
-    let muted = css_var(el, "--bs-secondary").unwrap_or_else(|| "#6c757d".into());
-
-    // Cached score range from simulation — recomputing min/max on every paint
-    // (60+/sec while panning) was a measurable cost.
-    let s_min = layout.score_min;
-    let span = (layout.score_max - layout.score_min).max(1e-6);
-
-    // Isolation: focus on a single community by dimming everything else.
-    let in_focus = |idx: usize| -> bool {
-        match isolated_community {
-            Some(c) => layout.communities.get(idx).copied() == Some(c),
-            None => true,
-        }
-    };
-
-    // ---- Pre-pass: dim out-of-focus edges + nodes (when isolating) -------
-    if isolated_community.is_some() {
-        let mut dim_edges: Vec<usize> = Vec::new();
-        for (idx, &(src, tgt, _, _)) in layout.edges.iter().enumerate() {
-            if src >= layout.nodes.len() || tgt >= layout.nodes.len() {
-                continue;
-            }
-            if !(in_focus(src) && in_focus(tgt)) {
-                dim_edges.push(idx);
-            }
-        }
-        if !dim_edges.is_empty() {
-            ctx.set_stroke_style_str(&with_alpha(&muted, 0.10));
-            ctx.set_line_width(0.6);
-            ctx.begin_path();
-            for &idx in &dim_edges {
-                let (src, tgt, _, _) = layout.edges[idx];
-                let a = layout.nodes[src];
-                let b = layout.nodes[tgt];
-                ctx.move_to(a.x, a.y);
-                ctx.line_to(b.x, b.y);
-            }
-            ctx.stroke();
-        }
-        ctx.set_fill_style_str(&with_alpha(&muted, 0.18));
-        ctx.begin_path();
-        for i in 0..layout.nodes.len().min(graph.nodes.len()) {
-            if in_focus(i) {
-                continue;
-            }
-            let pos = layout.nodes[i];
-            ctx.move_to(pos.x + pos.radius, pos.y);
-            ctx.arc(pos.x, pos.y, pos.radius, 0.0, std::f64::consts::TAU)
-                .ok();
-        }
-        ctx.fill();
-    }
-
-    // ---- Pass 1: backbone edges (in-focus only) --------------------------
-    // Quantise (alpha, line_width) into a small grid and stroke each bucket
-    // as a single path.
-    const ALPHA_BANDS: usize = 8;
-    const WIDTH_BANDS: usize = 4;
-    let total_buckets = ALPHA_BANDS * WIDTH_BANDS;
-    let mut buckets: Vec<Vec<usize>> = vec![Vec::new(); total_buckets];
-    let mut highlight_edges: Vec<usize> = Vec::new();
-    for (idx, &(src, tgt, _, score)) in layout.edges.iter().enumerate() {
-        if src >= layout.nodes.len() || tgt >= layout.nodes.len() {
-            continue;
-        }
-        if !(in_focus(src) && in_focus(tgt)) {
-            continue;
-        }
-        let highlight = matches!(hover, Some(h) if h == src || h == tgt);
-        if highlight {
-            highlight_edges.push(idx);
-            continue;
-        }
-        let strength = ((score - s_min) / span).clamp(0.0, 1.0);
-        let alpha_b = ((strength * (ALPHA_BANDS as f64 - 1.0)).round() as usize)
-            .min(ALPHA_BANDS - 1);
-        let width_b = ((strength * (WIDTH_BANDS as f64 - 1.0)).round() as usize)
-            .min(WIDTH_BANDS - 1);
-        buckets[alpha_b * WIDTH_BANDS + width_b].push(idx);
-    }
-    for bucket_idx in 0..total_buckets {
-        if buckets[bucket_idx].is_empty() {
-            continue;
-        }
-        let alpha_b = bucket_idx / WIDTH_BANDS;
-        let width_b = bucket_idx % WIDTH_BANDS;
-        let alpha_norm = alpha_b as f64 / (ALPHA_BANDS as f64 - 1.0).max(1.0);
-        let width_norm = width_b as f64 / (WIDTH_BANDS as f64 - 1.0).max(1.0);
-        let alpha = (0.12 + alpha_norm * 0.55).clamp(0.12, 0.78);
-        let line_w = (0.6 + width_norm * 3.0).clamp(0.6, 4.0);
-        ctx.set_stroke_style_str(&with_alpha(&muted, alpha as f32));
-        ctx.set_line_width(line_w);
-        ctx.begin_path();
-        for &idx in &buckets[bucket_idx] {
-            let (src, tgt, _, _) = layout.edges[idx];
-            let a = layout.nodes[src];
-            let b = layout.nodes[tgt];
-            ctx.move_to(a.x, a.y);
-            ctx.line_to(b.x, b.y);
-        }
-        ctx.stroke();
-    }
-
-    // Highlighted edges drawn last (one path) so they always sit on top.
-    if !highlight_edges.is_empty() {
-        ctx.set_stroke_style_str(&with_alpha(&body_color, 0.95));
-        ctx.set_line_width(2.6);
-        ctx.begin_path();
-        for &idx in &highlight_edges {
-            let (src, tgt, _, _) = layout.edges[idx];
-            let a = layout.nodes[src];
-            let b = layout.nodes[tgt];
-            ctx.move_to(a.x, a.y);
-            ctx.line_to(b.x, b.y);
-        }
-        ctx.stroke();
-    }
-
-    // ---- Pass 2: nodes (community fill, batched per community) ------------
-    // Coloured purely by community now — tag-type fill removed per UX request.
-    // Singleton communities fall back to the muted colour so isolated nodes
-    // don't add saturated noise.
-    let max_community = layout.communities.iter().copied().max().unwrap_or(0);
-    let mut community_size = vec![0u32; (max_community as usize) + 1];
-    for &c in &layout.communities {
-        community_size[c as usize] += 1;
-    }
-    let community_color = |c: u32| -> String {
-        if (c as usize) < community_size.len() && community_size[c as usize] <= 1 {
-            return muted.clone();
-        }
-        let hue = ((c as f64) * 137.508_f64) % 360.0;
-        format!("hsl({:.0}, 60%, 55%)", hue)
-    };
-
-    // Bucket nodes by community so we stroke/fill each colour as one path.
-    let bucket_count = (max_community as usize) + 1;
-    let mut node_buckets: Vec<Vec<usize>> = vec![Vec::new(); bucket_count];
-    for (i, &c) in layout.communities.iter().enumerate() {
-        if i >= layout.nodes.len() {
-            continue;
-        }
-        if hover == Some(i) {
-            // Hover handled separately so the outline width is right.
-            continue;
-        }
-        if !in_focus(i) {
-            continue;
-        }
-        node_buckets[c as usize].push(i);
-    }
-
-    for (c_idx, ids) in node_buckets.iter().enumerate() {
-        if ids.is_empty() {
-            continue;
-        }
-        let color = community_color(c_idx as u32);
-        ctx.set_fill_style_str(&color);
-        ctx.begin_path();
-        for &i in ids {
-            let pos = layout.nodes[i];
-            ctx.move_to(pos.x + pos.radius, pos.y);
-            ctx.arc(pos.x, pos.y, pos.radius, 0.0, std::f64::consts::TAU)
-                .ok();
-        }
-        ctx.fill();
-    }
-
-    // Outlines as one path per width tier (here: just the standard tier;
-    // hovered node drawn last as a one-off below).
-    ctx.set_line_width(0.8);
-    ctx.set_stroke_style_str(&body_color);
-    ctx.begin_path();
-    for (i, _) in graph.nodes.iter().enumerate() {
-        if hover == Some(i) || i >= layout.nodes.len() {
-            continue;
-        }
-        if !in_focus(i) {
-            continue;
-        }
-        let pos = layout.nodes[i];
-        ctx.move_to(pos.x + pos.radius, pos.y);
-        ctx.arc(pos.x, pos.y, pos.radius, 0.0, std::f64::consts::TAU)
-            .ok();
-    }
-    ctx.stroke();
-
-    // Hovered node: drawn last with a thicker outline.
-    if let Some(h) = hover {
-        if h < layout.nodes.len() {
-            let pos = layout.nodes[h];
-            let community = layout.communities.get(h).copied().unwrap_or(0);
-            let color = community_color(community);
-            ctx.set_fill_style_str(&color);
-            ctx.begin_path();
-            ctx.arc(pos.x, pos.y, pos.radius, 0.0, std::f64::consts::TAU)
-                .ok();
-            ctx.fill();
-            ctx.set_line_width(2.0);
-            ctx.set_stroke_style_str(&body_color);
-            ctx.stroke();
-        }
-    }
-
-    // ---- Pass 3: labels with greedy collision avoidance --------------------
-    ctx.set_font("12px system-ui, -apple-system, Segoe UI, Roboto, sans-serif");
-    ctx.set_text_baseline("middle");
-    let mut placed: Vec<(f64, f64, f64, f64)> = Vec::new();
-    let approx_label_w = |name: &str| (name.chars().count() as f64) * 6.6 + 6.0;
-    let label_h = 14.0;
-
-    let mut order: Vec<usize> = (0..graph.nodes.len()).collect();
-    order.sort_by(|&a, &b| {
-        let ra = layout.nodes[a].radius;
-        let rb = layout.nodes[b].radius;
-        rb.partial_cmp(&ra)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| graph.nodes[b].count.cmp(&graph.nodes[a].count))
-    });
-    if let Some(h) = hover {
-        if let Some(p) = order.iter().position(|&i| i == h) {
-            order.remove(p);
-            order.insert(0, h);
-        }
-    }
-
-    ctx.set_text_align("left");
-    ctx.set_fill_style_str(&body_color);
-    for i in order {
-        if !in_focus(i) && hover != Some(i) {
-            continue;
-        }
-        let pos = layout.nodes[i];
-        let is_hover = hover == Some(i);
-        let name = &graph.nodes[i].name;
-        let lx = pos.x + pos.radius + 4.0;
-        let ly = pos.y;
-        let lw = approx_label_w(name);
-        let lh = label_h;
-        let bbox = (lx, ly - lh * 0.5, lx + lw, ly + lh * 0.5);
-
-        let force = is_hover || pos.radius >= 9.0;
-        if !force {
-            let collides = placed.iter().any(|&(ax0, ay0, ax1, ay1)| {
-                bbox.0 < ax1 && bbox.2 > ax0 && bbox.1 < ay1 && bbox.3 > ay0
-            });
-            if collides {
-                continue;
-            }
-        }
-
-        let _ = ctx.fill_text(name, lx, ly);
-        placed.push(bbox);
-    }
-}
-
-fn css_var(el: &web_sys::Element, name: &str) -> Option<String> {
-    let window = web_sys::window()?;
-    let computed = window.get_computed_style(el).ok()??;
-    computed
-        .get_property_value(name)
-        .ok()
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty())
-}
-
-fn with_alpha(color: &str, alpha: f32) -> String {
-    let trimmed = color.trim();
-    if let Some(stripped) = trimmed.strip_prefix('#') {
-        if let Some((r, g, b)) = parse_hex(stripped) {
-            return format!("rgba({r},{g},{b},{:.3})", alpha.clamp(0.0, 1.0));
-        }
-    }
-    if let Some(rest) = trimmed
-        .strip_prefix("rgb(")
-        .and_then(|s| s.strip_suffix(')'))
-    {
-        return format!("rgba({rest},{:.3})", alpha.clamp(0.0, 1.0));
-    }
-    trimmed.to_string()
-}
-
-fn zoom_around_centre(
-    canvas_ref: &NodeRef,
-    view: &UseStateHandle<ViewTransform>,
-    factor: f64,
-) {
-    let Some(canvas) = canvas_ref.cast::<HtmlCanvasElement>() else {
-        return;
-    };
-    let cx = (canvas.client_width().max(0) as f64) * 0.5;
-    let cy = (canvas.client_height().max(0) as f64) * 0.5;
-    let cur: ViewTransform = **view;
-    let new_scale = (cur.scale * factor).clamp(ZOOM_MIN, ZOOM_MAX);
-    if (new_scale - cur.scale).abs() < 1e-6 {
-        return;
-    }
-    let real = new_scale / cur.scale;
-    view.set(ViewTransform {
-        offset_x: cx - (cx - cur.offset_x) * real,
-        offset_y: cy - (cy - cur.offset_y) * real,
-        scale: new_scale,
-    });
-}
-
-/// Queue a single rAF redraw. If one is already pending, no-ops — the pending
-/// frame will pick up whatever state is current when it fires.
-fn schedule_redraw(
-    canvas_ref: &NodeRef,
-    layout_ref: &Rc<RefCell<LayoutState>>,
-    payload: &UseStateHandle<Option<TagRelationGraphPayload>>,
-    hover_idx: &UseStateHandle<Option<usize>>,
-    isolated_community: &UseStateHandle<Option<u32>>,
-    view_ref: &Rc<RefCell<ViewTransform>>,
-    raf_id: &Rc<RefCell<Option<i32>>>,
-) {
-    if raf_id.borrow().is_some() {
-        return;
-    }
-    let Some(win) = web_sys::window() else {
-        return;
-    };
-
-    let canvas_ref = canvas_ref.clone();
-    let layout_ref = layout_ref.clone();
-    let payload = payload.clone();
-    let hover_idx = hover_idx.clone();
-    let isolated_community = isolated_community.clone();
-    let view_ref = view_ref.clone();
-    let raf_id_inner = raf_id.clone();
-
-    let cb = Closure::<dyn FnMut(f64)>::new(move |_: f64| {
-        *raf_id_inner.borrow_mut() = None;
-        let Some(canvas) = canvas_ref.cast::<HtmlCanvasElement>() else {
-            return;
-        };
-        let Some(graph) = payload.as_ref() else {
-            return;
-        };
-        let layout = layout_ref.borrow();
-        if layout.nodes.is_empty() {
-            return;
-        }
-        let view = *view_ref.borrow();
-        draw_graph(&canvas, &layout, graph, *hover_idx, *isolated_community, view);
-    });
-    let id = win
-        .request_animation_frame(cb.as_ref().unchecked_ref())
-        .ok();
-    *raf_id.borrow_mut() = id;
-    // Closure leaks per scheduled frame (~100 bytes each). Coalescing through
-    // `raf_id` caps this to one leak per frame fired, not per request.
-    cb.forget();
-}
-
-fn parse_hex(s: &str) -> Option<(u8, u8, u8)> {
-    match s.len() {
-        3 => {
-            let r = u8::from_str_radix(&s[0..1].repeat(2), 16).ok()?;
-            let g = u8::from_str_radix(&s[1..2].repeat(2), 16).ok()?;
-            let b = u8::from_str_radix(&s[2..3].repeat(2), 16).ok()?;
-            Some((r, g, b))
-        }
-        6 => {
-            let r = u8::from_str_radix(&s[0..2], 16).ok()?;
-            let g = u8::from_str_radix(&s[2..4], 16).ok()?;
-            let b = u8::from_str_radix(&s[4..6], 16).ok()?;
-            Some((r, g, b))
-        }
-        _ => None,
+fn trim_label(s: &str) -> String {
+    let count = s.chars().count();
+    if count > 24 {
+        let mut iter = s.chars();
+        let truncated: String = iter.by_ref().take(23).collect();
+        format!("{truncated}…")
+    } else {
+        s.to_string()
     }
 }
