@@ -542,6 +542,19 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
     let tick = use_state(|| 0u64);
 
     let view = use_state(ViewState::default);
+    // Mirror of `view` for long-lived `Closure`s (wheel + window mousemove /
+    // mouseup). `UseStateHandle<T>` deref returns the value captured at the
+    // moment the handle was cloned — a closure created once at mount and
+    // never re-created would otherwise always see the initial `ViewState`,
+    // breaking accumulated zoom (each wheel tick would multiply from 1.0 ×
+    // ZOOM_STEP) and breaking drag math at any non-default scale (world-x
+    // = (vb-x − tx) / scale uses a stale tx/scale). Yew Callbacks don't
+    // have this problem because they're rebuilt every render. Synchronised
+    // both on every render (line below) and inside the writing handlers
+    // themselves so consecutive events within the same microtask see the
+    // freshest value.
+    let view_ref: Rc<RefCell<ViewState>> = use_mut_ref(ViewState::default);
+    *view_ref.borrow_mut() = *view;
     let pan: Rc<RefCell<PanState>> = use_mut_ref(PanState::default);
     let is_dragging = use_state(|| false);
 
@@ -689,6 +702,7 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
     {
         let svg_ref_for_effect = svg_ref.clone();
         let view = view.clone();
+        let view_ref = view_ref.clone();
         let canvas_present = payload.is_some() || *loading;
         use_effect_with(canvas_present, move |_present| {
             let mut handle: Option<(web_sys::Element, Closure<dyn FnMut(WebWheelEvent)>)> = None;
@@ -696,6 +710,7 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
             if let Some(svg) = svg_ref_for_effect.cast::<web_sys::Element>() {
                 let svg_for_cb = svg.clone();
                 let view = view.clone();
+                let view_ref = view_ref.clone();
                 let cb = Closure::<dyn FnMut(WebWheelEvent)>::new(move |evt: WebWheelEvent| {
                     evt.prevent_default();
                     let direction = if evt.delta_y() < 0.0 {
@@ -703,7 +718,11 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
                     } else {
                         1.0 / ZOOM_STEP
                     };
-                    let cur = *view;
+                    // Read through the mirror — `*view` would be the stale
+                    // snapshot captured when this effect ran, so cumulative
+                    // zoom would reset every event. See the `view_ref`
+                    // declaration for the full story.
+                    let cur = *view_ref.borrow();
                     let new_scale = (cur.scale * direction).clamp(MIN_SCALE, MAX_SCALE);
                     if (new_scale - cur.scale).abs() < 1e-6 {
                         return;
@@ -719,11 +738,16 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
                     // pre-zoom mapping `world = (vb - tx) / scale`.
                     let new_tx = vbx - f_eff * (vbx - cur.tx);
                     let new_ty = vby - f_eff * (vby - cur.ty);
-                    view.set(ViewState {
+                    let next = ViewState {
                         tx: new_tx,
                         ty: new_ty,
                         scale: new_scale,
-                    });
+                    };
+                    // Write through to the mirror immediately so that two
+                    // wheel events in the same microtask compound correctly
+                    // even before Yew can re-render and re-sync.
+                    *view_ref.borrow_mut() = next;
+                    view.set(next);
                 });
 
                 let opts = web_sys::AddEventListenerOptions::new();
@@ -778,6 +802,7 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
         let pan = pan.clone();
         let layout = layout.clone();
         let view = view.clone();
+        let view_ref = view_ref.clone();
         let svg_ref = svg_ref.clone();
         let is_dragging = is_dragging.clone();
         let payload = payload.clone();
@@ -790,6 +815,7 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
                 let pan = pan.clone();
                 let layout = layout.clone();
                 let view = view.clone();
+                let view_ref = view_ref.clone();
                 let svg_ref = svg_ref.clone();
                 Closure::<dyn FnMut(WebMouseEvent)>::new(move |e: WebMouseEvent| {
                     let Some(svg) = svg_ref.cast::<web_sys::Element>() else {
@@ -798,6 +824,9 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
                     // Node drag takes priority: its mousedown set
                     // `layout.pinned`, and every mousemove updates the
                     // pin's target to follow the cursor in world coords.
+                    // Read via `view_ref` so the world-space inverse uses
+                    // the current zoom/pan — `*view` here is the snapshot
+                    // captured at mount and is permanently stale.
                     let pinned_active = layout.borrow().pinned.is_some();
                     if pinned_active {
                         let (vbx, vby) = client_to_viewbox(
@@ -805,7 +834,7 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
                             e.client_x() as f64,
                             e.client_y() as f64,
                         );
-                        let v = *view;
+                        let v = *view_ref.borrow();
                         let world_x = (vbx - v.tx) / v.scale;
                         let world_y = (vby - v.ty) / v.scale;
                         let mut l = layout.borrow_mut();
@@ -831,9 +860,10 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
                         (dx, dy)
                     };
                     let k = px_to_viewbox_scale(&svg);
-                    let mut v = *view;
+                    let mut v = *view_ref.borrow();
                     v.tx += dx_px * k;
                     v.ty += dy_px * k;
+                    *view_ref.borrow_mut() = v;
                     view.set(v);
                 })
             };
@@ -954,15 +984,17 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
             None
         };
 
-    let node_visible = |idx: usize| -> bool {
-        match cur_iso {
-            Some(c) => l.communities.get(idx).copied() == Some(c),
-            None => true,
-        }
-    };
+    // Out-of-context nodes (other communities while one is isolated, or
+    // non-neighbours of a hovered node) stay rendered — they fade to this
+    // opacity instead of dropping from the DOM. Keeping them in view
+    // preserves spatial orientation so the user can still see how the
+    // focused subset fits into the whole graph.
+    const INACTIVE_OPACITY: f64 = 0.18;
+
     let node_focus_full = |idx: usize| -> bool {
         // Full opacity if: no hover-or-isolation context OR this node is in
-        // the active context.
+        // the active context. Hover takes precedence over isolation because
+        // hovering is the more recent user gesture.
         match (&hover_neighbour_set, cur_iso) {
             (Some(set), _) => set.contains(&idx),
             (None, Some(c)) => l.communities.get(idx).copied() == Some(c),
@@ -988,6 +1020,9 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
 
     // -------- Build SVG layers (edges → circles → labels) -----------------
 
+    // Edges always render — out-of-context ones get a low-alpha "inactive"
+    // pass instead of being culled, so the user keeps spatial context
+    // when isolating a community or hovering a node.
     let edges_html: Vec<Html> = l
         .edges
         .iter()
@@ -995,12 +1030,9 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
             if a >= l.nodes.len() || b >= l.nodes.len() {
                 return None;
             }
-            if !(node_visible(a) && node_visible(b)) {
-                return None;
-            }
             let strength = ((score - l.score_min) / span).clamp(0.0, 1.0);
-            let in_hover =
-                cur_hover.map(|h| h == a || h == b).unwrap_or(false);
+            let in_hover = cur_hover.map(|h| h == a || h == b).unwrap_or(false);
+            let endpoints_in_focus = node_focus_full(a) && node_focus_full(b);
             let width = if in_hover {
                 2.6
             } else {
@@ -1010,10 +1042,10 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
                 0.95
             } else {
                 let base = 0.15 + strength * 0.55;
-                if hover_neighbour_set.is_some() {
-                    base * 0.25
-                } else {
+                if endpoints_in_focus {
                     base
+                } else {
+                    (base * INACTIVE_OPACITY).max(0.04)
                 }
             };
             let stroke = if in_hover {
@@ -1038,44 +1070,18 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
 
     let graph_nodes_ref = payload.as_ref();
 
-    // Persistent labels: top-K tags by count. Previously this gate was
-    // `radius >= 9` since radius scaled with count; with uniform radius the
-    // signal is lost, so we pick the top-K explicitly. K tapers from "all"
-    // for sparse graphs to ~25 for dense so the canvas stays readable.
-    let label_always: std::collections::HashSet<usize> = if let Some(graph) = graph_nodes_ref {
-        let mut by_count: Vec<(usize, i64)> = graph
-            .nodes
-            .iter()
-            .enumerate()
-            .map(|(i, n)| (i, n.count))
-            .collect();
-        by_count.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-        let total = by_count.len();
-        let target = if total <= 30 {
-            total
-        } else {
-            let t = ((total as f64 - 30.0) / (220.0 - 30.0)).clamp(0.0, 1.0);
-            let s = t * t * (3.0 - 2.0 * t);
-            (50.0 + (25.0 - 50.0) * s).round() as usize
-        };
-        by_count.truncate(target.max(1));
-        by_count.into_iter().map(|(i, _)| i).collect()
-    } else {
-        std::collections::HashSet::new()
-    };
-
     let mut circles_html: Vec<Html> = Vec::with_capacity(l.nodes.len());
-    let mut labels_html: Vec<Html> = Vec::new();
+    let mut labels_html: Vec<Html> = Vec::with_capacity(l.nodes.len());
 
     for (i, n) in l.nodes.iter().enumerate() {
-        if !node_visible(i) {
-            continue;
-        }
         let community = l.communities.get(i).copied().unwrap_or(0);
         let color = community_color(community);
         let is_hover = cur_hover == Some(i);
         let in_focus = node_focus_full(i);
-        let opacity: f64 = if in_focus { 1.0 } else { 0.25 };
+        // Inactive nodes stay rendered at a low opacity instead of being
+        // pulled from the DOM — this preserves spatial context when a
+        // community is isolated or a node is hovered.
+        let opacity: f64 = if in_focus { 1.0 } else { INACTIVE_OPACITY };
         let stroke_width = if is_hover { 2.4 } else { 0.9 };
 
         let on_node_mousedown = {
@@ -1094,6 +1100,11 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
                 };
                 let (vbx, vby) =
                     client_to_viewbox(&svg, e.client_x() as f64, e.client_y() as f64);
+                // Yew Callback — recreated each render — captures the
+                // current `view` snapshot, so `*view_handle` is fresh here.
+                // World-space inverse must use the *current* tx/ty/scale
+                // or a drag started at non-default zoom would land the
+                // node nowhere near the cursor.
                 let v = *view_handle;
                 let world_x = (vbx - v.tx) / v.scale;
                 let world_y = (vby - v.ty) / v.scale;
@@ -1170,44 +1181,40 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
             </g>
         });
 
-        // Label policy: persistent labels on the top-K tags by count (set
-        // computed above), plus the hovered node and its direct neighbours.
-        // Other tags stay anonymous until the user mouses over them, which
-        // keeps the canvas readable even at n=250.
-        let always_labelled = label_always.contains(&i);
-        let neighbour_labelled = hover_neighbour_set
-            .as_ref()
-            .map(|s| s.contains(&i))
-            .unwrap_or(false);
-        if !(always_labelled || is_hover || neighbour_labelled) {
-            continue;
-        }
+        // Every node gets a persistent label. The previous top-K gate left
+        // many tags anonymous, and uniform radii removed the radius-based
+        // signal that originally selected which tags were "important
+        // enough" to label. Labels are rendered into a separate `Vec` and
+        // emitted last in the SVG so they sit on top of every edge and
+        // circle; a paint-order stroke + body-bg colour gives each glyph
+        // a halo that keeps it legible over coloured nodes.
         let Some(node_data) = graph_nodes_ref.and_then(|g| g.nodes.get(i)) else {
             continue;
         };
-        let label_anchor;
-        let label_dx;
-        if n.x >= CENTER_X {
-            label_anchor = "start";
-            label_dx = n.radius + 4.0;
+        let (label_anchor, label_dx) = if n.x >= CENTER_X {
+            ("start", n.radius + 4.0)
         } else {
-            label_anchor = "end";
-            label_dx = -(n.radius + 4.0);
-        }
+            ("end", -(n.radius + 4.0))
+        };
         let label_opacity: f64 = if is_hover {
             1.0
-        } else if neighbour_labelled || hover_neighbour_set.is_none() {
-            if in_focus { 0.9 } else { 0.3 }
+        } else if in_focus {
+            0.92
         } else {
-            0.25
+            INACTIVE_OPACITY
         };
-        let weight = if is_hover { "600" } else { "500" };
+        let weight = if is_hover { "700" } else { "500" };
         let trimmed = trim_label(&node_data.name);
         labels_html.push(html! {
             <text
                 x={format!("{:.2}", n.x + label_dx)}
                 y={format!("{:.2}", n.y + 4.0)}
                 text-anchor={label_anchor}
+                paint-order="stroke fill"
+                stroke="var(--bs-body-bg)"
+                stroke-width="3.2"
+                stroke-linejoin="round"
+                stroke-opacity={format!("{:.3}", label_opacity)}
                 fill="var(--bs-body-color)"
                 fill-opacity={format!("{:.3}", label_opacity)}
                 font-size="11"
