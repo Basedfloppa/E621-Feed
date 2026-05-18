@@ -1,5 +1,6 @@
 use crate::ThemeToggle;
 use yew::{Callback, Html, MouseEvent, classes, function_component, html, use_effect_with};
+use yew_router::prelude::use_location;
 use crate::models::{read_config_from_head, start_tour, AttachTo, Button, Step};
 
 fn should_run_tour() -> bool {
@@ -28,18 +29,15 @@ fn mark_tour_finished() {
 
 #[function_component(Header)]
 pub fn header() -> Html {
+    // `use_location` re-renders the Header
     let path = {
-        let p = if let Some(win) = web_sys::window() {
-            win.location()
-                .pathname()
-                .unwrap_or_else(|_| "/".to_string())
+        let raw = use_location()
+            .map(|loc| loc.path().to_string())
+            .unwrap_or_else(|| "/".to_string());
+        if raw.len() > 1 {
+            raw.trim_end_matches('/').to_string()
         } else {
-            "/".to_string()
-        };
-        if p.len() > 1 {
-            p.trim_end_matches('/').to_string()
-        } else {
-            p
+            raw
         }
     };
 

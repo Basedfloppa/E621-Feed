@@ -4,9 +4,13 @@ use yew::{
     Callback, Event, Html, Properties, TargetCast, UseStateHandle, function_component, html,
     use_effect_with, use_state,
 };
+use yew_router::prelude::use_navigator;
 
+use crate::Route;
 use crate::models::{ACCOUNT_LIST_CHANGED_EVENT, api_get, read_config_from_head};
 use crate::pages::UserInfo;
+
+const CREATE_NEW_OPTION_VALUE: &str = "__create_new__";
 
 #[derive(Properties, PartialEq)]
 pub struct SavedAccountsProps {
@@ -18,6 +22,7 @@ pub struct SavedAccountsProps {
 pub fn saved_accounts_select(props: &SavedAccountsProps) -> Html {
     let user_query: UseStateHandle<String> = use_state(|| "".to_string());
     let saved_accounts = use_state(Vec::<UserInfo>::new);
+    let navigator = use_navigator();
 
     {
         // Refetch on mount and whenever any other component dispatches the
@@ -70,11 +75,21 @@ pub fn saved_accounts_select(props: &SavedAccountsProps) -> Html {
         let saved_accounts = saved_accounts.clone();
         let found_user = props.selected_user.clone();
         let user_query = user_query.clone();
+        let navigator = navigator.clone();
 
         Callback::from(move |e: Event| {
             let select: web_sys::HtmlSelectElement = e.target_unchecked_into();
-            let idx = select.selected_index() as usize;
+            let value = select.value();
 
+            if value == CREATE_NEW_OPTION_VALUE {
+                select.set_selected_index(0);
+                if let Some(nav) = navigator.as_ref() {
+                    nav.push(&Route::Account);
+                }
+                return;
+            }
+
+            let idx = select.selected_index() as usize;
             if idx == 0 {
                 return;
             }
@@ -119,6 +134,9 @@ pub fn saved_accounts_select(props: &SavedAccountsProps) -> Html {
                             </option>
                         }
                     })}
+                    <option value={CREATE_NEW_OPTION_VALUE}>
+                        {"+ Create new account…"}
+                    </option>
                 </select>
                 <button
                     class="btn btn-outline-secondary"

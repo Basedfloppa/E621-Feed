@@ -1,16 +1,40 @@
-use crate::components::ConfirmModal;
+use crate::components::{ConfirmModal, UserSearchForm};
 use crate::models::{
     api_delete, api_get, api_patch, api_post, dispatch_account_list_changed, humanize_error_body,
     read_config_from_head,
 };
 use crate::pages::UserInfo;
 use gloo_timers::callback::Timeout;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use web_sys::{HtmlInputElement, HtmlTextAreaElement};
 use yew::prelude::*;
+use yew_router::prelude::use_location;
+
+/// Query params used by the "Create this account" hand-off from
+/// `/` (home) to `/account`. `Serialize` is used by `home.rs` when it
+/// pushes via `Navigator::push_with_query`; `Deserialize` is used here
+/// on mount to pre-populate the form. Both fields are optional (a hard
+/// `<a href="/account">` link should still work) — `#[serde(default)]`
+/// + the empty-string check below keep the page robust to either.
+#[derive(Serialize, Deserialize, Default, Clone, PartialEq)]
+pub struct AccountPrefill {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+}
 
 #[function_component(Account)]
 pub fn account_creator() -> Html {
+    // Single config read for the JSX-level `api_base` prop on
+    // `UserSearchForm`. Effects below intentionally keep their own
+    // `read_config_from_head()` calls so they don't fight Yew over
+    // owning a captured `cfg` clone, but the search component needs the
+    // URL at render time as a prop, hence this top-level fetch.
+    let backend_domain = read_config_from_head()
+        .map(|c| c.backend_domain)
+        .unwrap_or_default();
     let id = use_state(String::new);
     let name = use_state(String::new);
     let blacklist = use_state(String::new);
@@ -26,6 +50,53 @@ pub fn account_creator() -> Html {
     let experiment_buckets: UseStateHandle<HashMap<i64, String>> = use_state(HashMap::new);
     let pending_remove: UseStateHandle<Option<UserInfo>> = use_state(|| None);
     let default_blacklist: UseStateHandle<Vec<String>> = use_state(Vec::new);
+
+    // Look-up support: the create-account form embeds `UserSearchForm`,
+    // which writes its hit into `searched_user`. The effect below
+    // mirrors that hit into the form's `id`/`name` fields so the user
+    // sees their search auto-fill the inputs instead of having to copy
+    // numbers by hand. Kept separate from `loading` so a search-in-flight
+    // doesn't disable the create-account submit button (and vice versa).
+    let searched_user: UseStateHandle<Option<UserInfo>> = use_state(|| None);
+    let search_error: UseStateHandle<Option<String>> = use_state(|| None);
+    let searching = use_state(|| false);
+    {
+        let id = id.clone();
+        let name = name.clone();
+        use_effect_with((*searched_user).clone(), move |hit| {
+            if let Some(user) = hit.as_ref() {
+                id.set(user.id.to_string());
+                name.set(user.name.clone());
+            }
+            || ()
+        });
+    }
+
+    // On-mount prefill from the URL query. Home pushes
+    // `/account?id=…&name=…` when the user clicks "Create this account"
+    // from the unsaved-lookup banner — we read those params here once
+    // and seed the form so the user doesn't have to re-type. Run only
+    // on mount: subsequent edits should reflect user intent, not query
+    // state.
+    let location = use_location();
+    {
+        let id = id.clone();
+        let name = name.clone();
+        let loc = location.clone();
+        use_effect_with((), move |_| {
+            if let Some(l) = loc {
+                if let Ok(q) = l.query::<AccountPrefill>() {
+                    if !q.id.is_empty() {
+                        id.set(q.id);
+                    }
+                    if !q.name.is_empty() {
+                        name.set(q.name);
+                    }
+                }
+            }
+            || ()
+        });
+    }
     {
         let default_blacklist = default_blacklist.clone();
         use_effect_with((), move |_| {
@@ -654,6 +725,24 @@ pub fn account_creator() -> Html {
                     <div class="card shadow">
                         <div class="card-body">
                             <h2 class="card-title text-center mb-4">{"Create New Account"}</h2>
+
+                            // e621 look-up: paste a username or ID, hit
+                            // search, the response auto-populates the ID
+                            // and Username fields below via the
+                            // `searched_user` → `id`/`name` effect.
+                            // Saves the user from copy-pasting twice.
+                            <UserSearchForm
+                                found_user={searched_user.clone()}
+                                error={search_error.clone()}
+                                api_base={backend_domain.clone()}
+                                is_loading={searching.clone()}
+                            />
+                            if let Some(err) = (*search_error).clone() {
+                                <div class="alert alert-warning py-2 px-3 mb-3" role="alert">
+                                    { err }
+                                </div>
+                            }
+
                             <form onsubmit={onsubmit}>
                                 <div class="mb-3">
                                     <label for="account-id" class="form-label">{"Account ID"}</label>

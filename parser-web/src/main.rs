@@ -9,7 +9,7 @@ mod models;
 mod pages;
 
 #[derive(Clone, Routable, PartialEq)]
-enum Route {
+pub enum Route {
     #[at("/")]
     Home,
     #[at("/account")]

@@ -1,8 +1,13 @@
 use serde::{Deserialize, Serialize};
+use wasm_bindgen::JsCast;
+use wasm_bindgen::closure::Closure;
 use yew::prelude::*;
+use yew_router::prelude::use_navigator;
 
+use crate::Route;
 use crate::components::*;
-use crate::models::read_config_from_head;
+use crate::models::{ACCOUNT_LIST_CHANGED_EVENT, api_get, read_config_from_head};
+use crate::pages::account::AccountPrefill;
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct TagCount {
@@ -44,6 +49,91 @@ pub fn home_page() -> Html {
     let error: UseStateHandle<Option<String>> = use_state(|| None::<String>);
     let canvas_ref = use_node_ref();
     let active_view: UseStateHandle<TagView> = use_state(|| TagView::Chart);
+    let navigator = use_navigator();
+
+    // Saved-accounts mirror for the "found in e621 but not saved on this
+    // device" prompt below. `SavedAccountsSelect` maintains its own copy
+    // and there's no shared store yet — duplicating the fetch is the
+    // smallest change. The `ACCOUNT_LIST_CHANGED_EVENT` listener keeps
+    // this view in sync after any creation/deletion in another tab/page.
+    let saved_accounts: UseStateHandle<Vec<UserInfo>> = use_state(Vec::new);
+    {
+        let saved_accounts = saved_accounts.clone();
+        let backend = cfg.backend_domain.clone();
+        use_effect_with((), move |_| {
+            let fetch = {
+                let saved_accounts = saved_accounts.clone();
+                let backend = backend.clone();
+                move || {
+                    let saved_accounts = saved_accounts.clone();
+                    let url = format!("{}/accounts", backend);
+                    wasm_bindgen_futures::spawn_local(async move {
+                        if let Ok(resp) = api_get(&url).send().await {
+                            if resp.ok() {
+                                if let Ok(accts) = resp.json::<Vec<UserInfo>>().await {
+                                    saved_accounts.set(accts);
+                                }
+                            }
+                        }
+                    });
+                }
+            };
+            fetch();
+
+            let listener_fetch = fetch.clone();
+            let listener: Closure<dyn FnMut(web_sys::Event)> =
+                Closure::new(move |_e: web_sys::Event| listener_fetch());
+            if let Some(window) = web_sys::window() {
+                let _ = window.add_event_listener_with_callback(
+                    ACCOUNT_LIST_CHANGED_EVENT,
+                    listener.as_ref().unchecked_ref(),
+                );
+            }
+            move || {
+                if let Some(window) = web_sys::window() {
+                    let _ = window.remove_event_listener_with_callback(
+                        ACCOUNT_LIST_CHANGED_EVENT,
+                        listener.as_ref().unchecked_ref(),
+                    );
+                }
+                drop(listener);
+            }
+        });
+    }
+
+    // Drives the "create this account" prompt and gates the analyze /
+    // tag-views section: a `selected_user` lifted out of search may
+    // correspond to a real e621 account that just isn't saved locally
+    // yet — analysing such an account would 404 in the backend, so
+    // we surface the create flow first.
+    let is_saved = selected_user
+        .as_ref()
+        .map(|u| saved_accounts.iter().any(|sa| sa.id == u.id))
+        .unwrap_or(false);
+
+    // Click → navigate to `/account` with the looked-up id and name as
+    // query params so the form arrives pre-filled. Uses
+    // `push_with_query` (yew_router soft nav) rather than a hard `<a>`
+    // jump so the SPA state (saved-accounts cache, session cookie, …)
+    // doesn't get rebuilt for one click.
+    let on_create_account = {
+        let navigator = navigator.clone();
+        let selected_user = selected_user.clone();
+        Callback::from(move |_: MouseEvent| {
+            let Some(user) = (*selected_user).clone() else {
+                return;
+            };
+            if let Some(nav) = navigator.as_ref() {
+                let _ = nav.push_with_query(
+                    &Route::Account,
+                    &AccountPrefill {
+                        id: user.id.to_string(),
+                        name: user.name.clone(),
+                    },
+                );
+            }
+        })
+    };
 
     html! {
         <div>
@@ -73,22 +163,60 @@ pub fn home_page() -> Html {
                                     error={error.clone()}
                                 />
 
-                                <div id="home-analyzer">
-                                    <FetchAnalyzeButton
-                                        tag_count={tag_counts.clone()}
-                                        found_user={selected_user.clone()}
-                                        error={error.clone()}
-                                        api_base={cfg.backend_domain.clone()}
-                                        is_loading={is_loading.clone()}
-                                    />
-                                </div>
+                                // "Looked up but not saved" prompt. The
+                                // search routes fall back to an e621 lookup
+                                // when the account isn't in our DB, so a
+                                // hit here can be either a saved account
+                                // (analyzing works) or just an e621 lookup
+                                // (analyzing would 404 because the backend
+                                // requires a device-scoped row). We surface
+                                // the create flow before the user clicks
+                                // analyze and hits a confusing error.
+                                if selected_user.is_some() && !is_saved {
+                                    <div class="alert alert-warning d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
+                                        <span class="flex-grow-1">
+                                            { "This account isn't saved on this device yet. Add it to your account list before analysing." }
+                                        </span>
+                                        <button
+                                            type="button"
+                                            class="btn btn-sm btn-primary"
+                                            onclick={on_create_account}
+                                        >
+                                            { "Create this account" }
+                                        </button>
+                                    </div>
+                                }
+
+                                // The analyze section only renders for an
+                                // account that's actually persisted —
+                                // `is_saved` implies `selected_user.is_some()`
+                                // so the previous "user selected at all"
+                                // gate is now strictly stronger.
+                                if is_saved {
+                                    <div id="home-analyzer">
+                                        <FetchAnalyzeButton
+                                            tag_count={tag_counts.clone()}
+                                            found_user={selected_user.clone()}
+                                            error={error.clone()}
+                                            api_base={cfg.backend_domain.clone()}
+                                            is_loading={is_loading.clone()}
+                                        />
+                                    </div>
+                                }
                             </div>
                         </div>
                     </div>
                 </div>
             </div>
             {
-                if selected_user.is_some() {
+                // The view switcher and the chart/graph cards both hang
+                // off an analysed account, so they live under the same
+                // `is_saved` gate as the analyze button. An unsaved e621
+                // lookup would otherwise expose buttons whose target
+                // requests (`/account/<id>/tag_relations`, the
+                // tag-counts fetch) return 404 for an account that
+                // isn't device-scoped to this owner_token.
+                if is_saved {
                     let chart_active = matches!(*active_view, TagView::Chart);
                     let graph_active = matches!(*active_view, TagView::Graph);
                     let on_chart = {
@@ -100,51 +228,53 @@ pub fn home_page() -> Html {
                         Callback::from(move |_| active_view.set(TagView::Graph))
                     };
                     html! {
-                        <div class="container mt-3">
-                            <div class="d-flex justify-content-center">
-                                <div class="btn-group" role="group" aria-label="Tag visualisation switcher">
-                                    <button
-                                        type="button"
-                                        class={classes!("btn", "btn-outline-primary", chart_active.then_some("active"))}
-                                        aria-pressed={chart_active.to_string()}
-                                        onclick={on_chart}
-                                    >
-                                        { "Bar chart" }
-                                    </button>
-                                    <button
-                                        type="button"
-                                        class={classes!("btn", "btn-outline-primary", graph_active.then_some("active"))}
-                                        aria-pressed={graph_active.to_string()}
-                                        onclick={on_graph}
-                                    >
-                                        { "Relation graph" }
-                                    </button>
+                        <>
+                            <div class="container mt-3">
+                                <div class="d-flex justify-content-center">
+                                    <div class="btn-group" role="group" aria-label="Tag visualisation switcher">
+                                        <button
+                                            type="button"
+                                            class={classes!("btn", "btn-outline-primary", chart_active.then_some("active"))}
+                                            aria-pressed={chart_active.to_string()}
+                                            onclick={on_chart}
+                                        >
+                                            { "Bar chart" }
+                                        </button>
+                                        <button
+                                            type="button"
+                                            class={classes!("btn", "btn-outline-primary", graph_active.then_some("active"))}
+                                            aria-pressed={graph_active.to_string()}
+                                            onclick={on_graph}
+                                        >
+                                            { "Relation graph" }
+                                        </button>
+                                    </div>
                                 </div>
                             </div>
-                        </div>
+                            <div class="container-fluid mt-3 px-3 px-md-4">
+                                {
+                                    match *active_view {
+                                        TagView::Chart => html! {
+                                            <TagChartCard
+                                                canvas_ref={canvas_ref.clone()}
+                                                tag_counts={tag_counts.clone()}
+                                            />
+                                        },
+                                        TagView::Graph => html! {
+                                            <TagRelationGraphCard
+                                                found_user={selected_user.clone()}
+                                                api_base={cfg.backend_domain.clone()}
+                                            />
+                                        },
+                                    }
+                                }
+                            </div>
+                        </>
                     }
                 } else {
                     html! {}
                 }
             }
-            <div class="container-fluid mt-3 px-3 px-md-4">
-                {
-                    match *active_view {
-                        TagView::Chart => html! {
-                            <TagChartCard
-                                canvas_ref={canvas_ref.clone()}
-                                tag_counts={tag_counts.clone()}
-                            />
-                        },
-                        TagView::Graph => html! {
-                            <TagRelationGraphCard
-                                found_user={selected_user.clone()}
-                                api_base={cfg.backend_domain.clone()}
-                            />
-                        },
-                    }
-                }
-            </div>
         </div>
     }
 }

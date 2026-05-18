@@ -103,15 +103,33 @@ pub(crate) async fn get_account_id(
     validation::validate_account_id(id)?;
     let owner_token = owner.0;
     ratelimit::check(&format!("read:owner:{owner_token}"), 240, 60)?;
-    let acc = db_blocking(move || {
-        get_account_by_id(&owner_token, id).map_err(|e| {
-            let m = format!("Failed to get account: {e}");
-            error!("{m}");
-            m
-        })
-    })
-    .await?;
-    Ok(Json(acc))
+
+    // Mirror `/user/name/<name>` semantics: try local first, fall back
+    // to an e621 lookup if the account isn't saved on this device yet.
+    // Without the fallback, the SPA's search-by-ID flow couldn't
+    // surface an unsaved account at all (the route would 404), so the
+    // "looks like this account isn't saved — create it?" prompt on the
+    // home page never had data to show.
+    let owner_for_local = owner_token.clone();
+    let local = db_blocking(move || get_account_by_id(&owner_for_local, id)).await;
+    if let Ok(acc) = local {
+        return Ok(Json(acc));
+    }
+
+    ratelimit::check(&format!("user_lookup:owner:{owner_token}"), 30, 10)?;
+    let response = api::get_user_by_id(id).await.map_err(|e| {
+        error!("e621 user lookup for id={id} failed: {e}");
+        ApiError::NotFound(format!("No account found for ID {id}"))
+    })?;
+    let (resolved_id, resolved_name) = match response {
+        UserApiResponse::FullCurrentUser(u) => (u.id, u.name),
+        UserApiResponse::FullUser(u) => (u.id, u.name),
+    };
+    Ok(Json(TruncatedAccount {
+        id: resolved_id,
+        name: resolved_name,
+        blacklist: String::new(),
+    }))
 }
 
 #[openapi(tag = "Accounts")]
