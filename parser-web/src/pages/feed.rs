@@ -79,6 +79,13 @@ pub fn feed_page() -> Html {
             (js_sys::Math::random() * 1_000_000_000.0) as u64
         )
     });
+    let show_desc = use_state(|| {
+        window()
+            .and_then(|w| w.local_storage().ok().flatten())
+            .and_then(|s| s.get_item("hide_post_desc").ok().flatten())
+            .and_then(|v| v.parse::<bool>().ok())
+            .unwrap_or(false)
+    });
     // Per-page bottom-cutoff in percent (0..=95). 0 = show everything,
     // 30 = drop the bottom 30% of each fetched page by raw score, 95 =
     // keep only the top 5%. Decoupled from the model's raw `score` so
@@ -97,6 +104,16 @@ pub fn feed_page() -> Html {
             .and_then(|s| s.get_item("feed_grid_type").ok().flatten());
         GridType::from_storage(stored)
     });
+
+    {
+        let show_desc = show_desc.clone();
+        use_effect_with(*show_desc, move |a: &bool| {
+            if let Some(store) = window().and_then(|w| w.local_storage().ok().flatten()) {
+                let _ = store.set_item("hide_post_desc", &a.to_string());
+            }
+            || ()
+        });
+    }
 
     {
         let cutoff_pct = cutoff_pct.clone();
@@ -427,6 +444,7 @@ pub fn feed_page() -> Html {
                         session_id={card_session_id.clone()}
                         position={position}
                         breakdown={sp.breakdown.clone()}
+                        show_desc={*show_desc.clone()}
                     />
                 </div>
             }
@@ -449,10 +467,10 @@ pub fn feed_page() -> Html {
                     <label for="feed-affinity-input" class="form-label mb-1 d-block">
                         {"Per-page cutoff"}
                         <small class="text-muted ms-1">
-                            { "(% of each page to drop from the bottom by score; 0 = show all)" }
+                            { "(% of worst posts to drop)" }
                         </small>
                     </label>
-                    <div class="d-flex align-items-center gap-2 flex-wrap">
+                    <div class="d-flex align-items-center gap-2">
                         <input
                             id="feed-affinity-input"
                             type="number"
@@ -561,6 +579,23 @@ pub fn feed_page() -> Html {
                             <i class="bi bi-square-fill" aria-hidden="true"></i>
                         </button>
                     </div>
+                </div>
+
+                <div class="col-auto feed-post-text-col" id="feed-post-text">
+                    <span class="d-block">{"Show post text"}</span>
+                    <input 
+                        id="show-post-text"
+                        type="checkbox" 
+                        class="form-check-input"
+                        checked={*show_desc}
+                        oninput={{
+                                    let show_desc = show_desc.clone();
+                                    Callback::from(move |e: InputEvent| {
+                                        let input: HtmlInputElement = e.target_unchecked_into();
+                                        show_desc.set(input.checked());
+                                    })
+                                }} 
+                    />
                 </div>
             </div>
 
