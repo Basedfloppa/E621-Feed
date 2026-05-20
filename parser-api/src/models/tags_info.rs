@@ -1,3 +1,4 @@
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use schemars::JsonSchema;
 
@@ -50,6 +51,10 @@ pub struct AccountPreferenceProfile {
     pub feedback: Vec<AccountTagFeedback>,
     pub quality: AccountQualityProfile,
     pub recency: AccountRecencyProfile,
+    /// When the profile was last refreshed by `/process`.
+    /// `None` = never refreshed (legacy accounts).
+    #[serde(default)]
+    pub last_refreshed_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, JsonSchema)]

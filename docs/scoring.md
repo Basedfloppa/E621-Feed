@@ -37,10 +37,16 @@ for the math see
 |---|---|---|
 |`quality_a`|score_total matters less|score_total matters more|
 |`quality_b`|fav_count matters less|fav_count matters more|
+|`quality_c`|upvote ratio ignored|`up / (up + down)` blended into quality with this weight (0 = disabled, default 0.3)|
 |`quality_log_bias`|more posts register as "quality"|raises the bar before the absolute-quality sigmoid lights up|
 |`quality_w_absolute`|trust user-relative score/comment ratios more|rely more on raw site score + fav thresholds|
 |`quality_w_relative_score`|absolute score dominates|user's typical score level matters more|
 |`quality_w_relative_comments`|comments barely count|comment volume vs user's norm matters more|
+
+The upvote ratio component (weighted by `quality_c`) is blended into the existing
+three-component score as a fourth weighted term. At `quality_c = 0` (legacy
+default) the behaviour is unchanged. The ratio defaults to 0.5 for posts with
+zero votes. Uses the `score.up` / `score.down` fields from the e621 API.
 
 ## Popularity channel internals
 
@@ -51,9 +57,22 @@ for the math see
 
 ## Recency channel
 
+Three-piece exponential kernel: hot → recent → days.
+
+1. **Hot piece** — posts younger than `recency_split_age_hours` (default 24 h).
+   Uses `recency_tau_hot` τ. Disabled when `recency_tau_hot` is NaN (the default).
+2. **Recent piece** — posts younger than `recency_split_age_days` (default 30 d).
+   Uses `recency_tau_recent` τ. Disabled when `recency_tau_recent` is NaN
+   (then falls through directly to days).
+3. **Days piece** — all older posts. Uses `recency_tau_days` τ.
+
 |Variable|Lower →|Higher →|
 |---|---|---|
 |`recency_tau_days`|faster decay (newer wins)|slower decay (older survives)|
+|`recency_tau_recent`|faster decay within the recent window|slower decay within the recent window (NaN = disabled, 2-piece kernel)|
+|`recency_tau_hot`|faster decay for hot posts (<24 h)|slower decay for hot posts (NaN = disabled, falls back to recent/days)|
+|`recency_split_age_days`|smaller recent window|larger recent window (default 30 d)|
+|`recency_split_age_hours`|smaller hot window (hours)|larger hot window (default 24 h; only used when `recency_tau_hot` is not NaN)|
 |`recency_w_global`|personal age profile dominates|newer posts always win regardless of user pattern|
 |`recency_w_personal`|uniform newer-is-better|posts close to user's typical age are favored|
 |`recency_personal_floor_frac`|personal recency window can collapse tight|personal recency always at least this fraction of `recency_tau_days`|
@@ -61,12 +80,22 @@ for the math see
 
 ## Diversity / MMR
 
+MMR is applied first (Jaccard-based redundancy penalty across 5 tag groups),
+then a diversity-quota pass guarantees minimum variety in the top 20:
+
+- **Artist quota** — at least 2 different artists
+- **Character quota** — at least 3 different characters
+
 |Variable|Lower →|Higher →|
 |---|---|---|
 |`diversity_window`|shorter memory; repeats can resurface|longer memory; more variety per page|
 |`diversity_w_artist`|same artist can stack up|harder cap on back-to-back artists|
 |`diversity_w_character`|same character can stack up|harder cap on repeated characters|
+|`diversity_w_copyright`|copyright overlap ignored|penalises posts sharing copyright tags|
+|`diversity_w_species`|species overlap ignored|penalises posts sharing species tags|
 |`diversity_w_general`|general-tag overlap ignored|penalises posts with too-similar tag sets|
+|`diversity_max_penalty`|MMR penalty capped lower|redundancy penalty can push duplicate posts further down|
+|`diversity_interaction_damp`|interaction signal doesn't reduce redundancy penalty|liked similar posts → less penalty for similarity|
 
 ## Discrete-preference smoothing + strong-negative veto
 
@@ -79,10 +108,38 @@ for the math see
 
 ## Feedback decay + meta interaction
 
+Feedback counts are decayed eagerly at `/process` time. Between refreshes, a
+supplementary decay factor is applied per-tag in `interaction_fit` based on
+`profile_refreshed_at` and `feedback_decay_half_life_days` — the longer since
+the last profile rebuild, the less the interaction signal is trusted.
+
 |Variable|Lower →|Higher →|
 |---|---|---|
 |`feedback_decay_half_life_days`|tag feedback fades fast — recent shifts in taste dominate quickly|tag feedback persists longer — old preferences linger|
 |`meta_interaction_weight`|meta tags ignored even for interaction signal|meta-tag feedback (monochrome, absurd_res, english_text…) feeds the interaction channel; meta is still excluded from tag_similarity / tag_relation|
+
+## Rating fit
+
+Confidence-weighted blend between Bayesian-smoothed and raw observed rate.
+When the user has a strong preference for a rating (e.g. 500 S vs 50 Q),
+the raw rate dominates. When preference is weak or noisy, the smoothed
+estimate keeps the score conservative.
+
+|Variable|Lower →|Higher →|
+|---|---|---|
+|`discrete_smoothing_alpha`|rating/media prefs react sharply to small samples|cold-start profiles stay near neutral longer|
+|`coldstart_smoothing_boost`|less extra smoothing below `coldstart_n0`|more aggressive smoothing for cold profiles|
+|`discrete_pref_floor`|ratings/media-types with zero samples get near-zero score|minimum score floor for unseen categories|
+
+## Exploration bonus
+
+Applied post-scoring: `score += ε × (1 − tag_similarity)`. Posts whose tags
+are novel (low similarity to the user's profile) receive a boost proportional
+to `exploration_epsilon`. Disabled at 0 (default).
+
+|Variable|Lower →|Higher →|
+|---|---|---|
+|`exploration_epsilon`|pure exploit (default 0)|more exploration toward novel content (capped at 0.5)|
 
 ## Tag-relation graph
 

@@ -3,6 +3,7 @@
 use std::collections::HashSet;
 
 use chrono::Utc;
+use rayon::prelude::*;
 use rocket::serde::json::Json;
 use rocket_okapi::openapi;
 
@@ -22,7 +23,7 @@ use e621_account_parser_api::{
     ratelimit, validation,
 };
 use e621_account_parser_api::utils::{
-    current_global_relation, current_idf, diversify_scored_posts, ScoringContext,
+    current_global_relation, current_idf, diversify_scored_posts, CachedPostFeatures, ScoringContext,
 };
 
 #[openapi(tag = "Recommendations")]
@@ -181,20 +182,47 @@ pub(crate) async fn get_recommendations(
         &user_relation,
     );
 
-    let mut scored: Vec<ScoredPost> = Vec::with_capacity(combined.len());
-    for post in combined {
-        let (s, breakdown) = ctx.score(&post);
-        scored.push(ScoredPost {
-            post,
-            score: s,
-            breakdown: Some(breakdown),
-        });
-    }
+    // Pre-resolve per-post features once so the parallel scoring loop
+    // skips HashMap-by-string lookups in IDF and tag-relation graphs.
+    let cached: Vec<CachedPostFeatures> = combined
+        .iter()
+        .map(|post| CachedPostFeatures::from_post_with_user(post, &idf, &global_relation, Some(&user_relation)))
+        .collect();
+
+    // Parallel scoring via rayon — the closure captures &ctx, &idf,
+    // &global_relation, &user_relation which are all Send + Sync.
+    let mut scored: Vec<ScoredPost> = combined
+        .into_par_iter()
+        .zip(cached.into_par_iter())
+        .map(|(post, cf)| {
+            let (s, breakdown) = ctx.score_cached(&cf);
+            ScoredPost {
+                post,
+                score: s,
+                breakdown: Some(breakdown),
+            }
+        })
+        .collect();
 
     if let Some(threshold) = affinity_threshold {
         scored.retain(|sp| sp.score >= threshold);
     }
-    let scored = diversify_scored_posts(scored, &priors);
+    let mut scored = diversify_scored_posts(scored, &priors);
+
+    // Class F: ε-greedy exploration bonus.
+    // Boost posts with novel (low-similarity) tags so users see
+    // content outside their established preference bubble.
+    if priors.exploration_epsilon > 1e-4 {
+        let eps = priors.exploration_epsilon.min(0.5);
+        for sp in &mut scored {
+            let tag_novelty = 1.0 - sp
+                .breakdown
+                .as_ref()
+                .map(|b| b.tag_similarity)
+                .unwrap_or(0.0);
+            sp.score = (sp.score + eps * tag_novelty).clamp(0.0, 1.0);
+        }
+    }
 
     Ok(Json(scored))
 }

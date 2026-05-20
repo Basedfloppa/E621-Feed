@@ -99,6 +99,22 @@ impl<'a> ScoringContext<'a> {
         let p0 = self.user_base_positive_rate;
         let meta_w = self.priors.meta_interaction_weight.max(0.0);
 
+        // Class F: time-weighted decay — mirrors channels.rs interaction_fit.
+        let staleness = match self.profile.last_refreshed_at {
+            Some(last) => {
+                let elapsed_days =
+                    (self.priors.now - last).num_seconds() as f32 / 86_400.0;
+                if elapsed_days > 0.0 {
+                    (-std::f32::consts::LN_2 * elapsed_days
+                        / self.priors.feedback_decay_half_life_days.max(1.0))
+                    .exp()
+                } else {
+                    1.0
+                }
+            }
+            None => 1.0,
+        };
+
         for ct in &post.tags {
             let g_idx = ct.group as usize;
             let group_weight = if ct.group == Group::Meta as u8 {
@@ -114,7 +130,7 @@ impl<'a> ScoringContext<'a> {
                 let pos = fb.positive.max(0) as f32;
                 let neg = fb.negative.max(0) as f32;
                 let imp = fb.impressions.max(0) as f32;
-                let conf = (pos + neg + imp).ln_1p();
+                let conf = (pos + neg + imp).ln_1p() * staleness;
                 if conf <= 0.0 {
                     continue;
                 }
@@ -311,14 +327,33 @@ impl<'a> ScoringContext<'a> {
             self.profile.quality.avg_comment_count,
             exp,
         );
-        blend3(
+        let mut score = blend3(
             absolute,
             p.quality_w_absolute,
             rel_score,
             p.quality_w_relative_score,
             rel_comments,
             p.quality_w_relative_comments,
-        )
+        );
+        // Class F: blend in upvote ratio if quality_c > 0.
+        if p.quality_c > 1e-3 {
+            let up = post.score_up.max(0) as f32;
+            let down = post.score_down.max(0) as f32;
+            let upvote_ratio = if up + down > 0.0 {
+                up / (up + down)
+            } else {
+                0.5
+            };
+            let w_sum = p.quality_w_absolute
+                + p.quality_w_relative_score
+                + p.quality_w_relative_comments;
+            if w_sum > 0.0 {
+                score = (score * w_sum + upvote_ratio * p.quality_c) / (w_sum + p.quality_c);
+            } else {
+                score = upvote_ratio;
+            }
+        }
+        score
     }
 
     /// Cached `popularity_fit`.
@@ -355,17 +390,19 @@ impl<'a> ScoringContext<'a> {
             .find(|s| s.rating == rating)
             .map(|s| s.count.max(0))
             .unwrap_or(0);
+        let total = self.rating_total.max(1);
         let k = self.profile.rating.len().max(3);
         let boost = self.priors.coldstart_smoothing_boost.max(0.0);
         let alpha = self.priors.discrete_smoothing_alpha
             * (1.0 + (1.0 - self.personal_confidence) * boost);
-        discrete_preference_smooth(
-            self.rating_total,
-            matched,
-            k,
-            alpha,
-            self.priors.discrete_pref_floor,
-        )
+
+        // Baseline smoothed rate (legacy behaviour).
+        let smoothed = discrete_preference_smooth(total, matched, k, alpha, self.priors.discrete_pref_floor);
+
+        // Confidence-weighted blend with raw observed rate.
+        let confidence = (matched as f32 / (matched as f32 + alpha)).sqrt();
+        let raw = matched as f32 / total as f32;
+        (smoothed * (1.0 - confidence) + raw * confidence).clamp(0.0, 1.0)
     }
 
     /// Cached `media_fit`.

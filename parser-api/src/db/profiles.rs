@@ -1,4 +1,4 @@
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use rusqlite::params;
 
 use crate::models::{
@@ -135,7 +135,16 @@ pub fn refresh_account_profiles(account_id: i32) -> Result<(), String> {
     set_recency_profile(account_id)?;
     set_account_tag_cooccurrence(account_id)?;
     decay_account_tag_feedback(account_id)?;
-    Ok(())
+    // Record refresh timestamp for time-weighted interaction_fit decay.
+    let now = Utc::now().to_rfc3339();
+    super::with_write_tx(|tx| {
+        tx.execute(
+            "UPDATE accounts SET profile_refreshed_at = ?1 WHERE id = ?2",
+            params![now, account_id],
+        )
+        .map_err(|e| format!("Failed to set profile_refreshed_at: {e}"))?;
+        Ok(())
+    })
 }
 
 /// Multiplies per-tag feedback counts by `0.5 ^ (elapsed / half_life)` and
@@ -315,12 +324,27 @@ pub fn get_account_recency_profile(account_id: i32) -> Result<AccountRecencyProf
 }
 
 pub fn get_account_preference_profile(account_id: i32) -> Result<AccountPreferenceProfile, String> {
+    let conn = open_db()?;
+    let refreshed_at: Option<String> = conn
+        .query_row(
+            "SELECT profile_refreshed_at FROM accounts WHERE id = ?",
+            rusqlite::params![account_id],
+            |row| row.get(0),
+        )
+        .ok();
+    let last_refreshed_at = match refreshed_at {
+        Some(ref s) if !s.is_empty() => {
+            Some(s.parse::<DateTime<Utc>>().unwrap_or_else(|_| Utc::now()))
+        }
+        _ => None,
+    };
     Ok(AccountPreferenceProfile {
         rating: get_account_rating_profile(account_id)?,
         media: get_account_media_profile(account_id)?,
         feedback: get_account_tag_feedback(account_id)?,
         quality: get_account_quality_profile(account_id)?,
         recency: get_account_recency_profile(account_id)?,
+        last_refreshed_at,
     })
 }
 

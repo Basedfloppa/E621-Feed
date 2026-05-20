@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use crate::models::Post;
 
-use super::{open_db, parse_db_datetime};
+use super::{open_db, open_db_for_prefetch, parse_db_datetime};
 
 /// Delete catalog posts that aren't favourited by anyone and haven't been
 /// re-touched within `retention_secs`. Used by the cache-validator worker
@@ -18,7 +18,7 @@ use super::{open_db, parse_db_datetime};
 ///
 /// Marks `IDF` and `GLOBAL` caches dirty when anything was deleted, so the
 /// in-memory graphs shrink on the next worker tick. Mirror of the longer-
-/// lived `run_catalog_cleanup` in prefetch.rs.
+/// lived `prune_stale_catalog_posts` — both are now unified in `cache_pruner.rs`.
 pub fn prune_orphan_candidates(retention_secs: u64) -> Result<(usize, usize), String> {
     let conn = open_db().map_err(|e| format!("prune_orphan_candidates open: {e}"))?;
     let cutoff = (Utc::now() - chrono::Duration::seconds(retention_secs as i64)).to_rfc3339();
@@ -62,6 +62,37 @@ pub fn prune_orphan_candidates(retention_secs: u64) -> Result<(usize, usize), St
 
     let after = (before as usize).saturating_sub(deleted);
     Ok((before as usize, after))
+}
+
+/// Longer-lived catalog cleanup run on `cleanup_interval_secs` (default 6h).
+/// Deletes posts that aren't favourited by anyone and haven't been re-touched
+/// within `catalog_retention_days`. Unlike `prune_orphan_candidates` (which
+/// churns aggressively on browse-time inserts), this is the belt-and-suspenders
+/// bound that ensures the catalog can't grow without limit.
+///
+/// Returns the number of deleted posts. Marks IDF + global-relation dirty when
+/// anything was pruned so in-memory caches shrink on the next rebuild.
+pub fn prune_stale_catalog_posts(retention_days: i64) -> Result<i64, String> {
+    let conn = open_db_for_prefetch()?;
+    let cutoff = (Utc::now() - chrono::Duration::days(retention_days)).to_rfc3339();
+
+    let deleted = conn
+        .execute(
+            "
+            DELETE FROM posts
+            WHERE last_seen_at < ?1
+              AND NOT EXISTS (SELECT 1 FROM accounts_post ap WHERE ap.post_id = posts.id)
+            ",
+            params![cutoff],
+        )
+        .map_err(|e| format!("delete stale catalog posts: {e}"))?;
+
+    if deleted > 0 {
+        crate::utils::mark_idf_dirty();
+        crate::utils::mark_global_relation_dirty();
+    }
+
+    Ok(deleted as i64)
 }
 
 pub fn drop_account_posts(account_id: i32) -> Result<(), String> {

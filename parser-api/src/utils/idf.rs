@@ -171,19 +171,31 @@ static IDF_REBUILDING: AtomicBool = AtomicBool::new(false);
 static BUMP_LOCK: Mutex<()> = Mutex::new(());
 static BUMP_DRIFT_COUNT: AtomicI64 = AtomicI64::new(0);
 
-/// Wall-clock of the most recent interaction with this cache (read, bump,
-/// or dirty-mark). The cache-pruner reads this on each tick and, if the
-/// idle window has elapsed, swaps the index back to empty so the working
-/// set returns to the OS. Initialised lazily to process-start.
-static LAST_ACCESS: LazyLock<Mutex<Instant>> = LazyLock::new(|| Mutex::new(Instant::now()));
+/// Two separate access timers so background work (prefetch, save_posts_tags_batch)
+/// doesn't prevent idle-eviction of the user-facing cache.
+///
+/// `LAST_USER_ACCESS` — updated only by request-serving code (`current_idf`).
+/// The cache-pruner uses this to decide whether to evict.
+///
+/// `LAST_SYSTEM_ACCESS` — updated by background workers (`bump_idf`,
+/// `mark_idf_dirty`). Not consulted for idle-eviction.
+static LAST_USER_ACCESS: LazyLock<Mutex<Instant>> =
+    LazyLock::new(|| Mutex::new(Instant::now()));
+static LAST_SYSTEM_ACCESS: LazyLock<Mutex<Instant>> =
+    LazyLock::new(|| Mutex::new(Instant::now()));
 
-fn touch_access() {
-    let mut g = LAST_ACCESS.lock().unwrap_or_else(|p| p.into_inner());
+fn touch_user_access() {
+    let mut g = LAST_USER_ACCESS.lock().unwrap_or_else(|p| p.into_inner());
+    *g = Instant::now();
+}
+
+fn touch_system_access() {
+    let mut g = LAST_SYSTEM_ACCESS.lock().unwrap_or_else(|p| p.into_inner());
     *g = Instant::now();
 }
 
 pub fn mark_idf_dirty() {
-    touch_access();
+    touch_system_access();
     IDF_DIRTY.store(true, Ordering::Release);
     spawn_rebuild_if_needed();
 }
@@ -192,7 +204,7 @@ pub fn bump_idf(df_delta: HashMap<String, i64>, n_posts_delta: i64) {
     if df_delta.is_empty() && n_posts_delta == 0 {
         return;
     }
-    touch_access();
+    touch_system_access();
     let _guard = BUMP_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let current = IDF_CACHE.load_full();
     let mut next = (*current).clone();
@@ -266,7 +278,7 @@ fn spawn_rebuild_if_needed() {
 }
 
 pub fn current_idf() -> Arc<IdfIndex> {
-    touch_access();
+    touch_user_access();
     if IDF_DIRTY.load(Ordering::Acquire) {
         spawn_rebuild_if_needed();
     }
@@ -289,10 +301,10 @@ pub fn evict_if_idle(idle_secs: u64) -> (usize, i64) {
     if idle_secs == 0 {
         return (0, 0);
     }
-    // Snapshot last-access under the lock, but drop the guard before
+    // Snapshot user-access under the lock, but drop the guard before
     // touching ArcSwap to keep the critical section short.
     let elapsed = {
-        let g = LAST_ACCESS.lock().unwrap_or_else(|p| p.into_inner());
+        let g = LAST_USER_ACCESS.lock().unwrap_or_else(|p| p.into_inner());
         g.elapsed()
     };
     if elapsed.as_secs() < idle_secs {
@@ -308,11 +320,11 @@ pub fn evict_if_idle(idle_secs: u64) -> (usize, i64) {
     IDF_CACHE.store(Arc::new(IdfIndex::empty()));
     BUMP_DRIFT_COUNT.store(0, Ordering::Release);
     IDF_DIRTY.store(true, Ordering::Release);
-    // Bump LAST_ACCESS so the next cache-pruner tick (every 30s on a
+    // Bump LAST_USER_ACCESS so the next cache-pruner tick (every 30s on a
     // tight cadence) doesn't see "still idle, evict again" against the
     // empty cache and log spurious evictions.
     {
-        let mut g = LAST_ACCESS.lock().unwrap_or_else(|p| p.into_inner());
+        let mut g = LAST_USER_ACCESS.lock().unwrap_or_else(|p| p.into_inner());
         *g = Instant::now();
     }
     (prev_tags, prev_posts)

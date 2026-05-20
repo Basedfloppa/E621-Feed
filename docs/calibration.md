@@ -33,16 +33,17 @@
    enum-valued knobs. Reports `[best priors — non-default values]` and a
    clamp-saturation warning if any knob landed at its search boundary.
 
-   v5.3 grid covers ~52 numeric knobs + 1 categorical:
+   As of v5.8 the grid covers ~58 numeric knobs + 1 categorical:
    * 8 `mix_*` weights
    * IDF / frequency shaping (7): `df_floor`, `idf_max`, `idf_lambda`,
      `idf_alpha`, `freq_alpha`, `bm25_k`, `one_sided_ratio_exp`,
      `idf_rsj_smoothing`
-   * Quality channel (5): `quality_a/b/log_bias`,
+   * Quality channel (6): `quality_a/b/c/log_bias`,
      `quality_w_absolute/relative_score/relative_comments`
    * Popularity channel (2): `popularity_w_fav/duration`
-   * Recency channel (4): `recency_tau_days`, `recency_w_global/personal`,
-     `recency_personal_floor_frac`
+   * Recency channel (6): `recency_tau_days`, `recency_tau_recent`,
+     `recency_tau_hot`, `recency_split_age_days`, `recency_split_age_hours`,
+     `recency_w_global/personal`, `recency_personal_floor_frac`
    * Discrete-pref + cold-start (3): `discrete_smoothing_alpha`,
      `discrete_pref_floor`, `coldstart_n0`
    * Tag-relation (5): `tag_relation_pmi_scale`, `tag_relation_w_global/personal`,
@@ -50,10 +51,12 @@
    * Cold-start internals (2): `coldstart_smoothing_boost`,
      `interaction_ctr_prior_alpha`
    * Per-group multipliers (6): `group_w_artist/character/copyright/species/general/lore`
-   * Algorithmic shape (4): `score_temperature`, `confidence_steepness`,
-     `mmr_redundancy_exp`, `tag_sim_jaccard_blend`
-   * Point splits (3, NaN-sentinel disabled): `idf_lambda_meta`,
-     `recency_tau_recent`, `tag_relation_pmi_scale_user`
+   * Algorithmic shape (5): `score_temperature`, `confidence_steepness`,
+     `mmr_redundancy_exp`, `tag_sim_jaccard_blend`, `exploration_epsilon`
+   * Point splits (5, NaN-sentinel disabled): `idf_lambda_meta`,
+     `recency_tau_recent`, `recency_tau_hot`, `tag_relation_pmi_scale_user`,
+     `recency_split_age_hours`
+   * Diversity weights (5): `diversity_w_artist/character/copyright/species/general`
    * Categorical (1): `tag_relation_pair_aggregator` ∈ {mean, max, geomean}
 
    Subsets / flags:

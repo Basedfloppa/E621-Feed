@@ -135,6 +135,18 @@ where
     Ok(result)
 }
 
+/// Run WAL checkpoint with truncate to keep the WAL file from growing
+/// unbounded. Safe to call frequently — SQLite no-ops when there's nothing
+/// to checkpoint. Uses the dedicated writer connection.
+pub fn wal_checkpoint() -> Result<(), String> {
+    let guard = write_conn()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    guard
+        .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+        .map_err(|e| format!("WAL checkpoint failed: {e}"))
+}
+
 /// Run migrations on the dedicated writer connection (so they share locking
 /// semantics with all other writers). The pool is not yet initialised when
 /// this runs, so we open the writer ourselves.

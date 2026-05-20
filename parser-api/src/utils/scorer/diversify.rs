@@ -35,6 +35,8 @@ use super::util::{normalize_tag, FEEDBACK_NEUTRAL};
 pub struct DiversityFeatures {
     artist: Vec<u64>,
     character: Vec<u64>,
+    copyright: Vec<u64>,
+    species: Vec<u64>,
     general: Vec<u64>,
 }
 
@@ -43,6 +45,8 @@ impl DiversityFeatures {
         Self {
             artist: hashed_tag_set(&p.tags.artist),
             character: hashed_tag_set(&p.tags.character),
+            copyright: hashed_tag_set(&p.tags.copyright),
+            species: hashed_tag_set(&p.tags.species),
             general: hashed_tag_set(&p.tags.general),
         }
     }
@@ -110,6 +114,8 @@ fn max_redundancy_indexed(
         let chosen = &features[i];
         let sim = jaccard(&cand.artist, &chosen.artist) * priors.diversity_w_artist
             + jaccard(&cand.character, &chosen.character) * priors.diversity_w_character
+            + jaccard(&cand.copyright, &chosen.copyright) * priors.diversity_w_copyright
+            + jaccard(&cand.species, &chosen.species) * priors.diversity_w_species
             + jaccard(&cand.general, &chosen.general) * priors.diversity_w_general;
         if sim > max_sim {
             max_sim = sim;
@@ -224,5 +230,64 @@ pub fn diversify_scored_posts(posts: Vec<ScoredPost>, priors: &Priors) -> Vec<Sc
             out.push(sp);
         }
     }
+    // Apply diversity quota as a final pass.
+    enforce_diversity_quota(&mut out);
     out
+}
+
+/// Post-MMR diversity quota: guarantee at least 2 different artists and 3
+/// different characters in the top-K positions. Posts that exceed a group's
+/// quota are pushed down by swapping with a lower-ranked post from a
+/// different group.
+fn enforce_diversity_quota(scored: &mut Vec<ScoredPost>) {
+    let top_k = 20usize.min(scored.len());
+    if top_k < 4 {
+        return;
+    }
+
+    // Artist quota: at least 2 different artists among top-K.
+    let mut artist_set: Vec<Option<String>> = Vec::new();
+    // We'll collect used slots that are "locked" (the first occurrence of
+    // each artist). Extra posts from an already-seen artist get demoted.
+    let mut i = 0;
+    while i < top_k {
+        let post_artists = &scored[i].post.tags.artist;
+        let primary = post_artists.first().map(|a| a.to_ascii_lowercase());
+        let already_seen = primary.as_ref().map_or(false, |p| {
+            artist_set.iter().any(|a| a.as_deref() == Some(p.as_str()))
+        });
+        if already_seen {
+            // This post repeats an artist — swap it down past top_k.
+            let swap_target = scored.len() - 1 - (scored.len() - 1 - i) / 3;
+            if swap_target > i && swap_target < scored.len() {
+                scored.swap(i, swap_target);
+                // Don't increment i — re-evaluate the swapped-in post.
+                continue;
+            }
+        } else {
+            artist_set.push(primary);
+        }
+        i += 1;
+    }
+
+    // Character quota: at least 3 different characters among top-K.
+    let mut char_set: Vec<Option<String>> = Vec::new();
+    let mut i = 0;
+    while i < top_k {
+        let post_chars = &scored[i].post.tags.character;
+        let primary = post_chars.first().map(|c| c.to_ascii_lowercase());
+        let already_seen = primary.as_ref().map_or(false, |p| {
+            char_set.iter().any(|c| c.as_deref() == Some(p.as_str()))
+        });
+        if already_seen {
+            let swap_target = scored.len() - 1 - (scored.len() - 1 - i) / 3;
+            if swap_target > i && swap_target < scored.len() {
+                scored.swap(i, swap_target);
+                continue;
+            }
+        } else {
+            char_set.push(primary);
+        }
+        i += 1;
+    }
 }

@@ -154,6 +154,38 @@ pub struct Priors {
     /// "mean" | "max" | "geomean".
     #[serde(default = "default_tag_relation_pair_aggregator")]
     pub tag_relation_pair_aggregator: String,
+
+    // ---- Class F: quality upvote-ratio component ----
+    /// Weight for upvote-ratio component in quality_fit.
+    /// `up / (up + down)` is blended in with this weight.
+    /// 0 = disabled (legacy behaviour).
+    #[serde(default = "default_quality_c")]
+    pub quality_c: f32,
+
+    // ---- Class F: 3-piece recency kernel ----
+    /// 3rd τ for posts younger than `recency_split_age_hours`.
+    /// NaN = disabled (falls back to 2-piece recency_tau_recent / recency_tau_days).
+    #[serde(default = "default_recency_tau_hot")]
+    pub recency_tau_hot: f32,
+    /// Age boundary in hours between the "hot" and "recent" pieces.
+    /// Only used when `recency_tau_hot` is not NaN.
+    /// Default 24.0 = posts under 1 day get the hot kernel.
+    #[serde(default = "default_recency_split_age_hours")]
+    pub recency_split_age_hours: f32,
+
+    // ---- Class F: per-group diversity weights (copyright / species) ----
+    /// Jaccard weight for copyright tags in MMR redundancy.
+    #[serde(default = "default_diversity_w_copyright")]
+    pub diversity_w_copyright: f32,
+    /// Jaccard weight for species tags in MMR redundancy.
+    #[serde(default = "default_diversity_w_species")]
+    pub diversity_w_species: f32,
+
+    // ---- Class F: exploration ----
+    /// ε-greedy exploration bonus. 0 = disabled (pure exploit).
+    /// Applied post-scoring as `score += ε * (1 - tag_similarity)`.
+    #[serde(default = "default_exploration_epsilon")]
+    pub exploration_epsilon: f32,
 }
 
 fn default_quality_log_bias() -> f32 {
@@ -278,4 +310,22 @@ fn default_recency_split_age_days() -> f32 {
 }
 fn default_tag_relation_pair_aggregator() -> String {
     "mean".to_string()
+}
+fn default_quality_c() -> f32 {
+    0.3
+}
+fn default_recency_tau_hot() -> f32 {
+    f32::NAN
+}
+fn default_recency_split_age_hours() -> f32 {
+    24.0
+}
+fn default_diversity_w_copyright() -> f32 {
+    1.8
+}
+fn default_diversity_w_species() -> f32 {
+    1.5
+}
+fn default_exploration_epsilon() -> f32 {
+    0.0
 }

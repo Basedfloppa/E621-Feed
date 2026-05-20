@@ -448,6 +448,7 @@ fn build_profile(train_posts: &[Post]) -> AccountPreferenceProfile {
             avg_age_days: mean_age,
             avg_abs_dev_days: abs_dev,
         },
+        last_refreshed_at: None,
     }
 }
 

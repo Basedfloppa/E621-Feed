@@ -84,17 +84,23 @@ pub fn record_page_done(account_id: i32) {
     }
 }
 
-/// Drop old Done/Failed entries. Running jobs are never evicted.
-/// Retention comes from `runtime.jobs_finished_retain_secs`. Returns
-/// `(before, after)` for logging.
+/// Drop old Done/Failed entries. Running jobs older than
+/// `runtime.jobs_running_timeout_secs` are also evicted (guard against
+/// zombie jobs whose tokio task was cancelled). Done/Failed retention comes
+/// from `runtime.jobs_finished_retain_secs`. Returns `(before, after)` for
+/// logging.
 pub fn prune_finished_jobs() -> (usize, usize) {
-    let retain_secs = crate::models::cfg().runtime.jobs_finished_retain_secs.max(0);
+    let cfg = crate::models::cfg();
+    let retain_secs = cfg.runtime.jobs_finished_retain_secs.max(0);
+    let running_timeout_secs = cfg.runtime.jobs_running_timeout_secs.max(60);
     let mut map = registry().write().unwrap_or_else(|e| e.into_inner());
     let before = map.len();
     let cutoff = Utc::now() - ChronoDuration::seconds(retain_secs);
+    let running_cutoff = Utc::now() - ChronoDuration::seconds(running_timeout_secs);
     map.retain(|_, s| {
         if matches!(s.phase, ProcessJobPhase::Running) {
-            return true;
+            // Evict zombie Running jobs stuck past the timeout.
+            return s.started_at > running_cutoff;
         }
         s.finished_at.map(|f| f > cutoff).unwrap_or(true)
     });

@@ -109,6 +109,12 @@ pub struct RuntimeConfig {
     /// keeping these for an hour was overkill. Default 10 min.
     #[serde(default = "default_jobs_finished_retain_secs")]
     pub jobs_finished_retain_secs: i64,
+    /// Maximum lifetime for a Running `/process` job in seconds. Jobs
+    /// stuck in Running state longer than this are evicted by the
+    /// cache-pruner (guard against zombie jobs whose tokio task was
+    /// cancelled/panicked). Default 24 h.
+    #[serde(default = "default_jobs_running_timeout_secs")]
+    pub jobs_running_timeout_secs: i64,
     /// Prefetcher only targets accounts that interacted with the feed
     /// within this window.
     #[serde(default = "default_prefetch_active_window_days")]
@@ -163,6 +169,7 @@ impl Default for RuntimeConfig {
             catalog_retention_days: default_catalog_retention_days(),
             orphan_retention_secs: default_orphan_retention_secs(),
             jobs_finished_retain_secs: default_jobs_finished_retain_secs(),
+            jobs_running_timeout_secs: default_jobs_running_timeout_secs(),
             prefetch_active_window_days: default_prefetch_active_window_days(),
             prefetch_breaker_threshold: default_prefetch_breaker_threshold(),
             prefetch_breaker_pause_secs: default_prefetch_breaker_pause_secs(),
@@ -223,6 +230,9 @@ fn default_orphan_retention_secs() -> u64 {
 }
 fn default_jobs_finished_retain_secs() -> i64 {
     600
+}
+fn default_jobs_running_timeout_secs() -> i64 {
+    86400 // 24 h
 }
 fn default_prefetch_active_window_days() -> i64 {
     14

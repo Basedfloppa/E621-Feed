@@ -364,5 +364,11 @@ pub(crate) async fn update_account_blacklist(
         })
     })
     .await?;
+
+    // Blacklist change invalidates all cached e621 responses (keys contain
+    // the old blacklist as a query parameter). Clear the whole cache rather
+    // than trying to pattern-match individual keys.
+    api::clear_api_cache();
+
     Ok(Json(updated))
 }

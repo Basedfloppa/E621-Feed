@@ -100,14 +100,33 @@ impl<'a> ScoringContext<'a> {
             self.profile.quality.avg_comment_count,
             exp,
         );
-        blend3(
+        let mut score = blend3(
             absolute,
             p.quality_w_absolute,
             rel_score,
             p.quality_w_relative_score,
             rel_comments,
             p.quality_w_relative_comments,
-        )
+        );
+        // Class F: blend in upvote ratio if quality_c > 0.
+        if p.quality_c > 1e-3 {
+            let up = post.score.up.max(0) as f32;
+            let down = post.score.down.max(0) as f32;
+            let upvote_ratio = if up + down > 0.0 {
+                up / (up + down)
+            } else {
+                0.5
+            };
+            let w_sum = p.quality_w_absolute
+                + p.quality_w_relative_score
+                + p.quality_w_relative_comments;
+            if w_sum > 0.0 {
+                score = (score * w_sum + upvote_ratio * p.quality_c) / (w_sum + p.quality_c);
+            } else {
+                score = upvote_ratio;
+            }
+        }
+        score
     }
 
     pub fn popularity_fit(&self, post: &Post) -> f32 {
@@ -142,17 +161,23 @@ impl<'a> ScoringContext<'a> {
             .find(|s| s.rating == rating)
             .map(|s| s.count.max(0))
             .unwrap_or(0);
+        let total = self.rating_total.max(1);
         let k = self.profile.rating.len().max(3);
         let boost = self.priors.coldstart_smoothing_boost.max(0.0);
         let alpha = self.priors.discrete_smoothing_alpha
             * (1.0 + (1.0 - self.personal_confidence) * boost);
-        discrete_preference_smooth(
-            self.rating_total,
-            matched,
-            k,
-            alpha,
-            self.priors.discrete_pref_floor,
-        )
+
+        // Baseline smoothed rate (legacy behaviour, kept as the conservative
+        // anchor for cold/ambiguous profiles).
+        let smoothed = discrete_preference_smooth(total, matched, k, alpha, self.priors.discrete_pref_floor);
+
+        // Confidence-weighted blend with the raw observed rate. When the
+        // user has a strong preference for a rating (e.g. 500 S vs 50 Q),
+        // the raw rate pulls the score toward the true ratio; when the
+        // preference is weak or noisy, smoothed dominates.
+        let confidence = (matched as f32 / (matched as f32 + alpha)).sqrt();
+        let raw = matched as f32 / total as f32;
+        (smoothed * (1.0 - confidence) + raw * confidence).clamp(0.0, 1.0)
     }
 
     pub fn media_fit(&self, post: &Post) -> f32 {
@@ -190,6 +215,24 @@ impl<'a> ScoringContext<'a> {
         let p0 = self.user_base_positive_rate;
         let meta_w = self.priors.meta_interaction_weight.max(0.0);
 
+        // Class F: time-weighted decay — supplementary decay since the last
+        // profile refresh. If the profile hasn't been refreshed recently,
+        // the feedback counts are stale and should carry less weight.
+        let staleness = match self.profile.last_refreshed_at {
+            Some(last) => {
+                let elapsed_days =
+                    (self.priors.now - last).num_seconds() as f32 / 86_400.0;
+                if elapsed_days > 0.0 {
+                    (-std::f32::consts::LN_2 * elapsed_days
+                        / self.priors.feedback_decay_half_life_days.max(1.0))
+                    .exp()
+                } else {
+                    1.0
+                }
+            }
+            None => 1.0,
+        };
+
         let groups: [(Group, &Vec<String>, f32); 7] = [
             (Group::Artist, &post.tags.artist, self.group_wts[Group::Artist as usize]),
             (Group::Character, &post.tags.character, self.group_wts[Group::Character as usize]),
@@ -214,7 +257,7 @@ impl<'a> ScoringContext<'a> {
                     let pos = fb.positive.max(0) as f32;
                     let neg = fb.negative.max(0) as f32;
                     let imp = fb.impressions.max(0) as f32;
-                    let conf = (pos + neg + imp).ln_1p();
+                    let conf = (pos + neg + imp).ln_1p() * staleness;
                     if conf <= 0.0 {
                         continue;
                     }
@@ -395,8 +438,14 @@ impl<'a> ScoringContext<'a> {
 
     pub fn recency_fit(&self, age_days: f32) -> f32 {
         let p = self.priors;
-        // Class D v5.3: 2-piece kernel.
-        let tau = if !p.recency_tau_recent.is_nan()
+        // Class D v5.3: 2-piece kernel + Class F: 3-piece kernel.
+        // Hot piece: posts younger than `recency_split_age_hours`.
+        let age_hours = age_days * 24.0;
+        let tau = if !p.recency_tau_hot.is_nan()
+            && age_hours <= p.recency_split_age_hours.max(0.0)
+        {
+            p.recency_tau_hot.max(1e-3)
+        } else if !p.recency_tau_recent.is_nan()
             && age_days <= p.recency_split_age_days.max(0.0)
         {
             p.recency_tau_recent.max(1e-3)

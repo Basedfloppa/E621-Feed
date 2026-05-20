@@ -87,18 +87,23 @@ group_w_lore      = 0.40
 coldstart_smoothing_boost   = 2.0
 interaction_ctr_prior_alpha = 4.0
 
-# Algorithmic shape (v5.3 — Class C, defaults are no-ops/legacy)
+# Algorithmic shape (v5.3 — Class C, v5.8 — Class F exploration)
 score_temperature      = 0.0   # 0 = identity; >0 sigmoid-sharpens the final score
 confidence_steepness   = 1.0   # 1 = legacy n/(n+n0); >1 sharpens warm-up
 mmr_redundancy_exp     = 1.0   # 1 = legacy linear MMR penalty
 tag_sim_jaccard_blend  = 0.0   # 0 = pure cosine; small >0 hedges sparse profiles
+# exploration_epsilon   = 0.0  # ε-greedy exploration bonus; 0 = disabled (default)
 
-# Point splits (v5.3 — Class D). Each split tracks its parent knob unless
-# explicitly set to a numeric value (then the split is engaged).
+# Point splits (v5.3 — Class D, v5.8 — Class F hot kernel). Each split
+# tracks its parent knob unless explicitly set to a numeric value (then
+# the split is engaged). NaN = disabled / track parent.
 # idf_lambda_meta             = 0.40
 # recency_tau_recent          = 4.0
 recency_split_age_days        = 30.0
 # tag_relation_pmi_scale_user = 2.0
+# 3-piece recency kernel (Class F): hot τ for posts < recency_split_age_hours
+# recency_tau_hot             = 2.0        # NaN (default) = disabled
+recency_split_age_hours       = 24.0
 
 # Categorical (v5.3 — Class E)
 tag_relation_pair_aggregator = "mean"  # "mean" | "max" | "geomean"
@@ -107,6 +112,9 @@ tag_relation_pair_aggregator = "mean"  # "mean" | "max" | "geomean"
 quality_w_absolute          = 0.55
 quality_w_relative_score    = 0.30
 quality_w_relative_comments = 0.15
+# Upvote-ratio weight (Class F): blend `up / (up + down)` into quality.
+# 0 = disabled (legacy behaviour). Default 0.3.
+# quality_c = 0.3
 
 # Popularity channel internals (sum to 1.0)
 popularity_w_fav      = 0.80
@@ -116,11 +124,13 @@ popularity_w_duration = 0.20
 recency_w_global   = 0.40
 recency_w_personal = 0.60
 
-# Diversity / MMR
-diversity_window     = 32
-diversity_w_artist   = 0.22
-diversity_w_character = 0.16
-diversity_w_general  = 0.08
+# Diversity / MMR (v5.8: added copyright + species groups)
+diversity_window         = 32
+diversity_w_artist       = 0.22
+diversity_w_character    = 0.16
+diversity_w_copyright    = 1.8
+diversity_w_species      = 1.5
+diversity_w_general      = 0.08
 
 # Discrete-preference smoothing + strong-negative veto
 discrete_smoothing_alpha          = 1.0

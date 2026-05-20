@@ -55,6 +55,13 @@ fn api_cache_get(url: &str, ttl: Duration) -> Option<String> {
     }
 }
 
+/// Clear the entire e621 cache. Used on blacklist change so stale entries
+/// keyed by the old blacklist don't linger until TTL expiry.
+pub fn clear_api_cache() {
+    let mut map = API_CACHE.lock().expect("api cache poisoned");
+    map.clear();
+}
+
 /// Drop every cache entry past TTL. Called by the periodic worker since
 /// `api_cache_put` only evicts on insert.
 pub fn prune_api_cache() -> (usize, usize) {
@@ -81,7 +88,6 @@ fn api_cache_put(url: &str, body: String, ttl: Duration, max_entries: usize) {
         let now = std::time::Instant::now();
         let mut keys_by_age: Vec<(String, std::time::Instant)> = map
             .iter()
-            .filter(|(_, v)| now.duration_since(v.inserted_at) < ttl * 2)
             .map(|(k, v)| (k.clone(), v.inserted_at))
             .collect();
         keys_by_age.sort_by_key(|(_, t)| *t);
@@ -101,16 +107,32 @@ fn api_cache_put(url: &str, body: String, ttl: Duration, max_entries: usize) {
     );
 }
 
-/// Authenticated GET with cache + rate-gate + retry. All e621 calls
-/// funnel through here so cache and rate limits stay consistent.
-async fn fetch_authed_text(url: String) -> Result<String, String> {
+/// Authenticated GET with optional cache + rate-gate + retry. All e621
+/// calls funnel through here so cache and rate limits stay consistent.
+///
+/// * `bypass_cache` — when true the response is fetched live from e621
+///   and the result is NOT written into the shared cache. Use for
+///   background prefetch traffic so it doesn't pollute the user-facing
+///   cache or evict entries that real requests will need.
+/// * `cache_ttl_secs` — per-call TTL override (0 = use global default).
+async fn fetch_authed_text(
+    url: String,
+    bypass_cache: bool,
+    cache_ttl_secs: u64,
+) -> Result<String, String> {
     let cfg = cfg();
-    let ttl = Duration::from_secs(cfg.e621_cache_ttl_secs);
+    let ttl = Duration::from_secs(if cache_ttl_secs > 0 {
+        cache_ttl_secs
+    } else {
+        cfg.e621_cache_ttl_secs
+    });
     let max_entries = cfg.e621_cache_max_entries;
 
-    if let Some(body) = api_cache_get(&url, ttl) {
-        debug!("e621 cache hit: {url}");
-        return Ok(body);
+    if !bypass_cache {
+        if let Some(body) = api_cache_get(&url, ttl) {
+            debug!("e621 cache hit: {url}");
+            return Ok(body);
+        }
     }
 
     let client = get_client();
@@ -134,7 +156,11 @@ async fn fetch_authed_text(url: String) -> Result<String, String> {
         return Err(format!("returned {status}: {preview}"));
     }
 
-    api_cache_put(&url, body.clone(), ttl, max_entries);
+    if !bypass_cache {
+        api_cache_put(&url, body.clone(), ttl, max_entries);
+    } else {
+        debug!("e621 cache bypassed (prefetch): {url}");
+    }
     Ok(body)
 }
 
@@ -298,7 +324,7 @@ pub async fn get_favorites(account: &TruncatedAccount, page: i32) -> Vec<Post> {
     );
     debug!("GET (auth) /favorites.json?user_id=…&limit=…&page={page}");
 
-    let body = match fetch_authed_text(url).await {
+    let body = match fetch_authed_text(url, false, 0).await {
         Ok(b) => b,
         Err(e) => {
             warn!("favorites request failed: {e}");
@@ -327,7 +353,7 @@ pub async fn get_account(account: &TruncatedAccount) -> Result<UserApiResponse, 
     let cfg = cfg();
     let url = format!("{}/users/{}.json", cfg.posts_domain, account.id);
     debug!("GET (auth) {url}");
-    let body = fetch_authed_text(url)
+    let body = fetch_authed_text(url, false, 0)
         .await
         .map_err(|e| format!("account request {e}"))?;
     let parsed = json::from_str::<UserApiResponse>(&body)
@@ -347,7 +373,7 @@ pub async fn search_users(order: &str, page: i32) -> Result<Vec<UserSearchResult
             ("page", page.to_string()),
         ],
     );
-    let body = fetch_authed_text(url)
+    let body = fetch_authed_text(url, false, 0)
         .await
         .map_err(|e| format!("users search {e}"))?;
     // Endpoint returns either `{ "users": [...] }` or a bare array.
@@ -368,7 +394,7 @@ pub async fn search_users(order: &str, page: i32) -> Result<Vec<UserSearchResult
 pub async fn get_user_by_id(uid: i32) -> Result<UserApiResponse, String> {
     let cfg = cfg();
     let url = format!("{}/users/{}.json", cfg.posts_domain, uid);
-    let body = fetch_authed_text(url)
+    let body = fetch_authed_text(url, false, 0)
         .await
         .map_err(|e| format!("user-by-id {e}"))?;
     json::from_str::<UserApiResponse>(&body).map_err(|e| format!("user-by-id parse failed: {e}"))
@@ -379,25 +405,45 @@ pub async fn get_user_by_id(uid: i32) -> Result<UserApiResponse, String> {
 pub async fn get_user_by_name(name: &str) -> Result<UserApiResponse, String> {
     let cfg = cfg();
     let url = format!("{}/users/{}.json", cfg.posts_domain, encode(name));
-    let body = fetch_authed_text(url)
+    let body = fetch_authed_text(url, false, 0)
         .await
         .map_err(|e| format!("user-by-name {e}"))?;
     json::from_str::<UserApiResponse>(&body)
         .map_err(|e| format!("user-by-name parse failed: {e}"))
 }
 
+/// Normalise the order of blacklist tags so two semantically identical
+/// blacklists produce the same cache key regardless of line order.
+fn normalise_blacklist(bl: &str) -> String {
+    let mut tags: Vec<&str> = bl
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
+    tags.sort();
+    tags.join(" -")
+}
+
 /// `get_posts` with a caller-supplied `tags` query — used by the
 /// prefetcher to warm the catalog. Blacklist still applied.
+///
+/// This function bypasses the shared API cache by design — the prefetcher
+/// runs on a background schedule and its requests should never evict or
+/// pollute entries that user-facing `/recommendations` calls depend on.
 pub async fn get_posts_by_tags(
     blacklist_tags: &str,
     tags_query: &str,
     page: Option<i32>,
 ) -> Result<Vec<Post>, String> {
-    let bl = blacklist_tags.trim();
-    let blacklist = if bl.is_empty() {
+    let blacklist = if blacklist_tags.trim().is_empty() {
         String::new()
     } else {
-        format!("-{}", bl.replace('\n', " -"))
+        let normalised = normalise_blacklist(blacklist_tags);
+        if normalised.is_empty() {
+            String::new()
+        } else {
+            format!("-{normalised}")
+        }
     };
     let combined = if blacklist.is_empty() {
         tags_query.to_string()
@@ -415,7 +461,8 @@ pub async fn get_posts_by_tags(
             ("tags", combined),
         ],
     );
-    let body = fetch_authed_text(url)
+    // Bypass cache — prefetch traffic must not pollute user-facing cache.
+    let body = fetch_authed_text(url, true, 0)
         .await
         .map_err(|e| format!("posts request {e}"))?;
     let posts = json::from_str::<PostsApiResponse>(&body)
@@ -424,19 +471,35 @@ pub async fn get_posts_by_tags(
     Ok(posts)
 }
 
+/// Per-page TTL so the first feed page (which users see most often)
+/// refreshes faster than deeper scroll pages. Page 0: 2 minutes, other
+/// pages: configured global TTL.
+fn posts_cache_ttl(page: Option<i32>) -> u64 {
+    match page.unwrap_or(0) {
+        0 => 120,               // first page — fresh content matters
+        _ => cfg().e621_cache_ttl_secs, // deeper pages — longer TTL
+    }
+}
+
 pub async fn get_posts(account: &TruncatedAccount, page: Option<i32>) -> Result<Vec<Post>, String> {
     let blacklisted_tags = account.blacklist.clone();
     let blacklist = if blacklisted_tags.trim().is_empty() {
         String::new()
     } else {
-        format!("-{}", blacklisted_tags.replace('\n', " -"))
+        let normalised = normalise_blacklist(&blacklisted_tags);
+        if normalised.is_empty() {
+            String::new()
+        } else {
+            format!("-{normalised}")
+        }
     };
     debug!(
         "Preparing posts fetch: page={} blacklist_len={}",
         page.unwrap_or(0),
-        blacklist.split_whitespace().count()
+        if blacklist.is_empty() { 0 } else { blacklist.split_whitespace().count() }
     );
     let cfg = cfg();
+    let ttl_secs = posts_cache_ttl(page);
     let url = build_url(
         "posts.json",
         &[
@@ -446,7 +509,7 @@ pub async fn get_posts(account: &TruncatedAccount, page: Option<i32>) -> Result<
         ],
     );
     debug!("GET (auth) {url}");
-    let body = fetch_authed_text(url)
+    let body = fetch_authed_text(url, false, ttl_secs)
         .await
         .map_err(|e| format!("posts request {e}"))?;
     let posts = json::from_str::<PostsApiResponse>(&body)

@@ -388,19 +388,31 @@ static GLOBAL_CACHE: LazyLock<ArcSwap<TagRelationGraph>> =
 static GLOBAL_DIRTY: AtomicBool = AtomicBool::new(true);
 static GLOBAL_REBUILDING: AtomicBool = AtomicBool::new(false);
 
-/// Wall-clock of the most recent interaction with this cache (read or
-/// dirty-mark). The cache-pruner reads this on each tick and, if the
-/// idle window has elapsed, swaps the graph back to empty so its
-/// O(N pairs) HashMap is freed back to the OS.
-static LAST_ACCESS: LazyLock<Mutex<Instant>> = LazyLock::new(|| Mutex::new(Instant::now()));
+/// Two separate access timers so background dirty-marks (cleanup, process)
+/// don't prevent idle-eviction of the user-facing cache.
+///
+/// `LAST_USER_ACCESS` — updated by request-serving code (`current_global_relation`).
+/// Used by `evict_if_idle` to decide whether to evict.
+///
+/// `LAST_SYSTEM_ACCESS` — updated by background workers (`mark_global_relation_dirty`).
+/// Not consulted for idle-eviction.
+static LAST_USER_ACCESS: LazyLock<Mutex<Instant>> =
+    LazyLock::new(|| Mutex::new(Instant::now()));
+static LAST_SYSTEM_ACCESS: LazyLock<Mutex<Instant>> =
+    LazyLock::new(|| Mutex::new(Instant::now()));
 
-fn touch_access() {
-    let mut g = LAST_ACCESS.lock().unwrap_or_else(|p| p.into_inner());
+fn touch_user_access() {
+    let mut g = LAST_USER_ACCESS.lock().unwrap_or_else(|p| p.into_inner());
+    *g = Instant::now();
+}
+
+fn touch_system_access() {
+    let mut g = LAST_SYSTEM_ACCESS.lock().unwrap_or_else(|p| p.into_inner());
     *g = Instant::now();
 }
 
 pub fn mark_global_relation_dirty() {
-    touch_access();
+    touch_system_access();
     GLOBAL_DIRTY.store(true, Ordering::Release);
     spawn_rebuild_if_needed();
 }
@@ -455,7 +467,7 @@ fn spawn_rebuild_if_needed() {
 }
 
 pub fn current_global_relation() -> Arc<TagRelationGraph> {
-    touch_access();
+    touch_user_access();
     if GLOBAL_DIRTY.load(Ordering::Acquire) {
         spawn_rebuild_if_needed();
     }
@@ -479,7 +491,7 @@ pub fn evict_if_idle(idle_secs: u64) -> (usize, usize) {
         return (0, 0);
     }
     let elapsed = {
-        let g = LAST_ACCESS.lock().unwrap_or_else(|p| p.into_inner());
+        let g = LAST_USER_ACCESS.lock().unwrap_or_else(|p| p.into_inner());
         g.elapsed()
     };
     if elapsed.as_secs() < idle_secs {
@@ -495,7 +507,7 @@ pub fn evict_if_idle(idle_secs: u64) -> (usize, usize) {
     GLOBAL_CACHE.store(Arc::new(TagRelationGraph::empty()));
     GLOBAL_DIRTY.store(true, Ordering::Release);
     {
-        let mut g = LAST_ACCESS.lock().unwrap_or_else(|p| p.into_inner());
+        let mut g = LAST_USER_ACCESS.lock().unwrap_or_else(|p| p.into_inner());
         *g = Instant::now();
     }
     (prev_pairs, prev_tags)

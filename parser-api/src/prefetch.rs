@@ -1,19 +1,12 @@
-//! Background workers that grow and trim the local catalog.
+//! Background worker that grows the local catalog by fetching top-artist /
+//! top-character posts for recently active accounts.
 //!
-//! Two long-running threads are spawned at startup:
+//! Uses `tokio::spawn` so it shares the global `RATE_GATE` in `api.rs`,
+//! ensuring background traffic doesn't eat into the live request budget.
 //!
-//! * `catalog-prefetch` — every PREFETCH_INTERVAL picks a recently-active
-//!   account, queries e621 for its top artist + top character, and upserts the
-//!   resulting posts into the catalog so later `/recommendations` calls have
-//!   richer local candidates.
-//! * `catalog-cleanup`  — every CLEANUP_INTERVAL deletes catalog posts that
-//!   neither belong to a user's favourites nor have been served by the
-//!   recommendations endpoint within the cleanup window. Stops the catalog
-//!   from growing without bound.
-//!
-//! Both workers use `tokio::spawn` so they share the global `RATE_GATE` in
-//! `api.rs`, ensuring background traffic doesn't eat into the live request
-//! budget.
+//! Catalog cleanup (prune stale posts, orphan accounts) and WAL checkpoint
+//! are handled by `cache_pruner.rs` — see that module for the unified
+//! background maintenance tick.
 
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
@@ -24,13 +17,11 @@ use rusqlite::params;
 use crate::api;
 use crate::db;
 use crate::models::cfg;
-use crate::utils::{bump_idf, mark_global_relation_dirty};
 
 static PREFETCH_CONSECUTIVE_FAILS: AtomicU32 = AtomicU32::new(0);
 
 pub fn spawn_prefetch_workers() {
     rocket::tokio::spawn(prefetch_loop());
-    rocket::tokio::spawn(cleanup_loop());
 }
 
 async fn prefetch_loop() {
@@ -59,35 +50,6 @@ async fn prefetch_loop() {
             warn!("[catalog-prefetch] tick failed: {e}");
         }
         let secs = runtime.prefetch_interval_secs.max(10);
-        rocket::tokio::time::sleep(Duration::from_secs(secs)).await;
-    }
-}
-
-async fn cleanup_loop() {
-    // Wait longer on first boot — let the catalog accumulate before we start
-    // pruning anything.
-    rocket::tokio::time::sleep(Duration::from_secs(3600)).await;
-
-    loop {
-        match rocket::tokio::task::spawn_blocking(run_catalog_cleanup).await {
-            Ok(Ok(deleted)) if deleted > 0 => {
-                info!("[catalog-cleanup] deleted {deleted} stale catalog posts");
-            }
-            Ok(Err(e)) => warn!("[catalog-cleanup] failed: {e}"),
-            Err(e) => warn!("[catalog-cleanup] task panicked: {e}"),
-            _ => {}
-        }
-
-        match rocket::tokio::task::spawn_blocking(db::cleanup_orphan_accounts).await {
-            Ok(Ok(deleted)) if deleted > 0 => {
-                info!("[account-cleanup] dropped {deleted} orphan accounts");
-            }
-            Ok(Err(e)) => warn!("[account-cleanup] failed: {e}"),
-            Err(e) => warn!("[account-cleanup] task panicked: {e}"),
-            _ => {}
-        }
-
-        let secs = cfg().runtime.cleanup_interval_secs.max(60);
         rocket::tokio::time::sleep(Duration::from_secs(secs)).await;
     }
 }
@@ -154,10 +116,10 @@ async fn run_prefetch_tick() -> Result<(), String> {
         }
     }
 
-    // No-op if save_posts_tags_batch already bumped IDF; this nudge covers
-    // the case where the second e621 call introduced new tags after the
-    // first batch's bump landed.
-    bump_idf(std::collections::HashMap::new(), 0);
+    // save_posts_tags_batch already bumps IDF incrementally inside.
+    // The old trailing bump_idf(HashMap::new(), 0) kept the cache
+    // "warm" between user requests — which actually prevented
+    // idle-eviction from ever triggering. Removed.
     Ok(())
 }
 
@@ -220,34 +182,3 @@ fn pick_prefetch_target() -> Result<Option<PrefetchTarget>, String> {
     }))
 }
 
-fn run_catalog_cleanup() -> Result<i64, String> {
-    let conn = crate::db::open_db_for_prefetch()?;
-    let cutoff =
-        (Utc::now() - chrono::Duration::days(cfg().runtime.catalog_retention_days)).to_rfc3339();
-
-    // Delete posts that:
-    //   1) aren't anyone's favourite (no row in accounts_post)
-    //   2) haven't been re-touched recently (last_seen_at < cutoff)
-    // CASCADE on tags_posts/posts FKs handles the link table cleanup.
-    let deleted = conn
-        .execute(
-            "
-            DELETE FROM posts
-            WHERE last_seen_at < ?1
-              AND NOT EXISTS (SELECT 1 FROM accounts_post ap WHERE ap.post_id = posts.id)
-            ",
-            params![cutoff],
-        )
-        .map_err(|e| format!("delete stale posts: {e}"))?;
-
-    if deleted > 0 {
-        // Tag DFs are now stale by exactly the deleted-post count per tag.
-        // Schedule a full IDF rebuild rather than tracking the delta — cleanup
-        // runs every 6h, so a one-off rebuild is cheap and avoids walking
-        // tags_posts again here.
-        crate::utils::mark_idf_dirty();
-        mark_global_relation_dirty();
-    }
-
-    Ok(deleted as i64)
-}
