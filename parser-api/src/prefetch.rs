@@ -76,7 +76,7 @@ async fn run_prefetch_tick() -> Result<(), String> {
     }
 
     for q in queries {
-        match api::get_posts_by_tags(&target.blacklist, &q, Some(0)).await {
+        match api::get_posts_by_tags(&target.blacklist, &q, Some(1)).await {
             Ok(posts) if !posts.is_empty() => {
                 // Successful fetch — reset the breaker.
                 PREFETCH_CONSECUTIVE_FAILS.store(0, Ordering::Relaxed);
@@ -104,44 +104,7 @@ async fn run_prefetch_tick() -> Result<(), String> {
             }
             Ok(_) => {}
             Err(e) => {
-                // Check if this is a permanent 410 Gone — the tag/account
-                // no longer exists on e621. Don't count this against the
-                // circuit breaker; instead remove the dead tag from the
-                // account's tag counts so we never try it again.
-                if e.contains("410 Gone") || e.contains("410.") {
-                    warn!(
-                        "[catalog-prefetch] tag gone (410) for account={} q={q}: \
-                         removing from account_tag_counts",
-                        target.account_id
-                    );
-                    let qc = q.clone();
-                    let aid = target.account_id;
-                    if let Err(cleanup) = rocket::tokio::task::spawn_blocking(move || {
-                        let conn = crate::db::open_db_for_prefetch()?;
-                        conn.execute(
-                            "DELETE FROM account_tag_counts
-                             WHERE account_id = ?1 AND tag_name = ?2",
-                            rusqlite::params![aid, qc],
-                        )
-                        .map_err(|e| format!("delete dead tag: {e}"))?;
-                        Ok::<_, String>(())
-                    })
-                    .await
-                    .map_err(|e| format!("cleanup join: {e}"))?
-                    {
-                        warn!(
-                            "[catalog-prefetch] failed to clean up dead tag for \
-                             account={} q={q}: {cleanup}",
-                            target.account_id
-                        );
-                    }
-                    // Don't break — try the next query (the account may
-                    // still have valid tags).
-                    continue;
-                }
-
-                // Transient error (rate limit, timeout, 5xx, etc.) —
-                // count this failure and bail out of the rest of the tick.
+                // Count this failure and bail out of the rest of the tick.
                 let n = PREFETCH_CONSECUTIVE_FAILS.fetch_add(1, Ordering::Relaxed) + 1;
                 warn!(
                     "[catalog-prefetch] e621 fetch failed for account={} q={q} \

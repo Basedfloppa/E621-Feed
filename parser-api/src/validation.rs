@@ -156,12 +156,13 @@ pub fn validate_blacklist_payload(payload: &BlacklistPayload) -> Result<(), ApiE
 }
 
 /// Bound the `page` query param on `/recommendations`. `None` (caller
-/// omitted the param) is the route's default, accepted as-is.
+/// omitted the param) is the route's default, accepted as-is. Page 0 is
+/// rejected because e621 uses 1-indexed pages and returns 410 Gone for 0.
 pub fn validate_recommendations_page(page: Option<i32>) -> Result<(), ApiError> {
     let Some(p) = page else { return Ok(()); };
-    if !(0..=MAX_RECOMMENDATIONS_PAGE).contains(&p) {
+    if !(1..=MAX_RECOMMENDATIONS_PAGE).contains(&p) {
         return Err(ApiError::BadRequest(format!(
-            "page {p} out of range [0, {MAX_RECOMMENDATIONS_PAGE}]"
+            "page {p} out of range [1, {MAX_RECOMMENDATIONS_PAGE}]"
         )));
     }
     Ok(())

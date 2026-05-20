@@ -457,7 +457,7 @@ pub async fn get_posts_by_tags(
         "posts.json",
         &[
             ("limit", cfg.posts_limit.to_string()),
-            ("page", page.unwrap_or(0).to_string()),
+            ("page", page.unwrap_or(1).to_string()),
             ("tags", combined),
         ],
     );
@@ -472,11 +472,11 @@ pub async fn get_posts_by_tags(
 }
 
 /// Per-page TTL so the first feed page (which users see most often)
-/// refreshes faster than deeper scroll pages. Page 0: 2 minutes, other
+/// refreshes faster than deeper scroll pages. Page 1: 2 minutes, other
 /// pages: configured global TTL.
 fn posts_cache_ttl(page: Option<i32>) -> u64 {
-    match page.unwrap_or(0) {
-        0 => 120,               // first page — fresh content matters
+    match page.unwrap_or(1) {
+        1 => 120,               // first page — fresh content matters
         _ => cfg().e621_cache_ttl_secs, // deeper pages — longer TTL
     }
 }
@@ -495,7 +495,7 @@ pub async fn get_posts(account: &TruncatedAccount, page: Option<i32>) -> Result<
     };
     debug!(
         "Preparing posts fetch: page={} blacklist_len={}",
-        page.unwrap_or(0),
+        page.unwrap_or(1),
         if blacklist.is_empty() { 0 } else { blacklist.split_whitespace().count() }
     );
     let cfg = cfg();
@@ -504,7 +504,7 @@ pub async fn get_posts(account: &TruncatedAccount, page: Option<i32>) -> Result<
         "posts.json",
         &[
             ("limit", cfg.posts_limit.to_string()),
-            ("page", page.unwrap_or(0).to_string()),
+            ("page", page.unwrap_or(1).to_string()),
             ("tags", blacklist),
         ],
     );
