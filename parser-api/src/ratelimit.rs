@@ -169,3 +169,21 @@ impl<'r> OpenApiFromRequest<'r> for ClientIp {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::check;
+
+    #[test]
+    fn check_allows_burst_then_blocks() {
+        // Unique key so the test is isolated from any other bucket in the
+        // process-global table. burst = 3 → first three calls pass, the
+        // fourth is rejected (refill over the microseconds between calls
+        // is negligible at 1 token/min).
+        let key = "test:ratelimit:burst-exhaustion";
+        assert!(check(key, 1, 3).is_ok());
+        assert!(check(key, 1, 3).is_ok());
+        assert!(check(key, 1, 3).is_ok());
+        assert!(check(key, 1, 3).is_err());
+    }
+}
+

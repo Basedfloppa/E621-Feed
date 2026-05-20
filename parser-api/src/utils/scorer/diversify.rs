@@ -235,59 +235,424 @@ pub fn diversify_scored_posts(posts: Vec<ScoredPost>, priors: &Priors) -> Vec<Sc
     out
 }
 
-/// Post-MMR diversity quota: guarantee at least 2 different artists and 3
-/// different characters in the top-K positions. Posts that exceed a group's
-/// quota are pushed down by swapping with a lower-ranked post from a
-/// different group.
-fn enforce_diversity_quota(scored: &mut Vec<ScoredPost>) {
+/// Post-MMR diversity quota: ensure the top-K window holds at least a
+/// minimum number of distinct primary artists / characters. This is a
+/// *minimum* guarantee, not a dedup — when MMR already produced a diverse
+/// top-K the function is a no-op and the MMR order is left untouched. The
+/// quota only fires for degenerate windows (e.g. all top results from a
+/// single artist), in which case diverse posts are promoted from below the
+/// window.
+fn enforce_diversity_quota(scored: &mut [ScoredPost]) {
+    const MIN_ARTISTS: usize = 2;
+    const MIN_CHARACTERS: usize = 3;
+
     let top_k = 20usize.min(scored.len());
     if top_k < 4 {
         return;
     }
 
-    // Artist quota: at least 2 different artists among top-K.
-    let mut artist_set: Vec<Option<String>> = Vec::new();
-    // We'll collect used slots that are "locked" (the first occurrence of
-    // each artist). Extra posts from an already-seen artist get demoted.
-    let mut i = 0;
-    while i < top_k {
-        let post_artists = &scored[i].post.tags.artist;
-        let primary = post_artists.first().map(|a| a.to_ascii_lowercase());
-        let already_seen = primary.as_ref().map_or(false, |p| {
-            artist_set.iter().any(|a| a.as_deref() == Some(p.as_str()))
-        });
-        if already_seen {
-            // This post repeats an artist — swap it down past top_k.
-            let swap_target = scored.len() - 1 - (scored.len() - 1 - i) / 3;
-            if swap_target > i && swap_target < scored.len() {
-                scored.swap(i, swap_target);
-                // Don't increment i — re-evaluate the swapped-in post.
-                continue;
-            }
-        } else {
-            artist_set.push(primary);
+    enforce_group_quota(scored, top_k, MIN_ARTISTS, |sp| {
+        sp.post.tags.artist.first().map(|a| a.to_ascii_lowercase())
+    });
+    enforce_group_quota(scored, top_k, MIN_CHARACTERS, |sp| {
+        sp.post.tags.character.first().map(|c| c.to_ascii_lowercase())
+    });
+}
+
+/// Ensure at least `min_distinct` distinct `key` values appear among the
+/// first `top_k` posts. When the window falls short, posts with a fresh
+/// key are promoted from below the window, each swapped with the
+/// lowest-ranked redundant in-window post so the fewest possible MMR
+/// positions are disturbed.
+///
+/// Terminates in at most `min_distinct` promotions — every iteration
+/// either adds a distinct key or breaks, so it can never loop (unlike the
+/// previous swap-and-re-evaluate implementation, which could oscillate two
+/// posts forever).
+fn enforce_group_quota(
+    scored: &mut [ScoredPost],
+    top_k: usize,
+    min_distinct: usize,
+    key: impl Fn(&ScoredPost) -> Option<String>,
+) {
+    // Distinct named keys already inside the window, plus the in-window
+    // slots that are demotable: posts repeating an earlier key, or posts
+    // with no key at all. Collected front-to-back so `pop()` yields the
+    // lowest-ranked redundant slot first.
+    let mut seen: Vec<String> = Vec::new();
+    let mut redundant: Vec<usize> = Vec::new();
+    for (i, sp) in scored.iter().enumerate().take(top_k) {
+        match key(sp) {
+            Some(k) if !seen.contains(&k) => seen.push(k),
+            _ => redundant.push(i),
         }
-        i += 1;
+    }
+    if seen.len() >= min_distinct {
+        return; // quota already satisfied — leave the MMR order alone
     }
 
-    // Character quota: at least 3 different characters among top-K.
-    let mut char_set: Vec<Option<String>> = Vec::new();
-    let mut i = 0;
-    while i < top_k {
-        let post_chars = &scored[i].post.tags.character;
-        let primary = post_chars.first().map(|c| c.to_ascii_lowercase());
-        let already_seen = primary.as_ref().map_or(false, |p| {
-            char_set.iter().any(|c| c.as_deref() == Some(p.as_str()))
-        });
-        if already_seen {
-            let swap_target = scored.len() - 1 - (scored.len() - 1 - i) / 3;
-            if swap_target > i && swap_target < scored.len() {
-                scored.swap(i, swap_target);
-                continue;
-            }
-        } else {
-            char_set.push(primary);
+    // Pull posts with a not-yet-seen key up from below the window.
+    let mut next_below = top_k;
+    while seen.len() < min_distinct {
+        let Some(j) = (next_below..scored.len())
+            .find(|&j| key(&scored[j]).is_some_and(|k| !seen.contains(&k)))
+        else {
+            break; // no more diverse posts available — best effort
+        };
+        next_below = j + 1;
+        let Some(slot) = redundant.pop() else {
+            break; // nothing redundant left to evict — quota physically unmet
+        };
+        scored.swap(slot, j);
+        if let Some(k) = key(&scored[slot]) {
+            seen.push(k);
         }
-        i += 1;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::{Flags, Post, Rating, Relationships, Score, ScoredPost, Tags};
+    use chrono::Utc;
+
+    /// Minimal `Post` for diversity tests — only `id`, `tags.artist` and
+    /// `tags.character` feed the quota logic; everything else is a neutral
+    /// placeholder.
+    fn post(id: i64, artists: &[&str], characters: &[&str]) -> Post {
+        Post {
+            id,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            file: None,
+            preview: None,
+            sample: None,
+            score: Score { up: 0, down: 0, total: 0 },
+            tags: Tags {
+                general: vec![],
+                artist: artists.iter().map(|s| s.to_string()).collect(),
+                copyright: vec![],
+                character: characters.iter().map(|s| s.to_string()).collect(),
+                species: vec![],
+                invalid: vec![],
+                meta: vec![],
+                lore: vec![],
+                contributor: vec![],
+            },
+            locked_tags: None,
+            change_seq: 0.0,
+            flags: Flags {
+                pending: false,
+                flagged: false,
+                note_locked: false,
+                status_locked: false,
+                rating_locked: false,
+                deleted: false,
+            },
+            rating: Rating::S,
+            fav_count: 0,
+            sources: vec![],
+            pools: vec![],
+            relationships: Relationships {
+                parent_id: None,
+                has_children: false,
+                has_active_children: false,
+                children: vec![],
+            },
+            approver_id: None,
+            uploader_id: 0,
+            description: None,
+            comment_count: 0,
+            is_favorited: false,
+            has_notes: false,
+            duration: None,
+        }
+    }
+
+    fn scored(id: i64, artists: &[&str], characters: &[&str]) -> ScoredPost {
+        ScoredPost {
+            post: post(id, artists, characters),
+            score: 1.0,
+            breakdown: None,
+        }
+    }
+
+    fn ids(posts: &[ScoredPost]) -> Vec<i64> {
+        posts.iter().map(|sp| sp.post.id).collect()
+    }
+
+    /// The quota must only ever re-order — never lose or duplicate a post.
+    fn assert_permutation_of(posts: &[ScoredPost], expected: &[i64]) {
+        let mut got = ids(posts);
+        let mut want = expected.to_vec();
+        got.sort_unstable();
+        want.sort_unstable();
+        assert_eq!(got, want, "quota must be a permutation of its input");
+    }
+
+    fn distinct_artists(posts: &[ScoredPost], window: usize) -> usize {
+        let mut set: Vec<String> = Vec::new();
+        for sp in posts.iter().take(window) {
+            if let Some(a) = sp.post.tags.artist.first() {
+                let a = a.to_ascii_lowercase();
+                if !set.contains(&a) {
+                    set.push(a);
+                }
+            }
+        }
+        set.len()
+    }
+
+    fn distinct_characters(posts: &[ScoredPost], window: usize) -> usize {
+        let mut set: Vec<String> = Vec::new();
+        for sp in posts.iter().take(window) {
+            if let Some(c) = sp.post.tags.character.first() {
+                let c = c.to_ascii_lowercase();
+                if !set.contains(&c) {
+                    set.push(c);
+                }
+            }
+        }
+        set.len()
+    }
+
+    // ── enforce_group_quota — core logic ────────────────────────────────
+
+    /// A window that already meets the quota is left byte-for-byte intact.
+    #[test]
+    fn group_quota_noop_when_satisfied() {
+        let mut posts = vec![
+            scored(0, &["a"], &[]),
+            scored(1, &["b"], &[]),
+            scored(2, &["c"], &[]),
+            scored(3, &["d"], &[]),
+        ];
+        enforce_group_quota(&mut posts, 4, 2, |sp| sp.post.tags.artist.first().cloned());
+        assert_eq!(ids(&posts), vec![0, 1, 2, 3], "satisfied quota must not re-order");
+    }
+
+    /// An all-one-artist window pulls a single diverse post up from below,
+    /// landing it in the lowest-ranked redundant slot.
+    #[test]
+    fn group_quota_promotes_one_diverse_post() {
+        let mut posts = vec![
+            scored(0, &["a"], &[]),
+            scored(1, &["a"], &[]),
+            scored(2, &["a"], &[]),
+            scored(3, &["a"], &[]),
+            scored(4, &["b"], &[]), // below window
+            scored(5, &["c"], &[]), // below window
+            scored(6, &["a"], &[]), // below window
+        ];
+        enforce_group_quota(&mut posts, 4, 2, |sp| sp.post.tags.artist.first().cloned());
+
+        // `b` (id 4) is swapped into slot 3 — the lowest-ranked redundant
+        // slot — and the displaced `a` (id 3) drops to slot 4.
+        assert_eq!(posts[3].post.id, 4);
+        assert_eq!(posts[3].post.tags.artist, vec!["b"]);
+        assert_eq!(posts[4].post.id, 3);
+        assert_eq!(distinct_artists(&posts, 4), 2);
+        assert_permutation_of(&posts, &[0, 1, 2, 3, 4, 5, 6]);
+    }
+
+    /// Multiple promotions run until the minimum distinct count is met,
+    /// each demoting the next lowest-ranked redundant slot.
+    #[test]
+    fn group_quota_promotes_until_minimum_met() {
+        let mut posts = vec![
+            scored(0, &["a"], &[]),
+            scored(1, &["a"], &[]),
+            scored(2, &["a"], &[]),
+            scored(3, &["a"], &[]),
+            scored(4, &["b"], &[]),
+            scored(5, &["c"], &[]),
+            scored(6, &["d"], &[]),
+            scored(7, &["a"], &[]),
+        ];
+        enforce_group_quota(&mut posts, 4, 3, |sp| sp.post.tags.artist.first().cloned());
+
+        assert_eq!(posts[3].post.id, 4, "first promotion fills slot 3");
+        assert_eq!(posts[2].post.id, 5, "second promotion fills slot 2");
+        assert_eq!(distinct_artists(&posts, 4), 3);
+        assert_permutation_of(&posts, &[0, 1, 2, 3, 4, 5, 6, 7]);
+    }
+
+    /// When no diverse post exists the quota does its best and returns —
+    /// no panic, no loop, order untouched.
+    #[test]
+    fn group_quota_best_effort_when_no_diversity_available() {
+        let mut posts = vec![
+            scored(0, &["a"], &[]),
+            scored(1, &["a"], &[]),
+            scored(2, &["a"], &[]),
+            scored(3, &["a"], &[]),
+            scored(4, &["a"], &[]),
+            scored(5, &["a"], &[]),
+        ];
+        enforce_group_quota(&mut posts, 4, 3, |sp| sp.post.tags.artist.first().cloned());
+        assert_eq!(ids(&posts), vec![0, 1, 2, 3, 4, 5]);
+    }
+
+    /// Posts with no tag in the group key produce `None` and are treated as
+    /// demotable filler — they never panic and never count toward the quota.
+    #[test]
+    fn group_quota_handles_missing_keys() {
+        let mut posts = vec![
+            scored(0, &[], &[]),    // None
+            scored(1, &["a"], &[]),
+            scored(2, &[], &[]),    // None
+            scored(3, &["a"], &[]),
+            scored(4, &["b"], &[]), // below window
+            scored(5, &["c"], &[]), // below window
+        ];
+        enforce_group_quota(&mut posts, 4, 2, |sp| sp.post.tags.artist.first().cloned());
+
+        assert_eq!(posts[3].post.id, 4, "diverse `b` fills the last redundant slot");
+        assert_eq!(distinct_artists(&posts, 4), 2);
+        assert_permutation_of(&posts, &[0, 1, 2, 3, 4, 5]);
+    }
+
+    /// `redundant` running dry before the quota is met must break cleanly.
+    #[test]
+    fn group_quota_stops_when_no_redundant_slot_left() {
+        let mut posts = vec![
+            scored(0, &["a"], &[]),
+            scored(1, &["b"], &[]),
+            scored(2, &["c"], &[]),
+            scored(3, &["d"], &[]),
+            scored(4, &["e"], &[]), // below window
+        ];
+        // min 5 distinct, but the window has no redundant slot to evict.
+        enforce_group_quota(&mut posts, 4, 5, |sp| sp.post.tags.artist.first().cloned());
+        assert_eq!(ids(&posts), vec![0, 1, 2, 3, 4], "no redundant slot — left intact");
+    }
+
+    // ── enforce_diversity_quota — integration (top_k = 20) ──────────────
+
+    /// Lists shorter than 4 are below the quota's minimum window and pass
+    /// straight through.
+    #[test]
+    fn diversity_quota_noop_on_short_list() {
+        let mut posts = vec![
+            scored(0, &["a"], &["x"]),
+            scored(1, &["a"], &["x"]),
+            scored(2, &["a"], &["x"]),
+        ];
+        enforce_diversity_quota(&mut posts);
+        assert_eq!(ids(&posts), vec![0, 1, 2]);
+    }
+
+    /// A top-20 that already holds plenty of distinct artists and
+    /// characters is left exactly as MMR ordered it.
+    #[test]
+    fn diversity_quota_noop_when_top_k_already_diverse() {
+        let mut posts: Vec<ScoredPost> = (0..22)
+            .map(|i| {
+                let a = format!("artist{i}");
+                let c = format!("char{i}");
+                scored(i, &[a.as_str()], &[c.as_str()])
+            })
+            .collect();
+        let before = ids(&posts);
+        enforce_diversity_quota(&mut posts);
+        assert_eq!(ids(&posts), before, "diverse top-K must keep its MMR order");
+    }
+
+    /// Artist quota: a top-20 monopolised by one artist pulls a second
+    /// artist up from below the window.
+    #[test]
+    fn diversity_quota_enforces_artist_minimum() {
+        let mut posts: Vec<ScoredPost> = (0..24)
+            .map(|i| {
+                // Distinct characters everywhere → character quota is a no-op,
+                // isolating artist-quota behaviour.
+                let c = format!("char{i}");
+                let a = if i == 20 { "bob" } else { "alice" };
+                scored(i, &[a], &[c.as_str()])
+            })
+            .collect();
+        enforce_diversity_quota(&mut posts);
+
+        assert!(distinct_artists(&posts, 20) >= 2, "top-20 must hold ≥2 artists");
+        assert_eq!(posts[19].post.id, 20, "`bob` promoted into the window");
+        assert_eq!(posts[19].post.tags.artist, vec!["bob"]);
+        assert_permutation_of(&posts, &(0..24).collect::<Vec<_>>());
+    }
+
+    /// Character quota: a top-20 monopolised by one character pulls two
+    /// more characters up to reach the minimum of three.
+    #[test]
+    fn diversity_quota_enforces_character_minimum() {
+        let mut posts: Vec<ScoredPost> = (0..24)
+            .map(|i| {
+                // Distinct artists everywhere → artist quota is a no-op.
+                let a = format!("artist{i}");
+                let c = match i {
+                    20 => "villain",
+                    21 => "rogue",
+                    _ => "hero",
+                };
+                scored(i, &[a.as_str()], &[c])
+            })
+            .collect();
+        enforce_diversity_quota(&mut posts);
+
+        assert!(distinct_characters(&posts, 20) >= 3, "top-20 must hold ≥3 characters");
+        assert_eq!(posts[19].post.id, 20, "`villain` promoted first");
+        assert_eq!(posts[18].post.id, 21, "`rogue` promoted second");
+        assert_permutation_of(&posts, &(0..24).collect::<Vec<_>>());
+    }
+
+    /// Artist matching is case-insensitive: "Alice"/"alice"/"ALICE" count
+    /// as one artist, so the window still triggers a promotion.
+    #[test]
+    fn diversity_quota_artist_match_is_case_insensitive() {
+        let mut posts: Vec<ScoredPost> = (0..24)
+            .map(|i| {
+                let c = format!("char{i}");
+                let a = match i % 3 {
+                    _ if i == 20 => "bob",
+                    0 => "Alice",
+                    1 => "alice",
+                    _ => "ALICE",
+                };
+                scored(i, &[a], &[c.as_str()])
+            })
+            .collect();
+        enforce_diversity_quota(&mut posts);
+
+        // If case were significant the top-20 would look fully diverse and
+        // nothing would move; the promotion proves case-folding.
+        assert_eq!(posts[19].post.id, 20);
+        assert!(posts[19].post.tags.artist[0].eq_ignore_ascii_case("bob"));
+    }
+
+    /// Regression for the infinite loop in the pre-fix swap-and-re-evaluate
+    /// implementation: a list whose top-K (and tail) are dominated by a
+    /// couple of repeated artists/characters used to oscillate two posts
+    /// forever. Run on a worker thread and fail loudly if it does not
+    /// return promptly, rather than hanging the test binary.
+    #[test]
+    fn regression_terminates_on_artist_heavy_list() {
+        let input: Vec<ScoredPost> = (0..200)
+            .map(|i| {
+                let artist = if i % 2 == 0 { "alice" } else { "bob" };
+                let character = if i % 3 == 0 { "hero" } else { "rival" };
+                scored(i, &[artist], &[character])
+            })
+            .collect();
+        let expected = ids(&input);
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut posts = input;
+            enforce_diversity_quota(&mut posts);
+            let _ = tx.send(posts);
+        });
+        let result = rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("enforce_diversity_quota did not return within 5s — infinite-loop regression");
+
+        assert_permutation_of(&result, &expected);
     }
 }

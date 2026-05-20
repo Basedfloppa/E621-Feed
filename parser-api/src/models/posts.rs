@@ -224,3 +224,131 @@ pub struct ScoredPost {
     pub score: f32,
     pub breakdown: Option<ScoreBreakdown>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+    use rocket::serde::json::serde_json;
+
+    /// Build a `Post` whose only meaningful fields for media-type tests are
+    /// the file extension and duration; everything else is neutral filler.
+    fn post_with(ext: Option<&str>, duration: Option<f64>) -> Post {
+        Post {
+            id: 1,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            file: ext.map(|e| FileInfo {
+                width: 1,
+                height: 1,
+                ext: Some(e.to_string()),
+                size: 1,
+                md5: None,
+                url: None,
+            }),
+            preview: None,
+            sample: None,
+            score: Score {
+                up: 0,
+                down: 0,
+                total: 0,
+            },
+            tags: Tags {
+                general: vec![],
+                artist: vec![],
+                copyright: vec![],
+                character: vec![],
+                species: vec![],
+                invalid: vec![],
+                meta: vec![],
+                lore: vec![],
+                contributor: vec![],
+            },
+            locked_tags: None,
+            change_seq: 0.0,
+            flags: Flags {
+                pending: false,
+                flagged: false,
+                note_locked: false,
+                status_locked: false,
+                rating_locked: false,
+                deleted: false,
+            },
+            rating: Rating::S,
+            fav_count: 0,
+            sources: vec![],
+            pools: vec![],
+            relationships: Relationships {
+                parent_id: None,
+                has_children: false,
+                has_active_children: false,
+                children: vec![],
+            },
+            approver_id: None,
+            uploader_id: 0,
+            description: None,
+            comment_count: 0,
+            is_favorited: false,
+            has_notes: false,
+            duration,
+        }
+    }
+
+    #[test]
+    fn media_type_from_extension() {
+        assert_eq!(post_with(Some("webm"), None).media_type(), "video");
+        assert_eq!(post_with(Some("mp4"), None).media_type(), "video");
+        assert_eq!(post_with(Some("gif"), None).media_type(), "animated");
+        assert_eq!(post_with(Some("png"), None).media_type(), "image");
+        assert_eq!(post_with(Some("jpg"), None).media_type(), "image");
+        // Extension match is case-insensitive.
+        assert_eq!(post_with(Some("WEBM"), None).media_type(), "video");
+    }
+
+    #[test]
+    fn media_type_falls_back_to_duration() {
+        // No usable extension but a positive duration → treat as video.
+        assert_eq!(post_with(None, Some(12.5)).media_type(), "video");
+        assert_eq!(post_with(None, Some(0.0)).media_type(), "image");
+        assert_eq!(post_with(None, None).media_type(), "image");
+    }
+
+    #[test]
+    fn is_animated_tracks_media_type() {
+        assert!(post_with(Some("gif"), None).is_animated());
+        assert!(post_with(Some("webm"), None).is_animated());
+        assert!(!post_with(Some("png"), None).is_animated());
+        assert!(!post_with(None, None).is_animated());
+    }
+
+    #[test]
+    fn rating_display() {
+        assert_eq!(Rating::S.to_string(), "s");
+        assert_eq!(Rating::Q.to_string(), "q");
+        assert_eq!(Rating::E.to_string(), "e");
+    }
+
+    #[test]
+    fn feed_interaction_type_display() {
+        assert_eq!(
+            FeedInteractionType::QualifiedImpression.to_string(),
+            "qualified_impression"
+        );
+        assert_eq!(FeedInteractionType::Open.to_string(), "open");
+        assert_eq!(FeedInteractionType::Hide.to_string(), "hide");
+        assert_eq!(FeedInteractionType::Unknown.to_string(), "unknown");
+    }
+
+    #[test]
+    fn feed_interaction_type_deserialization() {
+        let parse = |s: &str| serde_json::from_str::<FeedInteractionType>(s).unwrap();
+        assert_eq!(parse(r#""open""#), FeedInteractionType::Open);
+        assert_eq!(parse(r#""hide""#), FeedInteractionType::Hide);
+        assert_eq!(
+            parse(r#""qualified_impression""#),
+            FeedInteractionType::QualifiedImpression
+        );
+        // Unrecognised event types fall through to Unknown (#[serde(other)]).
+        assert_eq!(parse(r#""brand_new_event""#), FeedInteractionType::Unknown);
+    }
+}

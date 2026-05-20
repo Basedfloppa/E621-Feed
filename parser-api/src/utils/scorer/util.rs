@@ -174,3 +174,110 @@ impl MixWeights {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::borrow::Cow;
+
+    fn close(a: f32, b: f32) -> bool {
+        (a - b).abs() < 1e-4
+    }
+
+    #[test]
+    fn sigmoid_is_centred_and_monotone() {
+        assert!(close(sigmoid(0.0), 0.5));
+        assert!(sigmoid(20.0) > 0.99);
+        assert!(sigmoid(-20.0) < 0.01);
+        assert!(sigmoid(1.0) > sigmoid(-1.0));
+    }
+
+    #[test]
+    fn normalize_tag_lowercases_and_trims() {
+        assert_eq!(&*normalize_tag("Foo"), "foo");
+        assert_eq!(&*normalize_tag("  Bar_Baz  "), "bar_baz");
+        // Already-lowercase input is borrowed, not re-allocated.
+        assert!(matches!(normalize_tag("foo"), Cow::Borrowed(_)));
+        assert!(matches!(normalize_tag("Foo"), Cow::Owned(_)));
+    }
+
+    #[test]
+    fn one_sided_ratio_handles_zero_baseline() {
+        // No baseline + positive value → full marks; no value → neutral.
+        assert!(close(one_sided_ratio(3.0, 0.0, 0.5), 1.0));
+        assert!(close(one_sided_ratio(0.0, 0.0, 0.5), FEEDBACK_NEUTRAL));
+    }
+
+    #[test]
+    fn one_sided_ratio_caps_and_shapes() {
+        // value >= baseline saturates at 1.0.
+        assert!(close(one_sided_ratio(8.0, 4.0, 0.5), 1.0));
+        // exp = 0.5 reproduces the sqrt shape: (1/4)^0.5 = 0.5.
+        assert!(close(one_sided_ratio(1.0, 4.0, 0.5), 0.5));
+    }
+
+    #[test]
+    fn discrete_preference_smooth_basics() {
+        // No observations → neutral.
+        assert!(close(
+            discrete_preference_smooth(0, 0, 3, 1.0, 0.0),
+            FEEDBACK_NEUTRAL
+        ));
+        // Perfect match, no smoothing → 1.0.
+        assert!(close(discrete_preference_smooth(100, 100, 3, 0.0, 0.0), 1.0));
+        // Zero matches honours the floor.
+        assert!(close(discrete_preference_smooth(100, 0, 3, 0.0, 0.2), 0.2));
+    }
+
+    #[test]
+    fn blend_returns_zero_on_nonpositive_weights() {
+        assert_eq!(blend2(1.0, 0.0, 1.0, 0.0), 0.0);
+        assert_eq!(blend3(1.0, 0.0, 1.0, 0.0, 1.0, 0.0), 0.0);
+    }
+
+    #[test]
+    fn blend_is_weighted_average_clamped() {
+        assert!(close(blend2(0.0, 1.0, 1.0, 1.0), 0.5));
+        assert!(close(blend3(0.0, 1.0, 0.5, 1.0, 1.0, 1.0), 0.5));
+        // Out-of-range inputs clamp into [0, 1].
+        assert!(close(blend2(2.0, 1.0, 2.0, 1.0), 1.0));
+    }
+
+    #[test]
+    fn confidence_linear_and_curved() {
+        // p == 1 → n / (n + n0).
+        assert!(close(confidence(10.0, 10.0, 1.0), 0.5));
+        assert!(close(confidence(0.0, 10.0, 1.0), 0.0));
+        // p != 1 path stays in [0, 1] and is monotone in n.
+        assert!(close(confidence(10.0, 10.0, 2.0), 0.5));
+        assert!(confidence(100.0, 10.0, 2.0) > confidence(1.0, 10.0, 2.0));
+    }
+
+    #[test]
+    fn wilson_lower_bound_bounds_and_grows_with_evidence() {
+        assert_eq!(wilson_lower_bound(0.0, 0.0, WILSON_Z), 0.0);
+        let small = wilson_lower_bound(10.0, 10.0, WILSON_Z);
+        let large = wilson_lower_bound(1000.0, 1000.0, WILSON_Z);
+        // Same 100% observed rate, but more evidence → tighter (higher) bound.
+        assert!(small > 0.0 && small < 1.0);
+        assert!(large > small);
+    }
+
+    #[test]
+    fn ctr_score_falls_back_to_prior_without_data() {
+        assert!(close(ctr_score(0.0, 0.0, 0.0, 0.42, 0.0), 0.42));
+        // 8 up / 2 down, 10 impressions → 8 / (10 + 2) = 0.667.
+        assert!(close(ctr_score(8.0, 2.0, 10.0, 0.5, 0.0), 8.0 / 12.0));
+    }
+
+    #[test]
+    fn pair_aggregator_parsing() {
+        assert_eq!(PairAggregator::from_str("max"), PairAggregator::Max);
+        assert_eq!(PairAggregator::from_str("  MAX "), PairAggregator::Max);
+        assert_eq!(PairAggregator::from_str("geomean"), PairAggregator::GeoMean);
+        assert_eq!(PairAggregator::from_str("geo_mean"), PairAggregator::GeoMean);
+        assert_eq!(PairAggregator::from_str("mean"), PairAggregator::Mean);
+        // Unknown strings fall back to the Mean default.
+        assert_eq!(PairAggregator::from_str("nonsense"), PairAggregator::Mean);
+    }
+}

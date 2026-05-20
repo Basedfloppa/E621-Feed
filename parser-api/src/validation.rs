@@ -190,3 +190,149 @@ pub fn validate_feed_interaction(req: &FeedInteractionRequest) -> Result<(), Api
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::FeedInteractionType;
+
+    fn is_bad<T>(r: Result<T, ApiError>) -> bool {
+        matches!(r, Err(ApiError::BadRequest(_)))
+    }
+
+    #[test]
+    fn account_id_bounds() {
+        assert!(is_bad(validate_account_id(0)));
+        assert!(is_bad(validate_account_id(-1)));
+        assert!(is_bad(validate_account_id(MAX_ACCOUNT_ID + 1)));
+        assert!(validate_account_id(1).is_ok());
+        assert!(validate_account_id(MAX_ACCOUNT_ID).is_ok());
+    }
+
+    #[test]
+    fn owner_token_length_and_charset() {
+        assert!(is_bad(validate_owner_token(&"a".repeat(15))));
+        assert!(validate_owner_token(&"a".repeat(16)).is_ok());
+        assert!(validate_owner_token(&"a".repeat(128)).is_ok());
+        assert!(is_bad(validate_owner_token(&"a".repeat(129))));
+        assert!(validate_owner_token("AZaz09_-AZaz09_-").is_ok());
+        assert!(is_bad(validate_owner_token("token-with-bang!!token")));
+    }
+
+    #[test]
+    fn account_name_rules() {
+        assert!(is_bad(validate_account_name("   ")));
+        assert!(is_bad(validate_account_name("")));
+        assert!(validate_account_name("valid_user-name.1").is_ok());
+        assert!(validate_account_name(&"x".repeat(MAX_NAME_LEN)).is_ok());
+        assert!(is_bad(validate_account_name(&"x".repeat(MAX_NAME_LEN + 1))));
+        assert!(is_bad(validate_account_name("angle<bracket")));
+        // Non-ASCII glyphs are rejected.
+        assert!(is_bad(validate_account_name("naïve")));
+    }
+
+    #[test]
+    fn blacklist_text_rejects_abuse() {
+        assert!(validate_blacklist_text("rating:e\ncub").is_ok());
+        assert!(is_bad(validate_blacklist_text("ok\0nul")));
+        assert!(is_bad(validate_blacklist_text("<script>alert(1)</script>")));
+        assert!(is_bad(validate_blacklist_text("javascript:void")));
+        assert!(is_bad(validate_blacklist_text("a<b")));
+        assert!(is_bad(validate_blacklist_text(&"x".repeat(MAX_BLACKLIST_LEN + 1))));
+        assert!(is_bad(validate_blacklist_text(
+            &"y".repeat(MAX_BLACKLIST_LINE_LEN + 1)
+        )));
+    }
+
+    #[test]
+    fn normalize_blacklist_dedups_and_trims() {
+        // Case-insensitive dedup, whitespace trimmed, blank lines dropped;
+        // first-seen order and original casing are preserved.
+        assert_eq!(normalize_blacklist("a\n  B \n\na\nb"), "a\nB");
+        assert_eq!(normalize_blacklist(""), "");
+        assert_eq!(normalize_blacklist("   \n  "), "");
+        assert_eq!(normalize_blacklist("solo"), "solo");
+    }
+
+    #[test]
+    fn recommendations_page_bounds() {
+        assert!(validate_recommendations_page(None).is_ok());
+        assert!(validate_recommendations_page(Some(1)).is_ok());
+        assert!(validate_recommendations_page(Some(MAX_RECOMMENDATIONS_PAGE)).is_ok());
+        // Page 0 is invalid — e621 is 1-indexed and returns 410 for 0.
+        assert!(is_bad(validate_recommendations_page(Some(0))));
+        assert!(is_bad(validate_recommendations_page(Some(-3))));
+        assert!(is_bad(validate_recommendations_page(Some(
+            MAX_RECOMMENDATIONS_PAGE + 1
+        ))));
+    }
+
+    #[test]
+    fn affinity_threshold_rejects_non_finite_and_clamps() {
+        assert_eq!(validate_affinity_threshold(None).unwrap(), None);
+        assert!(validate_affinity_threshold(Some(f32::NAN)).is_err());
+        assert!(validate_affinity_threshold(Some(f32::INFINITY)).is_err());
+        assert_eq!(validate_affinity_threshold(Some(0.5)).unwrap(), Some(0.5));
+        // Out-of-range values clamp into [0, 1].
+        assert_eq!(validate_affinity_threshold(Some(1.7)).unwrap(), Some(1.0));
+        assert_eq!(validate_affinity_threshold(Some(-0.4)).unwrap(), Some(0.0));
+    }
+
+    #[test]
+    fn device_scoped_account_validation() {
+        let ok = DeviceScopedAccount {
+            id: 42,
+            name: "tester".to_string(),
+            blacklist: Some("rating:e".to_string()),
+        };
+        assert!(validate_device_scoped_account(&ok).is_ok());
+
+        let bad_id = DeviceScopedAccount { id: 0, ..ok.clone() };
+        assert!(is_bad(validate_device_scoped_account(&bad_id)));
+
+        let bad_name = DeviceScopedAccount {
+            name: "bad<name".to_string(),
+            ..ok.clone()
+        };
+        assert!(is_bad(validate_device_scoped_account(&bad_name)));
+
+        // Omitted blacklist (None) is accepted — server applies its default.
+        let no_blacklist = DeviceScopedAccount {
+            blacklist: None,
+            ..ok.clone()
+        };
+        assert!(validate_device_scoped_account(&no_blacklist).is_ok());
+    }
+
+    #[test]
+    fn blacklist_payload_validation() {
+        assert!(validate_blacklist_payload(&BlacklistPayload { blacklist: None }).is_ok());
+        assert!(validate_blacklist_payload(&BlacklistPayload {
+            blacklist: Some("cub".to_string()),
+        })
+        .is_ok());
+        assert!(is_bad(validate_blacklist_payload(&BlacklistPayload {
+            blacklist: Some("<script".to_string()),
+        })));
+    }
+
+    #[test]
+    fn feed_interaction_validation() {
+        let ok = FeedInteractionRequest {
+            account_id: 7,
+            post_id: 1234,
+            event_type: FeedInteractionType::Open,
+            position: 3,
+            session_id: "sess-1".to_string(),
+        };
+        assert!(validate_feed_interaction(&ok).is_ok());
+        assert!(is_bad(validate_feed_interaction(&FeedInteractionRequest {
+            account_id: 0,
+            ..ok.clone()
+        })));
+        assert!(is_bad(validate_feed_interaction(&FeedInteractionRequest {
+            session_id: "s".repeat(MAX_SESSION_ID_LEN + 1),
+            ..ok.clone()
+        })));
+    }
+}

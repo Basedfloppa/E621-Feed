@@ -519,3 +519,20 @@ pub async fn get_posts(account: &TruncatedAccount, page: Option<i32>) -> Result<
     info!("Fetched {} posts", posts.len());
     Ok(posts)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::normalise_blacklist;
+
+    #[test]
+    fn normalise_blacklist_sorts_and_drops_blanks() {
+        assert_eq!(normalise_blacklist(""), "");
+        assert_eq!(normalise_blacklist("   \n\n  "), "");
+        assert_eq!(normalise_blacklist("solo"), "solo");
+        // Lines are trimmed, sorted, and re-joined with the " -" separator
+        // so two blacklists differing only in line order share a cache key.
+        assert_eq!(normalise_blacklist("  b \n a \n c "), "a -b -c");
+        assert_eq!(normalise_blacklist("c\nb\na"), "a -b -c");
+        assert_eq!(normalise_blacklist("z\n\n\ny"), "y -z");
+    }
+}

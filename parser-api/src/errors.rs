@@ -107,3 +107,51 @@ impl OpenApiResponderInner for ApiError {
         Ok(responses)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn from_string_promotes_missing_rows_to_not_found() {
+        assert!(matches!(
+            ApiError::from("no account found for id 5".to_string()),
+            ApiError::NotFound(_)
+        ));
+        // Heuristic is case-insensitive.
+        assert!(matches!(
+            ApiError::from("Query Returned No Rows".to_string()),
+            ApiError::NotFound(_)
+        ));
+        // Everything else is a 500.
+        assert!(matches!(
+            ApiError::from("disk on fire".to_string()),
+            ApiError::Internal(_)
+        ));
+    }
+
+    #[test]
+    fn from_str_matches_from_string() {
+        assert!(matches!(
+            ApiError::from("no account found"),
+            ApiError::NotFound(_)
+        ));
+        assert!(matches!(ApiError::from("boom"), ApiError::Internal(_)));
+    }
+
+    #[test]
+    fn status_codes_map_to_http() {
+        assert_eq!(ApiError::BadRequest(String::new()).status().code, 400);
+        assert_eq!(ApiError::Unauthorized(String::new()).status().code, 401);
+        assert_eq!(ApiError::Forbidden(String::new()).status().code, 403);
+        assert_eq!(ApiError::NotFound(String::new()).status().code, 404);
+        assert_eq!(ApiError::TooManyRequests(String::new()).status().code, 429);
+        assert_eq!(ApiError::Internal(String::new()).status().code, 500);
+    }
+
+    #[test]
+    fn message_returns_inner_text() {
+        assert_eq!(ApiError::BadRequest("nope".to_string()).message(), "nope");
+        assert_eq!(ApiError::Internal("kaboom".to_string()).message(), "kaboom");
+    }
+}
