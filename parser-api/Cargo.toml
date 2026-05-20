@@ -32,17 +32,17 @@ arc-swap = "1"
 rocket_okapi = { version = "0.9", features = ["swagger"] }
 schemars = { version = "0.8", features = ["chrono"] }
 rayon = "1"
+compact_str = "0.9"
 getrandom = "0.2"
 
-# jemalloc — opt-in via `--features jemalloc`. glibc's default
+# jemalloc — required for any non-trivial calibrate run. glibc's default
 # ptmalloc holds many small-allocation arenas hostage on the calibrate
-# hydration path (each account churns ~10K small `String` allocations
-# from `Post` tags/description/sources), pushing RSS to ~20 MB per
-# fixture. jemalloc trims arenas aggressively and brings RSS within
-# ~1.5× of the actual data footprint.
+# hydration + grid path (each account churns ~10K small `String`
+# allocations from `Post` tags/description/sources), and never returns
+# them to the kernel.
 #
-# Default-off because building jemalloc-sys needs `make` + a C
-# toolchain on the build host. Enable with:
+# Default-off only because building jemalloc-sys needs `make` + a C
+# toolchain on the build host. Always build with:
 #   cargo build --release --bin calibrate --features jemalloc
 # If that's not an option, `MALLOC_ARENA_MAX=2 ./calibrate ...` cuts
 # glibc fragmentation roughly in half at runtime without a rebuild.

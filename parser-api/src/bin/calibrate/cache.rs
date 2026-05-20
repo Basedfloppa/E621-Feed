@@ -29,7 +29,8 @@ use chrono::{DateTime, Utc};
 use rayon::prelude::*;
 
 use e621_account_parser_api::utils::{
-    diversify_indices, CachedPostFeatures, Priors, ScoringContext,
+    context_fingerprint, diversify_indices, CachedPostFeatures, ContextBase, Priors,
+    ScoringContext,
 };
 
 use crate::dataset::EvalDataset;
@@ -95,8 +96,14 @@ pub(crate) struct ChannelScores {
 /// Per-account ranked entries. Keeps post ids / positives parallel to
 /// channel scores so a partial-mask probe can reblend them without
 /// re-reading the dataset.
+///
+/// `context_base` holds the pre-computed account data (user/feedback
+/// HashMaps) from the prior probe. If the current probe's priors have the
+/// same fingerprint, the base can be reused via [`ScoringContext::from_base`]
+/// instead of rebuilding the expensive hashmaps from scratch.
 pub(crate) struct AccountChannelCache {
     pub(crate) channels: Vec<ChannelScores>,
+    pub(crate) context_base: Option<ContextBase>,
 }
 
 pub(crate) struct ScoreCache {
@@ -183,27 +190,47 @@ pub(crate) fn score_with_cache(
         0
     };
 
+    let fp = context_fingerprint(priors);
     let per_account: Vec<(AccountChannelCache, (f64, f64, f64))> = pool().install(|| {
         dataset
             .accounts
             .par_iter()
             .enumerate()
             .map(|(acc_idx, fx)| {
-                let ctx = ScoringContext::new(
-                    &fx.tags,
-                    priors,
-                    &dataset.idf,
-                    &fx.profile,
-                    &dataset.global_relation,
-                    &fx.user_relation,
-                );
+                let prev_acc = prev.map(|c| &c.accounts[acc_idx]);
+
+                // ContextBase cache (Point 1): if the prior probe's base
+                // has the same fingerprint, reuse it via `from_base`.
+                // Otherwise build fresh.
+                let prev_base = prev_acc
+                    .and_then(|pa| pa.context_base.as_ref())
+                    .filter(|b| b.fingerprint() == fp)
+                    .cloned();
+                let ctx = if let Some(base) = prev_base {
+                    ScoringContext::from_base(
+                        base,
+                        priors,
+                        &dataset.idf,
+                        &fx.profile,
+                        &dataset.global_relation,
+                        &fx.user_relation,
+                    )
+                } else {
+                    // Full rebuild — includes ContextBase::new() internally.
+                    ScoringContext::new(
+                        &fx.tags,
+                        priors,
+                        &dataset.idf,
+                        &fx.profile,
+                        &dataset.global_relation,
+                        &fx.user_relation,
+                    )
+                };
 
                 let n_test = fx.test_features.len();
                 let n_neg = fx.neg_features.len();
                 let total_posts = n_test + n_neg;
                 let mut next_channels: Vec<ChannelScores> = Vec::with_capacity(total_posts);
-
-                let prev_acc = prev.map(|c| &c.accounts[acc_idx]);
 
                 // Channel recompute (cache-aware) for both buckets, then
                 // a final blend per post. Common to both code paths
@@ -257,9 +284,21 @@ pub(crate) fn score_with_cache(
                     mrr_pub(&scored),
                 );
 
+                // Build the new ContextBase for the output cache.
+                // When the base was reused (fingerprint matched), clone the
+                // previous base — avoids reconstructing the HashMaps.
+                let new_base = prev_acc
+                    .and_then(|pa| pa.context_base.as_ref())
+                    .filter(|b| b.fingerprint() == fp)
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        ContextBase::new(&fx.tags, priors, &dataset.idf, &fx.profile)
+                    });
+
                 (
                     AccountChannelCache {
                         channels: next_channels,
+                        context_base: Some(new_base),
                     },
                     metrics_tuple,
                 )

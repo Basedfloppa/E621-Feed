@@ -15,6 +15,8 @@
 //! `/recommendations` path still uses `&Post`; cached features are only
 //! built where the same post is scored many times (calibrate grid probes).
 
+use compact_str::CompactString;
+
 use chrono::{DateTime, Utc};
 
 use crate::models::{Post, Rating};
@@ -30,7 +32,7 @@ pub struct CachedTag {
     /// `Group` enum value cast to `u8` (0..=6).
     pub group: u8,
     /// Lowercased, trimmed tag name.
-    pub lc: String,
+    pub lc: CompactString,
     /// Raw document-frequency from `IdfIndex` at prep time. Used to
     /// reconstruct IDF without re-looking-up the HashMap on every probe.
     pub df_raw: i64,
@@ -98,10 +100,10 @@ impl CachedPostFeatures {
                 if trimmed.is_empty() {
                     continue;
                 }
-                let lc: String = if trimmed.bytes().any(|b| b.is_ascii_uppercase()) {
-                    trimmed.to_ascii_lowercase()
+                let lc: CompactString = if trimmed.bytes().any(|b| b.is_ascii_uppercase()) {
+                    trimmed.to_ascii_lowercase().into()
                 } else {
-                    trimmed.to_owned()
+                    CompactString::new(trimmed)
                 };
                 let df_raw = idf.df_for(&lc);
                 let global_tid = global_relation.tag_id(g, lc.as_str());

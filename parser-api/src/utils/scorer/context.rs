@@ -32,16 +32,81 @@ pub struct ScoringContext<'a> {
     pub(super) mix: MixWeights,
 }
 
-impl<'a> ScoringContext<'a> {
+/// Pre-computed per-account data whose construction is expensive (HashMap
+/// builds, per-tag IDF computations, BM25 saturation). Cached across grid
+/// probes by the calibrate harness so probes that don't touch IDF params
+/// or group weights can skip rebuilding the `user` / `feedback` maps.
+///
+/// `fingerprint` is a hash of the priors fields that affect the base:
+/// IDF parameters, group weights, `freq_alpha`, `coldstart_n0`, and
+/// `confidence_steepness`. If the fingerprint matches the current probe's
+/// priors, the base can be reused; otherwise it must be rebuilt.
+///
+/// All fields are `pub(super)` — the calibrate binary accesses the struct
+/// through [`ScoringContext::from_base`] which moves the fields out.
+#[derive(Clone)]
+pub struct ContextBase {
+    pub(super) user: [HashMap<String, f32>; GROUP_COUNT],
+    pub(super) user_tag_count: u32,
+    pub(super) u_norm: f32,
+    pub(super) feedback: [HashMap<String, CompactFeedback>; GROUP_COUNT],
+    pub(super) rating_total: i64,
+    pub(super) media_total: i64,
+    pub(super) personal_confidence: f32,
+    pub(super) user_base_positive_rate: f32,
+    pub(super) fingerprint: u64,
+}
+
+/// Hash of the priors fields that affect [`ContextBase`] construction.
+/// Used by the calibrate grid to decide whether a cached base is still
+/// fresh for the current probe's priors.
+pub fn context_fingerprint(p: &Priors) -> u64 {
+    let mut h: u64 = 0;
+    // Fold each relevant f32 field via its raw bits.
+    macro_rules! mix {
+        ($val:expr) => {
+            h = h.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+            h ^= ($val as u32) as u64;
+        };
+    }
+    // IDF params (M_SIM)
+    mix!(p.idf_lambda.to_bits());
+    mix!(p.idf_alpha.to_bits());
+    mix!(if p.idf_lambda_meta.is_nan() {
+        p.idf_lambda.to_bits()
+    } else {
+        p.idf_lambda_meta.to_bits()
+    });
+    mix!(p.df_floor.to_bits());
+    mix!(p.idf_max.to_bits());
+    mix!(p.idf_rsj_smoothing.to_bits());
+    mix!(p.bm25_k.to_bits());
+    mix!(p.freq_alpha.to_bits());
+    // Group weights (M_GROUP_W)
+    mix!(p.group_w_artist.to_bits());
+    mix!(p.group_w_character.to_bits());
+    mix!(p.group_w_copyright.to_bits());
+    mix!(p.group_w_species.to_bits());
+    mix!(p.group_w_general.to_bits());
+    mix!(p.group_w_lore.to_bits());
+    // Confidence params (M_CONFIDENCE_DERIVED)
+    mix!(p.coldstart_n0.to_bits());
+    mix!(p.confidence_steepness.to_bits());
+    h
+}
+
+impl ContextBase {
+    /// Build a new ContextBase from account profile data + current priors.
+    /// This is the expensive path: per-tag `normalize_tag`, IDF computation,
+    /// BM25 saturation, `powf(freq_alpha)`, and HashMap insertion for every
+    /// tag in the account's tag-counts and feedback profile.
     pub fn new(
         account_tag_counts: &[TagCount],
-        priors: &'a Priors,
-        idf: &'a IdfIndex,
-        profile: &'a AccountPreferenceProfile,
-        global_relation: &'a TagRelationGraph,
-        user_relation: &'a TagRelationGraph,
+        priors: &Priors,
+        idf: &IdfIndex,
+        profile: &AccountPreferenceProfile,
     ) -> Self {
-        // Group weights live in Priors (Class B v5.3); meta is pinned 0.
+        // Group weights affect the `user` map (multiply into per-tag weight).
         let mut group_wts = [0.0f32; GROUP_COUNT];
         group_wts[Group::Artist as usize] = priors.group_w_artist;
         group_wts[Group::Character as usize] = priors.group_w_character;
@@ -73,7 +138,6 @@ impl<'a> ScoringContext<'a> {
             }
             let tlc = normalize_tag(&t.name);
             let idf_w = idf.idf_tempered(&tlc, df_floor, idf_max, rsj, lambda, alpha);
-            // BM25 saturation on per-tag fav frequency.
             let tf = (t.count as f32).max(0.0);
             let saturated = (tf * (bm25_k + 1.0)) / (tf + bm25_k);
             let w = saturated.powf(priors.freq_alpha) * g * idf_w;
@@ -81,6 +145,7 @@ impl<'a> ScoringContext<'a> {
                 *user[group as usize].entry(tlc.into_owned()).or_insert(0.0) += w;
             }
         }
+
         let mut user_tag_count: u32 = 0;
         for map in &user {
             for &w in map.values() {
@@ -89,6 +154,7 @@ impl<'a> ScoringContext<'a> {
             user_tag_count += map.len() as u32;
         }
 
+        // Feedback maps (from profile — never changes between probes).
         let mut total_pos = 0.0f32;
         let mut total_neg = 0.0f32;
         let mut feedback: [HashMap<String, CompactFeedback>; GROUP_COUNT] = Default::default();
@@ -125,6 +191,65 @@ impl<'a> ScoringContext<'a> {
             0.5
         };
 
+        let fingerprint = context_fingerprint(priors);
+
+        Self {
+            user,
+            user_tag_count,
+            u_norm: u_norm_sq.sqrt(),
+            feedback,
+            rating_total,
+            media_total,
+            personal_confidence,
+            user_base_positive_rate,
+            fingerprint,
+        }
+    }
+
+    /// The fingerprint hash this base was built from.
+    pub fn fingerprint(&self) -> u64 {
+        self.fingerprint
+    }
+}
+
+impl<'a> ScoringContext<'a> {
+    /// Full constructor — builds the expensive ContextBase internally.
+    /// Prefer [`Self::from_base`] when a cached base is available.
+    pub fn new(
+        account_tag_counts: &[TagCount],
+        priors: &'a Priors,
+        idf: &'a IdfIndex,
+        profile: &'a AccountPreferenceProfile,
+        global_relation: &'a TagRelationGraph,
+        user_relation: &'a TagRelationGraph,
+    ) -> Self {
+        let base = ContextBase::new(account_tag_counts, priors, idf, profile);
+        Self::from_base(base, priors, idf, profile, global_relation, user_relation)
+    }
+
+    /// Fast-path constructor: takes ownership of a pre-built [`ContextBase`]
+    /// and wraps it into a full ScoringContext. Only the cheap fields
+    /// (`group_wts`, `pair_aggregator`, `mix`) are recomputed from the
+    /// current priors — the expensive `user` / `feedback` HashMaps are
+    /// moved in from the base.
+    pub fn from_base(
+        base: ContextBase,
+        priors: &'a Priors,
+        idf: &'a IdfIndex,
+        profile: &'a AccountPreferenceProfile,
+        global_relation: &'a TagRelationGraph,
+        user_relation: &'a TagRelationGraph,
+    ) -> Self {
+        // Group weights are cheap to recompute (7 assignments).
+        let mut group_wts = [0.0f32; GROUP_COUNT];
+        group_wts[Group::Artist as usize] = priors.group_w_artist;
+        group_wts[Group::Character as usize] = priors.group_w_character;
+        group_wts[Group::Copyright as usize] = priors.group_w_copyright;
+        group_wts[Group::Species as usize] = priors.group_w_species;
+        group_wts[Group::General as usize] = priors.group_w_general;
+        group_wts[Group::Lore as usize] = priors.group_w_lore;
+        group_wts[Group::Meta as usize] = 0.0;
+
         Self {
             priors,
             profile,
@@ -132,16 +257,16 @@ impl<'a> ScoringContext<'a> {
             global_relation,
             user_relation,
             group_wts,
-            user,
-            user_tag_count,
             pair_aggregator: PairAggregator::from_str(&priors.tag_relation_pair_aggregator),
-            u_norm: u_norm_sq.sqrt(),
-            feedback,
-            rating_total,
-            media_total,
-            personal_confidence,
-            user_base_positive_rate,
             mix: MixWeights::from_priors(priors),
+            user: base.user,
+            user_tag_count: base.user_tag_count,
+            u_norm: base.u_norm,
+            feedback: base.feedback,
+            rating_total: base.rating_total,
+            media_total: base.media_total,
+            personal_confidence: base.personal_confidence,
+            user_base_positive_rate: base.user_base_positive_rate,
         }
     }
 

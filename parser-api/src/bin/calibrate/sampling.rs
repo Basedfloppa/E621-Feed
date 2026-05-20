@@ -78,19 +78,23 @@ pub(crate) fn split_train_test_time(
 }
 
 /// Uniform random sampling without replacement (legacy).
+/// `scratch` is a reusable buffer for exclusion + chosen tracking.
 pub(crate) fn sample_negatives_uniform(
     catalog: &[i64],
     excluded: &[i64],
     target: usize,
+    scratch: &mut HashSet<i64>,
 ) -> Vec<i64> {
-    let excl: HashSet<i64> = excluded.iter().copied().collect();
+    scratch.clear();
+    scratch.extend(excluded.iter().copied());
     if catalog.is_empty() {
         return Vec::new();
     }
     let mut rng = NEG_SAMPLE_SEED;
     let n = catalog.len();
-    let mut chosen: HashSet<i64> = HashSet::with_capacity(target);
     let mut out: Vec<i64> = Vec::with_capacity(target);
+    // Reserve enough capacity so insert never rehashes mid-loop.
+    scratch.reserve(target.saturating_sub(scratch.len()));
     let mut tries = 0usize;
     let max_tries = target.saturating_mul(10).max(100);
     while out.len() < target && tries < max_tries {
@@ -99,7 +103,9 @@ pub(crate) fn sample_negatives_uniform(
         rng ^= rng << 17;
         let idx = (rng as usize) % n;
         let id = catalog[idx];
-        if !excl.contains(&id) && chosen.insert(id) {
+        // `insert` returns true only when the ID wasn't already in the set
+        // (neither excluded nor previously chosen).
+        if scratch.insert(id) {
             out.push(id);
         }
         tries += 1;
@@ -110,14 +116,18 @@ pub(crate) fn sample_negatives_uniform(
 /// Mixed hard-negatives: 40% uniform + 30% popularity-decile-matched +
 /// 30% age-window-matched per held-out positive. Deterministic via
 /// `NEG_SAMPLE_SEED ^ account_id`.
+/// `scratch` is a reusable buffer for exclusion + chosen tracking.
 pub(crate) fn sample_negatives_mixed(
     catalog: &CatalogIndex,
     excluded: &[i64],
     test_posts: &[Post],
     target: usize,
     account_id: i32,
+    scratch: &mut HashSet<i64>,
 ) -> Vec<i64> {
-    let excl: HashSet<i64> = excluded.iter().copied().collect();
+    scratch.clear();
+    scratch.extend(excluded.iter().copied());
+    scratch.reserve(target);
     let n = catalog.ids.len();
     if n == 0 || test_posts.is_empty() {
         return Vec::new();
@@ -128,7 +138,6 @@ pub(crate) fn sample_negatives_mixed(
     let target_time = target.saturating_sub(target_uniform + target_pop);
 
     let mut rng: u64 = NEG_SAMPLE_SEED ^ (account_id as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
-    let mut chosen: HashSet<i64> = HashSet::with_capacity(target);
     let mut out: Vec<i64> = Vec::with_capacity(target);
 
     let next = |rng: &mut u64| -> usize {
@@ -145,7 +154,7 @@ pub(crate) fn sample_negatives_mixed(
         while out.len() < target_uniform && tries < max_tries {
             let idx = next(&mut rng) % n;
             let id = catalog.ids[idx];
-            if !excl.contains(&id) && chosen.insert(id) {
+            if scratch.insert(id) {
                 out.push(id);
             }
             tries += 1;
@@ -172,7 +181,7 @@ pub(crate) fn sample_negatives_mixed(
             if hi_idx > lo_idx {
                 let pick = catalog.by_fav[lo_idx + (next(&mut rng) % (hi_idx - lo_idx))] as usize;
                 let id = catalog.ids[pick];
-                if !excl.contains(&id) && chosen.insert(id) {
+                if scratch.insert(id) {
                     out.push(id);
                 }
             }
@@ -200,7 +209,7 @@ pub(crate) fn sample_negatives_mixed(
             if hi_idx > lo_idx {
                 let pick = catalog.by_age[lo_idx + (next(&mut rng) % (hi_idx - lo_idx))] as usize;
                 let id = catalog.ids[pick];
-                if !excl.contains(&id) && chosen.insert(id) {
+                if scratch.insert(id) {
                     out.push(id);
                 }
             }
@@ -215,7 +224,7 @@ pub(crate) fn sample_negatives_mixed(
         while out.len() < target && tries < max_tries {
             let idx = next(&mut rng) % n;
             let id = catalog.ids[idx];
-            if !excl.contains(&id) && chosen.insert(id) {
+            if scratch.insert(id) {
                 out.push(id);
             }
             tries += 1;

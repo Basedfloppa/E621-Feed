@@ -1,8 +1,11 @@
 //! Eval-dataset hydration: catalog index + per-account fixtures.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use chrono::{DateTime, Utc};
+use rayon::prelude::*;
 use rusqlite::params;
 
 use e621_account_parser_api::db;
@@ -18,6 +21,14 @@ use crate::options::{GridOptions, NegMode, SplitStrategy};
 use crate::sampling::{
     sample_negatives_mixed, sample_negatives_uniform, split_train_test, split_train_test_time,
 };
+
+// Thread-local scratch HashSet reused across account hydrations within
+// the same rayon thread. Significantly reduces allocator churn compared
+// to allocating a new HashSet per account (Point 5).
+thread_local! {
+    static HYDRATION_SCRATCH: RefCell<std::collections::HashSet<i64>> =
+        RefCell::new(std::collections::HashSet::with_capacity(4096));
+}
 
 /// Best-effort current RSS in MB. Returns `None` on platforms without
 /// `/proc/self/statm` (i.e. anything but Linux). Two values come back:
@@ -193,7 +204,6 @@ pub(crate) fn prepare_eval_dataset(opts: &GridOptions) -> anyhow::Result<EvalDat
         }
     };
 
-    let t = std::time::Instant::now();
     let account_ids = eligible_accounts(min_favs as i64, max_accounts)?;
     eprintln!(
         "[prep] {} eligible accounts (top by fav count, after min_favs={} filter)",
@@ -201,162 +211,173 @@ pub(crate) fn prepare_eval_dataset(opts: &GridOptions) -> anyhow::Result<EvalDat
         min_favs
     );
     let total_accounts = account_ids.len();
-    let mut fixtures = Vec::with_capacity(account_ids.len());
-    // Heartbeat cadence: report on percentiles + every N to surface stalls
-    // on individual large accounts.
     let report_every = (total_accounts / 20).max(5);
-    let mut posts_hydrated: usize = 0;
+    let counter = AtomicUsize::new(0);
+    let posts_counter = AtomicUsize::new(0);
+    let t_start = std::time::Instant::now();
 
-    for (i, account_id) in account_ids.into_iter().enumerate() {
-        let (train_ids, test_ids) = if matches!(opts.split, SplitStrategy::TimeCausal) {
-            let favs = account_favorite_ids_with_ts(account_id)?;
-            if favs.len() < min_favs {
-                continue;
+    let fixtures: Vec<AccountFixture> = account_ids
+        .into_par_iter()
+        .filter_map(|account_id| {
+            let (train_ids, test_ids) = if matches!(opts.split, SplitStrategy::TimeCausal) {
+                let favs = match account_favorite_ids_with_ts(account_id) {
+                    Ok(f) => f,
+                    Err(e) => {
+                        eprintln!("fav query (ts) for {account_id} failed: {e}");
+                        return None;
+                    }
+                };
+                if favs.len() < min_favs {
+                    return None;
+                }
+                split_train_test_time(&favs, test_fraction)
+            } else {
+                let fav_ids = match account_favorite_ids(account_id) {
+                    Ok(f) => f,
+                    Err(e) => {
+                        eprintln!("fav query for {account_id} failed: {e}");
+                        return None;
+                    }
+                };
+                if fav_ids.len() < min_favs {
+                    return None;
+                }
+                split_train_test(account_id, &fav_ids, test_fraction, opts.split)
+            };
+            if test_ids.is_empty() {
+                return None;
             }
-            split_train_test_time(&favs, test_fraction)
-        } else {
-            let fav_ids = account_favorite_ids(account_id)?;
-            if fav_ids.len() < min_favs {
-                continue;
+
+            let train_posts = match db::hydrate_posts_by_ids(&train_ids) {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("hydrate train for {account_id} failed: {e}");
+                    return None;
+                }
+            };
+            let test_posts = match db::hydrate_posts_by_ids(&test_ids) {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("hydrate test for {account_id} failed: {e}");
+                    return None;
+                }
+            };
+            if train_posts.len() < min_favs / 2 || test_posts.is_empty() {
+                return None;
             }
-            split_train_test(account_id, &fav_ids, test_fraction, opts.split)
-        };
-        if test_ids.is_empty() {
-            continue;
-        }
 
-        let train_posts = match db::hydrate_posts_by_ids(&train_ids) {
-            Ok(p) => p,
-            Err(e) => {
-                eprintln!("hydrate train for {account_id} failed: {e}");
-                continue;
-            }
-        };
-        let test_posts = match db::hydrate_posts_by_ids(&test_ids) {
-            Ok(p) => p,
-            Err(e) => {
-                eprintln!("hydrate test for {account_id} failed: {e}");
-                continue;
-            }
-        };
-        if train_posts.len() < min_favs / 2 || test_posts.is_empty() {
-            continue;
-        }
+            let profile = build_profile(&train_posts);
+            let tags = build_tag_counts(&train_posts);
 
-        let profile = build_profile(&train_posts);
-        let tags = build_tag_counts(&train_posts);
+            let target_negs = test_posts.len() * negative_ratio;
+            // Negatives must avoid both train and test (the user already favourited them).
+            let mut excluded_ids: Vec<i64> = Vec::with_capacity(train_ids.len() + test_ids.len());
+            excluded_ids.extend_from_slice(&train_ids);
+            excluded_ids.extend_from_slice(&test_ids);
+            // Thread-local scratch buffer reuse (Point 5): avoids per-account HashSet alloc.
+            let neg_ids = HYDRATION_SCRATCH.with(|cell| {
+                let mut scratch = cell.borrow_mut();
+                scratch.clear();
+                match opts.neg_mode {
+                    NegMode::Uniform => {
+                        sample_negatives_uniform(&catalog.ids, &excluded_ids, target_negs, &mut scratch)
+                    }
+                    NegMode::Mixed => sample_negatives_mixed(
+                        &catalog,
+                        &excluded_ids,
+                        &test_posts,
+                        target_negs,
+                        account_id,
+                        &mut scratch,
+                    ),
+                }
+            });
+            let mut candidate_ids = neg_ids;
+            // Safety filter: sampling functions should already exclude train+test,
+            // but this catches any edge-case leaks (e.g. when target exceeds catalog size).
+            candidate_ids.retain(|id| !excluded_ids.contains(id));
+            let neg_posts = db::hydrate_posts_by_ids(&candidate_ids).unwrap_or_default();
+            let test_count = test_posts.len();
 
-        let test_id_set: std::collections::HashSet<i64> =
-            test_posts.iter().map(|p| p.id).collect();
-        let target_negs = test_posts.len() * negative_ratio;
-        // Negatives must avoid both train and test (the user already favourited them).
-        let mut excluded_ids: Vec<i64> = Vec::with_capacity(train_ids.len() + test_ids.len());
-        excluded_ids.extend_from_slice(&train_ids);
-        excluded_ids.extend_from_slice(&test_ids);
-        let neg_ids = match opts.neg_mode {
-            NegMode::Uniform => {
-                sample_negatives_uniform(&catalog.ids, &excluded_ids, target_negs)
-            }
-            NegMode::Mixed => sample_negatives_mixed(
-                &catalog,
-                &excluded_ids,
-                &test_posts,
-                target_negs,
-                account_id,
-            ),
-        };
-        let mut candidate_ids = neg_ids;
-        candidate_ids.retain(|id| !test_id_set.contains(id));
-        let neg_posts = db::hydrate_posts_by_ids(&candidate_ids).unwrap_or_default();
-        let test_count = test_posts.len();
+            posts_counter.fetch_add(test_posts.len() + neg_posts.len(), Ordering::Relaxed);
 
-        posts_hydrated += test_posts.len() + neg_posts.len();
+            // Per-account user tag-relation graph (cooccurrence on train_posts).
+            // Built before features so each cached tag carries a `user_tid`.
+            let mut user_relation = TagRelationGraph::from_train_posts(&train_posts);
+            // Drop the heavy train-side `Post` structs early.
+            drop(train_posts);
 
-        // Per-account user tag-relation graph (cooccurrence on train_posts).
-        // Built before features so each cached tag carries a `user_tid`.
-        let mut user_relation = TagRelationGraph::from_train_posts(&train_posts);
-        // Drop the heavy train-side `Post` structs — graph + profile +
-        // tag-counts already extracted everything we need from them.
-        // Cuts per-iteration peak by the size of `train_posts` while
-        // we still hold test/neg in scope.
-        drop(train_posts);
-
-        // Pre-resolve post tags once so the grid scoring loop reads
-        // (group, lc, df_raw, global_tid, user_tid) directly without
-        // HashMap lookups against IDF / relation graphs per probe.
-        let test_features: Vec<CachedPostFeatures> = test_posts
-            .iter()
-            .map(|p| {
-                CachedPostFeatures::from_post_with_user(p, &idf, &global_relation, Some(&user_relation))
-            })
-            .collect();
-        let neg_features: Vec<CachedPostFeatures> = neg_posts
-            .iter()
-            .map(|p| {
-                CachedPostFeatures::from_post_with_user(p, &idf, &global_relation, Some(&user_relation))
-            })
-            .collect();
-        // Compact pair-storage HashMap → sorted Vec, drop tag_to_id,
-        // prune singleton (cooc=1) pairs and pairs neither endpoint of
-        // which appears in (test ∪ neg). The prod `tag_relation_min_cooc=2`
-        // already discards singletons at scoring time; pairs unreachable
-        // from the scoring set will never be queried by
-        // `tag_relation_fit_cached` (it iterates pairs of tags from the
-        // current post). Combined: ~10-20× per-account graph memory drop.
-        let mut queryable: std::collections::HashSet<
-            e621_account_parser_api::utils::TagId,
-        > = std::collections::HashSet::new();
-        for cf in test_features.iter().chain(neg_features.iter()) {
-            for ct in &cf.tags {
-                if let Some(tid) = ct.user_tid {
-                    queryable.insert(tid);
+            // Pre-resolve post tags once so the grid scoring loop reads
+            // (group, lc, df_raw, global_tid, user_tid) directly without
+            // HashMap lookups against IDF / relation graphs per probe.
+            let test_features: Vec<CachedPostFeatures> = test_posts
+                .iter()
+                .map(|p| {
+                    CachedPostFeatures::from_post_with_user(p, &idf, &global_relation, Some(&user_relation))
+                })
+                .collect();
+            let neg_features: Vec<CachedPostFeatures> = neg_posts
+                .iter()
+                .map(|p| {
+                    CachedPostFeatures::from_post_with_user(p, &idf, &global_relation, Some(&user_relation))
+                })
+                .collect();
+            // Compact pair-storage HashMap → sorted Vec, drop tag_to_id,
+            // prune singleton (cooc=1) pairs and pairs neither endpoint of
+            // which appears in (test ∪ neg).
+            let mut queryable: std::collections::HashSet<
+                e621_account_parser_api::utils::TagId,
+            > = std::collections::HashSet::new();
+            for cf in test_features.iter().chain(neg_features.iter()) {
+                for ct in &cf.tags {
+                    if let Some(tid) = ct.user_tid {
+                        queryable.insert(tid);
+                    }
                 }
             }
-        }
-        user_relation.freeze_with_query_set(&queryable, 2);
-        // MMR features only when actually needed — they double the per-post
-        // memory footprint and the non-diversify path never reads them.
-        let diversity_features: Vec<DiversityFeatures> = if opts.diversify {
-            let mut v = Vec::with_capacity(test_posts.len() + neg_posts.len());
-            v.extend(test_posts.iter().map(DiversityFeatures::from_post));
-            v.extend(neg_posts.iter().map(DiversityFeatures::from_post));
-            v
-        } else {
-            Vec::new()
-        };
-        // Drop the heavy `Post` structs (tags as Vec<String>, description,
-        // sources, pools, …) now that everything we need is extracted.
-        // Keeps the per-account steady-state under what `Vec<Post>` cost.
-        drop(test_posts);
-        drop(neg_posts);
+            user_relation.freeze_with_query_set(&queryable, 2);
+            // MMR features only when actually needed.
+            let diversity_features: Vec<DiversityFeatures> = if opts.diversify {
+                let mut v = Vec::with_capacity(test_posts.len() + neg_posts.len());
+                v.extend(test_posts.iter().map(DiversityFeatures::from_post));
+                v.extend(neg_posts.iter().map(DiversityFeatures::from_post));
+                v
+            } else {
+                Vec::new()
+            };
+            // Drop the heavy `Post` structs now that features are extracted.
+            drop(test_posts);
+            drop(neg_posts);
 
-        fixtures.push(AccountFixture {
-            profile,
-            tags,
-            test_features,
-            neg_features,
-            diversity_features,
-            user_relation,
-            test_count,
-        });
+            // Progress heartbeat (thread-safe atomic counter, stderr output may
+            // interleave across threads — acceptable for progress logging).
+            let n = counter.fetch_add(1, Ordering::Relaxed) + 1;
+            if n % report_every == 0 || n == total_accounts {
+                eprintln!(
+                    "[prep]   hydrated {n}/{total_accounts} accounts ({} posts cached so far, {:.1}s elapsed)",
+                    posts_counter.load(Ordering::Relaxed),
+                    t_start.elapsed().as_secs_f32()
+                );
+                log_mem(&format!("after {n} accounts"));
+            }
 
-        if (i + 1) % report_every == 0 || i + 1 == total_accounts {
-            eprintln!(
-                "[prep]   hydrated {}/{} accounts ({} posts cached so far, {:.1}s elapsed)",
-                fixtures.len(),
-                total_accounts,
-                posts_hydrated,
-                t.elapsed().as_secs_f32()
-            );
-            log_mem(&format!("after {} accounts", fixtures.len()));
-        }
-    }
+            Some(AccountFixture {
+                profile,
+                tags,
+                test_features,
+                neg_features,
+                diversity_features,
+                user_relation,
+                test_count,
+            })
+        })
+        .collect();
 
     eprintln!(
         "[prep] DONE: {} accounts hydrated, {} posts cached in memory, {:.1}s total",
         fixtures.len(),
-        posts_hydrated,
-        t.elapsed().as_secs_f32()
+        posts_counter.load(Ordering::Relaxed),
+        t_start.elapsed().as_secs_f32()
     );
     log_mem("after all fixtures hydrated");
 
