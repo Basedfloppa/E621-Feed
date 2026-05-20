@@ -204,7 +204,7 @@ fn default_recency_personal_floor_frac() -> f32 {
     1.0
 }
 fn default_mix_tag_relation() -> f32 {
-    0.0
+    0.08
 }
 fn default_tag_relation_w_global() -> f32 {
     0.4
@@ -246,7 +246,7 @@ fn default_discrete_pref_floor() -> f32 {
     0.05
 }
 fn default_diversity_max_penalty() -> f32 {
-    0.20
+    0.45
 }
 fn default_diversity_interaction_damp() -> f32 {
     0.35

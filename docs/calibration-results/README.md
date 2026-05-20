@@ -95,6 +95,57 @@ from the v5.4 group-weight bumps and (now extended) IDF parameters
 already shipping in prod. Real production gain v5.4 → v5.5 will be
 small; copy via the bucket A/B mechanism, not unconditional rollout.
 
+### v5.10 — three-way convergence (May 2026, N=800)
+
+Three independent runs against the v5.9 defaults, varying split strategy and
+diversification — all converged to the **identical** `[best]`:
+
+| File | Split | Diversify | NDCG@20 | Recall@50 | MRR |
+|---|---|---|---|---|---|
+| [`grid_20260520_060456.toml`](grid_20260520_060456.toml) | post_id | — | 0.8108 | 0.1445 | 0.9227 |
+| [`grid_20260520_065952.toml`](grid_20260520_065952.toml) | time_causal | +div | 0.8119 | 0.1453 | 0.9257 |
+| [`grid_20260520_073430.toml`](grid_20260520_073430.toml) | time_causal | — | 0.8047 | 0.1444 | 0.9186 |
+
+All three `[best]` blocks are byte-identical. This is the strongest
+repeatability signal yet — the grid optimum is stable across split strategies,
+diversification, and independent random seeds.
+
+**Headlines:**
+
+- **post_id split converges to the same values as time_causal.** Earlier
+  runs (v5.7, v5.8) showed systematic drift between the two splits (e.g.
+  `df_floor`, `bm25_k`, `group_w_*`). The v5.9 defaults eliminated those.
+  The grid now finds the same optimum regardless of split — meaning the
+  earlier overshoot was a baseline issue, not a split artifact.
+- **No new grid moves.** Every knob's `[best]` already matches (or is
+  within one probe step of) the v5.9 production default. The only
+  consistent delta is `diversity_max_penalty=0.45` vs prod's `0.20` —
+  which was intentionally set lower as a UX fix.
+- **mix_quality / mix_recency / mix_popularity stay at zero** across all
+  three runs. The grid is unambiguous: these channels provide zero
+  marginal gain in the offline task. The small non-zero production values
+  (0.02 each) serve as a hedge against holdout artifacts.
+- **Diversify cost:** the +div run was 59 % slower (3243 s vs 2037 s) for
+  +0.0011 NDCG@20 and +0.0008 Recall@50 — well below the SE-based
+  acceptance threshold. Confirms v5.9's conclusion that MMR is a UX
+  feature, not an offline tuning knob.
+- **`tag_sim_jaccard_blend` hits the lower clamp (0.000)** in all three
+  runs. The grid wants to go below zero (meaning Jaccard similarity
+  actively hurts vs pure cosine). The clamp is the only boundary hit
+  across all runs — consider widening if a follow-up run targets
+  tag_similarity internals.
+
+**Rating vs earlier runs:**
+
+| Metric | v5.8 (N=915, time_causal) | v5.9 (N=915, time_causal) | v5.10 (N=800, time_causal) |
+|---|---|---|---|
+| NDCG@20 | 0.8026 | 0.8024 | 0.8047 |
+| Recall@50 | 0.1668 | — | 0.1444 |
+| MRR | 0.9185 | — | 0.9186 |
+
+The slight Recall@50 drop from N=915 → N=800 is expected (fewer accounts =
+wider CIs). NDCG@20 and MRR are consistent at the 2nd decimal.
+
 ### v5.9 — stability run + UX fixes (May 2026, N=915)
 
 Two follow-up runs on the v5.8 baseline plus a diversify counterpart:

@@ -33,12 +33,12 @@
    enum-valued knobs. Reports `[best priors — non-default values]` and a
    clamp-saturation warning if any knob landed at its search boundary.
 
-   As of v5.9 the grid covers ~64 numeric knobs + 1 categorical:
+   As of v5.10 the grid covers ~64 numeric knobs + 1 categorical:
    * 8 `mix_*` weights
    * IDF / frequency shaping (7): `df_floor`, `idf_max`, `idf_lambda`,
      `idf_alpha`, `freq_alpha`, `bm25_k`, `one_sided_ratio_exp`,
      `idf_rsj_smoothing`
-   * Quality channel (6): `quality_a/b/c/log_bias`,
+   * Quality channel (4): `quality_a/b/log_bias`, `quality_c`,
      `quality_w_absolute/relative_score/relative_comments`
    * Popularity channel (2): `popularity_w_fav/duration`
    * Recency channel (6): `recency_tau_days`, `recency_tau_recent`,
