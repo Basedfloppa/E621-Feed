@@ -64,8 +64,11 @@ pub(crate) const PAIRED_KNOBS: &[(&str, &str)] = &[
     // diversity-only — only swept when --with-diversify is on; the grid
     // helper skips paired probes whose components aren't in the active set.
     ("diversity_w_artist", "diversity_w_character"),
+    ("diversity_w_copyright", "diversity_w_species"),
     ("diversity_w_general", "diversity_window"),
     ("diversity_max_penalty", "diversity_interaction_damp"),
+    // v5.8 Class F: 3-piece recency hot kernel
+    ("recency_tau_hot", "recency_split_age_hours"),
 ];
 
 /// Per-pass scale on probe-deltas. Lets coarse direction emerge quickly
@@ -96,6 +99,8 @@ const PROBES_STEEP: &[f32] = &[-0.30, -0.10, 0.10, 0.30];
 const PROBES_MMR_EXP: &[f32] = &[-0.30, -0.10, 0.10, 0.30];
 const PROBES_JAC_BLEND: &[f32] = &[-0.05, 0.05, 0.10, 0.20];
 const PROBES_TAU_RECENT: &[f32] = &[-2.0, -1.0, 1.0, 2.0];
+const PROBES_TAU_HOT: &[f32] = &[-0.5, -0.2, 0.2, 0.5];
+const PROBES_HOURS: &[f32] = &[-6.0, -2.0, 2.0, 6.0];
 // v5.6 additions:
 const PROBES_INT_TINY: &[f32] = &[-1.0, 1.0]; // for integer thresholds
 const PROBES_DIV_W: &[f32] = &[-0.05, -0.02, 0.02, 0.05];
@@ -258,6 +263,14 @@ pub(crate) const GRID_KNOBS: &[KnobSpec] = &[
             p.quality_w_relative_comments = (p.quality_w_relative_comments + v).max(0.0)
         },
         probes: PROBES_WEIGHT,
+        invalidates: M_QUALITY,
+        diversify_only: false,
+    },
+    // -- v5.8 Class F: quality upvote-ratio component --
+    KnobSpec {
+        name: "quality_c",
+        apply: |p, v| p.quality_c = (p.quality_c + v).clamp(0.0, 1.0),
+        probes: PROBES_SMALL_FRACTION,
         invalidates: M_QUALITY,
         diversify_only: false,
     },
@@ -465,6 +478,15 @@ pub(crate) const GRID_KNOBS: &[KnobSpec] = &[
         invalidates: M_SIM,
         diversify_only: false,
     },
+    // -- v5.8 Class F: exploration bonus --
+    KnobSpec {
+        name: "exploration_epsilon",
+        apply: |p, v| p.exploration_epsilon = (p.exploration_epsilon + v).clamp(0.0, 0.5),
+        probes: PROBES_SMALL_FRACTION,
+        // Final-blend post-shape only — applied after scoring.
+        invalidates: M_NONE,
+        diversify_only: false,
+    },
     // -- v5.3 Class D: point splits (NaN sentinel = disabled; first probe seeds from parent) --
     KnobSpec {
         name: "idf_lambda_meta",
@@ -500,6 +522,30 @@ pub(crate) const GRID_KNOBS: &[KnobSpec] = &[
         },
         probes: PROBES_PMI,
         invalidates: M_TAG_RELATION,
+        diversify_only: false,
+    },
+    // -- v5.8 Class F: 3-piece recency hot kernel (NaN-sentinel, probes seed from recency_tau_recent) --
+    KnobSpec {
+        name: "recency_tau_hot",
+        apply: |p, v| {
+            if p.recency_tau_hot.is_nan() {
+                p.recency_tau_hot = if p.recency_tau_recent.is_nan() {
+                    p.recency_tau_days
+                } else {
+                    p.recency_tau_recent
+                };
+            }
+            p.recency_tau_hot = (p.recency_tau_hot + v).max(0.1);
+        },
+        probes: PROBES_TAU_HOT,
+        invalidates: M_RECENCY,
+        diversify_only: false,
+    },
+    KnobSpec {
+        name: "recency_split_age_hours",
+        apply: |p, v| p.recency_split_age_hours = (p.recency_split_age_hours + v).clamp(1.0, 168.0),
+        probes: PROBES_HOURS,
+        invalidates: M_RECENCY,
         diversify_only: false,
     },
     // -- v5.6: tag-relation co-occurrence thresholds --
@@ -561,6 +607,21 @@ pub(crate) const GRID_KNOBS: &[KnobSpec] = &[
     KnobSpec {
         name: "diversity_w_character",
         apply: |p, v| p.diversity_w_character = (p.diversity_w_character + v).clamp(0.0, 1.0),
+        probes: PROBES_DIV_W,
+        invalidates: M_NONE,
+        diversify_only: true,
+    },
+    // -- v5.8 Class F: per-group diversity copyright/species --
+    KnobSpec {
+        name: "diversity_w_copyright",
+        apply: |p, v| p.diversity_w_copyright = (p.diversity_w_copyright + v).clamp(0.0, 10.0),
+        probes: PROBES_DIV_W,
+        invalidates: M_NONE,
+        diversify_only: true,
+    },
+    KnobSpec {
+        name: "diversity_w_species",
+        apply: |p, v| p.diversity_w_species = (p.diversity_w_species + v).clamp(0.0, 10.0),
         probes: PROBES_DIV_W,
         invalidates: M_NONE,
         diversify_only: true,

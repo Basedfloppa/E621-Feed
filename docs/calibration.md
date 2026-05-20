@@ -33,7 +33,7 @@
    enum-valued knobs. Reports `[best priors — non-default values]` and a
    clamp-saturation warning if any knob landed at its search boundary.
 
-   As of v5.8 the grid covers ~58 numeric knobs + 1 categorical:
+   As of v5.9 the grid covers ~64 numeric knobs + 1 categorical:
    * 8 `mix_*` weights
    * IDF / frequency shaping (7): `df_floor`, `idf_max`, `idf_lambda`,
      `idf_alpha`, `freq_alpha`, `bm25_k`, `one_sided_ratio_exp`,
@@ -146,7 +146,7 @@ N=1000 was ~8 hours. See "Performance" for what each layer costs.
 [run] dataset ready in 412.3s
 [eval] scoring 915 accounts under config.toml priors...
 [baseline] N=915  NDCG@20=0.0368  Recall@50=0.0092  MRR=0.0698
-[grid] 52 knobs × ~4 probes/pass × 3 passes = up to 624 evals + paired sweep
+[grid] 64 knobs × ~4 probes/pass × 3 passes = up to 768 evals + paired sweep
 [grid] adaptive step: [1.0, 0.5, 0.25]
 [grid] running baseline eval...
 pass 1(×1.00): mix_sim +0.100        NDCG@20 0.037 -> 0.066
