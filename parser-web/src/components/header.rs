@@ -231,6 +231,16 @@ pub fn header() -> Html {
                 >
                     <i class="bi bi-question-circle" aria-hidden="true"></i>
                 </button>
+                <a
+                    class="btn btn-link nav-link order-lg-3"
+                    href="https://github.com/Basedfloppa/E621-Feed"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    title="GitHub repository"
+                    aria-label="GitHub repository"
+                >
+                    <i class="bi bi-github" aria-hidden="true"></i>
+                </a>
                 <div class="order-lg-3"><ThemeToggle /></div>
                 <button
                     class="navbar-toggler order-lg-3"

@@ -97,6 +97,7 @@ async fn process_status(
 
 async fn run_process(account_id: i32, owner_token: String) -> Result<(), String> {
     let mut pipe = PipelineMetrics::new("process");
+    let phase_start = std::time::Instant::now();
 
     let cfg = cfg();
     let blacklist: HashSet<String> = cfg.tag_blacklist.iter().map(|s| s.to_lowercase()).collect();
@@ -111,13 +112,22 @@ async fn run_process(account_id: i32, owner_token: String) -> Result<(), String>
     };
     let pages = (favcount / cfg.posts_limit) + (if favcount % cfg.posts_limit > 0 { 1 } else { 0 });
     jobs::set_pages_total(account_id, pages);
-    pipe.mark("init");
+    macro_rules! record_phase {
+        ($name:expr) => {{
+            let elapsed = phase_start.elapsed().as_secs_f64() * 1000.0;
+            jobs::record_phase(account_id, $name, elapsed);
+            pipe.mark($name);
+            let secs = elapsed / 1000.0;
+            info!("[process {account_id}] phase '{name}' done in {secs:.1}s", name = $name);
+        }};
+    }
+    record_phase!("init");
 
     db_blocking(move || {
         db::drop_account_posts(account_id).map_err(|e| format!("Failed to drop account posts: {e}"))
     })
     .await?;
-    pipe.mark("drop_old");
+    record_phase!("drop_old");
 
     // Fetch pages in parallel; writes stay serial (SQLite is single-writer).
     let account_for_fetch = account.clone();
@@ -152,14 +162,14 @@ async fn run_process(account_id: i32, owner_token: String) -> Result<(), String>
         jobs::record_page_done(account_id);
     }
     mark_idf_dirty();
-    pipe.mark("fetch_and_save");
+    record_phase!("fetch_and_save");
 
     db_blocking(move || {
         refresh_account_profiles(account_id)
             .map_err(|e| format!("Failed to refresh account profiles: {e}"))
     })
     .await?;
-    pipe.mark("profile_refresh");
+    record_phase!("profile_refresh");
     pipe.finish_and_log();
     Ok(())
 }

@@ -11,6 +11,15 @@ use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use rocket::serde::Serialize;
 use schemars::JsonSchema;
 
+/// A single recorded phase in a process pipeline (serializable version).
+#[derive(Debug, Serialize, Clone, JsonSchema)]
+#[serde(crate = "rocket::serde")]
+pub struct JobPhaseRecord {
+    pub name: String,
+    /// Elapsed milliseconds since the previous phase (or since start for the first).
+    pub elapsed_ms: f64,
+}
+
 #[derive(Debug, Serialize, Clone, Copy, JsonSchema, PartialEq, Eq)]
 #[serde(crate = "rocket::serde", rename_all = "snake_case")]
 pub enum ProcessJobPhase {
@@ -31,6 +40,11 @@ pub struct ProcessJobState {
     pub started_at: DateTime<Utc>,
     #[schemars(with = "Option<String>", description = "RFC3339 timestamp")]
     pub finished_at: Option<DateTime<Utc>>,
+    /// Pipeline phase timing records (populated when perf_metrics is enabled).
+    #[serde(default)]
+    pub phases: Vec<JobPhaseRecord>,
+    /// Total elapsed seconds since the process started.
+    pub elapsed_secs: f64,
 }
 
 pub enum BeginResult {
@@ -62,6 +76,8 @@ pub fn try_begin(account_id: i32) -> BeginResult {
         error: None,
         started_at: Utc::now(),
         finished_at: None,
+        phases: Vec::new(),
+        elapsed_secs: 0.0,
     };
     map.insert(account_id, state.clone());
     BeginResult::Started(state)
@@ -103,6 +119,21 @@ pub fn prune_finished_jobs() -> (usize, usize) {
     });
     let after = map.len();
     (before, after)
+}
+
+/// Record a pipeline phase timing for a running job. Idempotent — silently
+/// no-ops if the job doesn't exist or isn't running.
+pub fn record_phase(account_id: i32, name: impl Into<String>, elapsed_ms: f64) {
+    if let Ok(mut map) = registry().write()
+        && let Some(s) = map.get_mut(&account_id)
+        && s.phase == ProcessJobPhase::Running
+    {
+        s.phases.push(JobPhaseRecord {
+            name: name.into(),
+            elapsed_ms,
+        });
+        s.elapsed_secs = (Utc::now() - s.started_at).num_milliseconds() as f64 / 1000.0;
+    }
 }
 
 pub fn finish(account_id: i32, result: Result<(), String>) {

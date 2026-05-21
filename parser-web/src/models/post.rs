@@ -215,6 +215,12 @@ pub enum ProcessJobPhase {
 }
 
 #[derive(Deserialize, Serialize, Clone, PartialEq, Debug)]
+pub struct JobPhaseRecord {
+    pub name: String,
+    pub elapsed_ms: f64,
+}
+
+#[derive(Deserialize, Serialize, Clone, PartialEq, Debug)]
 pub struct ProcessJobState {
     pub account_id: i32,
     pub phase: ProcessJobPhase,
@@ -225,4 +231,7 @@ pub struct ProcessJobState {
     pub started_at: String,
     #[serde(default)]
     pub finished_at: Option<String>,
+    #[serde(default)]
+    pub phases: Vec<JobPhaseRecord>,
+    pub elapsed_secs: f64,
 }
