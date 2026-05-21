@@ -3,7 +3,7 @@ use rusqlite::params;
 
 use crate::models::{
     AccountMediaStat, AccountPreferenceProfile, AccountQualityProfile, AccountRatingStat,
-    AccountRecencyProfile, AccountTagFeedback,
+    AccountRecencyProfile, AccountTagFeedback, AccountUploaderStat,
 };
 
 use super::{
@@ -127,12 +127,66 @@ pub fn set_recency_profile(account_id: i32) -> Result<(), String> {
     })
 }
 
+pub fn set_uploader_profile(account_id: i32) -> Result<(), String> {
+    super::with_write_tx(|tx| {
+        tx.execute(
+            "DELETE FROM account_uploader_profile WHERE account_id = ?1",
+            params![account_id],
+        )
+        .map_err(|e| format!("Failed to clear uploader profile: {e}"))?;
+
+        tx.execute(
+            "
+            INSERT INTO account_uploader_profile (account_id, uploader_id, post_count, avg_score, avg_fav)
+            SELECT
+                ?1,
+                p.uploader_id,
+                COUNT(*)                       AS post_count,
+                COALESCE(AVG(p.score_total), 0) AS avg_score,
+                COALESCE(AVG(p.fav_count), 0)   AS avg_fav
+            FROM posts p
+            INNER JOIN accounts_post ap ON ap.post_id = p.id
+            WHERE ap.account_id = ?1 AND p.uploader_id IS NOT NULL
+            GROUP BY p.uploader_id
+            ",
+            params![account_id],
+        )
+        .map_err(|e| format!("Failed to populate uploader profile: {e}"))?;
+        Ok(())
+    })
+}
+
+pub fn get_account_uploader_profile(account_id: i32) -> Result<Vec<AccountUploaderStat>, String> {
+    let conn = super::open_db()?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT uploader_id, post_count, avg_score, avg_fav
+             FROM account_uploader_profile
+             WHERE account_id = ?
+             ORDER BY post_count DESC",
+        )
+        .map_err(|e| format!("Failed to prepare uploader profile query: {e}"))?;
+
+    stmt.query_map([account_id], |row| {
+        Ok(AccountUploaderStat {
+            uploader_id: row.get(0)?,
+            post_count: row.get(1)?,
+            avg_score: row.get(2)?,
+            avg_fav: row.get(3)?,
+        })
+    })
+    .map_err(|e| format!("Failed to fetch uploader profile: {e}"))?
+    .collect::<Result<Vec<_>, _>>()
+    .map_err(|e| format!("Failed to enumerate uploader profile: {e}"))
+}
+
 pub fn refresh_account_profiles(account_id: i32) -> Result<(), String> {
     set_tag_counts(account_id)?;
     set_rating_profile(account_id)?;
     set_media_profile(account_id)?;
     set_quality_profile(account_id)?;
     set_recency_profile(account_id)?;
+    set_uploader_profile(account_id)?;
     set_account_tag_cooccurrence(account_id)?;
     decay_account_tag_feedback(account_id)?;
     // Record refresh timestamp for time-weighted interaction_fit decay.
@@ -344,6 +398,7 @@ pub fn get_account_preference_profile(account_id: i32) -> Result<AccountPreferen
         feedback: get_account_tag_feedback(account_id)?,
         quality: get_account_quality_profile(account_id)?,
         recency: get_account_recency_profile(account_id)?,
+        uploaders: get_account_uploader_profile(account_id)?,
         last_refreshed_at,
     })
 }

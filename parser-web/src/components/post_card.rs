@@ -169,8 +169,8 @@ pub fn post_card(props: &PostCardProps) -> Html {
         use_effect_with(post.id, move |_| {
             let mut registration: Option<(Element, u64)> = None;
 
-            if !*impression_logged {
-                if let Some(el) = root_ref.cast::<Element>() {
+            if !*impression_logged
+                && let Some(el) = root_ref.cast::<Element>() {
                     let is_visible = std::rc::Rc::new(std::cell::Cell::new(false));
                     let is_scheduled = std::rc::Rc::new(std::cell::Cell::new(false));
 
@@ -227,7 +227,6 @@ pub fn post_card(props: &PostCardProps) -> Html {
                     let id = shared_observer::observe(&el, on_entry);
                     registration = Some((el, id));
                 }
-            }
 
             move || {
                 if let Some((el, id)) = registration {
@@ -539,48 +538,39 @@ fn is_supported_image(url: &str) -> bool {
 }
 
 fn fallback_image_url(post: &Post) -> String {
-    if let Some(url) = post.preview.as_ref().and_then(|p| p.url.as_deref()) {
-        if is_supported_image(url) {
+    if let Some(url) = post.preview.as_ref().and_then(|p| p.url.as_deref())
+        && is_supported_image(url) {
             return url.to_owned();
         }
-    }
-    if let Some(url) = post.sample.as_ref().and_then(|s| s.url.as_deref()) {
-        if is_supported_image(url) {
+    if let Some(url) = post.sample.as_ref().and_then(|s| s.url.as_deref())
+        && is_supported_image(url) {
             return url.to_owned();
         }
-    }
-    if let Some(url) = post.file.as_ref().and_then(|f| f.url.as_deref()) {
-        if is_supported_image(url) {
+    if let Some(url) = post.file.as_ref().and_then(|f| f.url.as_deref())
+        && is_supported_image(url) {
             return url.to_owned();
         }
-    }
     String::new()
 }
 
 fn preferred_image_url(post: &Post, required_width: i64) -> Option<AttrValue> {
     let mut candidates: Vec<(AttrValue, i64)> = Vec::new();
 
-    if let Some(p) = post.preview.as_ref() {
-        if let Some(url) = p.url.as_deref() {
-            if is_supported_image(url) {
+    if let Some(p) = post.preview.as_ref()
+        && let Some(url) = p.url.as_deref()
+            && is_supported_image(url) {
                 candidates.push((AttrValue::from(url.to_owned()), p.width));
             }
-        }
-    }
-    if let Some(s) = post.sample.as_ref() {
-        if let (Some(url), Some(w)) = (s.url.as_deref(), s.width) {
-            if is_supported_image(url) {
+    if let Some(s) = post.sample.as_ref()
+        && let (Some(url), Some(w)) = (s.url.as_deref(), s.width)
+            && is_supported_image(url) {
                 candidates.push((AttrValue::from(url.to_owned()), w));
             }
-        }
-    }
-    if let Some(f) = post.file.as_ref() {
-        if let Some(url) = f.url.as_deref() {
-            if is_supported_image(url) {
+    if let Some(f) = post.file.as_ref()
+        && let Some(url) = f.url.as_deref()
+            && is_supported_image(url) {
                 candidates.push((AttrValue::from(url.to_owned()), f.width));
             }
-        }
-    }
 
     candidates.sort_by_key(|&(_, w)| w);
     if let Some((u, _)) = candidates.iter().find(|&&(_, w)| w >= required_width) {

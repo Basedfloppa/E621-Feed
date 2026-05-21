@@ -296,11 +296,10 @@ impl TagRelationGraph {
                     if c < min_cooc as i64 {
                         return None;
                     }
-                    if let Some(q) = queryable {
-                        if !q.contains(&a) || !q.contains(&b) {
+                    if let Some(q) = queryable
+                        && (!q.contains(&a) || !q.contains(&b)) {
                             return None;
                         }
-                    }
                     Some((a, b, c.max(0).min(u32::MAX as i64) as u32))
                 })
                 .collect(),
@@ -340,7 +339,8 @@ impl TagRelationGraph {
     pub fn from_train_posts(posts: &[crate::models::Post]) -> Self {
         let mut g = Self::with_posts(posts.len() as i64);
         // Same group set tag_relation_fit operates on (no `meta`).
-        let groups: [(GroupKey, fn(&crate::models::Post) -> &Vec<String>); 6] = [
+        type TagGroupGetter = (GroupKey, fn(&crate::models::Post) -> &Vec<String>);
+        let groups: [TagGroupGetter; 6] = [
             (0, |p| &p.tags.artist),
             (1, |p| &p.tags.character),
             (2, |p| &p.tags.copyright),
@@ -373,8 +373,8 @@ impl TagRelationGraph {
             }
             for i in 0..scratch.len() {
                 let (_, ai) = scratch[i];
-                for j in (i + 1)..scratch.len() {
-                    let (_, bj) = scratch[j];
+                for (_, bj) in scratch.iter().skip(i + 1) {
+                    let bj = *bj;
                     g.insert_pair_by_id(ai, bj, 1);
                 }
             }

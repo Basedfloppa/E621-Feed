@@ -128,12 +128,11 @@ async fn fetch_authed_text(
     });
     let max_entries = cfg.e621_cache_max_entries;
 
-    if !bypass_cache {
-        if let Some(body) = api_cache_get(&url, ttl) {
+    if !bypass_cache
+        && let Some(body) = api_cache_get(&url, ttl) {
             debug!("e621 cache hit: {url}");
             return Ok(body);
         }
-    }
 
     let client = get_client();
     let resp = send_with_retry(

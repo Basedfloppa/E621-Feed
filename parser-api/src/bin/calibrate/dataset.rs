@@ -352,7 +352,7 @@ pub(crate) fn prepare_eval_dataset(opts: &GridOptions) -> anyhow::Result<EvalDat
             // Progress heartbeat (thread-safe atomic counter, stderr output may
             // interleave across threads — acceptable for progress logging).
             let n = counter.fetch_add(1, Ordering::Relaxed) + 1;
-            if n % report_every == 0 || n == total_accounts {
+            if n.is_multiple_of(report_every) || n == total_accounts {
                 eprintln!(
                     "[prep]   hydrated {n}/{total_accounts} accounts ({} posts cached so far, {:.1}s elapsed)",
                     posts_counter.load(Ordering::Relaxed),
@@ -469,6 +469,7 @@ fn build_profile(train_posts: &[Post]) -> AccountPreferenceProfile {
             avg_age_days: mean_age,
             avg_abs_dev_days: abs_dev,
         },
+        uploaders: Vec::new(),
         last_refreshed_at: None,
     }
 }

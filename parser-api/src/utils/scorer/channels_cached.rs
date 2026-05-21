@@ -13,7 +13,7 @@
 use super::cached::{CachedPostFeatures, CachedTag};
 use super::context::ScoringContext;
 use super::util::{
-    blend2, blend3, ctr_score, discrete_preference_smooth, one_sided_ratio, sigmoid,
+    blend2, blend3, confidence, ctr_score, discrete_preference_smooth, one_sided_ratio, sigmoid,
     wilson_lower_bound, PairAggregator, FEEDBACK_NEUTRAL, WILSON_Z,
 };
 use super::Group;
@@ -426,6 +426,40 @@ impl<'a> ScoringContext<'a> {
             self.priors.discrete_pref_floor,
         )
     }
+
+    /// Cached `uploader_fit` — same math as [`super::channels`] but reads
+    /// `uploader_id` from the prebuilt features.
+    pub fn uploader_fit_cached(&self, post: &CachedPostFeatures) -> f32 {
+        let Some(stats) = self.uploader_map.get(&post.uploader_id) else {
+            return FEEDBACK_NEUTRAL;
+        };
+        let conf = confidence(
+            stats.post_count as f32,
+            self.priors.uploader_n0.max(1.0),
+            self.priors.confidence_steepness,
+        );
+        if conf <= 1e-6 {
+            return FEEDBACK_NEUTRAL;
+        }
+        let score_fit = one_sided_ratio(
+            stats.avg_score,
+            self.profile.quality.avg_score_total,
+            self.priors.one_sided_ratio_exp,
+        );
+        let fav_fit = one_sided_ratio(
+            stats.avg_fav,
+            self.profile.quality.avg_fav_count,
+            self.priors.one_sided_ratio_exp,
+        );
+        let raw = blend2(
+            score_fit,
+            self.priors.uploader_w_avg_score,
+            fav_fit,
+            self.priors.uploader_w_avg_fav,
+        );
+        // Confidence-weighted blend with neutral.
+        FEEDBACK_NEUTRAL * (1.0 - conf) + raw * conf
+    }
 }
 
 // Touch the unused-import warning suppressors: CachedTag is part of the
@@ -433,3 +467,506 @@ impl<'a> ScoringContext<'a> {
 // CachedPostFeatures directly.
 #[allow(dead_code)]
 fn _phantom(_: &CachedTag) {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::{
+        AccountMediaStat, AccountPreferenceProfile, AccountQualityProfile,
+        AccountRatingStat, AccountRecencyProfile, AccountTagFeedback, Flags, Post,
+        Rating, Relationships, Score, TagCount, Tags,
+    };
+    use crate::utils::idf::IdfIndex;
+    use crate::utils::scorer::cached::CachedPostFeatures;
+    use crate::utils::scorer::context::ScoringContext;
+    use crate::utils::scorer::priors::Priors;
+    use crate::utils::tag_relation::TagRelationGraph;
+    use chrono::Utc;
+    use std::collections::HashMap;
+
+    // ------------------------------------------------------------------
+    //  Fixture helpers (identical to channels.rs tests)
+    // ------------------------------------------------------------------
+
+    fn close(a: f32, b: f32) -> bool {
+        (a - b).abs() < 1e-4
+    }
+
+    fn default_priors() -> Priors {
+        Priors {
+            now: Utc::now(),
+            recency_tau_days: 60.0,
+            quality_a: 1.0,
+            quality_b: 1.0,
+            mix_sim: 1.0,
+            mix_quality: 1.0,
+            mix_recency: 0.0,
+            mix_rating: 0.0,
+            mix_media: 0.0,
+            mix_popularity: 0.0,
+            mix_interaction: 0.0,
+            mix_tag_relation: 0.0,
+            idf_lambda: 1.0,
+            idf_alpha: 1.0,
+            freq_alpha: 1.0,
+            quality_w_absolute: 1.0,
+            quality_w_relative_score: 0.0,
+            quality_w_relative_comments: 0.0,
+            popularity_w_fav: 1.0,
+            popularity_w_duration: 0.0,
+            recency_w_global: 1.0,
+            recency_w_personal: 0.0,
+            diversity_window: 100,
+            diversity_w_artist: 1.0,
+            diversity_w_character: 1.0,
+            diversity_w_general: 1.0,
+            quality_log_bias: -3.0,
+            discrete_smoothing_alpha: 1.0,
+            strong_negative_count: 3,
+            strong_negative_penalty: 0.40,
+            recency_personal_floor_frac: 1.0,
+            tag_relation_w_global: 0.0,
+            tag_relation_w_personal: 0.0,
+            tag_relation_pmi_scale: 3.5,
+            tag_relation_min_cooc: 2,
+            tag_relation_user_min_cooc: 1,
+            tag_relation_cooc_ref: 16.0,
+            tag_relation_user_cooc_ref: 5.0,
+            strong_negative_wilson_threshold: 0.55,
+            recency_log_personal: true,
+            feedback_decay_half_life_days: 90.0,
+            meta_interaction_weight: 0.3,
+            coldstart_n0: 25.0,
+            discrete_pref_floor: 0.05,
+            diversity_max_penalty: 0.45,
+            diversity_interaction_damp: 0.35,
+            df_floor: 0.4,
+            idf_max: 100.0,
+            bm25_k: 2.25,
+            one_sided_ratio_exp: 0.5,
+            coldstart_smoothing_boost: 2.0,
+            interaction_ctr_prior_alpha: 4.0,
+            idf_rsj_smoothing: 0.35,
+            group_w_artist: 2.40,
+            group_w_character: 2.00,
+            group_w_copyright: 1.45,
+            group_w_species: 1.30,
+            group_w_general: 0.70,
+            group_w_lore: 0.40,
+            score_temperature: 0.0,
+            confidence_steepness: 1.0,
+            mmr_redundancy_exp: 1.0,
+            tag_sim_jaccard_blend: 0.0,
+            idf_lambda_meta: f32::NAN,
+            tag_relation_pmi_scale_user: f32::NAN,
+            recency_tau_recent: f32::NAN,
+            recency_split_age_days: 30.0,
+            tag_relation_pair_aggregator: "mean".to_string(),
+            quality_c: 0.0,
+            recency_tau_hot: f32::NAN,
+            recency_split_age_hours: 24.0,
+            diversity_w_copyright: 1.8,
+            diversity_w_species: 1.5,
+            exploration_epsilon: 0.0,
+            mix_uploader: 0.0,
+            uploader_n0: 5.0,
+            uploader_w_avg_score: 0.6,
+            uploader_w_avg_fav: 0.4,
+        }
+    }
+
+    fn build_idf() -> IdfIndex {
+        let mut df = HashMap::new();
+        df.insert("skeb".to_string(), 1000);
+        df.insert("cat".to_string(), 5000);
+        df.insert("dog".to_string(), 3000);
+        df.insert("furry".to_string(), 8000);
+        df.insert("original_character".to_string(), 2000);
+        df.insert("commission".to_string(), 1500);
+        df.insert("detailed_background".to_string(), 500);
+        IdfIndex::from_df(&df, 10_000)
+    }
+
+    fn build_global_graph() -> TagRelationGraph {
+        let mut g = TagRelationGraph::with_posts(1000);
+        g.set_marginal(0, "skeb", 100);
+        g.set_marginal(1, "cat", 500);
+        g.set_marginal(1, "dog", 300);
+        g.set_marginal(2, "original_character", 200);
+        g.insert_pair(0, "skeb", 1, "cat", 100);
+        g.insert_pair(0, "skeb", 1, "dog", 30);
+        g.insert_pair(1, "cat", 1, "dog", 10);
+        g
+    }
+
+    fn build_user_graph() -> TagRelationGraph {
+        let mut g = TagRelationGraph::with_posts(50);
+        g.set_marginal(0, "skeb", 20);
+        g.set_marginal(1, "cat", 30);
+        g.set_marginal(1, "dog", 10);
+        g.insert_pair(0, "skeb", 1, "cat", 15);
+        g.insert_pair(0, "skeb", 1, "dog", 5);
+        g
+    }
+
+    fn default_profile() -> AccountPreferenceProfile {
+        AccountPreferenceProfile {
+            rating: vec![
+                AccountRatingStat { rating: "s".to_string(), count: 500 },
+                AccountRatingStat { rating: "q".to_string(), count: 100 },
+                AccountRatingStat { rating: "e".to_string(), count: 50 },
+            ],
+            media: vec![
+                AccountMediaStat {
+                    media_type: "image".to_string(),
+                    count: 600,
+                },
+                AccountMediaStat {
+                    media_type: "video".to_string(),
+                    count: 50,
+                },
+            ],
+            feedback: vec![
+                AccountTagFeedback {
+                    tag_name: "skeb".to_string(),
+                    group_type: "artist".to_string(),
+                    impression_count: 100,
+                    positive_count: 80,
+                    negative_count: 5,
+                },
+                AccountTagFeedback {
+                    tag_name: "cat".to_string(),
+                    group_type: "character".to_string(),
+                    impression_count: 50,
+                    positive_count: 40,
+                    negative_count: 2,
+                },
+            ],
+            quality: AccountQualityProfile {
+                avg_score_total: 100.0,
+                avg_fav_count: 50.0,
+                avg_comment_count: 10.0,
+                avg_duration: 0.0,
+            },
+            recency: AccountRecencyProfile {
+                avg_age_days: 30.0,
+                avg_abs_dev_days: 15.0,
+            },
+            uploaders: vec![],
+            last_refreshed_at: None,
+        }
+    }
+
+    fn default_tag_counts() -> Vec<TagCount> {
+        vec![
+            TagCount {
+                name: "skeb".to_string(),
+                group_type: "artist".to_string(),
+                count: 10,
+            },
+            TagCount {
+                name: "cat".to_string(),
+                group_type: "character".to_string(),
+                count: 20,
+            },
+            TagCount {
+                name: "dog".to_string(),
+                group_type: "character".to_string(),
+                count: 5,
+            },
+            TagCount {
+                name: "original_character".to_string(),
+                group_type: "copyright".to_string(),
+                count: 15,
+            },
+            TagCount {
+                name: "furry".to_string(),
+                group_type: "general".to_string(),
+                count: 50,
+            },
+            TagCount {
+                name: "commission".to_string(),
+                group_type: "general".to_string(),
+                count: 30,
+            },
+        ]
+    }
+
+    fn make_empty_tags() -> Tags {
+        Tags {
+            general: vec![],
+            artist: vec![],
+            copyright: vec![],
+            character: vec![],
+            species: vec![],
+            invalid: vec![],
+            meta: vec![],
+            lore: vec![],
+            contributor: vec![],
+        }
+    }
+
+    fn make_post(tags: Tags) -> Post {
+        Post {
+            id: 1,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            file: None,
+            preview: None,
+            sample: None,
+            score: Score {
+                up: 100,
+                down: 0,
+                total: 100,
+            },
+            tags,
+            locked_tags: None,
+            change_seq: 0.0,
+            flags: Flags::default(),
+            rating: Rating::S,
+            fav_count: 50,
+            sources: vec![],
+            pools: vec![],
+            relationships: Relationships {
+                parent_id: None,
+                has_children: false,
+                has_active_children: false,
+                children: vec![],
+            },
+            approver_id: None,
+            uploader_id: 0,
+            description: None,
+            comment_count: 5,
+            is_favorited: false,
+            has_notes: false,
+            duration: None,
+        }
+    }
+
+    /// Compute per-tag CachedPostFeatures for the same Post/IDF/graph used
+    /// by the ScoringContext.
+    fn cache_post(post: &Post, idf: &IdfIndex, global: &TagRelationGraph) -> CachedPostFeatures {
+        CachedPostFeatures::from_post(post, idf, global)
+    }
+
+    // ==================================================================
+    //  Equivalence tests: cached vs uncached output for identical inputs.
+    //  If the math diverges, these tests catch it.
+    // ==================================================================
+
+    /// Build priors + fixtures inline; return (ctx, idf, global) so the
+    /// cached-fn variants can still call `cache_post` without redundant
+    /// construction.
+    macro_rules! cached_setup {
+        ($ctx:ident, $idf:ident, $global:ident) => {
+            let priors = default_priors();
+            let $idf = build_idf();
+            let $global = build_global_graph();
+            let user_graph = build_user_graph();
+            let profile = default_profile();
+            let counts = default_tag_counts();
+            let mut $ctx = ScoringContext::new(
+                &counts,
+                &priors,
+                &$idf,
+                &profile,
+                &$global,
+                &user_graph,
+            );
+        };
+    }
+
+    #[test]
+    fn tag_similarity_cached_matches_uncached() {
+        cached_setup!(ctx, idf, global);
+        let mut tags = make_empty_tags();
+        tags.artist.push("skeb".to_string());
+        tags.character.push("cat".to_string());
+        tags.character.push("dog".to_string());
+        tags.general.push("furry".to_string());
+        tags.general.push("commission".to_string());
+        let post = make_post(tags);
+
+        let uncached = ctx.tag_similarity(&post);
+        let cached = ctx.tag_similarity_cached(&cache_post(&post, &idf, &global));
+        assert!(
+            close(uncached, cached),
+            "tag_similarity mismatch: uncached={uncached} cached={cached}"
+        );
+    }
+
+    #[test]
+    fn interaction_fit_cached_matches_uncached() {
+        cached_setup!(ctx, idf, global);
+        let mut tags = make_empty_tags();
+        tags.artist.push("skeb".to_string());
+        tags.character.push("cat".to_string());
+        let post = make_post(tags);
+
+        let (u_score, u_veto) = ctx.interaction_fit(&post);
+        let (c_score, c_veto) = ctx.interaction_fit_cached(&cache_post(&post, &idf, &global));
+        assert!(
+            close(u_score, c_score),
+            "interaction_fit score mismatch: uncached={u_score} cached={c_score}"
+        );
+        assert_eq!(u_veto, c_veto, "interaction_fit veto mismatch");
+    }
+
+    #[test]
+    fn tag_relation_fit_cached_matches_uncached() {
+        let mut priors = default_priors();
+        priors.tag_relation_w_global = 1.0;
+        priors.tag_relation_w_personal = 0.0;
+        let idf = build_idf();
+        let global = build_global_graph();
+        let user_graph = build_user_graph();
+        let profile = default_profile();
+        let counts = default_tag_counts();
+        let ctx = ScoringContext::new(&counts, &priors, &idf, &profile, &global, &user_graph);
+
+        let mut tags = make_empty_tags();
+        tags.artist.push("skeb".to_string());
+        tags.character.push("cat".to_string());
+        tags.character.push("dog".to_string());
+        let post = make_post(tags);
+
+        let uncached = ctx.tag_relation_fit(&post);
+        let cached = ctx.tag_relation_fit_cached(&cache_post(&post, &idf, &global));
+        assert!(
+            close(uncached, cached),
+            "tag_relation_fit mismatch: uncached={uncached} cached={cached}"
+        );
+    }
+
+    #[test]
+    fn quality_fit_cached_matches_uncached() {
+        cached_setup!(ctx, idf, global);
+        let post = make_post(make_empty_tags());
+        let u = ctx.quality_fit(&post);
+        let c = ctx.quality_fit_cached(&cache_post(&post, &idf, &global));
+        assert!(close(u, c), "quality_fit mismatch: uncached={u} cached={c}");
+    }
+
+    #[test]
+    fn popularity_fit_cached_matches_uncached() {
+        cached_setup!(ctx, idf, global);
+        let post = make_post(make_empty_tags());
+        let u = ctx.popularity_fit(&post);
+        let c = ctx.popularity_fit_cached(&cache_post(&post, &idf, &global));
+        assert!(
+            close(u, c),
+            "popularity_fit mismatch: uncached={u} cached={c}"
+        );
+    }
+
+    #[test]
+    fn rating_fit_cached_matches_uncached() {
+        cached_setup!(ctx, idf, global);
+        let post = make_post(make_empty_tags());
+        let u = ctx.rating_fit(&post);
+        let c = ctx.rating_fit_cached(&cache_post(&post, &idf, &global));
+        assert!(close(u, c), "rating_fit mismatch: uncached={u} cached={c}");
+    }
+
+    #[test]
+    fn media_fit_cached_matches_uncached() {
+        cached_setup!(ctx, idf, global);
+        let mut tags = make_empty_tags();
+        tags.artist.push("skeb".to_string());
+        let post = make_post(tags);
+        let u = ctx.media_fit(&post);
+        let c = ctx.media_fit_cached(&cache_post(&post, &idf, &global));
+        assert!(close(u, c), "media_fit mismatch: uncached={u} cached={c}");
+    }
+
+    #[test]
+    fn score_cached_matches_uncached() {
+        cached_setup!(ctx, idf, global);
+        let mut tags = make_empty_tags();
+        tags.artist.push("skeb".to_string());
+        tags.character.push("cat".to_string());
+        let post = make_post(tags);
+
+        let (u_score, u_brk) = ctx.score(&post);
+        let (c_score, c_brk) = ctx.score_cached(&cache_post(&post, &idf, &global));
+        assert!(
+            close(u_score, c_score),
+            "score mismatch: uncached={u_score} cached={c_score}"
+        );
+        assert!(
+            close(u_brk.tag_similarity, c_brk.tag_similarity),
+            "breakdown.tag_similarity mismatch"
+        );
+        assert!(
+            close(u_brk.quality_fit, c_brk.quality_fit),
+            "breakdown.quality_fit mismatch"
+        );
+        assert!(
+            close(u_brk.interaction_fit, c_brk.interaction_fit),
+            "breakdown.interaction_fit mismatch"
+        );
+    }
+
+    // ==================================================================
+    //  Cached-channel edge cases
+    // ==================================================================
+
+    #[test]
+    fn tag_similarity_cached_empty_post() {
+        cached_setup!(ctx, idf, global);
+        let post = make_post(make_empty_tags());
+        let cached = cache_post(&post, &idf, &global);
+        let sim = ctx.tag_similarity_cached(&cached);
+        assert!(close(sim, 0.0), "expected 0.0 got {sim}");
+    }
+
+    #[test]
+    fn interaction_fit_cached_no_feedback() {
+        cached_setup!(ctx, idf, global);
+        let mut tags = make_empty_tags();
+        tags.artist.push("unknown".to_string());
+        let post = make_post(tags);
+        let cached = cache_post(&post, &idf, &global);
+        let (score, veto) = ctx.interaction_fit_cached(&cached);
+        assert!(
+            close(score, FEEDBACK_NEUTRAL),
+            "expected neutral, got {score}"
+        );
+        assert!(!veto, "expected no veto");
+    }
+
+    #[test]
+    fn tag_relation_fit_cached_disabled() {
+        cached_setup!(ctx, idf, global); // w_global=0, w_personal=0
+        let mut tags = make_empty_tags();
+        tags.artist.push("skeb".to_string());
+        tags.character.push("cat".to_string());
+        let post = make_post(tags);
+        let cached = cache_post(&post, &idf, &global);
+        let t = ctx.tag_relation_fit_cached(&cached);
+        assert!(close(t, FEEDBACK_NEUTRAL), "expected neutral, got {t}");
+    }
+
+    #[test]
+    fn quality_fit_cached_upvote_ratio() {
+        let mut priors = default_priors();
+        priors.quality_c = 0.5;
+        priors.quality_w_relative_score = 0.0;
+        priors.quality_w_relative_comments = 0.0;
+        let idf = build_idf();
+        let global = build_global_graph();
+        let user_graph = build_user_graph();
+        let profile = default_profile();
+        let counts = default_tag_counts();
+        let ctx = ScoringContext::new(&counts, &priors, &idf, &profile, &global, &user_graph);
+
+        let post = Post {
+            score: Score { up: 40, down: 10, total: 50 },
+            fav_count: 0,
+            ..make_post(make_empty_tags())
+        };
+        let cached = cache_post(&post, &idf, &global);
+        let c = ctx.quality_fit_cached(&cached);
+        assert!(close(c, 0.745), "expected ~0.745 got {c}");
+    }
+}

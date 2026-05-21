@@ -20,11 +20,10 @@ fn should_run_tour() -> bool {
 }
 
 fn mark_tour_finished() {
-    if let Some(win) = web_sys::window() {
-        if let Ok(Some(storage)) = win.local_storage() {
+    if let Some(win) = web_sys::window()
+        && let Ok(Some(storage)) = win.local_storage() {
             let _ = storage.set_item("finished_tour", "true");
         }
-    }
 }
 
 #[function_component(Header)]

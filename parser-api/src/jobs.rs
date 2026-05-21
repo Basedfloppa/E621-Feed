@@ -50,11 +50,10 @@ pub fn get_state(account_id: i32) -> Option<ProcessJobState> {
 
 pub fn try_begin(account_id: i32) -> BeginResult {
     let mut map = registry().write().unwrap_or_else(|e| e.into_inner());
-    if let Some(existing) = map.get(&account_id) {
-        if existing.phase == ProcessJobPhase::Running {
+    if let Some(existing) = map.get(&account_id)
+        && existing.phase == ProcessJobPhase::Running {
             return BeginResult::AlreadyRunning(existing.clone());
         }
-    }
     let state = ProcessJobState {
         account_id,
         phase: ProcessJobPhase::Running,
@@ -69,19 +68,17 @@ pub fn try_begin(account_id: i32) -> BeginResult {
 }
 
 pub fn set_pages_total(account_id: i32, total: i32) {
-    if let Ok(mut map) = registry().write() {
-        if let Some(s) = map.get_mut(&account_id) {
+    if let Ok(mut map) = registry().write()
+        && let Some(s) = map.get_mut(&account_id) {
             s.pages_total = total;
         }
-    }
 }
 
 pub fn record_page_done(account_id: i32) {
-    if let Ok(mut map) = registry().write() {
-        if let Some(s) = map.get_mut(&account_id) {
+    if let Ok(mut map) = registry().write()
+        && let Some(s) = map.get_mut(&account_id) {
             s.pages_done += 1;
         }
-    }
 }
 
 /// Drop old Done/Failed entries. Running jobs older than
@@ -109,8 +106,8 @@ pub fn prune_finished_jobs() -> (usize, usize) {
 }
 
 pub fn finish(account_id: i32, result: Result<(), String>) {
-    if let Ok(mut map) = registry().write() {
-        if let Some(s) = map.get_mut(&account_id) {
+    if let Ok(mut map) = registry().write()
+        && let Some(s) = map.get_mut(&account_id) {
             match result {
                 Ok(()) => {
                     s.phase = ProcessJobPhase::Done;
@@ -123,5 +120,4 @@ pub fn finish(account_id: i32, result: Result<(), String>) {
             }
             s.finished_at = Some(Utc::now());
         }
-    }
 }

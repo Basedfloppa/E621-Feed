@@ -3,7 +3,26 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        FEATURES: ""
     container_name: app
+    ports:
+      - "8181:8181"
+    volumes:
+      - ./config.toml:/app/config.toml:ro
+      - ./Rocket.toml:/app/Rocket.toml:ro
+      - ./database.db:/app/database.db
+    environment:
+      - CONFIG_PATH=/app/config.toml
+
+  app-perf:
+    profiles: ["perf"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        FEATURES: "perf_metrics"
+    container_name: app-perf
     ports:
       - "8181:8181"
     volumes:

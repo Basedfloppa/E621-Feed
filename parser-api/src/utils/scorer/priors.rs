@@ -186,6 +186,22 @@ pub struct Priors {
     /// Applied post-scoring as `score += ε * (1 - tag_similarity)`.
     #[serde(default = "default_exploration_epsilon")]
     pub exploration_epsilon: f32,
+
+    // ---- Class G: uploader quality channel ----
+    /// Mix weight for the uploader quality channel in the final blend.
+    /// 0 = disabled.
+    #[serde(default = "default_mix_uploader")]
+    pub mix_uploader: f32,
+    /// Cold-start threshold: how many posts from an uploader are needed
+    /// before the signal reaches 50% confidence.
+    #[serde(default = "default_uploader_n0")]
+    pub uploader_n0: f32,
+    /// Weight of the avg_score component inside the uploader channel.
+    #[serde(default = "default_uploader_w_avg_score")]
+    pub uploader_w_avg_score: f32,
+    /// Weight of the avg_fav component inside the uploader channel.
+    #[serde(default = "default_uploader_w_avg_fav")]
+    pub uploader_w_avg_fav: f32,
 }
 
 fn default_quality_log_bias() -> f32 {
@@ -328,4 +344,16 @@ fn default_diversity_w_species() -> f32 {
 }
 fn default_exploration_epsilon() -> f32 {
     0.0
+}
+fn default_mix_uploader() -> f32 {
+    0.05
+}
+fn default_uploader_n0() -> f32 {
+    5.0
+}
+fn default_uploader_w_avg_score() -> f32 {
+    0.6
+}
+fn default_uploader_w_avg_fav() -> f32 {
+    0.4
 }

@@ -20,7 +20,7 @@ use e621_account_parser_api::utils::Priors;
 
 use crate::cache::{
     M_CONFIDENCE_DERIVED, M_DISCRETE, M_GROUP_W, M_INTERACTION, M_NONE, M_RATIO_EXP, M_RECENCY,
-    M_SIM, M_TAG_RELATION,
+    M_SIM, M_TAG_RELATION, M_UPLOADER,
 };
 
 /// One tunable parameter for the grid search. `apply` mutates the trial
@@ -167,6 +167,13 @@ pub(crate) const GRID_KNOBS: &[KnobSpec] = &[
     KnobSpec {
         name: "mix_tag_relation",
         apply: |p, v| p.mix_tag_relation = (p.mix_tag_relation + v).max(0.0),
+        probes: PROBES_MIX,
+        invalidates: M_NONE,
+        diversify_only: false,
+    },
+    KnobSpec {
+        name: "mix_uploader",
+        apply: |p, v| p.mix_uploader = (p.mix_uploader + v).max(0.0),
         probes: PROBES_MIX,
         invalidates: M_NONE,
         diversify_only: false,
@@ -318,6 +325,28 @@ pub(crate) const GRID_KNOBS: &[KnobSpec] = &[
         apply: |p, v| p.popularity_w_duration = (p.popularity_w_duration + v).max(0.0),
         probes: PROBES_WEIGHT,
         invalidates: M_POPULARITY,
+        diversify_only: false,
+    },
+    // -- Uploader channel (3) --
+    KnobSpec {
+        name: "uploader_n0",
+        apply: |p, v| p.uploader_n0 = (p.uploader_n0 + v).max(1.0),
+        probes: PROBES_COLDSTART,
+        invalidates: M_UPLOADER,
+        diversify_only: false,
+    },
+    KnobSpec {
+        name: "uploader_w_avg_score",
+        apply: |p, v| p.uploader_w_avg_score = (p.uploader_w_avg_score + v).max(0.0),
+        probes: PROBES_WEIGHT,
+        invalidates: M_UPLOADER,
+        diversify_only: false,
+    },
+    KnobSpec {
+        name: "uploader_w_avg_fav",
+        apply: |p, v| p.uploader_w_avg_fav = (p.uploader_w_avg_fav + v).max(0.0),
+        probes: PROBES_WEIGHT,
+        invalidates: M_UPLOADER,
         diversify_only: false,
     },
     // -- Discrete preference (2) + cold-start (1) --
@@ -706,6 +735,13 @@ pub(crate) const MIX_ONLY_KNOBS: &[KnobSpec] = &[
     KnobSpec {
         name: "mix_tag_relation",
         apply: |p, v| p.mix_tag_relation = (p.mix_tag_relation + v).max(0.0),
+        probes: PROBES_MIX,
+        invalidates: M_NONE,
+        diversify_only: false,
+    },
+    KnobSpec {
+        name: "mix_uploader",
+        apply: |p, v| p.mix_uploader = (p.mix_uploader + v).max(0.0),
         probes: PROBES_MIX,
         invalidates: M_NONE,
         diversify_only: false,

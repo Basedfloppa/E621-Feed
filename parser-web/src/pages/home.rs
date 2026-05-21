@@ -68,13 +68,11 @@ pub fn home_page() -> Html {
                     let saved_accounts = saved_accounts.clone();
                     let url = format!("{}/accounts", backend);
                     wasm_bindgen_futures::spawn_local(async move {
-                        if let Ok(resp) = api_get(&url).send().await {
-                            if resp.ok() {
-                                if let Ok(accts) = resp.json::<Vec<UserInfo>>().await {
+                        if let Ok(resp) = api_get(&url).send().await
+                            && resp.ok()
+                                && let Ok(accts) = resp.json::<Vec<UserInfo>>().await {
                                     saved_accounts.set(accts);
                                 }
-                            }
-                        }
                     });
                 }
             };

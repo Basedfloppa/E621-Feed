@@ -1,5 +1,5 @@
 *.lock
-*/target
+**/target
 */dist
 *.db*
 config.toml
@@ -11,3 +11,6 @@ config.js
 # from .well-known/security.example.txt during deploy. Keep it local so the
 # repo doesn't leak personal contact info.
 parser-web/.well-known/security.txt
+
+# codeql db
+**/db

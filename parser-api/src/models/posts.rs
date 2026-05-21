@@ -137,7 +137,7 @@ pub struct Tags {
     pub contributor: Vec<String>,
 }
 
-#[derive(Serialize, Deserialize, JsonSchema, Clone)]
+#[derive(Serialize, Deserialize, JsonSchema, Clone, Default)]
 pub struct Flags {
     pub pending: bool,
     pub flagged: bool,
@@ -206,6 +206,9 @@ pub struct ScoreBreakdown {
     pub interaction_fit: f32,
     #[serde(default)]
     pub tag_relation_fit: f32,
+    /// Uploader quality channel (0 when disabled). Added in v5.10.
+    #[serde(default)]
+    pub uploader_fit: f32,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema, Clone)]

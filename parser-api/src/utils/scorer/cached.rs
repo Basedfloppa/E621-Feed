@@ -52,6 +52,7 @@ pub struct CachedTag {
 /// pass (which needs the full struct).
 pub struct CachedPostFeatures {
     pub id: i64,
+    pub uploader_id: i64,
     pub created_at: DateTime<Utc>,
     pub score_total: i64,
     pub score_up: i64,
@@ -119,6 +120,7 @@ impl CachedPostFeatures {
         }
         Self {
             id: post.id,
+            uploader_id: post.uploader_id,
             created_at: post.created_at,
             score_total: post.score.total,
             score_up: post.score.up,

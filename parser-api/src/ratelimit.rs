@@ -128,14 +128,13 @@ fn maybe_gc(map: &mut HashMap<String, Bucket>, now: Instant) {
 /// Client IP for rate-limit keying. Trusts leftmost `X-Forwarded-For`
 /// behind nginx; falls back to the socket peer.
 pub fn client_ip(req: &Request<'_>) -> String {
-    if let Some(xff) = req.headers().get_one("x-forwarded-for") {
-        if let Some(first) = xff.split(',').next() {
+    if let Some(xff) = req.headers().get_one("x-forwarded-for")
+        && let Some(first) = xff.split(',').next() {
             let trimmed = first.trim();
             if !trimmed.is_empty() {
                 return trimmed.to_string();
             }
         }
-    }
     req.client_ip()
         .map(|ip| ip.to_string())
         .unwrap_or_else(|| "unknown".to_string())

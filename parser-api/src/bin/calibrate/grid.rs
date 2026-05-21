@@ -62,7 +62,7 @@ pub(crate) fn run_grid_with_dataset(
     let baseline = cfg_arc.priors.clone();
     // Baseline = full rebuild → seeds the channel cache for subsequent probes.
     let (baseline_m, baseline_cache) = score_with_cache(
-        &dataset,
+        dataset,
         &baseline,
         now,
         top_k_ndcg,
@@ -130,7 +130,7 @@ pub(crate) fn run_grid_with_dataset(
                     (k.apply)(&mut trial, delta);
                     let prev_cache = Some(&best_cache);
                     let (m_raw, trial_cache) = score_with_cache(
-                        &dataset,
+                        dataset,
                         &trial,
                         now,
                         top_k_ndcg,
@@ -184,7 +184,7 @@ pub(crate) fn run_grid_with_dataset(
                             );
                         }
                     }
-                    if pass_evals % heartbeat_every == 0 {
+                    if pass_evals.is_multiple_of(heartbeat_every) {
                         eprintln!(
                             "[grid]   pass {pass}(×{scale:.2}) heartbeat: {pass_evals}/{total_pass_evals} probes, current best NDCG@{top_k_ndcg} {:.4}, {:.1}s elapsed",
                             best_score,
@@ -225,7 +225,7 @@ pub(crate) fn run_grid_with_dataset(
                 (kb.apply)(&mut trial, sb * db * pair_scale);
                 let prev_cache = Some(&best_cache);
                 let (m_raw, trial_cache) = score_with_cache(
-                    &dataset,
+                    dataset,
                     &trial,
                     now,
                     top_k_ndcg,
@@ -276,7 +276,7 @@ pub(crate) fn run_grid_with_dataset(
             (ck.apply)(&mut trial, cand);
             let prev_cache = Some(&best_cache);
             let (m_raw, trial_cache) = score_with_cache(
-                &dataset,
+                dataset,
                 &trial,
                 now,
                 top_k_ndcg,
@@ -311,7 +311,7 @@ pub(crate) fn run_grid_with_dataset(
 
     // Final eval — use the cached path (or full rebuild on diversify).
     let (final_m_raw, _) = score_with_cache(
-        &dataset,
+        dataset,
         &best,
         now,
         top_k_ndcg,

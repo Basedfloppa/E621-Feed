@@ -52,7 +52,7 @@ pub fn prune_orphan_candidates(retention_secs: u64) -> Result<(usize, usize), St
                 params![cutoff],
             )
             .map_err(|e| format!("prune_orphan_candidates delete: {e}"))?;
-        Ok(n as usize)
+        Ok(n)
     })?;
 
     if deleted > 0 {

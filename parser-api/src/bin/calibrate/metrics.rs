@@ -227,7 +227,7 @@ fn score_with_opts(
                 );
                 if progress {
                     let done = counter.fetch_add(1, Ordering::Relaxed) + 1;
-                    if done % report_every == 0 || done == total {
+                    if done.is_multiple_of(report_every) || done == total {
                         eprintln!(
                             "[score]   {done}/{total} accounts scored ({:.1}s elapsed)",
                             t0.elapsed().as_secs_f32()

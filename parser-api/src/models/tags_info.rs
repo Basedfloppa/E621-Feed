@@ -44,6 +44,14 @@ pub struct AccountRecencyProfile {
     pub avg_abs_dev_days: f32,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone, JsonSchema)]
+pub struct AccountUploaderStat {
+    pub uploader_id: i64,
+    pub post_count: i64,
+    pub avg_score: f32,
+    pub avg_fav: f32,
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone, JsonSchema, Default)]
 pub struct AccountPreferenceProfile {
     pub rating: Vec<AccountRatingStat>,
@@ -51,6 +59,9 @@ pub struct AccountPreferenceProfile {
     pub feedback: Vec<AccountTagFeedback>,
     pub quality: AccountQualityProfile,
     pub recency: AccountRecencyProfile,
+    /// Per-uploader quality stats based on user's favourited posts.
+    #[serde(default)]
+    pub uploaders: Vec<AccountUploaderStat>,
     /// When the profile was last refreshed by `/process`.
     /// `None` = never refreshed (legacy accounts).
     #[serde(default)]

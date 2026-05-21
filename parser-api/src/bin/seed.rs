@@ -172,8 +172,8 @@ async fn probe_favorite_counts(ids: &[i32]) -> Vec<(i32, String, i32)> {
 ///   * `refresh_account_profiles` is skipped — calibrate.rs builds a
 ///     synthetic profile from the train half of each user's favourites, so
 ///     the on-disk profile rows aren't read.
-/// Net effect: ~10× faster per-user import. Don't reuse this for prod
-/// account import.
+///     Net effect: ~10× faster per-user import. Don't reuse this for prod
+///     account import.
 async fn import_user(uid: i32, name: &str) -> anyhow::Result<usize> {
     let cfg = models::cfg();
     let blacklist: HashSet<String> = cfg.tag_blacklist.iter().map(|s| s.to_lowercase()).collect();

@@ -37,6 +37,7 @@ impl Group {
         GROUP_NAMES[self as usize].1
     }
 
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Option<Self> {
         GROUP_NAMES.iter().find(|(_, n)| *n == s).map(|(g, _)| *g)
     }
@@ -51,10 +52,12 @@ mod channels;
 mod channels_cached;
 mod context;
 mod diversify;
+mod metrics;
 mod priors;
 mod util;
 
 pub use cached::{CachedPostFeatures, CachedTag};
 pub use context::{context_fingerprint, ContextBase, ScoringContext};
 pub use diversify::{diversify_indices, diversify_scored_posts, DiversityFeatures};
+pub use metrics::{ChannelTiming, PhaseRecord, PipelineMetrics, ScoringMetrics};
 pub use priors::Priors;

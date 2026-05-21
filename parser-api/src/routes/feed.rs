@@ -23,7 +23,8 @@ use e621_account_parser_api::{
     ratelimit, validation,
 };
 use e621_account_parser_api::utils::{
-    current_global_relation, current_idf, diversify_scored_posts, CachedPostFeatures, ScoringContext,
+    current_global_relation, current_idf, diversify_scored_posts, CachedPostFeatures,
+    ChannelTiming, PipelineMetrics, ScoringContext, ScoringMetrics,
 };
 
 #[openapi(tag = "Recommendations")]
@@ -67,6 +68,8 @@ pub(crate) async fn get_recommendations(
     let cfg = cfg();
     let runtime = cfg.runtime.clone();
 
+    let mut pipe = PipelineMetrics::new("recommendations");
+
     let owner = owner_token;
     // Single blocking hop pulls everything SQLite-backed in one go so the
     // network round-trip below overlaps with SQL latency.
@@ -108,6 +111,7 @@ pub(crate) async fn get_recommendations(
         ))
     })
     .await?;
+    pipe.mark("db_hydrate");
 
     let (bucket_name, mut priors) = cfg.pick_bucket(account_id, explicit_bucket.as_deref());
     if let Some(bucket) = &bucket_name {
@@ -118,6 +122,7 @@ pub(crate) async fn get_recommendations(
     let live_posts: Vec<Post> = api::get_posts(&account, page)
         .await
         .map_err(|e| ApiError::Internal(format!("Failed to fetch posts: {e}")))?;
+    pipe.mark("e621_fetch");
 
     // Catalog persistence is fire-and-forget: SQLite is single-writer and
     // infinite scroll fires this several times per second. Pull off the
@@ -188,20 +193,35 @@ pub(crate) async fn get_recommendations(
         .iter()
         .map(|post| CachedPostFeatures::from_post_with_user(post, &idf, &global_relation, Some(&user_relation)))
         .collect();
+    pipe.mark("cache_build");
 
     // Parallel scoring via rayon — the closure captures &ctx, &idf,
     // &global_relation, &user_relation which are all Send + Sync.
-    let mut scored: Vec<ScoredPost> = combined
+    let scored_and_timing: Vec<(ScoredPost, ChannelTiming)> = combined
         .into_par_iter()
         .zip(cached.into_par_iter())
         .map(|(post, cf)| {
-            let (s, breakdown) = ctx.score_cached(&cf);
-            ScoredPost {
+            let (s, breakdown, timing) = ctx.score_cached_with_metrics(&cf);
+            let sp = ScoredPost {
                 post,
                 score: s,
                 breakdown: Some(breakdown),
-            }
+            };
+            (sp, timing)
         })
+        .collect();
+
+    // Accumulate performance metrics (trivially cheap when perf_metrics is off).
+    let mut metrics = ScoringMetrics::default();
+    for (_, timing) in &scored_and_timing {
+        metrics.accumulate(timing);
+    }
+    metrics.log_summary();
+    pipe.mark("scoring");
+
+    let mut scored: Vec<ScoredPost> = scored_and_timing
+        .into_iter()
+        .map(|(sp, _)| sp)
         .collect();
 
     if let Some(threshold) = affinity_threshold {
@@ -223,6 +243,8 @@ pub(crate) async fn get_recommendations(
             sp.score = (sp.score + eps * tag_novelty).clamp(0.0, 1.0);
         }
     }
+    pipe.mark("diversify_post");
+    pipe.finish_and_log();
 
     Ok(Json(scored))
 }

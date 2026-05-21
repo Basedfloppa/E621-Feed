@@ -49,6 +49,7 @@ getrandom = "0.2"
 [features]
 default = []
 jemalloc = ["dep:tikv-jemallocator"]
+perf_metrics = []
 
 [target.'cfg(target_os = "linux")'.dependencies]
 tikv-jemallocator = { version = "0.6", optional = true }

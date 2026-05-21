@@ -50,6 +50,7 @@ pub(crate) const M_MEDIA: u16 = 1 << 4;
 pub(crate) const M_POPULARITY: u16 = 1 << 5;
 pub(crate) const M_INTERACTION: u16 = 1 << 6;
 pub(crate) const M_TAG_RELATION: u16 = 1 << 7;
+pub(crate) const M_UPLOADER: u16 = 1 << 8;
 
 /// Empty mask: probe touched only mix weights / temperature / penalty.
 /// All channels reused from prior cache; only the final blend is rerun.
@@ -62,7 +63,8 @@ pub(crate) const M_ALL: u16 = M_SIM
     | M_MEDIA
     | M_POPULARITY
     | M_INTERACTION
-    | M_TAG_RELATION;
+    | M_TAG_RELATION
+    | M_UPLOADER;
 
 // Common combos used by the knob registry. Defining them as named
 // constants makes the registry table easier to read.
@@ -90,6 +92,7 @@ pub(crate) struct ChannelScores {
     pub(crate) popularity: f32,
     pub(crate) interaction: f32,
     pub(crate) tag_relation: f32,
+    pub(crate) uploader: f32,
     pub(crate) veto: bool,
 }
 
@@ -149,6 +152,9 @@ fn recompute_one_post(
         let age_days = (now - features.created_at).num_seconds() as f32 / 86_400.0;
         next.recency = ctx.recency_fit(age_days);
     }
+    if mask & M_UPLOADER != 0 {
+        next.uploader = ctx.uploader_fit_cached(features);
+    }
 
     next
 }
@@ -168,6 +174,7 @@ fn diversify_head_limit(top_k_ndcg: usize, top_k_recall: usize) -> usize {
 /// scores when `prev` is `Some` and `mask` excludes some channels.
 /// Honors `prev`/`mask` on both the plain-sort and the diversify paths;
 /// `prev=None` (or `mask=M_ALL`) forces a full channel rebuild.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn score_with_cache(
     dataset: &EvalDataset,
     priors: &Priors,
@@ -336,6 +343,7 @@ fn blend_channel(ctx: &ScoringContext<'_>, ch: ChannelScores) -> f32 {
         ch.popularity,
         ch.interaction,
         ch.tag_relation,
+        ch.uploader,
         ch.veto,
     )
 }

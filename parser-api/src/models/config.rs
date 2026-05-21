@@ -429,11 +429,10 @@ impl Config {
                     Some(keys[h % keys.len()].clone())
                 }
             });
-        if let Some(name) = &chosen_name {
-            if let Some(ovr) = self.buckets.get(name) {
+        if let Some(name) = &chosen_name
+            && let Some(ovr) = self.buckets.get(name) {
                 ovr.apply_to(&mut priors);
             }
-        }
         (chosen_name, priors)
     }
 }
@@ -473,8 +472,8 @@ pub fn start_config_watcher(path: PathBuf) -> anyhow::Result<ConfigWatcher> {
             if stop_flag.load(Ordering::Relaxed) {
                 break;
             }
-            if let Ok(mtime) = file_mtime(&path) {
-                if last_mtime.is_none_or(|old| old < mtime) {
+            if let Ok(mtime) = file_mtime(&path)
+                && last_mtime.is_none_or(|old| old < mtime) {
                     thread::sleep(Duration::from_millis(120));
 
                     match reload_from(&path) {
@@ -487,7 +486,6 @@ pub fn start_config_watcher(path: PathBuf) -> anyhow::Result<ConfigWatcher> {
                         }
                     }
                 }
-            }
         }
     });
 

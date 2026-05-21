@@ -22,7 +22,7 @@ use e621_account_parser_api::{
     models::{cfg, default_path, reload_from, start_config_watcher, Post, UserApiResponse},
     prefetch,
     ratelimit::{self, ClientIp},
-    utils::mark_idf_dirty,
+    utils::{mark_idf_dirty, PipelineMetrics},
     validation,
 };
 #[cfg(debug_assertions)]
@@ -96,6 +96,8 @@ async fn process_status(
 }
 
 async fn run_process(account_id: i32, owner_token: String) -> Result<(), String> {
+    let mut pipe = PipelineMetrics::new("process");
+
     let cfg = cfg();
     let blacklist: HashSet<String> = cfg.tag_blacklist.iter().map(|s| s.to_lowercase()).collect();
 
@@ -109,11 +111,13 @@ async fn run_process(account_id: i32, owner_token: String) -> Result<(), String>
     };
     let pages = (favcount / cfg.posts_limit) + (if favcount % cfg.posts_limit > 0 { 1 } else { 0 });
     jobs::set_pages_total(account_id, pages);
+    pipe.mark("init");
 
     db_blocking(move || {
         db::drop_account_posts(account_id).map_err(|e| format!("Failed to drop account posts: {e}"))
     })
     .await?;
+    pipe.mark("drop_old");
 
     // Fetch pages in parallel; writes stay serial (SQLite is single-writer).
     let account_for_fetch = account.clone();
@@ -148,12 +152,15 @@ async fn run_process(account_id: i32, owner_token: String) -> Result<(), String>
         jobs::record_page_done(account_id);
     }
     mark_idf_dirty();
+    pipe.mark("fetch_and_save");
 
     db_blocking(move || {
         refresh_account_profiles(account_id)
             .map_err(|e| format!("Failed to refresh account profiles: {e}"))
     })
     .await?;
+    pipe.mark("profile_refresh");
+    pipe.finish_and_log();
     Ok(())
 }
 

@@ -50,13 +50,11 @@ pub fn fetch_analyze_button(props: &AnalyzeButtonProps) -> Html {
             let url = format!("{}/process/{}/status", api_base, user.id);
             let job_status = job_status.clone();
             wasm_bindgen_futures::spawn_local(async move {
-                if let Ok(resp) = api_get(&url).send().await {
-                    if resp.ok() {
-                        if let Ok(s) = resp.json::<Option<ProcessJobState>>().await {
+                if let Ok(resp) = api_get(&url).send().await
+                    && resp.ok()
+                        && let Ok(s) = resp.json::<Option<ProcessJobState>>().await {
                             job_status.set(s);
                         }
-                    }
-                }
             });
         });
     }
@@ -145,20 +143,18 @@ pub fn fetch_analyze_button(props: &AnalyzeButtonProps) -> Html {
                             let url = url.clone();
                             let job_status = job_status.clone();
                             wasm_bindgen_futures::spawn_local(async move {
-                                if let Ok(resp) = api_get(&url).send().await {
-                                    if resp.ok() {
-                                        if let Ok(s) =
+                                if let Ok(resp) = api_get(&url).send().await
+                                    && resp.ok()
+                                        && let Ok(s) =
                                             resp.json::<Option<ProcessJobState>>().await
                                         {
                                             job_status.set(s);
                                         }
-                                    }
-                                }
                             });
                         });
 
-                        if let Some(window) = web_sys::window() {
-                            if let Ok(h) = window
+                        if let Some(window) = web_sys::window()
+                            && let Ok(h) = window
                                 .set_interval_with_callback_and_timeout_and_arguments_0(
                                     cb.as_ref().unchecked_ref(),
                                     STATUS_POLL_INTERVAL_MS,
@@ -166,7 +162,6 @@ pub fn fetch_analyze_button(props: &AnalyzeButtonProps) -> Html {
                             {
                                 handle = Some(h);
                             }
-                        }
                         _closure = Some(cb);
                     }
                 }
@@ -191,11 +186,10 @@ pub fn fetch_analyze_button(props: &AnalyzeButtonProps) -> Html {
             }
 
             move || {
-                if let Some(h) = handle {
-                    if let Some(w) = web_sys::window() {
+                if let Some(h) = handle
+                    && let Some(w) = web_sys::window() {
                         w.clear_interval_with_handle(h);
                     }
-                }
                 drop(_closure);
             }
         });

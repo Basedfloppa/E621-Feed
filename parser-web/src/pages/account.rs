@@ -84,8 +84,8 @@ pub fn account_creator() -> Html {
         let name = name.clone();
         let loc = location.clone();
         use_effect_with((), move |_| {
-            if let Some(l) = loc {
-                if let Ok(q) = l.query::<AccountPrefill>() {
+            if let Some(l) = loc
+                && let Ok(q) = l.query::<AccountPrefill>() {
                     if !q.id.is_empty() {
                         id.set(q.id);
                     }
@@ -93,7 +93,6 @@ pub fn account_creator() -> Html {
                         name.set(q.name);
                     }
                 }
-            }
             || ()
         });
     }
@@ -103,8 +102,8 @@ pub fn account_creator() -> Html {
             if let Some(cfg) = read_config_from_head() {
                 wasm_bindgen_futures::spawn_local(async move {
                     let url = format!("{}/defaults/blacklist", cfg.backend_domain);
-                    if let Ok(resp) = api_get(&url).send().await {
-                        if resp.ok() {
+                    if let Ok(resp) = api_get(&url).send().await
+                        && resp.ok() {
                             #[derive(serde::Deserialize)]
                             struct Resp {
                                 blacklist: Vec<String>,
@@ -113,7 +112,6 @@ pub fn account_creator() -> Html {
                                 default_blacklist.set(parsed.blacklist);
                             }
                         }
-                    }
                 });
             }
             || ()
@@ -145,13 +143,11 @@ pub fn account_creator() -> Html {
             if let Some(cfg) = read_config_from_head() {
                 wasm_bindgen_futures::spawn_local(async move {
                     let url = format!("{}/accounts", cfg.backend_domain);
-                    if let Ok(response) = api_get(&url).send().await {
-                        if response.ok() {
-                            if let Ok(accounts) = response.json::<Vec<UserInfo>>().await {
+                    if let Ok(response) = api_get(&url).send().await
+                        && response.ok()
+                            && let Ok(accounts) = response.json::<Vec<UserInfo>>().await {
                                 saved_accounts.set(accounts);
                             }
-                        }
-                    }
                 });
             }
             || ()
@@ -165,8 +161,8 @@ pub fn account_creator() -> Html {
         use_effect_with(ids, move |ids: &Vec<i64>| {
             let ids = ids.clone();
             let cfg = read_config_from_head();
-            if !ids.is_empty() {
-                if let Some(cfg) = cfg {
+            if !ids.is_empty()
+                && let Some(cfg) = cfg {
                     wasm_bindgen_futures::spawn_local(async move {
                         let mut found: HashMap<i64, String> = HashMap::new();
                         for id in ids {
@@ -174,21 +170,17 @@ pub fn account_creator() -> Html {
                                 "{}/account/{}/experiment_bucket",
                                 cfg.backend_domain, id
                             );
-                            if let Ok(resp) = api_get(&url).send().await {
-                                if resp.ok() {
-                                    if let Ok(v) = resp.json::<serde_json::Value>().await {
-                                        if let Some(name) = v.get("bucket").and_then(|b| b.as_str())
+                            if let Ok(resp) = api_get(&url).send().await
+                                && resp.ok()
+                                    && let Ok(v) = resp.json::<serde_json::Value>().await
+                                        && let Some(name) = v.get("bucket").and_then(|b| b.as_str())
                                         {
                                             found.insert(id, name.to_string());
                                         }
-                                    }
-                                }
-                            }
                         }
                         experiment_buckets.set(found);
                     });
                 }
-            }
             || ()
         });
     }

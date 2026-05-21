@@ -2,11 +2,15 @@
 FROM rust:slim-trixie AS chef-base
 WORKDIR /app
 
+# Build features (e.g. "perf_metrics"); override with --build-arg FEATURES=perf_metrics
+ARG FEATURES=""
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config \
     libssl-dev \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
+
 RUN cargo install cargo-chef --locked
 
 FROM chef-base AS planner
@@ -25,13 +29,14 @@ RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry \
     cargo chef cook --release --recipe-path recipe.json
 
 FROM cacher AS builder
+ARG FEATURES=""
 
 COPY . .
 
 RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry \
     --mount=type=cache,id=cargo-git,target=/usr/local/cargo/git \
     --mount=type=cache,id=cargo-target,target=/app/target \
-    cargo build --release --bin e621-account-parser-api \
+    cargo build --release --bin e621-account-parser-api ${FEATURES:+--features "$FEATURES"} \
     && cp /app/target/release/e621-account-parser-api /app/e621-account-parser-api \
     && strip /app/e621-account-parser-api
 

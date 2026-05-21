@@ -13,6 +13,9 @@ use crate::components::*;
 use crate::models::*;
 use crate::pages::UserInfo;
 
+/// Type alias for closure types.
+type ScrollListener = Option<(web_sys::Window, Closure<dyn FnMut(Event)>)>;
+
 const PIXELS_BEFORE_REFETCH: f64 = 1000.0;
 /// Stop auto-fetching after this many consecutive empty/all-duplicate pages,
 /// so an exhausted catalog or a strict per-page cutoff can't loop forever.
@@ -315,7 +318,7 @@ pub fn feed_page() -> Html {
         let fetch_page = fetch_page.clone();
 
         use_effect(move || {
-            let mut listener: Option<(web_sys::Window, Closure<dyn FnMut(Event)>)> = None;
+            let mut listener: ScrollListener = None;
 
             if let Some(win) = window() {
                 // Throttle: scroll fires at >100Hz on touchpads/wheels and
@@ -483,13 +486,11 @@ pub fn feed_page() -> Html {
                             oninput={{
                                 let cutoff_pct = cutoff_pct.clone();
                                 Callback::from(move |e: InputEvent| {
-                                    if let Some(target) = e.target() {
-                                        if let Ok(input) = target.dyn_into::<HtmlInputElement>() {
-                                            if let Ok(v) = input.value().parse::<f32>() {
+                                    if let Some(target) = e.target()
+                                        && let Ok(input) = target.dyn_into::<HtmlInputElement>()
+                                            && let Ok(v) = input.value().parse::<f32>() {
                                                 cutoff_pct.set(v.clamp(0.0, 95.0));
                                             }
-                                        }
-                                    }
                                 })
                             }}
                         />

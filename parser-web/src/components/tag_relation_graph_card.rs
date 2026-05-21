@@ -89,6 +89,9 @@ const STORAGE_KEY_TOP_N: &str = "tag_graph_top_n";
 const STORAGE_KEY_MIN_COOC: &str = "tag_graph_min_cooc";
 const STORAGE_KEY_EDGES_PER_TAG: &str = "tag_graph_edges_per_tag";
 
+/// Type alias for complex closure types.
+type WheelHandler = Option<(web_sys::Element, Closure<dyn FnMut(WebWheelEvent)>)>;
+
 // =================== Layout state =========================================
 
 #[derive(Properties, PartialEq)]
@@ -348,11 +351,11 @@ impl LayoutState {
             MAX_SPEED
         };
 
-        for i in 0..n {
+        for (i, &(fx, fy)) in forces.iter().enumerate() {
             if Some(i) == pinned_idx {
                 continue;
             }
-            let (fx, fy) = forces[i];
+            
             let node = &mut self.nodes[i];
             node.vx = (node.vx + fx) * DAMPING;
             node.vy = (node.vy + fy) * DAMPING;
@@ -368,14 +371,13 @@ impl LayoutState {
         // Snap the pinned node to its drag target *after* the force pass so
         // other nodes see it at the cursor position rather than at its
         // pre-step location.
-        if let Some(p) = &self.pinned {
-            if let Some(node) = self.nodes.get_mut(p.node_idx) {
+        if let Some(p) = &self.pinned
+            && let Some(node) = self.nodes.get_mut(p.node_idx) {
                 node.x = p.target_x;
                 node.y = p.target_y;
                 node.vx = 0.0;
                 node.vy = 0.0;
             }
-        }
 
         // Hard collision resolution. The continuous repulsion above keeps
         // most pairs apart on its own, but high-degree hubs in dense
@@ -705,7 +707,7 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
         let view_ref = view_ref.clone();
         let canvas_present = payload.is_some() || *loading;
         use_effect_with(canvas_present, move |_present| {
-            let mut handle: Option<(web_sys::Element, Closure<dyn FnMut(WebWheelEvent)>)> = None;
+            let mut handle: WheelHandler = None;
 
             if let Some(svg) = svg_ref_for_effect.cast::<web_sys::Element>() {
                 let svg_for_cb = svg.clone();
@@ -885,11 +887,10 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
                     // otherwise the node is just released to physics.
                     let pinned = layout.borrow().pinned.clone();
                     if let Some(p) = pinned {
-                        if p.distance < CLICK_DRAG_THRESHOLD {
-                            if let (Some(graph), Some(cfg)) =
+                        if p.distance < CLICK_DRAG_THRESHOLD
+                            && let (Some(graph), Some(cfg)) =
                                 (payload.as_ref(), read_config_from_head())
-                            {
-                                if let Some(node) = graph.nodes.get(p.node_idx) {
+                                && let Some(node) = graph.nodes.get(p.node_idx) {
                                     let url = format!(
                                         "{}/posts?tags={}",
                                         cfg.posts_domain,
@@ -900,8 +901,6 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
                                             win.open_with_url_and_target(&url, "_blank");
                                     }
                                 }
-                            }
-                        }
                         layout.borrow_mut().pinned = None;
                     }
                     if was_panning || *is_dragging {
