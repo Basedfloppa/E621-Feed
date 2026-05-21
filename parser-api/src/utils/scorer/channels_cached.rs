@@ -568,6 +568,7 @@ mod tests {
             diversity_w_copyright: 1.8,
             diversity_w_species: 1.5,
             exploration_epsilon: 0.0,
+            tag_relation_max_tags: 20,
             mix_uploader: 0.0,
             uploader_n0: 5.0,
             uploader_w_avg_score: 0.6,

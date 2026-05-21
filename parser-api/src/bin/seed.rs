@@ -213,7 +213,7 @@ async fn import_user(uid: i32, name: &str) -> anyhow::Result<usize> {
             .collect();
         let n = posts.len();
         db::save_posts(&posts, uid).map_err(|e| anyhow::anyhow!("save_posts page {page}: {e}"))?;
-        db::save_posts_tags_batch(&posts, &blacklist, false)
+        db::save_posts_tags_batch(&posts, &blacklist, false, None)
             .map_err(|e| anyhow::anyhow!("save_tags page {page}: {e}"))?;
         total += n;
     }

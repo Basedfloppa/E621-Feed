@@ -324,6 +324,14 @@ impl<'a> ScoringContext<'a> {
             return FEEDBACK_NEUTRAL;
         }
 
+        // Class G: Cluster-PMI — keep only top-K tags by group weight to
+        // reduce the O(T²) pairwise loop to O(K²). 0 = no limit (legacy).
+        let max_tags = self.priors.tag_relation_max_tags;
+        if max_tags > 0 && entries.len() > max_tags {
+            entries.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+            entries.truncate(max_tags);
+        }
+
         let ng = self.global_relation.n_posts().max(1) as f32;
         let nu = self.user_relation.n_posts().max(0) as f32;
         let pmi_scale = self.priors.tag_relation_pmi_scale.max(1e-3);
@@ -614,6 +622,7 @@ mod tests {
             diversity_w_copyright: 1.8,
             diversity_w_species: 1.5,
             exploration_epsilon: 0.0,
+            tag_relation_max_tags: 20,
             mix_uploader: 0.0,
             uploader_n0: 5.0,
             uploader_w_avg_score: 0.6,

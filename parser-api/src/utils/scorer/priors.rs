@@ -187,7 +187,15 @@ pub struct Priors {
     #[serde(default = "default_exploration_epsilon")]
     pub exploration_epsilon: f32,
 
-    // ---- Class G: uploader quality channel ----
+    // ---- Class G: Cluster-PMI tag limit ----
+    /// Maximum number of tags to consider in tag_relation_fit's O(T²) loop.
+    /// Tags are sorted by group weight and only the top K are used, reducing
+    /// complexity from O(T²) to O(K²). Default 20 → 190 pairs vs 1225 at T=50.
+    /// 0 = no limit (legacy behaviour, potentially slower).
+    #[serde(default = "default_tag_relation_max_tags")]
+    pub tag_relation_max_tags: usize,
+
+    // ---- Class H: uploader quality channel ----
     /// Mix weight for the uploader quality channel in the final blend.
     /// 0 = disabled.
     #[serde(default = "default_mix_uploader")]
@@ -344,6 +352,9 @@ fn default_diversity_w_species() -> f32 {
 }
 fn default_exploration_epsilon() -> f32 {
     0.0
+}
+fn default_tag_relation_max_tags() -> usize {
+    20
 }
 fn default_mix_uploader() -> f32 {
     0.05

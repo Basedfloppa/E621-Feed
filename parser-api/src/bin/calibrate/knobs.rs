@@ -407,6 +407,17 @@ pub(crate) const GRID_KNOBS: &[KnobSpec] = &[
         invalidates: M_TAG_RELATION,
         diversify_only: false,
     },
+    // -- Class G: Cluster-PMI tag limit --
+    KnobSpec {
+        name: "tag_relation_max_tags",
+        apply: |p, v| {
+            let next = (p.tag_relation_max_tags as f32 + v).round();
+            p.tag_relation_max_tags = next.clamp(5.0, 50.0) as usize;
+        },
+        probes: &[-5.0, -2.0, 2.0, 5.0],
+        invalidates: M_TAG_RELATION,
+        diversify_only: false,
+    },
     // -- v5.3 Class A: 3 constants previously hardcoded --
     KnobSpec {
         name: "idf_rsj_smoothing",

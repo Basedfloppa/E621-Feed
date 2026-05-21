@@ -33,8 +33,8 @@
    enum-valued knobs. Reports `[best priors — non-default values]` and a
    clamp-saturation warning if any knob landed at its search boundary.
 
-   As of v5.10 the grid covers ~64 numeric knobs + 1 categorical:
-   * 8 `mix_*` weights
+   As of v5.11 the grid covers ~70 numeric knobs + 1 categorical:
+   * 9 `mix_*` weights (added `mix_uploader`)
    * IDF / frequency shaping (7): `df_floor`, `idf_max`, `idf_lambda`,
      `idf_alpha`, `freq_alpha`, `bm25_k`, `one_sided_ratio_exp`,
      `idf_rsj_smoothing`
@@ -46,8 +46,8 @@
      `recency_w_global/personal`, `recency_personal_floor_frac`
    * Discrete-pref + cold-start (3): `discrete_smoothing_alpha`,
      `discrete_pref_floor`, `coldstart_n0`
-   * Tag-relation (5): `tag_relation_pmi_scale`, `tag_relation_w_global/personal`,
-     `tag_relation_cooc_ref/user_cooc_ref`
+   * Tag-relation (6): `tag_relation_pmi_scale`, `tag_relation_w_global/personal`,
+     `tag_relation_cooc_ref/user_cooc_ref`, `tag_relation_max_tags`
    * Cold-start internals (2): `coldstart_smoothing_boost`,
      `interaction_ctr_prior_alpha`
    * Per-group multipliers (6): `group_w_artist/character/copyright/species/general/lore`
@@ -56,6 +56,7 @@
    * Point splits (5, NaN-sentinel disabled): `idf_lambda_meta`,
      `recency_tau_recent`, `recency_tau_hot`, `tag_relation_pmi_scale_user`,
      `recency_split_age_hours`
+   * Uploader channel (3): `uploader_n0`, `uploader_w_avg_score`, `uploader_w_avg_fav`
    * Diversity weights (5): `diversity_w_artist/character/copyright/species/general`
    * Categorical (1): `tag_relation_pair_aggregator` ∈ {mean, max, geomean}
 
@@ -210,14 +211,15 @@ that don't depend on those biases — `mix_sim`, `mix_rating`,
 The v5-calibrated values are **already baked into the defaults** in
 [`parser-api/config.example.toml`](../parser-api/config.example.toml).
 To validate the change in production, define a `control` bucket that
-rolls the mix weights back to the pre-v5 values. Only the 8 `mix_*`
-knobs are bucket-overridable (see `BucketOverride` in
-[`src/models/config.rs`](../parser-api/src/models/config.rs)) — IDF,
-`freq_alpha`, and `tag_relation_*` shifts apply to all arms.
+rolls the mix weights back to the pre-v5 values.
+
+Buckets can override **any Priors field** via the generic `priors` JSON
+override — not just the `mix_*` weights. See `BucketOverride` in
+[`src/models/config.rs`](../parser-api/src/models/config.rs).
 
 ```toml
 [buckets.control]
-mix_sim          = 0.48   # pre-v5 default
+mix_sim          = 0.48   # pre-v5 default (legacy syntax)
 mix_quality      = 0.10
 mix_recency      = 0.07
 mix_rating       = 0.10
@@ -226,9 +228,20 @@ mix_popularity   = 0.07
 mix_interaction  = 0.10
 mix_tag_relation = 0.08
 
+# Or use the generic priors override (JSON inline table in TOML):
+[buckets.control_v2]
+priors = { mix_sim = 0.48, mix_quality = 0.10, diversity_max_penalty = 0.30 }
+
 [buckets.exp_v5]
 # empty = current config (the v5-calibrated mix weights from config.example.toml)
 ```
+
+The `priors` field accepts any key from `[priors]` as a JSON inline table
+(e.g. `{ group_w_artist = 2.0, diversity_max_penalty = 0.3 }`). Legacy
+`mix_*` fields take precedence over `priors` when both specify the same
+knob. See `merge_priors()` in
+[`src/models/config.rs`](../parser-api/src/models/config.rs) for the full
+list of overridable fields.
 
 Accounts are auto-bucketed by `account_id` hash (deterministic across
 restarts). Per-interaction bucket assignment is logged into
@@ -300,7 +313,7 @@ calibrate_threads = 0   # 0 = auto (nproc/2). Set explicitly to e.g. 4 to be mor
 
 2. **Per-channel score cache** ([`bin/calibrate/cache.rs`](../parser-api/src/bin/calibrate/cache.rs)).
    Every `KnobSpec` declares an `invalidates: u16` bitmask naming which of
-   the 8 scoring channels its delta affects. The baseline run computes all
+   the 9 scoring channels its delta affects. The baseline run computes all
    channels and stores them per (account, post). Each subsequent probe
    recomputes only the invalidated channels and reuses the rest from the
    cache; the final mix-blend / temperature / strong-negative-penalty

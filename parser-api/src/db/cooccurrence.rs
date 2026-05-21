@@ -9,6 +9,81 @@ use super::open_db;
 /// plus headroom — cap at 200 pairs (400 params) per statement.
 const COOC_PAIRS_PER_STATEMENT: usize = 200;
 
+/// Incremental upsert into `account_tag_cooccurrence` for the given
+/// account and tag pairs. Called from `save_posts_tags_batch` to avoid
+/// the full DELETE + INSERT SELECT rebuild in `set_account_tag_cooccurrence`.
+/// Needs the reverse map from `tag_id → (name, group)`.
+/// Each pair increments `cooc_count` by 1.
+const COOC_ACCOUNT_PAIRS_PER_STMT: usize = 100;
+
+pub(super) fn upsert_account_cooccurrence_pairs(
+    tx: &rusqlite::Transaction,
+    account_id: i32,
+    tag_ids: &[i64],
+    tag_id_to_meta: &std::collections::HashMap<i64, (String, String)>,
+) -> Result<(), String> {
+    if tag_ids.len() < 2 {
+        return Ok(());
+    }
+    let mut pairs: Vec<(i64, i64)> = Vec::with_capacity(tag_ids.len() * (tag_ids.len() - 1) / 2);
+    for i in 0..tag_ids.len() {
+        let a = tag_ids[i];
+        for &b in &tag_ids[i + 1..] {
+            if a < b {
+                pairs.push((a, b));
+            } else {
+                pairs.push((b, a));
+            }
+        }
+    }
+
+    for chunk in pairs.chunks(COOC_ACCOUNT_PAIRS_PER_STMT) {
+        let mut sql = String::from(
+            "INSERT INTO account_tag_cooccurrence (account_id, tag1_name, tag1_group, tag2_name, tag2_group, cooc_count) VALUES "
+        );
+        // Use ?1 for account_id (shared), then 4 sequential ? per pair.
+        let mut param_idx = 2usize;
+        for (i, _) in chunk.iter().enumerate() {
+            if i > 0 {
+                sql.push(',');
+            }
+            // (?1, ?P, ?P+1, ?P+2, ?P+3, 1) where P = param_idx
+            sql.push_str(&format!("(?1, ?{p}, ?{p1}, ?{p2}, ?{p3}, 1)",
+                p = param_idx, p1 = param_idx + 1, p2 = param_idx + 2, p3 = param_idx + 3));
+            param_idx += 4;
+        }
+        sql.push_str(
+            " ON CONFLICT(account_id, tag1_name, tag1_group, tag2_name, tag2_group) DO UPDATE SET cooc_count = cooc_count + 1"
+        );
+
+        let mut stmt = tx
+            .prepare(&sql)
+            .map_err(|e| format!("prepare account cooc batch: {e}"))?;
+        let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = Vec::with_capacity(chunk.len() * 4 + 1);
+        params_vec.push(Box::new(account_id));
+        for (a, b) in chunk {
+            let (na, ga) = tag_id_to_meta.get(a).ok_or_else(|| format!("missing tag_id {a} in account cooc meta map"))?;
+            let (nb, gb) = tag_id_to_meta.get(b).ok_or_else(|| format!("missing tag_id {b} in account cooc meta map"))?;
+            // Canonical ordering by (name, group) strings
+            if (na, ga) <= (nb, gb) {
+                params_vec.push(Box::new(na.clone()));
+                params_vec.push(Box::new(ga.clone()));
+                params_vec.push(Box::new(nb.clone()));
+                params_vec.push(Box::new(gb.clone()));
+            } else {
+                params_vec.push(Box::new(nb.clone()));
+                params_vec.push(Box::new(gb.clone()));
+                params_vec.push(Box::new(na.clone()));
+                params_vec.push(Box::new(ga.clone()));
+            }
+        }
+        let params_refs: Vec<&dyn rusqlite::ToSql> = params_vec.iter().map(|b| b.as_ref()).collect();
+        stmt.execute(rusqlite::params_from_iter(params_refs))
+            .map_err(|e| format!("exec account cooc batch: {e}"))?;
+    }
+    Ok(())
+}
+
 pub(super) fn upsert_cooccurrence_pairs(
     tx: &rusqlite::Transaction,
     tag_ids: &[i64],

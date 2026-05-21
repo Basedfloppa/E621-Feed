@@ -2,6 +2,7 @@ use crate::utils::Priors;
 use anyhow::Context;
 use arc_swap::ArcSwap;
 use rocket::serde::Deserialize;
+use rocket::serde::json::serde_json;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -379,6 +380,29 @@ pub struct BucketOverride {
     pub mix_popularity: Option<f32>,
     pub mix_interaction: Option<f32>,
     pub mix_tag_relation: Option<f32>,
+    /// Arbitrary `[priors.*]` overrides as a JSON object. Merged after the
+    /// legacy mix fields so individual mix overrides take precedence. Every
+    /// value must be a valid JSON type matching the target Priors field.
+    /// Example in `config.toml`:
+    /// ```toml
+    /// [buckets.control]
+    /// priors = { group_w_artist = 2.0, diversity_max_penalty = 0.3 }
+    /// ```
+    #[serde(default, deserialize_with = "deserialize_priors_json")]
+    pub priors: Option<serde_json::Value>,
+}
+
+/// Deserialize `priors` from a TOML inline table or JSON object. TOML's
+/// `{ key = value }` is valid JSON after key-quoting, and serde_json can
+/// parse inline table values produced by `toml`.
+fn deserialize_priors_json<'de, D>(d: D) -> Result<Option<serde_json::Value>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    // toml::Value::Table can be deserialized to serde_json::Value via
+    // the serde data model — no manual conversion needed.
+    let opt: Option<serde_json::Value> = Option::deserialize(d)?;
+    Ok(opt)
 }
 
 impl BucketOverride {
@@ -407,7 +431,123 @@ impl BucketOverride {
         if let Some(v) = self.mix_tag_relation {
             p.mix_tag_relation = v;
         }
+        // Apply generic priors overrides via JSON merge.
+        if let Some(json) = &self.priors {
+            if let Ok(overrides) = serde_json::from_value::<Priors>(json.clone()) {
+                merge_priors(p, &overrides);
+            }
+        }
     }
+}
+
+/// Merge non-default values from `overrides` into `base`. The Priors default
+/// for every numeric field is either 0.0 or a sentinel like f32::NAN; we
+/// overwrite base fields when the override carries a non-default value.
+/// This avoids requiring every field to be `Option<T>` in Priors itself.
+fn merge_priors(base: &mut Priors, overrides: &Priors) {
+    // --- mix weights ---
+    if overrides.mix_sim != 0.0 { base.mix_sim = overrides.mix_sim; }
+    if overrides.mix_quality != 0.0 { base.mix_quality = overrides.mix_quality; }
+    if overrides.mix_recency != 0.0 { base.mix_recency = overrides.mix_recency; }
+    if overrides.mix_rating != 0.0 { base.mix_rating = overrides.mix_rating; }
+    if overrides.mix_media != 0.0 { base.mix_media = overrides.mix_media; }
+    if overrides.mix_popularity != 0.0 { base.mix_popularity = overrides.mix_popularity; }
+    if overrides.mix_interaction != 0.0 { base.mix_interaction = overrides.mix_interaction; }
+    if overrides.mix_tag_relation != 0.08 { base.mix_tag_relation = overrides.mix_tag_relation; }
+    if overrides.mix_uploader != 0.05 { base.mix_uploader = overrides.mix_uploader; }
+
+    // --- IDF / freq ---
+    if overrides.idf_lambda != 1.0 { base.idf_lambda = overrides.idf_lambda; }
+    if overrides.idf_alpha != 1.0 { base.idf_alpha = overrides.idf_alpha; }
+    if overrides.freq_alpha != 0.95 { base.freq_alpha = overrides.freq_alpha; }
+    if overrides.df_floor != 0.4 { base.df_floor = overrides.df_floor; }
+    if overrides.idf_max != 100.0 { base.idf_max = overrides.idf_max; }
+    if overrides.bm25_k != 2.25 { base.bm25_k = overrides.bm25_k; }
+    if overrides.idf_rsj_smoothing != 0.35 { base.idf_rsj_smoothing = overrides.idf_rsj_smoothing; }
+    if overrides.one_sided_ratio_exp != 0.5 { base.one_sided_ratio_exp = overrides.one_sided_ratio_exp; }
+    if !overrides.idf_lambda_meta.is_nan() { base.idf_lambda_meta = overrides.idf_lambda_meta; }
+
+    // --- quality channel ---
+    if overrides.quality_a != 0.5 { base.quality_a = overrides.quality_a; }
+    if overrides.quality_b != 0.2 { base.quality_b = overrides.quality_b; }
+    if overrides.quality_log_bias != -3.0 { base.quality_log_bias = overrides.quality_log_bias; }
+    if overrides.quality_w_absolute != 0.55 { base.quality_w_absolute = overrides.quality_w_absolute; }
+    if overrides.quality_w_relative_score != 0.3 { base.quality_w_relative_score = overrides.quality_w_relative_score; }
+    if overrides.quality_w_relative_comments != 0.15 { base.quality_w_relative_comments = overrides.quality_w_relative_comments; }
+    if overrides.quality_c != 0.3 { base.quality_c = overrides.quality_c; }
+
+    // --- recency channel ---
+    if overrides.recency_tau_days != 10.0 { base.recency_tau_days = overrides.recency_tau_days; }
+    if overrides.recency_w_global != 0.4 { base.recency_w_global = overrides.recency_w_global; }
+    if overrides.recency_w_personal != 0.6 { base.recency_w_personal = overrides.recency_w_personal; }
+    if overrides.recency_personal_floor_frac != 1.0 { base.recency_personal_floor_frac = overrides.recency_personal_floor_frac; }
+    if overrides.recency_log_personal != true { base.recency_log_personal = overrides.recency_log_personal; }
+    if !overrides.recency_tau_hot.is_nan() { base.recency_tau_hot = overrides.recency_tau_hot; }
+    if !overrides.recency_tau_recent.is_nan() { base.recency_tau_recent = overrides.recency_tau_recent; }
+    if overrides.recency_split_age_hours != 24.0 { base.recency_split_age_hours = overrides.recency_split_age_hours; }
+    if overrides.recency_split_age_days != 30.0 { base.recency_split_age_days = overrides.recency_split_age_days; }
+
+    // --- popularity channel ---
+    if overrides.popularity_w_fav != 0.8 { base.popularity_w_fav = overrides.popularity_w_fav; }
+    if overrides.popularity_w_duration != 0.2 { base.popularity_w_duration = overrides.popularity_w_duration; }
+
+    // --- tag relation channel ---
+    if overrides.tag_relation_w_global != 0.4 { base.tag_relation_w_global = overrides.tag_relation_w_global; }
+    if overrides.tag_relation_w_personal != 0.6 { base.tag_relation_w_personal = overrides.tag_relation_w_personal; }
+    if overrides.tag_relation_pmi_scale != 3.5 { base.tag_relation_pmi_scale = overrides.tag_relation_pmi_scale; }
+    if overrides.tag_relation_min_cooc != 2 { base.tag_relation_min_cooc = overrides.tag_relation_min_cooc; }
+    if overrides.tag_relation_user_min_cooc != 1 { base.tag_relation_user_min_cooc = overrides.tag_relation_user_min_cooc; }
+    if overrides.tag_relation_cooc_ref != 16.0 { base.tag_relation_cooc_ref = overrides.tag_relation_cooc_ref; }
+    if overrides.tag_relation_user_cooc_ref != 5.0 { base.tag_relation_user_cooc_ref = overrides.tag_relation_user_cooc_ref; }
+    if !overrides.tag_relation_pmi_scale_user.is_nan() { base.tag_relation_pmi_scale_user = overrides.tag_relation_pmi_scale_user; }
+    if overrides.tag_relation_pair_aggregator != "mean" { base.tag_relation_pair_aggregator.clone_from(&overrides.tag_relation_pair_aggregator); }
+    if overrides.tag_relation_max_tags != 20 { base.tag_relation_max_tags = overrides.tag_relation_max_tags; }
+
+    // --- group weights ---
+    if overrides.group_w_artist != 2.4 { base.group_w_artist = overrides.group_w_artist; }
+    if overrides.group_w_character != 2.0 { base.group_w_character = overrides.group_w_character; }
+    if overrides.group_w_copyright != 1.45 { base.group_w_copyright = overrides.group_w_copyright; }
+    if overrides.group_w_species != 1.3 { base.group_w_species = overrides.group_w_species; }
+    if overrides.group_w_general != 0.7 { base.group_w_general = overrides.group_w_general; }
+    if overrides.group_w_lore != 0.4 { base.group_w_lore = overrides.group_w_lore; }
+
+    // --- interaction / feedback ---
+    if overrides.interaction_ctr_prior_alpha != 4.0 { base.interaction_ctr_prior_alpha = overrides.interaction_ctr_prior_alpha; }
+    if overrides.meta_interaction_weight != 0.3 { base.meta_interaction_weight = overrides.meta_interaction_weight; }
+    if overrides.feedback_decay_half_life_days != 90.0 { base.feedback_decay_half_life_days = overrides.feedback_decay_half_life_days; }
+    if overrides.strong_negative_count != 3 { base.strong_negative_count = overrides.strong_negative_count; }
+    if overrides.strong_negative_penalty != 0.4 { base.strong_negative_penalty = overrides.strong_negative_penalty; }
+    if overrides.strong_negative_wilson_threshold != 0.55 { base.strong_negative_wilson_threshold = overrides.strong_negative_wilson_threshold; }
+
+    // --- cold-start / smoothing ---
+    if overrides.discrete_smoothing_alpha != 1.0 { base.discrete_smoothing_alpha = overrides.discrete_smoothing_alpha; }
+    if overrides.discrete_pref_floor != 0.05 { base.discrete_pref_floor = overrides.discrete_pref_floor; }
+    if overrides.coldstart_smoothing_boost != 2.0 { base.coldstart_smoothing_boost = overrides.coldstart_smoothing_boost; }
+    if overrides.coldstart_n0 != 25.0 { base.coldstart_n0 = overrides.coldstart_n0; }
+
+    // --- diversity / MMR ---
+    if overrides.diversity_window != 32 { base.diversity_window = overrides.diversity_window; }
+    if overrides.diversity_w_artist != 0.22 { base.diversity_w_artist = overrides.diversity_w_artist; }
+    if overrides.diversity_w_character != 0.16 { base.diversity_w_character = overrides.diversity_w_character; }
+    if overrides.diversity_w_copyright != 1.8 { base.diversity_w_copyright = overrides.diversity_w_copyright; }
+    if overrides.diversity_w_species != 1.5 { base.diversity_w_species = overrides.diversity_w_species; }
+    if overrides.diversity_w_general != 0.08 { base.diversity_w_general = overrides.diversity_w_general; }
+    if overrides.diversity_max_penalty != 0.45 { base.diversity_max_penalty = overrides.diversity_max_penalty; }
+    if overrides.diversity_interaction_damp != 0.35 { base.diversity_interaction_damp = overrides.diversity_interaction_damp; }
+
+    // --- uploader channel ---
+    if overrides.uploader_n0 != 5.0 { base.uploader_n0 = overrides.uploader_n0; }
+    if overrides.uploader_w_avg_score != 0.6 { base.uploader_w_avg_score = overrides.uploader_w_avg_score; }
+    if overrides.uploader_w_avg_fav != 0.4 { base.uploader_w_avg_fav = overrides.uploader_w_avg_fav; }
+
+    // --- algorithmic shape ---
+    if overrides.score_temperature != 0.0 { base.score_temperature = overrides.score_temperature; }
+    if overrides.confidence_steepness != 1.0 { base.confidence_steepness = overrides.confidence_steepness; }
+    if overrides.mmr_redundancy_exp != 1.0 { base.mmr_redundancy_exp = overrides.mmr_redundancy_exp; }
+    if overrides.tag_sim_jaccard_blend != 0.0 { base.tag_sim_jaccard_blend = overrides.tag_sim_jaccard_blend; }
+
+    // --- exploration ---
+    if overrides.exploration_epsilon != 0.0 { base.exploration_epsilon = overrides.exploration_epsilon; }
 }
 
 impl Config {

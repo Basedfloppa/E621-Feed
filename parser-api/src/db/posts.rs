@@ -97,12 +97,16 @@ pub fn prune_stale_catalog_posts(retention_days: i64) -> Result<i64, String> {
 
 pub fn drop_account_posts(account_id: i32) -> Result<(), String> {
     super::with_write_tx(|tx| {
-        let mut clear_account_post = tx
-            .prepare_cached("DELETE FROM accounts_post WHERE account_id = ?1")
-            .map_err(|e| format!("Failed to prepare transaction: {e}"))?;
-        clear_account_post
-            .execute(params![account_id])
-            .map_err(|e| format!("Failed to execute transaction: {e}"))?;
+        tx.execute(
+            "DELETE FROM accounts_post WHERE account_id = ?1",
+            params![account_id],
+        )
+        .map_err(|e| format!("Failed to clear accounts_post: {e}"))?;
+        tx.execute(
+            "DELETE FROM account_tag_cooccurrence WHERE account_id = ?1",
+            params![account_id],
+        )
+        .map_err(|e| format!("Failed to clear account_tag_cooccurrence: {e}"))?;
         Ok(())
     })
 }

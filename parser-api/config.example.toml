@@ -157,6 +157,7 @@ tag_relation_min_cooc       = 2
 tag_relation_user_min_cooc  = 1
 tag_relation_cooc_ref       = 16.0
 tag_relation_user_cooc_ref  = 5.0
+tag_relation_max_tags       = 20 # Cluster-PMI: top-K tags by group weight. 0 = no limit (legacy O(T²))
 
 # Feedback decay + meta interaction
 feedback_decay_half_life_days = 90.0

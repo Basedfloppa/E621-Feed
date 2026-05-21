@@ -15,7 +15,7 @@ use e621_account_parser_api::{
     api,
     auth::{self, OwnerToken},
     db,
-    db::{get_account_by_id, refresh_account_profiles, DbInit},
+    db::{get_account_by_id, refresh_account_profiles_skip_cooc, DbInit},
     errors::ApiError,
     jobs,
     jobs::{BeginResult, ProcessJobState},
@@ -154,7 +154,7 @@ async fn run_process(account_id: i32, owner_token: String) -> Result<(), String>
         let bl = blacklist.clone();
         db_blocking(move || -> Result<(), String> {
             db::save_posts(&posts, acc_id).map_err(|e| format!("Failed to save posts: {e}"))?;
-            db::save_posts_tags_batch(&posts, &bl, true)
+            db::save_posts_tags_batch(&posts, &bl, true, Some(acc_id))
                 .map_err(|e| format!("Failed to save tags for page {i}: {e}"))?;
             Ok(())
         })
@@ -165,7 +165,9 @@ async fn run_process(account_id: i32, owner_token: String) -> Result<(), String>
     record_phase!("fetch_and_save");
 
     db_blocking(move || {
-        refresh_account_profiles(account_id)
+        // Cooccurrence was built incrementally during save_posts_tags_batch,
+        // so skip the expensive full rebuild here.
+        refresh_account_profiles_skip_cooc(account_id)
             .map_err(|e| format!("Failed to refresh account profiles: {e}"))
     })
     .await?;

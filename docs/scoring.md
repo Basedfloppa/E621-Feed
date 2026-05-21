@@ -6,7 +6,21 @@ in [`parser-api/config.example.toml`](../parser-api/config.example.toml).
 For default values see the example config; for offline-grid evidence on
 which directions are trustworthy see [calibration.md](calibration.md);
 for the math see
-[`parser-api/src/utils/scorer.rs`](../parser-api/src/utils/scorer.rs).
+[`parser-api/src/utils/scorer/`](../parser-api/src/utils/scorer/).
+
+The final score is a weighted blend of **9 scoring channels**:
+
+| Channel | Mix weight | What it measures |
+|---|---|---|
+| `sim` | `mix_sim` | Tag cosine-similarity to the user's profile |
+| `quality` | `mix_quality` | Absolute + relative quality signals (score, favs, comments, upvote ratio) |
+| `recency` | `mix_recency` | How fresh the post is (multi-timescale exponential decay) |
+| `rating` | `mix_rating` | Rating compatibility (S/Q/E) vs user's preference profile |
+| `media` | `mix_media` | Media-type preference (image/video/flash) |
+| `popularity` | `mix_popularity` | Fav count and duration vs user's norm |
+| `interaction` | `mix_interaction` | Per-tag feedback (opens, hides) with Bayesian CTR and staleness decay |
+| `tag_relation` | `mix_tag_relation` | PMI-based pairwise tag co-occurrence (global + personal) |
+| `uploader` | `mix_uploader` | Uploader quality (avg score, avg fav count vs user's profile) |
 
 ## IDF / frequency shaping
 
@@ -131,6 +145,21 @@ estimate keeps the score conservative.
 |`coldstart_smoothing_boost`|less extra smoothing below `coldstart_n0`|more aggressive smoothing for cold profiles|
 |`discrete_pref_floor`|ratings/media-types with zero samples get near-zero score|minimum score floor for unseen categories|
 
+## Uploader channel
+
+When the account's profile has been refreshed, each uploader the user has
+favourited carries aggregated statistics (`avg_score`, `avg_fav`). Posts
+from uploaders whose stats are above the user's personal average receive a
+boost; below-average uploaders are penalised. Confidence-weighted by the
+number of posts seen from that uploader.
+
+|Variable|Lower →|Higher →|
+|---|---|---|
+|`mix_uploader`|uploader quality ignored|uploader quality blends into the final score (default 0.05)|
+|`uploader_n0`|fewer posts needed to trust uploader signal|more evidence required before uploader stats affect the score|
+|`uploader_w_avg_score`|fav count dominates uploader signal|avg score dominates uploader signal|
+|`uploader_w_avg_fav`|avg score dominates uploader signal|avg fav count dominates uploader signal|
+
 ## Exploration bonus
 
 Applied post-scoring: `score += ε × (1 − tag_similarity)`. Posts whose tags
@@ -141,7 +170,12 @@ to `exploration_epsilon`. Disabled at 0 (default).
 |---|---|---|
 |`exploration_epsilon`|pure exploit (default 0)|more exploration toward novel content (capped at 0.5)|
 
-## Tag-relation graph
+## Tag-relation graph + Cluster-PMI
+
+The tag-relation channel computes PMI-weighted pairwise associations
+between every pair of tags on a post. To keep this O(T²) loop tractable
+on posts with many tags, **Cluster-PMI** keeps only the top-K tags by
+group weight (default 20, controlled by `tag_relation_max_tags`).
 
 |Variable|Lower →|Higher →|
 |---|---|---|
@@ -152,3 +186,4 @@ to `exploration_epsilon`. Disabled at 0 (default).
 |`tag_relation_user_min_cooc`|let cooc=1 user pairs contribute|require multiple user-side co-occurrences before a pair contributes (default 1 — user pair samples are an order of magnitude sparser than catalog samples)|
 |`tag_relation_cooc_ref`|even rare global pairs trusted at full weight|global pairs need more cooc before earning full PMI weight (rare pairs get linearly shrunk toward zero)|
 |`tag_relation_user_cooc_ref`|rare user pairs trusted at full weight|user pairs need more co-occurrences before earning full personal-PMI weight|
+|`tag_relation_max_tags`|more tags enter the O(K²) pairwise loop (slower, more signal)|fewer tags used — O(T²) → O(K²) speedup via Cluster-PMI (default 20, set to 0 for no limit)|

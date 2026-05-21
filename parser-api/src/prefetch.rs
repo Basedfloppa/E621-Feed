@@ -89,6 +89,7 @@ async fn run_prefetch_tick() -> Result<(), String> {
                         &posts_for_persist,
                         &std::collections::HashSet::new(),
                         false,
+                        None,
                     )
                     .map_err(|e| format!("tags: {e}"))?;
                     Ok(())

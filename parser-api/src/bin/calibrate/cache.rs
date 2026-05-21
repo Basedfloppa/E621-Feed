@@ -2,9 +2,9 @@
 //!
 //! Each grid probe applies a small delta to one knob; most probes affect
 //! only a single scoring channel (e.g. `quality_a` only changes
-//! `quality_fit`). Without caching we recompute all 8 channels for every
+//! `quality_fit`). Without caching we recompute all 9 channels for every
 //! (account, post) on every probe — ~624 probes × 1000 accounts × ~220
-//! posts × 8 channels = the bulk of the 8-hour run.
+//! posts × 9 channels = the bulk of the 8-hour run.
 //!
 //! With this cache:
 //!   1. The baseline eval runs every channel and stores the result

@@ -18,7 +18,7 @@ use e621_account_parser_api::{
     },
     errors::ApiError,
     models::{
-        self, cfg, FeedInteractionRequest, Post, ScoredPost, TagCount,
+        self, cfg, FeedInteractionRequest, Post, ScoredPost,
     },
     ratelimit, validation,
 };
@@ -71,46 +71,50 @@ pub(crate) async fn get_recommendations(
     let mut pipe = PipelineMetrics::new("recommendations");
 
     let owner = owner_token;
-    // Single blocking hop pulls everything SQLite-backed in one go so the
-    // network round-trip below overlaps with SQL latency.
-    let (
-        tags,
-        profile,
-        account,
-        user_relation,
-        seen_ids,
-        owned_ids,
-        local_candidate_ids,
-        explicit_bucket,
-    ) = db_blocking(move || -> Result<_, String> {
-        let tags: Vec<TagCount> =
-            get_tag_counts(account_id).map_err(|e| format!("Failed to get tag counts: {e}"))?;
-        let profile = get_account_preference_profile(account_id)
-            .map_err(|e| format!("Failed to get account profile: {e}"))?;
-        let account = get_account_by_id(&owner, account_id)
-            .map_err(|e| format!("Failed to get account: {e}"))?;
-        let user_relation = db::load_account_tag_relation(account_id, &tags)
-            .map_err(|e| format!("Failed to load user tag relation graph: {e}"))?;
-        let seen_ids = get_recently_seen_post_ids(account_id, runtime.dedup_lookback_days)
-            .map_err(|e| format!("Failed to load seen post ids: {e}"))?;
-        let owned_ids = get_owned_post_ids(account_id)
-            .map_err(|e| format!("Failed to load owned post ids: {e}"))?;
-        let local_ids = collect_local_candidate_ids(account_id, runtime.local_candidate_limit)
-            .map_err(|e| format!("Failed to collect local candidate ids: {e}"))?;
-        let bucket = db::get_account_experiment_bucket(account_id)
-            .map_err(|e| format!("Failed to load experiment bucket: {e}"))?;
-        Ok((
-            tags,
-            profile,
-            account,
-            user_relation,
-            seen_ids,
-            owned_ids,
-            local_ids,
-            bucket,
-        ))
+    // Parallelise independent SQLite reads across r2d2 pool connections.
+    // load_account_tag_relation depends on get_tag_counts, so it runs
+    // in a second wave after tag counts are ready.
+    let rt = runtime.clone();
+    let (tags_res, profile_res, account_res, seen_res, owned_res, local_res, bucket_res) = rocket::tokio::join!(
+        rocket::tokio::task::spawn_blocking(move || {
+            get_tag_counts(account_id).map_err(|e| format!("Failed to get tag counts: {e}"))
+        }),
+        rocket::tokio::task::spawn_blocking(move || {
+            get_account_preference_profile(account_id).map_err(|e| format!("Failed to get account profile: {e}"))
+        }),
+        rocket::tokio::task::spawn_blocking(move || {
+            get_account_by_id(&owner, account_id).map_err(|e| format!("Failed to get account: {e}"))
+        }),
+        rocket::tokio::task::spawn_blocking(move || {
+            get_recently_seen_post_ids(account_id, rt.dedup_lookback_days).map_err(|e| format!("Failed to load seen post ids: {e}"))
+        }),
+        rocket::tokio::task::spawn_blocking(move || {
+            get_owned_post_ids(account_id).map_err(|e| format!("Failed to load owned post ids: {e}"))
+        }),
+        rocket::tokio::task::spawn_blocking(move || {
+            collect_local_candidate_ids(account_id, runtime.local_candidate_limit).map_err(|e| format!("Failed to collect local candidate ids: {e}"))
+        }),
+        rocket::tokio::task::spawn_blocking(move || {
+            db::get_account_experiment_bucket(account_id).map_err(|e| format!("Failed to load experiment bucket: {e}"))
+        }),
+    );
+
+    let tags = tags_res.map_err(|e| format!("Join error: {e}"))??;
+    let profile = profile_res.map_err(|e| format!("Join error: {e}"))??;
+    let account = account_res.map_err(|e| format!("Join error: {e}"))??;
+    let seen_ids = seen_res.map_err(|e| format!("Join error: {e}"))??;
+    let owned_ids = owned_res.map_err(|e| format!("Join error: {e}"))??;
+    let local_candidate_ids = local_res.map_err(|e| format!("Join error: {e}"))??;
+    let explicit_bucket = bucket_res.map_err(|e| format!("Join error: {e}"))??;
+
+    // Second wave: user_relation depends on tags.
+    let tags_for_relation = tags.clone();
+    let user_relation = rocket::tokio::task::spawn_blocking(move || {
+        db::load_account_tag_relation(account_id, &tags_for_relation)
+            .map_err(|e| format!("Failed to load user tag relation graph: {e}"))
     })
-    .await?;
+    .await
+    .map_err(|e| format!("Join error: {e}"))??;
     pipe.mark("db_hydrate");
 
     let (bucket_name, mut priors) = cfg.pick_bucket(account_id, explicit_bucket.as_deref());
@@ -135,7 +139,7 @@ pub(crate) async fn get_recommendations(
                 upsert_catalog_posts(&posts_for_persist)
                     .map_err(|e| format!("Failed to store recommendation catalog posts: {e}"))?;
                 // Skip cooccurrence: candidate browse posts aren't user truth.
-                db::save_posts_tags_batch(&posts_for_persist, &HashSet::new(), false)
+                db::save_posts_tags_batch(&posts_for_persist, &HashSet::new(), false, None)
                     .map_err(|e| format!("Failed to store recommendation tags: {e}"))?;
                 Ok(())
             })
@@ -244,6 +248,35 @@ pub(crate) async fn get_recommendations(
         }
     }
     pipe.mark("diversify_post");
+
+    // Log score breakdown for top-10 and bottom-10 posts (sorted copy).
+    let mut sorted_for_log: Vec<&ScoredPost> = scored.iter().collect();
+    sorted_for_log.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    info!("── Score breakdown (top 10) ─────────────────");
+    for sp in sorted_for_log.iter().take(10) {
+        if let Some(b) = &sp.breakdown {
+            info!(
+                "  post_id={} score={:.4}  sim={:.3} qual={:.3} rec={:.3} rate={:.3} med={:.3} pop={:.3} inter={:.3} rel={:.3} upl={:.3}",
+                sp.post.id, sp.score,
+                b.tag_similarity, b.quality_fit, b.recency_fit, b.rating_fit,
+                b.media_fit, b.popularity_fit, b.interaction_fit, b.tag_relation_fit, b.uploader_fit,
+            );
+        }
+    }
+    if sorted_for_log.len() > 20 {
+        info!("── Score breakdown (bottom 10) ────────────────");
+        for sp in sorted_for_log.iter().rev().take(10) {
+            if let Some(b) = &sp.breakdown {
+                info!(
+                    "  post_id={} score={:.4}  sim={:.3} qual={:.3} rec={:.3} rate={:.3} med={:.3} pop={:.3} inter={:.3} rel={:.3} upl={:.3}",
+                    sp.post.id, sp.score,
+                    b.tag_similarity, b.quality_fit, b.recency_fit, b.rating_fit,
+                    b.media_fit, b.popularity_fit, b.interaction_fit, b.tag_relation_fit, b.uploader_fit,
+                );
+            }
+        }
+    }
+
     pipe.finish_and_log();
 
     Ok(Json(scored))

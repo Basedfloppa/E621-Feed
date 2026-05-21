@@ -9,6 +9,7 @@ pub fn save_posts_tags_batch(
     posts: &[Post],
     blacklist: &HashSet<String>,
     track_cooccurrence: bool,
+    account_id: Option<i32>,
 ) -> Result<(), String> {
     if posts.is_empty() {
         return Ok(());
@@ -25,6 +26,9 @@ pub fn save_posts_tags_batch(
     // (name, group) pairs in a 320-post batch. Caching collapses repeats to
     // a HashMap hit and avoids the upsert+RETURNING round-trip.
     let mut tag_id_cache: HashMap<(String, &'static str), i64> = HashMap::new();
+    // Reverse map: tag_id → (name, group) for incremental account cooc.
+    // Built at the end of the post loop when account_id is Some.
+    let mut tag_id_to_meta: HashMap<i64, (String, &'static str)> = HashMap::new();
 
     super::with_write_tx(|tx| {
         // The `DO UPDATE SET name = name` no-op forces RETURNING to fire on
@@ -102,11 +106,46 @@ pub fn save_posts_tags_batch(
                 }
             }
 
-            if track_cooccurrence && !had_tags && post_tag_ids.len() >= 2 {
+            let has_multi_tags = post_tag_ids.len() >= 2;
+            if track_cooccurrence && !had_tags && has_multi_tags {
                 post_tag_ids.sort_unstable();
                 post_tag_ids.dedup();
                 super::cooccurrence::upsert_cooccurrence_pairs(tx, &post_tag_ids)?;
                 cooc_dirty = true;
+            }
+            // Class G: incremental account-level cooccurrence update.
+            // Since we cleared account_tag_cooccurrence in drop_account_posts,
+            // every post's tag pairs are fresh; ON CONFLICT handles dedup.
+            // Build the reverse map incrementally as we discover new tags.
+            for &tid in &post_tag_ids {
+                if !tag_id_to_meta.contains_key(&tid) {
+                    if let Some(((name, group), _)) = tag_id_cache.iter().find(|&(_, &v)| v == tid) {
+                        tag_id_to_meta.insert(tid, (name.clone(), *group));
+                    }
+                }
+            }
+            if account_id.is_some() && track_cooccurrence && has_multi_tags {
+                // post_tag_ids was sorted+deduped in the global cooc branch above;
+                // if that branch wasn't taken, dedup here.
+                if !cooc_dirty {
+                    post_tag_ids.sort_unstable();
+                    post_tag_ids.dedup();
+                }
+                // Build the per-post meta map from our global reverse map.
+                let id_to_meta: std::collections::HashMap<i64, (String, String)> = post_tag_ids
+                    .iter()
+                    .filter_map(|&tid| {
+                        tag_id_to_meta
+                            .get(&tid)
+                            .map(|(n, g)| (tid, (n.clone(), g.to_string())))
+                    })
+                    .collect();
+                super::cooccurrence::upsert_account_cooccurrence_pairs(
+                    tx,
+                    account_id.unwrap(),
+                    &post_tag_ids,
+                    &id_to_meta,
+                )?;
             }
         }
 
