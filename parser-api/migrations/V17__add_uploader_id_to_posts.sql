@@ -1,0 +1,1 @@
+ALTER TABLE posts ADD COLUMN uploader_id INTEGER;

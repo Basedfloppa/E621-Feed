@@ -13,4 +13,4 @@ config.js
 parser-web/.well-known/security.txt
 
 # codeql db
-**/db
+*/db

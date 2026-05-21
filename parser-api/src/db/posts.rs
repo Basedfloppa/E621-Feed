@@ -139,10 +139,11 @@ const POST_UPSERT_SQL: &str = "
         file_ext, file_width, file_height, file_size, is_animated, duration,
         comment_count, has_notes, is_deleted, has_children,
         preview_url, sample_url, file_url, score_up, score_down,
-        sample_width, sample_height, preview_width, preview_height
+        sample_width, sample_height, preview_width, preview_height,
+        uploader_id
     )
     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17,
-            ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26)
+            ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27)
     ON CONFLICT(id) DO UPDATE SET
         updated_at = excluded.updated_at,
         score_total = excluded.score_total,
@@ -167,7 +168,8 @@ const POST_UPSERT_SQL: &str = "
         sample_width = COALESCE(excluded.sample_width, posts.sample_width),
         sample_height = COALESCE(excluded.sample_height, posts.sample_height),
         preview_width = COALESCE(excluded.preview_width, posts.preview_width),
-        preview_height = COALESCE(excluded.preview_height, posts.preview_height)
+        preview_height = COALESCE(excluded.preview_height, posts.preview_height),
+        uploader_id = excluded.uploader_id
 ";
 
 fn post_upsert_params(post: &Post) -> Vec<rusqlite::types::Value> {
@@ -226,6 +228,7 @@ fn post_upsert_params(post: &Post) -> Vec<rusqlite::types::Value> {
         opt_int(sample_height),
         opt_int(preview_width),
         opt_int(preview_height),
+        Value::Integer(post.uploader_id),
     ]
 }
 
