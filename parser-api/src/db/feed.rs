@@ -252,3 +252,67 @@ pub fn collect_local_candidate_ids(account_id: i32, limit: i64) -> Result<Vec<i6
     }
     Ok(out.into_iter().collect())
 }
+
+/// Given a list of candidate post IDs and blacklisted simple tag names,
+/// return the subset of post IDs that have at least one blacklisted tag.
+///
+/// `blacklisted_tags` must be plain tag names (no e621 search syntax like
+/// `-rating:s` or `young furry`). The caller is responsible for extracting
+/// only simple tags from the account's blacklist text.
+pub fn load_blacklisted_post_ids(
+    post_ids: &[i64],
+    blacklisted_tags: &[String],
+) -> Result<HashSet<i64>, String> {
+    if post_ids.is_empty() || blacklisted_tags.is_empty() {
+        return Ok(HashSet::new());
+    }
+
+    let conn = open_db()?;
+
+    // Build placeholders for both tag names and post IDs.
+    let tag_ph = vec!["?"; blacklisted_tags.len()].join(",");
+    let post_ph = vec!["?"; post_ids.len()].join(",");
+    let sql = format!(
+        "SELECT DISTINCT tp.post_id
+         FROM tags_posts tp
+         INNER JOIN tags t ON t.id = tp.tag_id
+         WHERE t.name IN ({tag_ph})
+           AND tp.post_id IN ({post_ph})"
+    );
+    let mut stmt = conn
+        .prepare(&sql)
+        .map_err(|e| format!("prep load_blacklisted_post_ids: {e}"))?;
+
+    // Mixed parameter types (String + i64) → use rusqlite::types::Value.
+    let mut params: Vec<rusqlite::types::Value> =
+        Vec::with_capacity(blacklisted_tags.len() + post_ids.len());
+    for tag in blacklisted_tags {
+        params.push(rusqlite::types::Value::Text(tag.clone()));
+    }
+    for id in post_ids {
+        params.push(rusqlite::types::Value::Integer(*id));
+    }
+
+    let rows = stmt
+        .query_map(rusqlite::params_from_iter(params), |r| r.get::<_, i64>(0))
+        .map_err(|e| format!("query load_blacklisted_post_ids: {e}"))?;
+    rows.collect::<Result<HashSet<_>, _>>()
+        .map_err(|e| format!("collect load_blacklisted_post_ids: {e}"))
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use super::*;
+
+    #[test]
+    fn blacklist_filter_empty() {
+        let ids = load_blacklisted_post_ids(&[], &[]).unwrap();
+        assert!(ids.is_empty());
+
+        let ids = load_blacklisted_post_ids(&[1, 2, 3], &[]).unwrap();
+        assert!(ids.is_empty());
+
+        let ids = load_blacklisted_post_ids(&[], &["gore".to_string()]).unwrap();
+        assert!(ids.is_empty());
+    }
+}

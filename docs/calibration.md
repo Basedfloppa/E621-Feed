@@ -102,7 +102,7 @@ cd ./parser-api/
 cp database.db database.db.bak
 
 # 2. Build.
-cargo build --release --bin seed --bin calibrate --feature jemalloc
+cargo build --release --bin seed --bin calibrate --features jemalloc
 
 # 3. Inspect what's already in the DB before seeding more.
 ./target/release/calibrate probe

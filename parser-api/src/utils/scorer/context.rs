@@ -1,7 +1,7 @@
 //! `ScoringContext`: per-account state cached at construction. The
 //! per-channel implementations live in [`super::channels`].
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::models::{AccountPreferenceProfile, AccountUploaderStat, Post, ScoreBreakdown, TagCount};
 use crate::utils::idf::IdfIndex;
@@ -32,6 +32,11 @@ pub struct ScoringContext<'a> {
     pub(super) mix: MixWeights,
     /// Per-uploader quality stats (uploader_id -> stats), built from profile.
     pub(super) uploader_map: HashMap<i64, AccountUploaderStat>,
+    /// Simple tag names (no e621 search syntax) that should be ignored during
+    /// tag-similarity computation. Acts as an IDF prior: blacklisted tags
+    /// contribute 0 to both the post vector and the dot product, reducing the
+    /// similarity score for posts that contain them.
+    pub(super) blacklisted_tags: HashSet<String>,
 }
 
 /// Pre-computed per-account data whose construction is expensive (HashMap
@@ -225,6 +230,8 @@ impl ContextBase {
 impl<'a> ScoringContext<'a> {
     /// Full constructor — builds the expensive ContextBase internally.
     /// Prefer [`Self::from_base`] when a cached base is available.
+    /// Construct with an empty blacklist set. See [`Self::new_with_blacklist`]
+    /// for the version that accepts blacklisted tags.
     pub fn new(
         account_tag_counts: &[TagCount],
         priors: &'a Priors,
@@ -233,8 +240,33 @@ impl<'a> ScoringContext<'a> {
         global_relation: &'a TagRelationGraph,
         user_relation: &'a TagRelationGraph,
     ) -> Self {
+        Self::new_with_blacklist(
+            account_tag_counts,
+            priors,
+            idf,
+            profile,
+            global_relation,
+            user_relation,
+            HashSet::new(),
+        )
+    }
+
+    /// Like [`Self::new`] but accepts a set of simple tag names that should
+    /// be ignored during tag-similarity computation (IDF prior for account
+    /// blacklist). Pass an empty set for the same behaviour as [`Self::new`].
+    pub fn new_with_blacklist(
+        account_tag_counts: &[TagCount],
+        priors: &'a Priors,
+        idf: &'a IdfIndex,
+        profile: &'a AccountPreferenceProfile,
+        global_relation: &'a TagRelationGraph,
+        user_relation: &'a TagRelationGraph,
+        blacklisted_tags: HashSet<String>,
+    ) -> Self {
         let base = ContextBase::new(account_tag_counts, priors, idf, profile);
-        Self::from_base(base, priors, idf, profile, global_relation, user_relation)
+        let mut ctx = Self::from_base(base, priors, idf, profile, global_relation, user_relation);
+        ctx.blacklisted_tags = blacklisted_tags;
+        ctx
     }
 
     /// Fast-path constructor: takes ownership of a pre-built [`ContextBase`]
@@ -278,6 +310,7 @@ impl<'a> ScoringContext<'a> {
             personal_confidence: base.personal_confidence,
             user_base_positive_rate: base.user_base_positive_rate,
             uploader_map: base.uploader_map,
+            blacklisted_tags: HashSet::new(),
         }
     }
 

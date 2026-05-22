@@ -46,6 +46,10 @@ impl<'a> ScoringContext<'a> {
             if g <= 0.0 {
                 continue;
             }
+            // Blacklist-IDF prior: skip tags that the user has blacklisted.
+            if self.blacklisted_tags.contains(ct.lc.as_str()) {
+                continue;
+            }
             let lam = if ct.group == Group::Meta as u8 {
                 lambda_meta
             } else {

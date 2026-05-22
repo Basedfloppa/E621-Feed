@@ -104,8 +104,34 @@ pub(crate) async fn get_recommendations(
     let account = account_res.map_err(|e| format!("Join error: {e}"))??;
     let seen_ids = seen_res.map_err(|e| format!("Join error: {e}"))??;
     let owned_ids = owned_res.map_err(|e| format!("Join error: {e}"))??;
-    let local_candidate_ids = local_res.map_err(|e| format!("Join error: {e}"))??;
+    let mut local_candidate_ids = local_res.map_err(|e| format!("Join error: {e}"))??;
     let explicit_bucket = bucket_res.map_err(|e| format!("Join error: {e}"))??;
+
+    // Filter local candidates through the account's blacklist. Live posts
+    // from e621 already have the blacklist applied (api.rs sends
+    // `-tag1 -tag2` to the e621 API), but local catalog candidates are
+    // queried without a blacklist filter — without this step blacklisted
+    // content can surface from the local pool.
+    //
+    // We only extract simple tag names (no e621 search syntax like
+    // `-rating:s` or `young furry`) — complex expressions are best-effort
+    // and will be ignored here; they still apply to live e621 posts.
+    let blacklisted_simple_tags: Vec<String> = account
+        .blacklist
+        .lines()
+        .flat_map(|l| l.split_whitespace().filter(|t| !t.is_empty()))
+        .filter(|t| !t.contains(':') && !t.starts_with('-'))
+        .map(|t| t.to_lowercase())
+        .collect();
+    if !blacklisted_simple_tags.is_empty() && !local_candidate_ids.is_empty() {
+        let ids_for_filter = local_candidate_ids.clone();
+        let tags_for_filter = blacklisted_simple_tags.clone();
+        let blacklisted_ids: HashSet<i64> = db_blocking(move || {
+            db::load_blacklisted_post_ids(&ids_for_filter, &tags_for_filter)
+        })
+        .await?;
+        local_candidate_ids.retain(|id| !blacklisted_ids.contains(id));
+    }
 
     // Second wave: user_relation depends on tags.
     let tags_for_relation = tags.clone();
@@ -182,13 +208,16 @@ pub(crate) async fn get_recommendations(
     let idf = current_idf();
     let global_relation = current_global_relation();
 
-    let ctx = ScoringContext::new(
+    // Build the blacklist set for the IDF prior (scoring-level soft filter).
+    let blacklist_set: HashSet<String> = blacklisted_simple_tags.into_iter().collect();
+    let ctx = ScoringContext::new_with_blacklist(
         &tags,
         &priors,
         &idf,
         &profile,
         &global_relation,
         &user_relation,
+        blacklist_set,
     );
 
     // Pre-resolve per-post features once so the parallel scoring loop

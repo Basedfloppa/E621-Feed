@@ -52,6 +52,12 @@ impl<'a> ScoringContext<'a> {
                     continue;
                 }
                 let tlc = normalize_tag(t);
+                // Blacklist-IDF prior: skip tags that the user has blacklisted
+                // so they contribute nothing to tag similarity. This is a soft
+                // signal — the post can still rank via other channels.
+                if self.blacklisted_tags.contains(tlc.as_ref()) {
+                    continue;
+                }
                 let idf_w = self.idf.idf_tempered(&tlc, df_floor, idf_max, rsj, lam, alpha);
                 let pw = g * idf_w;
                 p_norm_sq += pw * pw;

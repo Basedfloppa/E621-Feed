@@ -1,0 +1,70 @@
+# calibrate grid result — 2026-05-22T00:12:55.255286907+00:00
+# split=time_causal neg=mixed-hard diversify=true pairs_only=false run_paired=true
+# N=800 NDCG@20=0.8064 Recall@50=0.1446 MRR=0.9093 elapsed=3304.1s
+# WARN clamp-saturated:
+#   tag_sim_jaccard_blend=lower clamp (0.000)
+
+[priors]
+recency_tau_days = 10.00
+quality_a = 0.500
+quality_b = 0.200
+quality_log_bias = -3.000
+mix_sim = 0.720
+mix_quality = 0.000
+mix_recency = 0.000
+mix_rating = 0.040
+mix_media = 0.050
+mix_popularity = 0.000
+mix_interaction = 0.100
+mix_tag_relation = 0.080
+df_floor = 0.400
+idf_max = 100.00
+idf_lambda = 1.000
+idf_alpha = 1.050
+freq_alpha = 0.950
+bm25_k = 2.250
+one_sided_ratio_exp = 0.500
+idf_rsj_smoothing = 0.350
+group_w_artist = 2.400
+group_w_character = 2.000
+group_w_copyright = 1.450
+group_w_species = 1.300
+group_w_general = 0.700
+group_w_lore = 0.400
+coldstart_smoothing_boost = 2.000
+interaction_ctr_prior_alpha = 4.000
+score_temperature = 0.000
+confidence_steepness = 1.000
+mmr_redundancy_exp = 1.000
+tag_sim_jaccard_blend = 0.000
+tag_relation_pair_aggregator = "mean"
+quality_w_absolute = 0.550
+quality_w_relative_score = 0.300
+quality_w_relative_comments = 0.150
+popularity_w_fav = 0.800
+popularity_w_duration = 0.200
+recency_w_global = 0.400
+recency_w_personal = 0.600
+recency_personal_floor_frac = 1.000
+recency_log_personal = true
+discrete_smoothing_alpha = 1.000
+discrete_pref_floor = 0.050
+strong_negative_count = 3
+strong_negative_penalty = 0.400
+strong_negative_wilson_threshold = 0.550
+tag_relation_w_global = 0.400
+tag_relation_w_personal = 0.600
+tag_relation_pmi_scale = 3.500
+tag_relation_min_cooc = 2
+tag_relation_user_min_cooc = 1
+tag_relation_cooc_ref = 16.00
+tag_relation_user_cooc_ref = 5.00
+feedback_decay_half_life_days = 90.00
+meta_interaction_weight = 0.300
+coldstart_n0 = 25.0
+diversity_window = 32
+diversity_w_artist = 0.220
+diversity_w_character = 0.160
+diversity_w_general = 0.080
+diversity_max_penalty = 0.450
+diversity_interaction_damp = 0.350
