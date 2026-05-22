@@ -33,8 +33,8 @@
    enum-valued knobs. Reports `[best priors — non-default values]` and a
    clamp-saturation warning if any knob landed at its search boundary.
 
-   As of v5.11 the grid covers ~70 numeric knobs + 1 categorical:
-   * 9 `mix_*` weights (added `mix_uploader`)
+   As of v5.11 the grid covers ~77 numeric knobs + 1 categorical:
+   * 11 `mix_*` weights (added `mix_uploader`, `mix_exclusivity`, `mix_novelty`)
    * IDF / frequency shaping (7): `df_floor`, `idf_max`, `idf_lambda`,
      `idf_alpha`, `freq_alpha`, `bm25_k`, `one_sided_ratio_exp`,
      `idf_rsj_smoothing`
@@ -57,11 +57,13 @@
      `recency_tau_recent`, `recency_tau_hot`, `tag_relation_pmi_scale_user`,
      `recency_split_age_hours`
    * Uploader channel (3): `uploader_n0`, `uploader_w_avg_score`, `uploader_w_avg_fav`
+   * Exclusivity channel (3): `min_exclusivity_cooc`, `exclusivity_scale`, `exclusivity_max_tags`
+   * Novelty channel (1): `novelty_n0` (`novelty_use_feedback` is bool — not grid-swept)
    * Diversity weights (5): `diversity_w_artist/character/copyright/species/general`
    * Categorical (1): `tag_relation_pair_aggregator` ∈ {mean, max, geomean}
 
    Subsets / flags:
-   * `grid mix-only` — only the 8 mix weights (fastest)
+   * `grid mix-only` — only the 11 mix weights (fastest)
    * `grid pairs-only` — skip the single-knob sweep, only the paired moves
    * `grid no-pairs` — skip the paired sweep
    * `grid with-diversify` — run `diversify_scored_posts` before NDCG so

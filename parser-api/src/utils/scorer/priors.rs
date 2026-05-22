@@ -210,6 +210,34 @@ pub struct Priors {
     /// Weight of the avg_fav component inside the uploader channel.
     #[serde(default = "default_uploader_w_avg_fav")]
     pub uploader_w_avg_fav: f32,
+
+    // ---- Class I: tag exclusivity channel ----
+    /// Mix weight for the tag exclusivity channel. 0 = disabled.
+    #[serde(default = "default_mix_exclusivity")]
+    pub mix_exclusivity: f32,
+    /// Minimum co-occurrence count for a pair to be considered "not rare".
+    /// Pairs with cooc < min_exclusivity_cooc get full exclusivity credit.
+    #[serde(default = "default_min_exclusivity_cooc")]
+    pub min_exclusivity_cooc: i64,
+    /// Scale factor for the exclusivity sigmoid. Larger = sharper threshold.
+    #[serde(default = "default_exclusivity_scale")]
+    pub exclusivity_scale: f32,
+    /// Maximum tags to consider in the O(T²) exclusivity loop (0 = no limit).
+    #[serde(default = "default_exclusivity_max_tags")]
+    pub exclusivity_max_tags: usize,
+
+    // ---- Class I: tag novelty channel ----
+    /// Mix weight for the tag novelty channel. 0 = disabled.
+    #[serde(default = "default_mix_novelty")]
+    pub mix_novelty: f32,
+    /// Cold-start: how many impressions needed for 50% confidence that a tag
+    /// is "not novel" to the user.
+    #[serde(default = "default_novelty_n0")]
+    pub novelty_n0: f32,
+    /// When true, uses feedback impression_count; when false, only checks
+    /// whether the tag exists in the user's tag-counts (favourites).
+    #[serde(default = "default_novelty_use_feedback")]
+    pub novelty_use_feedback: bool,
 }
 
 fn default_quality_log_bias() -> f32 {
@@ -367,4 +395,27 @@ fn default_uploader_w_avg_score() -> f32 {
 }
 fn default_uploader_w_avg_fav() -> f32 {
     0.4
+}
+
+// ---- Class I defaults ----
+fn default_mix_exclusivity() -> f32 {
+    0.0
+}
+fn default_min_exclusivity_cooc() -> i64 {
+    2
+}
+fn default_exclusivity_scale() -> f32 {
+    0.5
+}
+fn default_exclusivity_max_tags() -> usize {
+    15
+}
+fn default_mix_novelty() -> f32 {
+    0.0
+}
+fn default_novelty_n0() -> f32 {
+    3.0
+}
+fn default_novelty_use_feedback() -> bool {
+    true
 }

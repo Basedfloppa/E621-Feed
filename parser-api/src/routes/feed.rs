@@ -285,10 +285,11 @@ pub(crate) async fn get_recommendations(
     for sp in sorted_for_log.iter().take(10) {
         if let Some(b) = &sp.breakdown {
             info!(
-                "  post_id={} score={:.4}  sim={:.3} qual={:.3} rec={:.3} rate={:.3} med={:.3} pop={:.3} inter={:.3} rel={:.3} upl={:.3}",
+                "  post_id={} score={:.4}  sim={:.3} qual={:.3} rec={:.3} rate={:.3} med={:.3} pop={:.3} inter={:.3} rel={:.3} upl={:.3} exc={:.3} nov={:.3}",
                 sp.post.id, sp.score,
                 b.tag_similarity, b.quality_fit, b.recency_fit, b.rating_fit,
                 b.media_fit, b.popularity_fit, b.interaction_fit, b.tag_relation_fit, b.uploader_fit,
+                b.exclusivity_fit, b.novelty_fit,
             );
         }
     }

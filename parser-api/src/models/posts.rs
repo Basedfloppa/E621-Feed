@@ -209,6 +209,12 @@ pub struct ScoreBreakdown {
     /// Uploader quality channel (0 when disabled). Added in v5.10.
     #[serde(default)]
     pub uploader_fit: f32,
+    /// Tag exclusivity channel (0 when disabled). Added in v5.11.
+    #[serde(default)]
+    pub exclusivity_fit: f32,
+    /// Tag novelty channel (0 when disabled). Added in v5.11.
+    #[serde(default)]
+    pub novelty_fit: f32,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema, Clone)]

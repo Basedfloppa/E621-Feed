@@ -51,6 +51,8 @@ pub(crate) const M_POPULARITY: u16 = 1 << 5;
 pub(crate) const M_INTERACTION: u16 = 1 << 6;
 pub(crate) const M_TAG_RELATION: u16 = 1 << 7;
 pub(crate) const M_UPLOADER: u16 = 1 << 8;
+pub(crate) const M_EXCLUSIVITY: u16 = 1 << 9;
+pub(crate) const M_NOVELTY: u16 = 1 << 10;
 
 /// Empty mask: probe touched only mix weights / temperature / penalty.
 /// All channels reused from prior cache; only the final blend is rerun.
@@ -64,7 +66,9 @@ pub(crate) const M_ALL: u16 = M_SIM
     | M_POPULARITY
     | M_INTERACTION
     | M_TAG_RELATION
-    | M_UPLOADER;
+    | M_UPLOADER
+    | M_EXCLUSIVITY
+    | M_NOVELTY;
 
 // Common combos used by the knob registry. Defining them as named
 // constants makes the registry table easier to read.
@@ -93,6 +97,8 @@ pub(crate) struct ChannelScores {
     pub(crate) interaction: f32,
     pub(crate) tag_relation: f32,
     pub(crate) uploader: f32,
+    pub(crate) exclusivity: f32,
+    pub(crate) novelty: f32,
     pub(crate) veto: bool,
 }
 
@@ -154,6 +160,12 @@ fn recompute_one_post(
     }
     if mask & M_UPLOADER != 0 {
         next.uploader = ctx.uploader_fit_cached(features);
+    }
+    if mask & M_EXCLUSIVITY != 0 {
+        next.exclusivity = ctx.exclusivity_fit_cached(features);
+    }
+    if mask & M_NOVELTY != 0 {
+        next.novelty = ctx.novelty_fit_cached(features);
     }
 
     next
@@ -344,6 +356,8 @@ fn blend_channel(ctx: &ScoringContext<'_>, ch: ChannelScores) -> f32 {
         ch.interaction,
         ch.tag_relation,
         ch.uploader,
+        ch.exclusivity,
+        ch.novelty,
         ch.veto,
     )
 }

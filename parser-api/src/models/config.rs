@@ -455,6 +455,8 @@ fn merge_priors(base: &mut Priors, overrides: &Priors) {
     if overrides.mix_interaction != 0.0 { base.mix_interaction = overrides.mix_interaction; }
     if overrides.mix_tag_relation != 0.08 { base.mix_tag_relation = overrides.mix_tag_relation; }
     if overrides.mix_uploader != 0.05 { base.mix_uploader = overrides.mix_uploader; }
+    if overrides.mix_exclusivity != 0.0 { base.mix_exclusivity = overrides.mix_exclusivity; }
+    if overrides.mix_novelty != 0.0 { base.mix_novelty = overrides.mix_novelty; }
 
     // --- IDF / freq ---
     if overrides.idf_lambda != 1.0 { base.idf_lambda = overrides.idf_lambda; }
@@ -539,6 +541,15 @@ fn merge_priors(base: &mut Priors, overrides: &Priors) {
     if overrides.uploader_n0 != 5.0 { base.uploader_n0 = overrides.uploader_n0; }
     if overrides.uploader_w_avg_score != 0.6 { base.uploader_w_avg_score = overrides.uploader_w_avg_score; }
     if overrides.uploader_w_avg_fav != 0.4 { base.uploader_w_avg_fav = overrides.uploader_w_avg_fav; }
+
+    // --- exclusivity channel ---
+    if overrides.min_exclusivity_cooc != 2 { base.min_exclusivity_cooc = overrides.min_exclusivity_cooc; }
+    if overrides.exclusivity_scale != 0.5 { base.exclusivity_scale = overrides.exclusivity_scale; }
+    if overrides.exclusivity_max_tags != 15 { base.exclusivity_max_tags = overrides.exclusivity_max_tags; }
+
+    // --- novelty channel ---
+    if overrides.novelty_n0 != 3.0 { base.novelty_n0 = overrides.novelty_n0; }
+    if overrides.novelty_use_feedback != true { base.novelty_use_feedback = overrides.novelty_use_feedback; }
 
     // --- algorithmic shape ---
     if overrides.score_temperature != 0.0 { base.score_temperature = overrides.score_temperature; }

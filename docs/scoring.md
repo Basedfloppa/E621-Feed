@@ -8,7 +8,7 @@ which directions are trustworthy see [calibration.md](calibration.md);
 for the math see
 [`parser-api/src/utils/scorer/`](../parser-api/src/utils/scorer/).
 
-The final score is a weighted blend of **9 scoring channels**:
+The final score is a weighted blend of **11 scoring channels**:
 
 | Channel | Mix weight | What it measures |
 |---|---|---|
@@ -21,6 +21,8 @@ The final score is a weighted blend of **9 scoring channels**:
 | `interaction` | `mix_interaction` | Per-tag feedback (opens, hides) with Bayesian CTR and staleness decay |
 | `tag_relation` | `mix_tag_relation` | PMI-based pairwise tag co-occurrence (global + personal) |
 | `uploader` | `mix_uploader` | Uploader quality (avg score, avg fav count vs user's profile) |
+| `exclusivity` | `mix_exclusivity` | Tag exclusivity — rare tag combinations get a boost |
+| `novelty` | `mix_novelty` | Tag novelty — tags the user hasn't seen before get a boost |
 
 ## IDF / frequency shaping
 
@@ -44,6 +46,8 @@ The final score is a weighted blend of **9 scoring channels**:
 |`mix_popularity`|popularity fit matters less|feed tracks account's usual popularity range more|
 |`mix_interaction`|feed history matters less|recent browsing behavior matters more|
 |`mix_tag_relation`|tag co-occurrence graph ignored|tag pairs that cluster together (globally or in favourites) lift scores more|
+|`mix_exclusivity`|exclusivity channel disabled|rare tag combinations boost the final score|
+|`mix_novelty`|novelty channel disabled|unseen-before tags boost the final score|
 
 ## Quality channel internals
 
@@ -160,11 +164,51 @@ number of posts seen from that uploader.
 |`uploader_w_avg_score`|fav count dominates uploader signal|avg score dominates uploader signal|
 |`uploader_w_avg_fav`|avg score dominates uploader signal|avg fav count dominates uploader signal|
 
-## Exploration bonus
+## Tag exclusivity channel (v5.11)
 
-Applied post-scoring: `score += ε × (1 − tag_similarity)`. Posts whose tags
-are novel (low similarity to the user's profile) receive a boost proportional
-to `exploration_epsilon`. Disabled at 0 (default).
+Tags that rarely co-occur on the same post form a rare combination; posts
+dominated by such rare pairs earn a higher exclusivity score. The channel
+runs an O(T²) loop over the post's tags (truncated to `exclusivity_max_tags`
+by group weight, similar to Cluster-PMI) and reads pairwise co-occurrence
+counts from the global tag-relation graph. The average co-occurrence per
+pair is mapped to a score via:
+
+`exclusivity = 1.0 − sigmoid(avg_cooc / exclusivity_scale − min_exclusivity_cooc)`
+
+Default mix weight is 0 (disabled). Exclusivity signal is most useful for
+surfacing niche or cross-over content that doesn't naturally cluster into
+the user's established tag groups.
+
+|Variable|Lower →|Higher →|
+|---|---|---|
+|`mix_exclusivity`|exclusivity channel disabled|rare tag combinations boost the final score (default 0)|
+|`exclusivity_scale`|exclusivity curve sharper — small cooc differences matter|curve flatter — only very rare pairs get full credit (default 0.5)|
+|`min_exclusivity_cooc`|more pairs labelled "rare"|fewer pairs labelled rare — requires truly unusual combos (default 2)|
+|`exclusivity_max_tags`|more tags enter the O(K²) loop (slower, more signal)|fewer tags — faster, but may miss rare pairs at the tail (default 15)|
+
+## Tag novelty channel (v5.11)
+
+A post scores higher when it carries tags the user hasn't seen before (or has
+seen only a few times). The channel checks each tag against the user's
+favourites (`self.user` maps) and optionally against `feed_interactions`
+impression counts.
+
+For each tag, novelty is computed as `1.0 − confidence(impressions, n0, 1.0)`,
+where confidence is the `n^p / (n^p + n0^p)` curve. Tags with zero
+impressions get full novelty (1.0); tags the user has seen many times
+approach 0. The per-tag novelty scores are averaged across all tags on
+the post.
+
+Default mix weight is 0 (disabled). Most useful for cold-start users or
+for users who want broader discovery beyond their established tag profile.
+
+|Variable|Lower →|Higher →|
+|---|---|---|
+|`mix_novelty`|novelty channel disabled|unseen-before tags boost the final score (default 0)|
+|`novelty_n0`|fewer impressions needed to consider a tag "known"|more impressions required before a tag is familiar (default 3)|
+|`novelty_use_feedback`|`false`: only check favourites for novelty|`true` (default): also check feed_interaction impression counts|
+
+## Exploration bonus
 
 |Variable|Lower →|Higher →|
 |---|---|---|

@@ -525,6 +525,137 @@ impl<'a> ScoringContext<'a> {
         let w_g = p.recency_w_global + p.recency_w_personal * (1.0 - conf);
         blend2(global, w_g, personal, w_p)
     }
+
+    /// Tag exclusivity channel: posts with rare tag combinations receive a
+    /// boost. Computes the average co-occurrence across all tag pairs on the
+    /// post and maps it through `1.0 - sigmoid(avg_cooc / scale - min_cooc)`
+    /// so that pairs below `min_exclusivity_cooc` score near 1.0 and common
+    /// pairs score near 0.0.
+    ///
+    /// O(T²) in the number of tags — uses `exclusivity_max_tags` to truncate
+    /// to top-K tags by group weight, mirroring Cluster-PMI in tag_relation.
+    pub fn exclusivity_fit(&self, post: &Post) -> f32 {
+        let p = self.priors;
+        if p.mix_exclusivity <= 0.0 { return 0.0; }
+        let min_cooc = p.min_exclusivity_cooc.max(1) as f32;
+        let scale = p.exclusivity_scale.max(0.01);
+        let max_tags = p.exclusivity_max_tags;
+
+        let groups: [(Group, &Vec<String>); 7] = [
+            (Group::Artist, &post.tags.artist),
+            (Group::Character, &post.tags.character),
+            (Group::Copyright, &post.tags.copyright),
+            (Group::Species, &post.tags.species),
+            (Group::General, &post.tags.general),
+            (Group::Lore, &post.tags.lore),
+            (Group::Meta, &post.tags.meta),
+        ];
+
+        let mut pairs = 0u32;
+        let mut total_cooc = 0i64;
+
+        for (group, tags) in groups {
+            let g = group as u8;
+            let g_idx = group as usize;
+            let group_w = self.group_wts[g_idx];
+            if group_w <= 0.0 { continue; }
+
+            // Build tag list with group weights for truncation.
+            let mut entries: Vec<(f32, &str)> = tags
+                .iter()
+                .filter(|t| !t.is_empty())
+                .map(|t| (group_w * self.idf.idf_tempered(&normalize_tag(t), p.df_floor, p.idf_max, p.idf_rsj_smoothing, p.idf_lambda, p.idf_alpha), t.as_str()))
+                .collect();
+            if max_tags > 0 && entries.len() > max_tags {
+                entries.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+                entries.truncate(max_tags);
+            }
+
+            for i in 0..entries.len() {
+                let t_a = normalize_tag(entries[i].1);
+                let tid_a = self.global_relation.tag_id(g, t_a.as_ref());
+                let tid_a = match tid_a { Some(id) => id, None => continue };
+
+                for j in i + 1..entries.len() {
+                    let t_b = normalize_tag(entries[j].1);
+                    let tid_b = self.global_relation.tag_id(g, t_b.as_ref());
+                    let tid_b = match tid_b { Some(id) => id, None => continue };
+
+                    let cooc = self.global_relation.cooc_by_id(tid_a, tid_b);
+                    total_cooc += cooc.max(0);
+                    pairs += 1;
+                }
+            }
+        }
+
+        if pairs == 0 { return 0.0; }
+        let avg_cooc = total_cooc as f32 / pairs as f32;
+        1.0 - sigmoid(avg_cooc / scale - min_cooc)
+    }
+
+    /// Tag novelty channel: posts containing tags the user has rarely or
+    /// never seen get a boost. For each tag on the post, checks:
+    ///
+    /// 1. Is it in the user's favourite tag-counts (self.user)? → not novel.
+    /// 2. Is it in the feedback with positive impressions? → novelty = `1.0 - confidence(impressions, n0)`.
+    /// 3. Otherwise → fully novel (weight = 1.0).
+    ///
+    /// The per-tag novelty scores are averaged across all tags on the post.
+    pub fn novelty_fit(&self, post: &Post) -> f32 {
+        let p = self.priors;
+        if p.mix_novelty <= 0.0 { return 0.0; }
+        let n0 = p.novelty_n0.max(0.5);
+
+        let groups: [(Group, &Vec<String>); 7] = [
+            (Group::Artist, &post.tags.artist),
+            (Group::Character, &post.tags.character),
+            (Group::Copyright, &post.tags.copyright),
+            (Group::Species, &post.tags.species),
+            (Group::General, &post.tags.general),
+            (Group::Lore, &post.tags.lore),
+            (Group::Meta, &post.tags.meta),
+        ];
+
+        let mut total = 0u32;
+        let mut novel_weight = 0.0f32;
+
+        for (group, tags) in groups {
+            let g_idx = group as usize;
+            let group_w = self.group_wts[g_idx];
+            if group_w <= 0.0 { continue; }
+
+            let user_map = &self.user[g_idx];
+            let fb_map = &self.feedback[g_idx];
+
+            for t in tags {
+                if t.is_empty() { continue; }
+                let tlc = normalize_tag(t);
+                total += 1;
+
+                // Known from favourites → not novel at all.
+                if user_map.contains_key(tlc.as_ref()) {
+                    continue;
+                }
+
+                // Check feedback impressions if enabled.
+                if p.novelty_use_feedback {
+                    if let Some(fb) = fb_map.get(tlc.as_ref()) {
+                        if fb.impressions > 0 {
+                            let seen = confidence(fb.impressions as f32, n0, 1.0);
+                            novel_weight += 1.0 - seen;
+                            continue;
+                        }
+                    }
+                }
+
+                // Tag is completely novel → full weight.
+                novel_weight += 1.0;
+            }
+        }
+
+        if total == 0 { return 0.0; }
+        (novel_weight / total as f32).clamp(0.0, 1.0)
+    }
 }
 
 #[cfg(test)]
@@ -633,6 +764,13 @@ mod tests {
             uploader_n0: 5.0,
             uploader_w_avg_score: 0.6,
             uploader_w_avg_fav: 0.4,
+            mix_exclusivity: 0.0,
+            min_exclusivity_cooc: 2,
+            exclusivity_scale: 0.5,
+            exclusivity_max_tags: 15,
+            mix_novelty: 0.0,
+            novelty_n0: 3.0,
+            novelty_use_feedback: true,
         }
     }
 

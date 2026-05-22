@@ -19,8 +19,8 @@
 use e621_account_parser_api::utils::Priors;
 
 use crate::cache::{
-    M_CONFIDENCE_DERIVED, M_DISCRETE, M_GROUP_W, M_INTERACTION, M_NONE, M_RATIO_EXP, M_RECENCY,
-    M_SIM, M_TAG_RELATION, M_UPLOADER,
+    M_CONFIDENCE_DERIVED, M_DISCRETE, M_EXCLUSIVITY, M_GROUP_W, M_INTERACTION, M_NONE,
+    M_NOVELTY, M_RATIO_EXP, M_RECENCY, M_SIM, M_TAG_RELATION, M_UPLOADER,
 };
 
 /// One tunable parameter for the grid search. `apply` mutates the trial
@@ -69,6 +69,9 @@ pub(crate) const PAIRED_KNOBS: &[(&str, &str)] = &[
     ("diversity_max_penalty", "diversity_interaction_damp"),
     // v5.8 Class F: 3-piece recency hot kernel
     ("recency_tau_hot", "recency_split_age_hours"),
+    // v5.11: exclusivity + novelty channel pairs
+    ("mix_exclusivity", "exclusivity_scale"),
+    ("mix_novelty", "novelty_n0"),
 ];
 
 /// Per-pass scale on probe-deltas. Lets coarse direction emerge quickly
@@ -174,6 +177,20 @@ pub(crate) const GRID_KNOBS: &[KnobSpec] = &[
     KnobSpec {
         name: "mix_uploader",
         apply: |p, v| p.mix_uploader = (p.mix_uploader + v).max(0.0),
+        probes: PROBES_MIX,
+        invalidates: M_NONE,
+        diversify_only: false,
+    },
+    KnobSpec {
+        name: "mix_exclusivity",
+        apply: |p, v| p.mix_exclusivity = (p.mix_exclusivity + v).max(0.0),
+        probes: PROBES_MIX,
+        invalidates: M_NONE,
+        diversify_only: false,
+    },
+    KnobSpec {
+        name: "mix_novelty",
+        apply: |p, v| p.mix_novelty = (p.mix_novelty + v).max(0.0),
         probes: PROBES_MIX,
         invalidates: M_NONE,
         diversify_only: false,
@@ -347,6 +364,42 @@ pub(crate) const GRID_KNOBS: &[KnobSpec] = &[
         apply: |p, v| p.uploader_w_avg_fav = (p.uploader_w_avg_fav + v).max(0.0),
         probes: PROBES_WEIGHT,
         invalidates: M_UPLOADER,
+        diversify_only: false,
+    },
+    // -- Exclusivity channel (3) --
+    KnobSpec {
+        name: "min_exclusivity_cooc",
+        apply: |p, v| {
+            let next = (p.min_exclusivity_cooc as f32 + v).round();
+            p.min_exclusivity_cooc = next.clamp(0.0, 20.0) as i64;
+        },
+        probes: PROBES_INT_TINY,
+        invalidates: M_EXCLUSIVITY,
+        diversify_only: false,
+    },
+    KnobSpec {
+        name: "exclusivity_scale",
+        apply: |p, v| p.exclusivity_scale = (p.exclusivity_scale + v).clamp(0.1, 5.0),
+        probes: PROBES_SMALL_FRACTION,
+        invalidates: M_EXCLUSIVITY,
+        diversify_only: false,
+    },
+    KnobSpec {
+        name: "exclusivity_max_tags",
+        apply: |p, v| {
+            let next = (p.exclusivity_max_tags as f32 + v).round();
+            p.exclusivity_max_tags = next.clamp(1.0, 50.0) as usize;
+        },
+        probes: &[-5.0, -2.0, 2.0, 5.0],
+        invalidates: M_EXCLUSIVITY,
+        diversify_only: false,
+    },
+    // -- Novelty channel (2) --
+    KnobSpec {
+        name: "novelty_n0",
+        apply: |p, v| p.novelty_n0 = (p.novelty_n0 + v).max(1.0),
+        probes: PROBES_COLDSTART,
+        invalidates: M_NOVELTY,
         diversify_only: false,
     },
     // -- Discrete preference (2) + cold-start (1) --
@@ -753,6 +806,20 @@ pub(crate) const MIX_ONLY_KNOBS: &[KnobSpec] = &[
     KnobSpec {
         name: "mix_uploader",
         apply: |p, v| p.mix_uploader = (p.mix_uploader + v).max(0.0),
+        probes: PROBES_MIX,
+        invalidates: M_NONE,
+        diversify_only: false,
+    },
+    KnobSpec {
+        name: "mix_exclusivity",
+        apply: |p, v| p.mix_exclusivity = (p.mix_exclusivity + v).max(0.0),
+        probes: PROBES_MIX,
+        invalidates: M_NONE,
+        diversify_only: false,
+    },
+    KnobSpec {
+        name: "mix_novelty",
+        apply: |p, v| p.mix_novelty = (p.mix_novelty + v).max(0.0),
         probes: PROBES_MIX,
         invalidates: M_NONE,
         diversify_only: false,

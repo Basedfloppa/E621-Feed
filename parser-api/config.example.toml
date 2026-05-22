@@ -68,6 +68,21 @@ uploader_n0         = 5.0    # cold-start: how many posts from an uploader neede
 uploader_w_avg_score = 0.6   # blend weight for avg_score component in uploader_fit
 uploader_w_avg_fav   = 0.4   # blend weight for avg_fav component in uploader_fit
 
+# Tag exclusivity channel (v5.11): ranks posts higher when they contain rare
+# tag combinations. Lower co-occurrence between the post's tags = higher score.
+# 0 = disabled. Set to a small non-zero value (e.g. 0.02) to enable calibration.
+mix_exclusivity         = 0.02
+min_exclusivity_cooc    = 2       # pairs with cooc < this get full exclusivity credit
+exclusivity_scale       = 0.5     # sigmoid scale; larger = sharper threshold
+exclusivity_max_tags    = 15      # top-K tags by group weight in O(T²) loop (0 = no limit)
+
+# Tag novelty channel (v5.11): ranks posts higher when they contain tags the
+# user hasn't seen before.
+# 0 = disabled. Set to a small non-zero value (e.g. 0.02) to enable calibration.
+mix_novelty         = 0.02
+novelty_n0          = 3.0     # impressions needed for 50% confidence tag is "not novel"
+# novelty_use_feedback = true  # false = only check favourites, not impression counts
+
 # IDF / frequency shaping
 df_floor          = 0.40   # v5.8: time_causal grid confirms 0.40 (v5.7's 0.20 was post_id-noise)
 idf_max           = 100.0

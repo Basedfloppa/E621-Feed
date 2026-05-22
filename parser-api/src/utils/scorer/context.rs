@@ -330,6 +330,8 @@ impl<'a> ScoringContext<'a> {
         interaction: f32,
         tag_relation: f32,
         uploader: f32,
+        exclusivity: f32,
+        novelty: f32,
         veto: bool,
     ) -> f32 {
         let mix = self.mix;
@@ -341,7 +343,9 @@ impl<'a> ScoringContext<'a> {
             + mix.popularity * popularity
             + mix.interaction * interaction
             + mix.tag_relation * tag_relation
-            + mix.uploader * uploader;
+            + mix.uploader * uploader
+            + mix.exclusivity * exclusivity
+            + mix.novelty * novelty;
         let mut score = raw.clamp(0.0, 1.0);
         let temp = self.priors.score_temperature;
         if temp > 1e-3 {
@@ -364,6 +368,8 @@ impl<'a> ScoringContext<'a> {
         let recency = self.recency_fit(age_days);
         let tag_relation = self.tag_relation_fit(post);
         let uploader = self.uploader_fit(post);
+        let exclusivity = self.exclusivity_fit(post);
+        let novelty = self.novelty_fit(post);
 
         let mix = self.mix;
         let raw = mix.sim * sim
@@ -374,7 +380,9 @@ impl<'a> ScoringContext<'a> {
             + mix.popularity * popularity
             + mix.interaction * interaction
             + mix.tag_relation * tag_relation
-            + mix.uploader * uploader;
+            + mix.uploader * uploader
+            + mix.exclusivity * exclusivity
+            + mix.novelty * novelty;
         let mut score = raw.clamp(0.0, 1.0);
         // Class C v5.3: optional sigmoid sharpening on the final blend.
         let temp = self.priors.score_temperature;
@@ -395,6 +403,8 @@ impl<'a> ScoringContext<'a> {
             interaction_fit: interaction,
             tag_relation_fit: tag_relation,
             uploader_fit: uploader,
+            exclusivity_fit: exclusivity,
+            novelty_fit: novelty,
         };
         (score.clamp(0.0, 1.0), breakdown)
     }
@@ -419,6 +429,8 @@ impl<'a> ScoringContext<'a> {
         let recency = self.recency_fit(age_days);
         let tag_relation = self.tag_relation_fit_cached(features);
         let uploader = self.uploader_fit_cached(features);
+        let exclusivity = self.exclusivity_fit_cached(features);
+        let novelty = self.novelty_fit_cached(features);
 
         let score = self.final_blend(
             sim,
@@ -430,6 +442,8 @@ impl<'a> ScoringContext<'a> {
             interaction,
             tag_relation,
             uploader,
+            exclusivity,
+            novelty,
             veto,
         );
 
@@ -443,6 +457,8 @@ impl<'a> ScoringContext<'a> {
             interaction_fit: interaction,
             tag_relation_fit: tag_relation,
             uploader_fit: uploader,
+            exclusivity_fit: exclusivity,
+            novelty_fit: novelty,
         };
         (score, breakdown)
     }
@@ -546,6 +562,13 @@ mod tests {
             uploader_n0: 5.0,
             uploader_w_avg_score: 0.6,
             uploader_w_avg_fav: 0.4,
+            mix_exclusivity: 0.0,
+            min_exclusivity_cooc: 2,
+            exclusivity_scale: 0.5,
+            exclusivity_max_tags: 15,
+            mix_novelty: 0.0,
+            novelty_n0: 3.0,
+            novelty_use_feedback: true,
         }
     }
 
@@ -789,7 +812,7 @@ mod tests {
 
         // Each channel contributes proportionally to its mix weight.
         // mix_sim=0, mix_quality=1, others=0 → score = quality
-        let score = ctx.final_blend(0.5, 0.7, 0.3, 0.6, 0.4, 0.2, 0.8, 0.5, 0.0, false);
+        let score = ctx.final_blend(0.5, 0.7, 0.3, 0.6, 0.4, 0.2, 0.8, 0.5, 0.0, 0.0, 0.0, false);
         assert!(
             close(score, 0.7),
             "with mix_quality=1 and no temp, score should equal quality=0.7 got {score}"
@@ -813,16 +836,16 @@ mod tests {
         let ctx_yes = ScoringContext::new(&counts, &p_yes, &idf, &profile, &graph, &graph);
 
         // Input score > 0.5 → temperature pushes it higher.
-        let s_no = ctx_no.final_blend(0.6, 0.6, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, false);
-        let s_yes = ctx_yes.final_blend(0.6, 0.6, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, false);
+        let s_no = ctx_no.final_blend(0.6, 0.6, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, false);
+        let s_yes = ctx_yes.final_blend(0.6, 0.6, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, false);
         assert!(
             s_yes >= s_no,
             "temperature should push >0.5 scores higher: {s_no} -> {s_yes}"
         );
 
         // Input score < 0.5 → temperature pushes it lower.
-        let s_no2 = ctx_no.final_blend(0.3, 0.3, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, false);
-        let s_yes2 = ctx_yes.final_blend(0.3, 0.3, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, false);
+        let s_no2 = ctx_no.final_blend(0.3, 0.3, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, false);
+        let s_yes2 = ctx_yes.final_blend(0.3, 0.3, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, false);
         assert!(
             s_yes2 <= s_no2,
             "temperature should push <0.5 scores lower: {s_no2} -> {s_yes2}"
@@ -839,8 +862,8 @@ mod tests {
         let counts = empty_counts();
         let ctx = ScoringContext::new(&counts, &p, &idf, &profile, &graph, &graph);
 
-        let _without = ctx.final_blend(0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, false);
-        let with_veto = ctx.final_blend(0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, true);
+        let _without = ctx.final_blend(0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, false);
+        let with_veto = ctx.final_blend(0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, true);
         // The total mix weight sums to 1.0, no temperature, so raw=1.0, score=1.0
         // With veto: 1.0 * (1 - 0.25) = 0.75
         assert!(close(with_veto, 0.75), "expected 0.75 got {with_veto}");
@@ -865,7 +888,7 @@ mod tests {
 
         // sim=0.2, quality=0.8, mix_sim=0.5, mix_quality=0.5, normalized to 1.0
         // score = 0.5*0.2 + 0.5*0.8 = 0.5
-        let s = ctx.final_blend(0.2, 0.8, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, false);
+        let s = ctx.final_blend(0.2, 0.8, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, false);
         assert!(close(s, 0.5), "expected 0.5 got {s}");
     }
 
@@ -890,8 +913,8 @@ mod tests {
             ScoringContext::from_base(base, &p, &idf, &profile, &graph, &graph);
         let ctx_new = ScoringContext::new(&counts, &p, &idf, &profile, &graph, &graph);
 
-        let s1 = ctx_from_base.final_blend(0.3, 0.6, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, false);
-        let s2 = ctx_new.final_blend(0.3, 0.6, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, false);
+        let s1 = ctx_from_base.final_blend(0.3, 0.6, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, false);
+        let s2 = ctx_new.final_blend(0.3, 0.6, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, false);
         assert!(
             close(s1, s2),
             "from_base and new should produce identical blends: {s1} vs {s2}"

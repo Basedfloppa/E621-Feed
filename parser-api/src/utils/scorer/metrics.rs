@@ -21,6 +21,8 @@ pub struct ChannelTiming {
     pub recency_fit: u64,
     pub tag_relation_fit: u64,
     pub uploader_fit: u64,
+    pub exclusivity_fit: u64,
+    pub novelty_fit: u64,
     pub final_blend: u64,
 }
 
@@ -45,6 +47,8 @@ impl ScoringMetrics {
         self.channel.recency_fit += t.recency_fit;
         self.channel.tag_relation_fit += t.tag_relation_fit;
         self.channel.uploader_fit += t.uploader_fit;
+        self.channel.exclusivity_fit += t.exclusivity_fit;
+        self.channel.novelty_fit += t.novelty_fit;
         self.channel.final_blend += t.final_blend;
         self.count += 1;
     }
@@ -67,6 +71,8 @@ impl ScoringMetrics {
             ("recency_fit",       c.recency_fit),
             ("tag_relation_fit",  c.tag_relation_fit),
             ("uploader_fit",      c.uploader_fit),
+            ("exclusivity_fit",   c.exclusivity_fit),
+            ("novelty_fit",       c.novelty_fit),
             ("final_blend",       c.final_blend),
         ];
         let total_all: u64 = rows.iter().map(|(_, ns)| ns).sum();
@@ -226,10 +232,13 @@ impl<'a> super::context::ScoringContext<'a> {
         };
         let (tag_relation, tr_ns) = timed_channel!(self, tag_relation_fit_cached, features);
         let (uploader, u_ns) = timed_channel!(self, uploader_fit_cached, features);
+        let (exclusivity, exc_ns) = timed_channel!(self, exclusivity_fit_cached, features);
+        let (novelty, nov_ns) = timed_channel!(self, novelty_fit_cached, features);
 
         let blend_start = Instant::now();
         let score = self.final_blend(
-            sim, quality, recency, rating, media, popularity, interaction, tag_relation, uploader, veto,
+            sim, quality, recency, rating, media, popularity, interaction, tag_relation, uploader,
+            exclusivity, novelty, veto,
         );
         let blend_ns = blend_start.elapsed().as_nanos() as u64;
 
@@ -243,6 +252,8 @@ impl<'a> super::context::ScoringContext<'a> {
             interaction_fit: interaction,
             tag_relation_fit: tag_relation,
             uploader_fit: uploader,
+            exclusivity_fit: exclusivity,
+            novelty_fit: novelty,
         };
 
         let timing = ChannelTiming {
@@ -255,6 +266,8 @@ impl<'a> super::context::ScoringContext<'a> {
             recency_fit: rec_ns,
             tag_relation_fit: tr_ns,
             uploader_fit: u_ns,
+            exclusivity_fit: exc_ns,
+            novelty_fit: nov_ns,
             final_blend: blend_ns,
         };
 
