@@ -72,6 +72,9 @@ pub(crate) const PAIRED_KNOBS: &[(&str, &str)] = &[
     // v5.11: exclusivity + novelty channel pairs
     ("mix_exclusivity", "exclusivity_scale"),
     ("mix_novelty", "novelty_n0"),
+    // v5.11 Class J: diversity semantic similarity
+    ("diversity_semantic_blend", "diversity_pmi_threshold"),
+    ("diversity_semantic_blend", "diversity_semantic_max_tags"),
 ];
 
 /// Per-pass scale on probe-deltas. Lets coarse direction emerge quickly
@@ -739,6 +742,33 @@ pub(crate) const GRID_KNOBS: &[KnobSpec] = &[
             p.diversity_interaction_damp = (p.diversity_interaction_damp + v).clamp(0.0, 1.0)
         },
         probes: PROBES_DIV_PENALTY,
+        invalidates: M_NONE,
+        diversify_only: true,
+    },
+    // -- v5.11 Class J: diversity semantic similarity (3) --
+    KnobSpec {
+        name: "diversity_semantic_blend",
+        apply: |p, v| p.diversity_semantic_blend = (p.diversity_semantic_blend + v).clamp(0.0, 1.0),
+        probes: &[-0.10, -0.05, 0.05, 0.10],
+        invalidates: M_NONE,
+        diversify_only: true,
+    },
+    KnobSpec {
+        name: "diversity_pmi_threshold",
+        apply: |p, v| {
+            p.diversity_pmi_threshold = (p.diversity_pmi_threshold + v).clamp(0.0, 5.0)
+        },
+        probes: &[-0.5, -0.2, 0.2, 0.5],
+        invalidates: M_NONE,
+        diversify_only: true,
+    },
+    KnobSpec {
+        name: "diversity_semantic_max_tags",
+        apply: |p, v| {
+            let next = (p.diversity_semantic_max_tags as f32 + v).round();
+            p.diversity_semantic_max_tags = next.clamp(1.0, 50.0) as usize;
+        },
+        probes: &[-3.0, -1.0, 1.0, 3.0],
         invalidates: M_NONE,
         diversify_only: true,
     },

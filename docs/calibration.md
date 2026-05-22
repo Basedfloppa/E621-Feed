@@ -33,7 +33,7 @@
    enum-valued knobs. Reports `[best priors — non-default values]` and a
    clamp-saturation warning if any knob landed at its search boundary.
 
-   As of v5.11 the grid covers ~77 numeric knobs + 1 categorical:
+   As of v5.11 the grid covers ~80 numeric knobs + 1 categorical:
    * 11 `mix_*` weights (added `mix_uploader`, `mix_exclusivity`, `mix_novelty`)
    * IDF / frequency shaping (7): `df_floor`, `idf_max`, `idf_lambda`,
      `idf_alpha`, `freq_alpha`, `bm25_k`, `one_sided_ratio_exp`,
@@ -60,6 +60,8 @@
    * Exclusivity channel (3): `min_exclusivity_cooc`, `exclusivity_scale`, `exclusivity_max_tags`
    * Novelty channel (1): `novelty_n0` (`novelty_use_feedback` is bool — not grid-swept)
    * Diversity weights (5): `diversity_w_artist/character/copyright/species/general`
+   * **Class J — diversity semantic (3):** `diversity_semantic_blend`,
+     `diversity_pmi_threshold`, `diversity_semantic_max_tags`
    * Categorical (1): `tag_relation_pair_aggregator` ∈ {mean, max, geomean}
 
    Subsets / flags:

@@ -260,7 +260,7 @@ pub(crate) async fn get_recommendations(
     if let Some(threshold) = affinity_threshold {
         scored.retain(|sp| sp.score >= threshold);
     }
-    let mut scored = diversify_scored_posts(scored, &priors);
+    let mut scored = diversify_scored_posts(scored, &global_relation, &priors);
 
     // Class F: ε-greedy exploration bonus.
     // Boost posts with novel (low-similarity) tags so users see

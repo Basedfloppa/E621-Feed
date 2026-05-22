@@ -238,6 +238,20 @@ pub struct Priors {
     /// whether the tag exists in the user's tag-counts (favourites).
     #[serde(default = "default_novelty_use_feedback")]
     pub novelty_use_feedback: bool,
+
+    // ---- Class J: diversity semantic similarity ----
+    /// Blend between Jaccard and PMI-based semantic similarity in MMR.
+    /// 0.0 = pure Jaccard (legacy behaviour).
+    #[serde(default = "default_diversity_semantic_blend")]
+    pub diversity_semantic_blend: f32,
+    /// Minimum PMI threshold for a tag pair to count as a "semantic match"
+    /// in MMR similarity. Higher = only strongly-associated pairs count.
+    #[serde(default = "default_diversity_pmi_threshold")]
+    pub diversity_pmi_threshold: f32,
+    /// Maximum tags per group for PMI-based semantic similarity in MMR
+    /// (0 = no limit, though O(T²) cost scales quadratically).
+    #[serde(default = "default_diversity_semantic_max_tags")]
+    pub diversity_semantic_max_tags: usize,
 }
 
 fn default_quality_log_bias() -> f32 {
@@ -418,4 +432,15 @@ fn default_novelty_n0() -> f32 {
 }
 fn default_novelty_use_feedback() -> bool {
     true
+}
+
+// ---- Class J defaults ----
+fn default_diversity_semantic_blend() -> f32 {
+    0.0
+}
+fn default_diversity_pmi_threshold() -> f32 {
+    0.0
+}
+fn default_diversity_semantic_max_tags() -> usize {
+    10
 }

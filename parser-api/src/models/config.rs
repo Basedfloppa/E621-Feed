@@ -536,6 +536,10 @@ fn merge_priors(base: &mut Priors, overrides: &Priors) {
     if overrides.diversity_w_general != 0.08 { base.diversity_w_general = overrides.diversity_w_general; }
     if overrides.diversity_max_penalty != 0.45 { base.diversity_max_penalty = overrides.diversity_max_penalty; }
     if overrides.diversity_interaction_damp != 0.35 { base.diversity_interaction_damp = overrides.diversity_interaction_damp; }
+    // --- v5.11 Class J: diversity semantic similarity ---
+    if overrides.diversity_semantic_blend != 0.0 { base.diversity_semantic_blend = overrides.diversity_semantic_blend; }
+    if overrides.diversity_pmi_threshold != 0.0 { base.diversity_pmi_threshold = overrides.diversity_pmi_threshold; }
+    if overrides.diversity_semantic_max_tags != 10 { base.diversity_semantic_max_tags = overrides.diversity_semantic_max_tags; }
 
     // --- uploader channel ---
     if overrides.uploader_n0 != 5.0 { base.uploader_n0 = overrides.uploader_n0; }

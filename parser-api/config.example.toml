@@ -190,6 +190,15 @@ discrete_pref_floor        = 0.05
 diversity_max_penalty      = 0.45
 diversity_interaction_damp = 0.35
 
+# Diversity semantic similarity (v5.11): blend PMI-based soft tag matching
+# into MMR. 0 = pure Jaccard (legacy). When >0, tags with high pointwise
+# mutual information count as a "soft match" even when the tag name differs.
+# The non-zero affordance below gives the calibration grid room to probe
+# in both directions during `grid with-diversify`.
+diversity_semantic_blend    = 0.05   # [0-1]; 0 = disabled (pure Jaccard)
+diversity_pmi_threshold     = 0.5    # minimum PMI for a soft match; pairs with PMI above this count as semantically related
+diversity_semantic_max_tags = 10     # top-K tags per group for the O(T²) PMI loop
+
 # --- Runtime / worker tuning ------------------------------------------------
 [runtime]
 local_candidate_limit            = 400    # local-catalog candidates per /recommendations page

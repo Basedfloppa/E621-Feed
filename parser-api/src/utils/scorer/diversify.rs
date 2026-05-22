@@ -11,43 +11,68 @@
 //!   order). The grid loop calls this once per probe with features
 //!   computed once at dataset prep.
 //!
-//! Memory: each [`DiversityFeatures`] holds three sorted `Vec<u64>` of
-//! per-tag SipHashes. Collisions at 64-bit are negligible at the tag
-//! cardinalities involved (≤ 10⁵ unique tags, ~10⁻¹⁵ collision
-//! probability per pair). This trades a few cents of false-positive
-//! similarity risk for a ~10× memory reduction over the previous
-//! `HashSet<String>` representation, keeping 500-account calibration
-//! datasets inside 15 GB.
+//! ## Semantic similarity (v5.11)
+//!
+//! By default MMR uses Jaccard similarity on 64-bit SipHashes of tag
+//! names — exact-match only. When `diversity_semantic_blend > 0`, a
+//! fraction of the similarity comes from PMI-based tag-pair association.
+//! Tags that co-occur more often than chance (PMI > threshold) count as
+//! a "soft match", catching related but different tags (e.g. `canine`
+//! and `wolf`) that Jaccard would miss.
+//!
+//! Each group-level similarity becomes:
+//!   `sim = (1 - blend) × Jaccard(hashes) + blend × PMI_match_ratio`
+//!
+//! The PMI match ratio caps at `diversity_semantic_max_tags` tags per
+//! post per group to keep the O(T²) loop bounded.
+//!
+//! To minimise overhead, when `diversity_semantic_blend == 0` (the
+//! default) the PMI computation is skipped entirely and the fast Jaccard
+//! path runs — identical to the v5.10 behaviour.
+//!
+//! Memory: each [`DiversityFeatures`] holds three sorted `Vec<(u64,
+//! Option<TagId>)>` of per-tag (hash, optional graph-id) pairs.
+//! Collisions at 64-bit are negligible at the tag cardinalities
+//! involved (≤ 10⁵ unique tags, ~10⁻¹⁵ collision probability per pair).
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 use crate::models::{Post, ScoredPost};
+use crate::utils::tag_relation::TagRelationGraph;
 
 use super::priors::Priors;
 use super::util::{normalize_tag, FEEDBACK_NEUTRAL};
 
-/// Pre-computed Jaccard-friendly tag fingerprints for one post. Tags are
-/// hashed once and stored as a sorted `Vec<u64>` per group so MMR's
-/// per-pair set intersection is a linear merge instead of a HashSet
-/// probe.
+type TagId = u32;
+
+/// Pre-computed fingerprints for one post. Each entry is a `(hash, tag_id)`
+/// tuple — the hash is the SipHash of the lowercased tag name (for Jaccard),
+/// and `tag_id` is the optional graph-interned id (for PMI-based semantic
+/// similarity). Sorted by hash for O(n) merge-intersection.
 #[derive(Clone)]
 pub struct DiversityFeatures {
-    artist: Vec<u64>,
-    character: Vec<u64>,
-    copyright: Vec<u64>,
-    species: Vec<u64>,
-    general: Vec<u64>,
+    artist: Vec<(u64, Option<TagId>)>,
+    character: Vec<(u64, Option<TagId>)>,
+    copyright: Vec<(u64, Option<TagId>)>,
+    species: Vec<(u64, Option<TagId>)>,
+    general: Vec<(u64, Option<TagId>)>,
 }
 
 impl DiversityFeatures {
-    pub fn from_post(p: &Post) -> Self {
+    /// Build features for one post.
+    ///
+    /// `graph` is only used to resolve `TagId`s for PMI similarity; when
+    /// `diversity_semantic_blend` is 0 in the calling code, the ids are
+    /// still stored but never queried — the HashMap lookups per tag are
+    /// negligible overhead compared to the rest of the scoring pipeline.
+    pub fn from_post(p: &Post, graph: &TagRelationGraph) -> Self {
         Self {
-            artist: hashed_tag_set(&p.tags.artist),
-            character: hashed_tag_set(&p.tags.character),
-            copyright: hashed_tag_set(&p.tags.copyright),
-            species: hashed_tag_set(&p.tags.species),
-            general: hashed_tag_set(&p.tags.general),
+            artist: hashed_tag_set(&p.tags.artist, 0, graph),
+            character: hashed_tag_set(&p.tags.character, 1, graph),
+            copyright: hashed_tag_set(&p.tags.copyright, 2, graph),
+            species: hashed_tag_set(&p.tags.species, 3, graph),
+            general: hashed_tag_set(&p.tags.general, 4, graph),
         }
     }
 }
@@ -59,32 +84,38 @@ fn hash_tag(t: &str) -> u64 {
     h.finish()
 }
 
-fn hashed_tag_set(tags: &[String]) -> Vec<u64> {
-    let mut out: Vec<u64> = tags
+fn hashed_tag_set(
+    tags: &[String],
+    group: u8,
+    graph: &TagRelationGraph,
+) -> Vec<(u64, Option<TagId>)> {
+    let mut out: Vec<(u64, Option<TagId>)> = tags
         .iter()
         .filter_map(|t| {
             let trimmed = t.trim();
             if trimmed.is_empty() {
-                None
-            } else {
-                Some(hash_tag(trimmed))
+                return None;
             }
+            let h = hash_tag(trimmed);
+            let tid = graph.tag_id(group, trimmed);
+            Some((h, tid))
         })
         .collect();
-    out.sort_unstable();
-    out.dedup();
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out.dedup_by(|a, b| a.0 == b.0);
     out
 }
 
-/// Jaccard between two sorted-deduped `Vec<u64>` via merge-intersection.
-fn jaccard(a: &[u64], b: &[u64]) -> f32 {
+/// Jaccard between two sorted-deduped slices via merge-intersection on
+/// the hash component only (ignoring TagId). Exact-match similarity.
+fn jaccard_hashes(a: &[(u64, Option<TagId>)], b: &[(u64, Option<TagId>)]) -> f32 {
     if a.is_empty() || b.is_empty() {
         return 0.0;
     }
     let (mut i, mut j) = (0usize, 0usize);
     let mut inter = 0u32;
     while i < a.len() && j < b.len() {
-        match a[i].cmp(&b[j]) {
+        match a[i].0.cmp(&b[j].0) {
             std::cmp::Ordering::Equal => {
                 inter += 1;
                 i += 1;
@@ -102,21 +133,150 @@ fn jaccard(a: &[u64], b: &[u64]) -> f32 {
     }
 }
 
+/// PMI-based soft similarity between two tag sets. For every pair
+/// `(tag_a, tag_b)` across the two posts (within the same group), compute
+/// the pointwise mutual information and count pairs where PMI exceeds
+/// `threshold` as "semantic matches".
+///
+/// `PMI(a,b) = ln(cooc(a,b) × N / (marginal(a) × marginal(b)))`
+///
+/// Returns the fraction of pairs that match — a score in [0, 1].
+fn pmi_group_similarity(
+    a: &[(u64, Option<TagId>)],
+    b: &[(u64, Option<TagId>)],
+    graph: &TagRelationGraph,
+    threshold: f32,
+    max_tags: usize,
+) -> f32 {
+    let a_tids: Vec<TagId> = a.iter().filter_map(|(_, tid)| *tid).take(max_tags).collect();
+    let b_tids: Vec<TagId> = b.iter().filter_map(|(_, tid)| *tid).take(max_tags).collect();
+
+    if a_tids.is_empty() || b_tids.is_empty() {
+        return 0.0;
+    }
+
+    let n_posts = graph.n_posts();
+    if n_posts <= 0 {
+        return 0.0;
+    }
+
+    let n_posts_f = n_posts as f64;
+    let threshold_f = threshold as f64;
+    let mut matches = 0u32;
+    let mut total = 0u32;
+
+    for &ta in &a_tids {
+        let ma = graph.marginal_by_id(ta);
+        if ma <= 0 {
+            continue;
+        }
+        for &tb in &b_tids {
+            if ta == tb {
+                // Exact id match — always counts as a semantic match.
+                matches += 1;
+                total += 1;
+                continue;
+            }
+            total += 1;
+            let cooc = graph.cooc_by_id(ta, tb);
+            if cooc <= 0 {
+                continue;
+            }
+            let mb = graph.marginal_by_id(tb);
+            if mb <= 0 {
+                continue;
+            }
+            let pmi = ((cooc as f64) * n_posts_f / ((ma as f64) * (mb as f64))).ln();
+            if pmi > threshold_f {
+                matches += 1;
+            }
+        }
+    }
+
+    if total == 0 {
+        0.0
+    } else {
+        matches as f32 / total as f32
+    }
+}
+
+/// Blended group-level similarity: Jaccard (exact tag-match) and PMI
+/// (semantic soft-match). When `blend <= 0`, falls back to pure Jaccard.
+fn group_similarity(
+    a: &[(u64, Option<TagId>)],
+    b: &[(u64, Option<TagId>)],
+    graph: &TagRelationGraph,
+    blend: f32,
+    pmi_threshold: f32,
+    max_tags: usize,
+) -> f32 {
+    if blend <= 0.0 {
+        return jaccard_hashes(a, b);
+    }
+    let jac = jaccard_hashes(a, b);
+    let pmi = pmi_group_similarity(a, b, graph, pmi_threshold, max_tags);
+    (1.0 - blend) * jac + blend * pmi
+}
+
 fn max_redundancy_indexed(
     cand: &DiversityFeatures,
     selected: &[usize],
     features: &[DiversityFeatures],
+    graph: &TagRelationGraph,
     priors: &Priors,
 ) -> f32 {
     let window = priors.diversity_window.max(1);
+    let blend = priors.diversity_semantic_blend.clamp(0.0, 1.0);
+    let pmi_threshold = priors.diversity_pmi_threshold;
+    let max_tags = priors.diversity_semantic_max_tags.max(1);
+
     let mut max_sim = 0.0f32;
     for &i in selected.iter().rev().take(window) {
         let chosen = &features[i];
-        let sim = jaccard(&cand.artist, &chosen.artist) * priors.diversity_w_artist
-            + jaccard(&cand.character, &chosen.character) * priors.diversity_w_character
-            + jaccard(&cand.copyright, &chosen.copyright) * priors.diversity_w_copyright
-            + jaccard(&cand.species, &chosen.species) * priors.diversity_w_species
-            + jaccard(&cand.general, &chosen.general) * priors.diversity_w_general;
+        let sim = if blend <= 0.0 {
+            // Fast path: pure Jaccard — no graph queries needed beyond
+            // what was already done at feature-construction time.
+            jaccard_hashes(&cand.artist, &chosen.artist) * priors.diversity_w_artist
+                + jaccard_hashes(&cand.character, &chosen.character) * priors.diversity_w_character
+                + jaccard_hashes(&cand.copyright, &chosen.copyright) * priors.diversity_w_copyright
+                + jaccard_hashes(&cand.species, &chosen.species) * priors.diversity_w_species
+                + jaccard_hashes(&cand.general, &chosen.general) * priors.diversity_w_general
+        } else {
+            group_similarity(&cand.artist, &chosen.artist, graph, blend, pmi_threshold, max_tags)
+                * priors.diversity_w_artist
+                + group_similarity(
+                    &cand.character,
+                    &chosen.character,
+                    graph,
+                    blend,
+                    pmi_threshold,
+                    max_tags,
+                ) * priors.diversity_w_character
+                + group_similarity(
+                    &cand.copyright,
+                    &chosen.copyright,
+                    graph,
+                    blend,
+                    pmi_threshold,
+                    max_tags,
+                ) * priors.diversity_w_copyright
+                + group_similarity(
+                    &cand.species,
+                    &chosen.species,
+                    graph,
+                    blend,
+                    pmi_threshold,
+                    max_tags,
+                ) * priors.diversity_w_species
+                + group_similarity(
+                    &cand.general,
+                    &chosen.general,
+                    graph,
+                    blend,
+                    pmi_threshold,
+                    max_tags,
+                ) * priors.diversity_w_general
+        };
         if sim > max_sim {
             max_sim = sim;
         }
@@ -139,6 +299,7 @@ fn max_redundancy_indexed(
 pub fn diversify_indices(
     entries: &[(f32, f32, i64)],
     features: &[DiversityFeatures],
+    graph: &TagRelationGraph,
     priors: &Priors,
     head_limit: usize,
 ) -> Vec<usize> {
@@ -175,7 +336,8 @@ pub fn diversify_indices(
 
         for (pos, &i) in available.iter().enumerate() {
             let (score, interaction, tid) = entries[i];
-            let redundancy = max_redundancy_indexed(&features[i], &selected, features, priors);
+            let redundancy =
+                max_redundancy_indexed(&features[i], &selected, features, graph, priors);
             let gap = (top_score - score).max(0.0);
             let penalty = (redundancy * gap * (1.0 - damp * interaction)).clamp(0.0, max_penalty);
             let adj = score - penalty;
@@ -201,13 +363,17 @@ pub fn diversify_indices(
 /// Owning re-rank used by the production `/recommendations` route.
 /// Builds [`DiversityFeatures`] on the fly and runs MMR over the whole
 /// list (no top-K cutoff) to preserve historical behaviour.
-pub fn diversify_scored_posts(posts: Vec<ScoredPost>, priors: &Priors) -> Vec<ScoredPost> {
+pub fn diversify_scored_posts(
+    posts: Vec<ScoredPost>,
+    graph: &TagRelationGraph,
+    priors: &Priors,
+) -> Vec<ScoredPost> {
     if posts.is_empty() {
         return posts;
     }
     let features: Vec<DiversityFeatures> = posts
         .iter()
-        .map(|sp| DiversityFeatures::from_post(&sp.post))
+        .map(|sp| DiversityFeatures::from_post(&sp.post, graph))
         .collect();
     let entries: Vec<(f32, f32, i64)> = posts
         .iter()
@@ -221,7 +387,7 @@ pub fn diversify_scored_posts(posts: Vec<ScoredPost>, priors: &Priors) -> Vec<Sc
         })
         .collect();
 
-    let order = diversify_indices(&entries, &features, priors, posts.len());
+    let order = diversify_indices(&entries, &features, graph, priors, posts.len());
 
     let mut slots: Vec<Option<ScoredPost>> = posts.into_iter().map(Some).collect();
     let mut out: Vec<ScoredPost> = Vec::with_capacity(slots.len());
@@ -314,6 +480,7 @@ fn enforce_group_quota(
 mod tests {
     use super::*;
     use crate::models::{Flags, Post, Rating, Relationships, Score, ScoredPost, Tags};
+    use crate::utils::tag_relation::TagRelationGraph;
     use chrono::Utc;
 
     /// Minimal `Post` for diversity tests — only `id`, `tags.artist` and
@@ -654,5 +821,111 @@ mod tests {
             .expect("enforce_diversity_quota did not return within 5s — infinite-loop regression");
 
         assert_permutation_of(&result, &expected);
+    }
+
+    // ── jaccard_hashes ──────────────────────────────────────────────────
+
+    #[test]
+    fn jaccard_hashes_empty_sides() {
+        assert_eq!(jaccard_hashes(&[], &[]), 0.0);
+        assert_eq!(jaccard_hashes(&[(1, None)], &[]), 0.0);
+        assert_eq!(jaccard_hashes(&[], &[(1, None)]), 0.0);
+    }
+
+    #[test]
+    fn jaccard_hashes_identical() {
+        let a = vec![(1, None), (2, None), (3, None)];
+        assert!((jaccard_hashes(&a, &a) - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn jaccard_hashes_partial_overlap() {
+        let a = vec![(1, None), (2, None), (3, None)];
+        let b = vec![(2, None), (3, None), (4, None)];
+        // intersection = {2, 3} = 2, union = {1,2,3,4} = 4
+        assert!((jaccard_hashes(&a, &b) - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn jaccard_hashes_no_overlap() {
+        let a = vec![(1, None), (2, None)];
+        let b = vec![(3, None), (4, None)];
+        assert_eq!(jaccard_hashes(&a, &b), 0.0);
+    }
+
+    // ── pmi_group_similarity (empty graph) ──────────────────────────────
+
+    #[test]
+    fn pmi_group_similarity_zero_on_empty_graph() {
+        let graph = TagRelationGraph::empty();
+        let a = vec![(1, Some(0)), (2, Some(1))];
+        let b = vec![(3, Some(2)), (4, Some(3))];
+        let score = pmi_group_similarity(&a, &b, &graph, 0.0, 10);
+        assert_eq!(score, 0.0, "empty graph has n_posts=0 -> 0.0");
+    }
+
+    // ── pmi_group_similarity (populated graph) ──────────────────────────
+
+    #[test]
+    fn pmi_group_similarity_matches_high_pmi_pairs() {
+        let mut graph = TagRelationGraph::with_posts(100);
+        // "dog" appears in 50 posts, "canine" in 40, they co-occur in 35.
+        graph.set_marginal(0, "dog", 50);
+        graph.set_marginal(0, "canine", 40);
+        graph.set_marginal(0, "cat", 30);
+        graph.set_marginal(0, "feline", 20);
+        // dog-canine cooc=35 -> PMI = ln(35*100/(50*40)) = ln(1.75) ≈ 0.56
+        graph.insert_pair(0, "dog", 0, "canine", 35);
+        // dog-cat cooc=5 -> PMI = ln(5*100/(50*30)) = ln(0.33) ≈ -1.10
+        graph.insert_pair(0, "dog", 0, "cat", 5);
+
+        let tid_dog = graph.tag_id(0, "dog").unwrap();
+        let tid_canine = graph.tag_id(0, "canine").unwrap();
+        let tid_cat = graph.tag_id(0, "cat").unwrap();
+
+        let a = vec![(0, Some(tid_dog))];
+        let b = vec![(1, Some(tid_canine))];
+        let c = vec![(2, Some(tid_cat))];
+
+        // dog vs canine: PMI ≈ 0.56 > 0.0 threshold -> match
+        let score = pmi_group_similarity(&a, &b, &graph, 0.0, 10);
+        assert!(
+            (score - 1.0).abs() < 1e-6,
+            "dog-canine should match at threshold 0.0, got {score}"
+        );
+
+        // dog vs cat: PMI ≈ -1.10 < 0.0 threshold -> no match
+        let score = pmi_group_similarity(&a, &c, &graph, 0.0, 10);
+        assert_eq!(score, 0.0, "dog-cat should not match at threshold 0.0, got {score}");
+    }
+
+    // ── group_similarity blend ──────────────────────────────────────────
+
+    #[test]
+    fn group_similarity_blend_zero_returns_jaccard() {
+        let graph = TagRelationGraph::empty();
+        let a = vec![(1, None), (2, None)];
+        let b = vec![(2, None), (3, None)];
+        // Jaccard = 1/3 ≈ 0.333
+        let jac = jaccard_hashes(&a, &b);
+        let blended = group_similarity(&a, &b, &graph, 0.0, 0.0, 10);
+        assert!(
+            (blended - jac).abs() < 1e-6,
+            "blend=0 should equal jaccard: {blended} vs {jac}"
+        );
+    }
+
+    // ── DiversityFeatures::from_post (empty graph) ──────────────────────
+
+    #[test]
+    fn from_post_empty_graph_produces_some_features() {
+        let graph = TagRelationGraph::empty();
+        let p = post(1, &["artist_a"], &["char_x"]);
+        let feats = DiversityFeatures::from_post(&p, &graph);
+        assert_eq!(feats.artist.len(), 1, "should have one artist tag");
+        assert_eq!(feats.character.len(), 1, "should have one character tag");
+        assert!(feats.copyright.is_empty());
+        assert!(feats.species.is_empty());
+        assert!(feats.general.is_empty());
     }
 }

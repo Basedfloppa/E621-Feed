@@ -201,8 +201,13 @@ fn score_with_opts(
                         entries.push((s, breakdown.interaction_fit, f.id));
                     }
                     let head_limit = top_k_ndcg.max(top_k_recall).saturating_mul(2).max(50);
-                    let order =
-                        diversify_indices(&entries, &fx.diversity_features, priors, head_limit);
+                    let order = diversify_indices(
+                        &entries,
+                        &fx.diversity_features,
+                        &dataset.global_relation,
+                        priors,
+                        head_limit,
+                    );
                     for i in order {
                         let is_pos = i < n_test;
                         scored.push((entries[i].2, entries[i].0, is_pos));

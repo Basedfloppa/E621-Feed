@@ -275,8 +275,13 @@ pub(crate) fn score_with_cache(
                 }
 
                 let scored: Vec<(i64, f32, bool)> = if diversify {
-                    let order =
-                        diversify_indices(&entries, &fx.diversity_features, priors, head_limit);
+                    let order = diversify_indices(
+                        &entries,
+                        &fx.diversity_features,
+                        &dataset.global_relation,
+                        priors,
+                        head_limit,
+                    );
                     order
                         .into_iter()
                         .map(|i| {

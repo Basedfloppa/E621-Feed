@@ -569,6 +569,9 @@ mod tests {
             mix_novelty: 0.0,
             novelty_n0: 3.0,
             novelty_use_feedback: true,
+            diversity_semantic_blend: 0.0,
+            diversity_pmi_threshold: 0.0,
+            diversity_semantic_max_tags: 10,
         }
     }
 

@@ -339,8 +339,8 @@ pub(crate) fn prepare_eval_dataset(opts: &GridOptions) -> anyhow::Result<EvalDat
             // MMR features only when actually needed.
             let diversity_features: Vec<DiversityFeatures> = if opts.diversify {
                 let mut v = Vec::with_capacity(test_posts.len() + neg_posts.len());
-                v.extend(test_posts.iter().map(DiversityFeatures::from_post));
-                v.extend(neg_posts.iter().map(DiversityFeatures::from_post));
+                v.extend(test_posts.iter().map(|p| DiversityFeatures::from_post(p, &global_relation)));
+                v.extend(neg_posts.iter().map(|p| DiversityFeatures::from_post(p, &global_relation)));
                 v
             } else {
                 Vec::new()

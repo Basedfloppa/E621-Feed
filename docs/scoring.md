@@ -104,6 +104,22 @@ then a diversity-quota pass guarantees minimum variety in the top 20:
 - **Artist quota** — at least 2 different artists
 - **Character quota** — at least 3 different characters
 
+### Semantic similarity (v5.11)
+
+By default MMR uses **Jaccard similarity** on exact tag-name hashes — two posts
+share a tag or they don't. When `diversity_semantic_blend > 0`, a fraction of
+the similarity comes from **PMI-based soft matching**: tags that co-occur more
+often than chance (e.g. `canine` and `wolf`) count as a "soft match" even when
+the tag name differs. The per-group similarity becomes:
+
+```
+sim = (1 - blend) × Jaccard(hashes) + blend × PMI_match_ratio
+```
+
+Where `PMI_match_ratio` is the fraction of (tag_a, tag_b) pairs whose pointwise
+mutual information exceeds `diversity_pmi_threshold`, capped at
+`diversity_semantic_max_tags` tags per group per post to bound O(T²) cost.
+
 |Variable|Lower →|Higher →|
 |---|---|---|
 |`diversity_window`|shorter memory; repeats can resurface|longer memory; more variety per page|
@@ -114,6 +130,9 @@ then a diversity-quota pass guarantees minimum variety in the top 20:
 |`diversity_w_general`|general-tag overlap ignored|penalises posts with too-similar tag sets|
 |`diversity_max_penalty`|MMR penalty capped lower|redundancy penalty can push duplicate posts further down|
 |`diversity_interaction_damp`|interaction signal doesn't reduce redundancy penalty|liked similar posts → less penalty for similarity|
+|`diversity_semantic_blend`|pure Jaccard (legacy)|PMI-soft-match blended into MMR similarity (0 = disabled, default)|
+|`diversity_pmi_threshold`|more pairs count as semantic matches|only strongly-associated pairs (PMI above this) count|
+|`diversity_semantic_max_tags`|fewer tags in O(T²) loop (faster)|more tags per group considered (slower, more signal)|
 
 ## Discrete-preference smoothing + strong-negative veto
 
