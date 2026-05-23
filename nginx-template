@@ -251,6 +251,21 @@ server {
         try_files /index.html =404;
     }
 
+    location ^~ /digest {
+        add_header Cache-Control "no-cache, must-revalidate" always;
+
+        add_header Strict-Transport-Security "max-age=31536000; includeSubDomains; preload" always;
+        add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'wasm-unsafe-eval' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data: https://*.e621.net; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'" always;
+        add_header Referrer-Policy "no-referrer" always;
+        add_header X-Content-Type-Options "nosniff" always;
+        add_header X-Frame-Options "DENY" always;
+        add_header Cross-Origin-Opener-Policy "same-origin" always;
+        add_header Cross-Origin-Resource-Policy "same-origin" always;
+        add_header Permissions-Policy "geolocation=(), microphone=(), camera=(), payment=(), usb=(), interest-cohort=()" always;
+
+        try_files /index.html =404;
+    }
+
     # Block Swagger UI and the OpenAPI in production
     location ~ ^/api/(swagger-ui|openapi\.json) {
         return 404;

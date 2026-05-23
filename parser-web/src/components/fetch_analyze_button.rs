@@ -37,24 +37,44 @@ pub fn fetch_analyze_button(props: &AnalyzeButtonProps) -> Html {
 
     // Bootstrap the existing job state when the user changes — so a refresh
     // mid-run still shows the running indicator and resumes polling.
+    //
+    // Status-fetch failures are logged to console and cleared from local
+    // state rather than silently leaving a stale Running indicator on screen.
     {
         let api_base = props.api_base.clone();
         let job_status = job_status.clone();
-        let error = props.error.clone();
         use_effect_with((*props.found_user).clone(), move |user| {
             let Some(user) = user.clone() else {
                 job_status.set(None);
                 return;
             };
-            let _ = error;
             let url = format!("{}/process/{}/status", api_base, user.id);
             let job_status = job_status.clone();
             wasm_bindgen_futures::spawn_local(async move {
-                if let Ok(resp) = api_get(&url).send().await
-                    && resp.ok()
-                        && let Ok(s) = resp.json::<Option<ProcessJobState>>().await {
-                            job_status.set(s);
+                match api_get(&url).send().await {
+                    Ok(resp) if resp.ok() => {
+                        match resp.json::<Option<ProcessJobState>>().await {
+                            Ok(s) => job_status.set(s),
+                            Err(e) => {
+                                web_sys::console::warn_1(
+                                    &format!("Bad /process status response: {e}").into(),
+                                );
+                                job_status.set(None);
+                            }
                         }
+                    }
+                    Ok(resp) => {
+                        web_sys::console::warn_1(
+                            &format!("/process/status bootstrap HTTP {}", resp.status()).into(),
+                        );
+                        job_status.set(None);
+                    }
+                    Err(e) => {
+                        web_sys::console::warn_1(
+                            &format!("/process/status bootstrap network error: {e}").into(),
+                        );
+                    }
+                }
             });
         });
     }
@@ -138,18 +158,61 @@ pub fn fetch_analyze_button(props: &AnalyzeButtonProps) -> Html {
                     {
                         let url = format!("{}/process/{}/status", api_base, uid);
                         let job_status = job_status.clone();
+                        let error_for_poll = error.clone();
 
                         let cb = Closure::<dyn FnMut()>::new(move || {
                             let url = url.clone();
                             let job_status = job_status.clone();
+                            let error_for_poll = error_for_poll.clone();
                             wasm_bindgen_futures::spawn_local(async move {
-                                if let Ok(resp) = api_get(&url).send().await
-                                    && resp.ok()
-                                        && let Ok(s) =
-                                            resp.json::<Option<ProcessJobState>>().await
-                                        {
-                                            job_status.set(s);
+                                // Any non-2xx or parse failure used to be
+                                // silently swallowed, leaving the UI stuck on
+                                // a frozen Running state. Surface the error
+                                // and synthesize a Failed transition so the
+                                // effect's teardown branch runs.
+                                match api_get(&url).send().await {
+                                    Ok(resp) if resp.ok() => {
+                                        match resp.json::<Option<ProcessJobState>>().await {
+                                            Ok(s) => job_status.set(s),
+                                            Err(e) => {
+                                                let msg = format!("Status parse error: {e}");
+                                                error_for_poll.set(Some(msg.clone()));
+                                                if let Some(cur) = (*job_status).clone() {
+                                                    job_status.set(Some(ProcessJobState {
+                                                        phase: ProcessJobPhase::Failed,
+                                                        error: Some(msg),
+                                                        ..cur
+                                                    }));
+                                                } else {
+                                                    job_status.set(None);
+                                                }
+                                            }
                                         }
+                                    }
+                                    Ok(resp) => {
+                                        let status = resp.status();
+                                        let text = resp.text().await.unwrap_or_default();
+                                        let msg = humanize_error_body(status, &text);
+                                        error_for_poll.set(Some(msg.clone()));
+                                        if let Some(cur) = (*job_status).clone() {
+                                            job_status.set(Some(ProcessJobState {
+                                                phase: ProcessJobPhase::Failed,
+                                                error: Some(format!("status HTTP {status}: {msg}")),
+                                                ..cur
+                                            }));
+                                        } else {
+                                            job_status.set(None);
+                                        }
+                                    }
+                                    Err(e) => {
+                                        // Transient network blip — surface it
+                                        // but keep the loop running so we
+                                        // recover when connectivity returns.
+                                        error_for_poll.set(Some(format!(
+                                            "Status network error: {e}"
+                                        )));
+                                    }
+                                }
                             });
                         });
 
