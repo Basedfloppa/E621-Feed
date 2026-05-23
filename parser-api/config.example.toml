@@ -30,6 +30,7 @@ posts_domain  = "https://uri.com"
 posts_limit   = 160       # 320 is the e621 max
 rps_delay_ms  = 250
 max_retries   = 3
+attempt_timeout_secs = 45  # hard tokio::time::timeout per HTTP attempt (defeats CF slow-lane that bypasses reqwest's .timeout)
 
 # HTTP User-Agent sent to e621.
 user_agent    = "E621AccountParser/0.1 (+https://github.com/Basedfloppa/E621-Feed; contact: you@example.com)"

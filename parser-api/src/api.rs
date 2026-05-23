@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex as StdMutex};
 use std::time::Duration;
 use tokio::sync::Mutex;
-use tokio::time::{Instant, sleep};
+use tokio::time::{Instant, sleep, timeout};
 use urlencoding::encode;
 
 use crate::models::{
@@ -257,13 +257,19 @@ fn builder_url(builder: &reqwest::RequestBuilder) -> String {
 /// distinguish connection-level vs body-stream-level failures without
 /// reading full Debug output. The body-vs-connect distinction is the
 /// one that matters most when diagnosing Cloudflare throttling.
+///
+/// Order matters: `body` is checked before `timeout` because a body
+/// stream that times out mid-read flips BOTH predicates true, and the
+/// body case is the operationally interesting one (Cloudflare slow-
+/// lane throttling) — we don't want it hidden behind the generic
+/// `timeout` tag.
 fn err_kind(e: &reqwest::Error) -> &'static str {
-    if e.is_timeout() {
-        "timeout"
-    } else if e.is_connect() {
+    if e.is_connect() {
         "connect"
     } else if e.is_body() {
         "body"
+    } else if e.is_timeout() {
+        "timeout"
     } else if e.is_decode() {
         "decode"
     } else if e.is_request() {
@@ -296,16 +302,53 @@ async fn send_with_retry(builder: reqwest::RequestBuilder) -> Result<Response, S
         rate_gate_wait().await;
 
         let attempt_start = std::time::Instant::now();
-        return match builder
-            .try_clone()
-            .ok_or_else(|| {
-                let m = "unable to clone request".to_string();
-                error!("{m}");
-                m
-            })?
-            .send()
-            .await
-        {
+        // Hard ceiling per attempt. `reqwest::ClientBuilder::timeout`
+        // SHOULD enforce the total request budget, but in practice
+        // Cloudflare's slow-lane throttle (favorites.json under
+        // admin-token throttle) trickles bytes through which keeps
+        // reqwest's internal timers happy — observed attempts run
+        // 76-178 seconds against a 30s configured timeout. This
+        // outer `tokio::time::timeout` is non-negotiable: when it
+        // fires, the request future is dropped, the underlying
+        // socket is closed, and retry logic gets a clean state.
+        let attempt_budget = Duration::from_secs(cfg.attempt_timeout_secs.max(5));
+        let req = builder.try_clone().ok_or_else(|| {
+            let m = "unable to clone request".to_string();
+            error!("{m}");
+            m
+        })?;
+        let send_fut = req.send();
+        let result = match timeout(attempt_budget, send_fut).await {
+            Ok(inner) => inner,
+            Err(_elapsed) => {
+                let elapsed = attempt_start.elapsed();
+                if attempt < cfg.max_retries {
+                    warn!(
+                        "Request hard-timeout after {:.2}s (budget {:?}) on attempt {}/{} for {}. Retrying in {:?}",
+                        elapsed.as_secs_f64(),
+                        attempt_budget,
+                        attempt + 1,
+                        cfg.max_retries + 1,
+                        url_for_logs,
+                        delay
+                    );
+                    sleep(delay).await;
+                    delay = delay.saturating_mul(2);
+                    continue;
+                }
+                error!(
+                    "Request hard-timeout after {:.2}s on final attempt {} for {}",
+                    elapsed.as_secs_f64(),
+                    cfg.max_retries + 1,
+                    url_for_logs
+                );
+                return Err(format!(
+                    "request failed after retries [hard-timeout]: {:.2}s budget exceeded",
+                    attempt_budget.as_secs_f64()
+                ));
+            }
+        };
+        return match result {
             Ok(resp) => {
                 let status = resp.status();
                 let elapsed = attempt_start.elapsed();

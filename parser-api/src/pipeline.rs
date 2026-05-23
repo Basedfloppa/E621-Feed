@@ -120,19 +120,39 @@ pub async fn run_process(account_id: i32, owner_token: String) -> Result<(), Str
     // monolithic DELETE pins the writer mutex for the full scan and starves
     // every other write (including the status polling-side metadata
     // updates) for minutes. Batch the delete so we release the lock between
-    // chunks and emit a log line per batch — gives the user a visible
-    // heartbeat instead of a frozen UI.
+    // chunks.
+    //
+    // On 2.6M-row accounts this phase realistically takes 15-20 minutes
+    // even with batching (SQLite is the bottleneck, not the writer
+    // mutex). The `info!` per batch goes through Rocket's log filter
+    // and may be silenced under `log_level=critical`, so we also fire
+    // an AUDIT line every Nth batch — guarantees a visible heartbeat
+    // in stdout so operators don't think the job is wedged.
     let drop_cooc_batch = cfg.runtime.drop_cooc_batch_size.max(1_000);
+    const COOC_AUDIT_EVERY_N_BATCHES: usize = 5;
     let deleted_cooc = db_blocking(move || {
+        let mut batches_seen = 0usize;
         db::drop_account_cooccurrence_batched(account_id, drop_cooc_batch, |batch, total| {
+            batches_seen += 1;
             info!(
                 "[process {account_id}] drop_cooc batch -{batch} (total deleted: {total})"
             );
+            if batches_seen % COOC_AUDIT_EVERY_N_BATCHES == 0 {
+                audit::event("process.drop_cooc_progress")
+                    .field("account_id", account_id)
+                    .field("batches", batches_seen)
+                    .field("deleted", total)
+                    .emit();
+            }
         })
         .map_err(|e| format!("Failed to drop account cooccurrence: {e}"))
     })
     .await?;
     info!("[process {account_id}] drop_cooc complete: {deleted_cooc} rows");
+    audit::event("process.drop_cooc_done")
+        .field("account_id", account_id)
+        .field("deleted", deleted_cooc)
+        .emit();
     record_phase!("drop_cooc");
 
     // Fetch pages in parallel; writes stay serial (SQLite is single-writer).
@@ -181,6 +201,12 @@ pub async fn run_process(account_id: i32, owner_token: String) -> Result<(), Str
                     "[process {account_id}] page {i} fetch failed \
                      ({consecutive_failures}/{MAX_CONSECUTIVE_PAGE_FAILURES} consecutive): {e}"
                 );
+                audit::event("process.page_failed")
+                    .field("account_id", account_id)
+                    .field("page", i)
+                    .field("consecutive", consecutive_failures)
+                    .field("error", &e)
+                    .emit_err();
                 if consecutive_failures >= MAX_CONSECUTIVE_PAGE_FAILURES {
                     return Err(format!(
                         "aborted after {consecutive_failures} consecutive page fetch failures; \
@@ -205,6 +231,15 @@ pub async fn run_process(account_id: i32, owner_token: String) -> Result<(), Str
         })
         .await?;
         jobs::record_page_done(account_id);
+        // AUDIT heartbeat per persisted page — under Rocket's
+        // log_level filter the per-page `info!` above may be invisible,
+        // but operators tailing the audit stream want to see /process
+        // making progress page-by-page.
+        audit::event("process.page_done")
+            .field("account_id", account_id)
+            .field("page", i)
+            .field("posts", posts_len)
+            .emit();
     }
     mark_idf_dirty();
     record_phase!("fetch_and_save");

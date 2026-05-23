@@ -26,6 +26,16 @@ pub struct Config {
     pub posts_limit: i32,
     pub rps_delay_ms: u64,
     pub max_retries: u64,
+    /// Hard ceiling per individual e621 HTTP attempt, in seconds.
+    /// `reqwest`'s built-in `.timeout(30)` does not always fire when
+    /// Cloudflare slow-streams the body (rare-byte trickle keeps the
+    /// read timer happy), so we wrap each `.send()` in
+    /// `tokio::time::timeout(attempt_timeout_secs)` as a non-negotiable
+    /// stop. Set generously enough to allow a real slow response
+    /// (~10s p99 for /favorites.json with many posts), tight enough
+    /// that two failed retries can't burn five minutes. Default 45.
+    #[serde(default = "default_attempt_timeout_secs")]
+    pub attempt_timeout_secs: u64,
 
     #[serde(default = "default_user_agent")]
     pub user_agent: String,
@@ -208,6 +218,9 @@ fn default_default_account_blacklist() -> Vec<String> {
 
 fn default_e621_cache_ttl_secs() -> u64 {
     600
+}
+fn default_attempt_timeout_secs() -> u64 {
+    45
 }
 fn default_e621_cache_max_entries() -> usize {
     5000
