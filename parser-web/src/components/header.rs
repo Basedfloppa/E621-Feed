@@ -282,6 +282,15 @@ pub fn header() -> Html {
                                 {"Feed"}
                             </a>
                         </li>
+                        <li class="nav-item">
+                            <a
+                                class={classes!("nav-link", is_active("/digest").then_some("active"))}
+                                aria-current={is_active("/digest").then_some("page")}
+                                href="/digest"
+                            >
+                                {"Digest"}
+                            </a>
+                        </li>
                     </ul>
                 </div>
             </div>

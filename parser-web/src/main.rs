@@ -16,6 +16,8 @@ pub enum Route {
     Account,
     #[at("/feed")]
     Feed,
+    #[at("/digest")]
+    Digest,
     #[not_found]
     #[at("/404")]
     NotFound,
@@ -26,6 +28,7 @@ fn switch(routes: Route) -> Html {
         Route::Home => html! { <HomePage /> },
         Route::Account => html! { <Account /> },
         Route::Feed => html! { <FeedPage />},
+        Route::Digest => html! { <DigestPage />},
         Route::NotFound => html! { <h1>{ "404" }</h1> },
     }
 }

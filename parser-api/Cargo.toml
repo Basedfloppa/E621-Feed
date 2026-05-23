@@ -34,6 +34,7 @@ schemars = { version = "0.8", features = ["chrono"] }
 rayon = "1"
 compact_str = "0.9"
 getrandom = "0.2"
+rand = "0.8"
 
 # jemalloc — required for any non-trivial calibrate run. glibc's default
 # ptmalloc holds many small-allocation arenas hostage on the calibrate

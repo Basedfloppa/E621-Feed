@@ -350,6 +350,7 @@ async fn rocket() -> _ {
         routes::feed::get_recommendations,
         routes::feed::get_recommendations_continue,
         routes::feed::get_similar_posts,
+        routes::digest::get_daily_digest,
         get_default_blacklist,
         session_bootstrap,
         session_clear

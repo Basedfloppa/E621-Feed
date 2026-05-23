@@ -1,9 +1,146 @@
-use chrono::Utc;
+use chrono::{NaiveDate, Utc};
 use rusqlite::params;
 
 use crate::models::{cfg, PreferredTag, TruncatedAccount};
 
 use super::open_db;
+
+/// Visit-activity summary returned by `get_visit_stats`.
+#[derive(Debug, Clone)]
+pub struct VisitStats {
+    pub visit_streak: i32,
+    pub avg_gap_days: f64,
+    pub total_visits_30d: i32,
+}
+
+/// Record or refresh the visit for `account_id` as of today.
+/// Idempotent — calling twice in the same day is a no-op for streak/gap.
+pub fn update_visit_tracker(account_id: i32) -> Result<VisitStats, String> {
+    let today = Utc::now().date_naive().to_string(); // YYYY-MM-DD
+    super::with_write_tx(|tx| {
+        // Read current row (if any).
+        let existing: Option<(String, i32, f64, i32)> = tx
+            .query_row(
+                "SELECT last_visit_date, visit_streak, avg_visit_gap_days, total_visits_30d \
+                 FROM user_visit_tracker WHERE account_id = ?1",
+                params![account_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .ok();
+
+        if let Some((last_date, streak, avg_gap, total_30d)) = existing {
+            if last_date == today {
+                // Already recorded for today — just return current stats.
+                return Ok(VisitStats {
+                    visit_streak: streak,
+                    avg_gap_days: avg_gap,
+                    total_visits_30d: total_30d,
+                });
+            }
+
+            // Calculate days since last visit.
+            let last = NaiveDate::parse_from_str(&last_date, "%Y-%m-%d")
+                .map_err(|e| format!("Failed to parse last_visit_date: {e}"))?;
+            let current = NaiveDate::parse_from_str(&today, "%Y-%m-%d")
+                .map_err(|e| format!("Failed to parse today: {e}"))?;
+            let gap_days = (current - last).num_days() as f64;
+
+            let new_streak = if gap_days == 1.0 { streak + 1 } else { 0 };
+            let new_avg_gap = avg_gap * 0.9 + gap_days * 0.1;
+            let new_total_30d = total_30d + 1;
+
+            tx.execute(
+                "UPDATE user_visit_tracker SET \
+                 last_visit_date = ?1, visit_streak = ?2, \
+                 avg_visit_gap_days = ?3, total_visits_30d = ?4 \
+                 WHERE account_id = ?5",
+                params![today, new_streak, new_avg_gap, new_total_30d, account_id],
+            )
+            .map_err(|e| format!("Failed to update visit tracker: {e}"))?;
+
+            Ok(VisitStats {
+                visit_streak: new_streak,
+                avg_gap_days: new_avg_gap,
+                total_visits_30d: new_total_30d,
+            })
+        } else {
+            // First-ever visit.
+            tx.execute(
+                "INSERT INTO user_visit_tracker (account_id, last_visit_date, visit_streak, avg_visit_gap_days, total_visits_30d) \
+                 VALUES (?1, ?2, 1, 7.0, 1)",
+                params![account_id, today],
+            )
+            .map_err(|e| format!("Failed to insert visit tracker: {e}"))?;
+
+            Ok(VisitStats {
+                visit_streak: 1,
+                avg_gap_days: 7.0,
+                total_visits_30d: 1,
+            })
+        }
+    })
+}
+
+/// Read current visit stats without side effects.
+pub fn get_visit_stats(account_id: i32) -> Result<VisitStats, String> {
+    let conn = open_db()?;
+    let row = conn
+        .query_row(
+            "SELECT visit_streak, avg_visit_gap_days, total_visits_30d \
+             FROM user_visit_tracker WHERE account_id = ?1",
+            params![account_id],
+            |r| {
+                Ok(VisitStats {
+                    visit_streak: r.get(0)?,
+                    avg_gap_days: r.get(1)?,
+                    total_visits_30d: r.get(2)?,
+                })
+            },
+        )
+        .map_err(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => {
+                "Visit tracker row not found for account — call update_visit_tracker first".to_string()
+            }
+            other => format!("get_visit_stats: {other}"),
+        })?;
+    Ok(row)
+}
+
+/// Return account IDs that are active enough to warrant a personalised
+/// digest precompute. `min_streak` and `max_gap_days` define the threshold.
+pub fn get_active_accounts_for_prefetch(
+    min_streak: i32,
+    max_gap_days: f64,
+) -> Result<Vec<i32>, String> {
+    let conn = open_db()?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT account_id FROM user_visit_tracker \
+             WHERE visit_streak >= ?1 AND avg_visit_gap_days <= ?2",
+        )
+        .map_err(|e| format!("get_active_accounts query: {e}"))?;
+    let rows = stmt
+        .query_map(params![min_streak, max_gap_days], |r| r.get::<_, i32>(0))
+        .map_err(|e| format!("get_active_accounts query_map: {e}"))?;
+    let mut ids = Vec::new();
+    for row in rows {
+        ids.push(row.map_err(|e| format!("get_active_accounts row: {e}"))?);
+    }
+    Ok(ids)
+}
+
+/// Update `last_digest_date` after a successful personalised digest build.
+pub fn mark_digest_built(account_id: i32) -> Result<(), String> {
+    let today = Utc::now().date_naive().to_string();
+    super::with_write_tx(|tx| {
+        tx.execute(
+            "UPDATE user_visit_tracker SET last_digest_date = ?1 WHERE account_id = ?2",
+            params![today, account_id],
+        )
+        .map_err(|e| format!("mark_digest_built: {e}"))?;
+        Ok(())
+    })
+}
 
 fn default_blacklist_text() -> String {
     cfg().default_account_blacklist.join("\n")
