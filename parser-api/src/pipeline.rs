@@ -19,7 +19,7 @@ use std::collections::HashSet;
 use rocket::futures::stream::StreamExt;
 
 use crate::{
-    api, db,
+    api, audit, db,
     db::{get_account_by_id, refresh_account_profiles_skip_cooc},
     jobs,
     models::{cfg, Post, UserApiResponse},
@@ -66,6 +66,10 @@ where
 /// body stays uniform.
 #[allow(unused_assignments)]
 pub async fn run_process(account_id: i32, owner_token: String) -> Result<(), String> {
+    audit::event("process.start")
+        .field("account_id", account_id)
+        .emit();
+    let pipeline_start = std::time::Instant::now();
     let mut pipe = PipelineMetrics::new("process");
     // `phase_start` is rebased after every `record_phase!` so the recorded
     // `elapsed_ms` is the delta since the previous phase (matching the
@@ -95,6 +99,11 @@ pub async fn run_process(account_id: i32, owner_token: String) -> Result<(), Str
             pipe.mark($name);
             let secs = elapsed / 1000.0;
             info!("[process {account_id}] phase '{name}' done in {secs:.1}s", name = $name);
+            audit::event("process.phase")
+                .field("account_id", account_id)
+                .field("phase", $name)
+                .field("ms", format!("{:.0}", elapsed))
+                .emit();
             phase_start = std::time::Instant::now();
         }};
     }
@@ -209,5 +218,11 @@ pub async fn run_process(account_id: i32, owner_token: String) -> Result<(), Str
     .await?;
     record_phase!("profile_refresh");
     pipe.finish_and_log();
+    audit::event("process.done")
+        .field("account_id", account_id)
+        .field("favs", favcount)
+        .field("pages", pages)
+        .field("ms", pipeline_start.elapsed().as_millis())
+        .emit();
     Ok(())
 }

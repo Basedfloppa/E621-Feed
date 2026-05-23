@@ -11,6 +11,7 @@ use rocket::State;
 use rusqlite::Result;
 
 use e621_account_parser_api::{
+    audit,
     auth::{self, OwnerToken},
     db::{get_account_by_id, DbInit},
     errors::ApiError,
@@ -65,12 +66,21 @@ async fn process_posts(
         .await?;
 
     match jobs::try_begin(account_id) {
-        BeginResult::AlreadyRunning(state) => Ok(Json(state)),
+        BeginResult::AlreadyRunning(state) => {
+            audit::event("process.already")
+                .field("account_id", account_id)
+                .emit();
+            Ok(Json(state))
+        }
         BeginResult::Started(state) => {
             tokio::spawn(async move {
                 let result = pipeline::run_process(account_id, owner_token).await;
                 if let Err(ref e) = result {
                     warn!("/process for {account_id} failed: {e}");
+                    audit::event("process.failed")
+                        .field("account_id", account_id)
+                        .field("error", e)
+                        .emit();
                 }
                 jobs::finish(account_id, result);
             });
@@ -121,6 +131,9 @@ fn session_bootstrap(
     // 32 random bytes → base64url ≈ 43 chars (≈256 bits entropy).
     let token = mint_owner_token();
     cookies.add(auth::build_owner_cookie(token));
+    audit::event("session.bootstrap")
+        .field("minted", true)
+        .emit();
     Ok(Json(serde_json::json!({ "minted": true })))
 }
 
@@ -139,6 +152,7 @@ async fn session_clear(cookies: &CookieJar<'_>) -> Result<Json<serde_json::Value
         }
     }
     cookies.add(auth::build_owner_cookie_clear());
+    audit::event("session.cleared").emit();
     Ok(Json(serde_json::json!({ "cleared": true })))
 }
 

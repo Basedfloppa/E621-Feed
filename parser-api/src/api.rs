@@ -214,32 +214,88 @@ fn get_client() -> &'static Client {
     &HTTP_CLIENT
 }
 
+/// Pull diagnostic headers off a response into a compact string suitable
+/// for log lines. Captures Cloudflare's edge identifiers, e621's
+/// origin timing/request id, and any rate-limit hints. Empty fields
+/// are skipped so the log isn't full of `n/a` noise.
+fn diag_headers(resp: &Response) -> String {
+    let h = resp.headers();
+    let take = |name: &str| {
+        h.get(name)
+            .and_then(|v| v.to_str().ok())
+            .filter(|s| !s.is_empty())
+            .map(|s| format!(" {name}={s}"))
+            .unwrap_or_default()
+    };
+    format!(
+        "{cf_ray}{cf_cache}{cf_mit}{server}{ratelimit}{rl_remaining}{rl_reset}{retry_after}{runtime}{req_id}",
+        cf_ray = take("cf-ray"),
+        cf_cache = take("cf-cache-status"),
+        cf_mit = take("cf-mitigated"),
+        server = take("server"),
+        ratelimit = take("x-ratelimit-limit"),
+        rl_remaining = take("x-ratelimit-remaining"),
+        rl_reset = take("x-ratelimit-reset"),
+        retry_after = take("retry-after"),
+        runtime = take("x-runtime"),
+        req_id = take("x-request-id"),
+    )
+}
+
+/// Best-effort URL stringification of a `RequestBuilder` for logs. We
+/// `try_clone+build` so the original builder remains usable. Returns
+/// "<unknown-url>" on any failure rather than panicking.
+fn builder_url(builder: &reqwest::RequestBuilder) -> String {
+    builder
+        .try_clone()
+        .and_then(|b| b.build().ok())
+        .map(|r| r.url().to_string())
+        .unwrap_or_else(|| "<unknown-url>".to_string())
+}
+
+/// Classify a `reqwest::Error` into a short tag so log greppers can
+/// distinguish connection-level vs body-stream-level failures without
+/// reading full Debug output. The body-vs-connect distinction is the
+/// one that matters most when diagnosing Cloudflare throttling.
+fn err_kind(e: &reqwest::Error) -> &'static str {
+    if e.is_timeout() {
+        "timeout"
+    } else if e.is_connect() {
+        "connect"
+    } else if e.is_body() {
+        "body"
+    } else if e.is_decode() {
+        "decode"
+    } else if e.is_request() {
+        "request"
+    } else if e.is_redirect() {
+        "redirect"
+    } else if e.is_status() {
+        "status"
+    } else {
+        "other"
+    }
+}
+
 async fn send_with_retry(builder: reqwest::RequestBuilder) -> Result<Response, String> {
     let mut delay: Duration = Duration::from_millis(300);
     let cfg = cfg();
+    // Captured once so we can include the URL in error/warning logs
+    // even after `builder` has been moved into `.send()`.
+    let url_for_logs = builder_url(&builder);
 
     for attempt in 0..=cfg.max_retries {
-        if let Some(b) = builder.try_clone() {
-            match b.build() {
-                Ok(req) => debug!(
-                    "HTTP attempt {}/{}: {} {} (rps_delay={}ms)",
-                    attempt + 1,
-                    cfg.max_retries + 1,
-                    req.method(),
-                    req.url(),
-                    cfg.rps_delay_ms
-                ),
-                Err(e) => warn!("Could not build request for logging: {e}"),
-            }
-        } else {
-            warn!(
-                "Unable to clone request for logging on attempt {}",
-                attempt + 1
-            );
-        }
+        debug!(
+            "HTTP attempt {}/{}: {} (rps_delay={}ms)",
+            attempt + 1,
+            cfg.max_retries + 1,
+            url_for_logs,
+            cfg.rps_delay_ms
+        );
 
         rate_gate_wait().await;
 
+        let attempt_start = std::time::Instant::now();
         return match builder
             .try_clone()
             .ok_or_else(|| {
@@ -252,20 +308,19 @@ async fn send_with_retry(builder: reqwest::RequestBuilder) -> Result<Response, S
         {
             Ok(resp) => {
                 let status = resp.status();
+                let elapsed = attempt_start.elapsed();
                 trace!("HTTP status received: {status}");
 
                 if (status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error())
                     && attempt < cfg.max_retries
                 {
-                    let retry_after = resp
-                        .headers()
-                        .get("retry-after")
-                        .and_then(|h| h.to_str().ok())
-                        .unwrap_or("n/a");
+                    let diag = diag_headers(&resp);
                     warn!(
-                        "Request got {} (retry-after: {}). Backing off for {:?} (attempt {}/{})",
+                        "Request got {} ({:.2}s) for {}.{} Backing off for {:?} (attempt {}/{})",
                         status,
-                        retry_after,
+                        elapsed.as_secs_f64(),
+                        url_for_logs,
+                        diag,
                         delay,
                         attempt + 1,
                         cfg.max_retries + 1
@@ -275,19 +330,36 @@ async fn send_with_retry(builder: reqwest::RequestBuilder) -> Result<Response, S
                     continue;
                 }
 
+                let diag = diag_headers(&resp);
                 if status.is_success() {
-                    info!("Request succeeded with {status}");
+                    debug!(
+                        "Request succeeded {} ({:.2}s) for {}.{}",
+                        status,
+                        elapsed.as_secs_f64(),
+                        url_for_logs,
+                        diag
+                    );
                 } else {
-                    warn!("Request completed with non-retryable status {status}");
+                    warn!(
+                        "Request completed with non-retryable status {} ({:.2}s) for {}.{}",
+                        status,
+                        elapsed.as_secs_f64(),
+                        url_for_logs,
+                        diag
+                    );
                 }
                 Ok(resp)
             }
             Err(e) => {
+                let elapsed = attempt_start.elapsed();
+                let kind = err_kind(&e);
                 if attempt < cfg.max_retries {
                     warn!(
-                        "Request error on attempt {}/{}: {:?}. Retrying in {:?}",
+                        "Request error [{kind}] on attempt {}/{} ({:.2}s) for {}: {}. Retrying in {:?}",
                         attempt + 1,
                         cfg.max_retries + 1,
+                        elapsed.as_secs_f64(),
+                        url_for_logs,
                         e,
                         delay
                     );
@@ -296,11 +368,15 @@ async fn send_with_retry(builder: reqwest::RequestBuilder) -> Result<Response, S
                     continue;
                 }
                 error!(
-                    "Request failed after {} attempts: {}",
+                    "Request failed after {} attempts (final attempt {:.2}s) [{kind}] for {}: {}",
                     cfg.max_retries + 1,
+                    elapsed.as_secs_f64(),
+                    url_for_logs,
                     e
                 );
-                Err(format!("request failed after retries: {e}"))
+                Err(format!(
+                    "request failed after retries [{kind}]: {e}"
+                ))
             }
         };
     }

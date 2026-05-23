@@ -354,6 +354,11 @@ pub(crate) async fn get_daily_digest(
 
     // Check cache.
     if let Some(cached) = cache_get(&cache_key) {
+        e621_account_parser_api::audit::event("feed.digest")
+            .field("account_id", account_id)
+            .field("mode", "cached")
+            .field("returned", cached.len())
+            .emit();
         return Ok(Json(cached));
     }
 
@@ -369,6 +374,19 @@ pub(crate) async fn get_daily_digest(
         build_generic_digest(account_id, hide_saved).await?
     };
 
+    e621_account_parser_api::audit::event("feed.digest")
+        .field("account_id", account_id)
+        .field(
+            "mode",
+            if use_personalized {
+                "personalized"
+            } else {
+                "generic"
+            },
+        )
+        .field("returned", posts.len())
+        .field("hide_saved", hide_saved)
+        .emit();
     cache_set(cache_key, posts.clone());
     Ok(Json(posts))
 }

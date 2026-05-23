@@ -179,6 +179,8 @@ pub(crate) async fn create_account(
     // Just normalise; DB layer applies the default if input is empty.
     let normalized_blacklist = normalize_optional_blacklist(acc.blacklist.as_deref());
 
+    let acc_id_for_audit = acc.id;
+    let name_for_audit = canonical_name.clone();
     let result = db_blocking(move || {
         set_account(&owner_token, acc.id, &canonical_name, &normalized_blacklist).map_err(|e| {
             let m = format!("Failed to set account: {e}");
@@ -187,6 +189,10 @@ pub(crate) async fn create_account(
         })
     })
     .await?;
+    e621_account_parser_api::audit::event("account.set")
+        .field("account_id", acc_id_for_audit)
+        .field("name", name_for_audit)
+        .emit();
     Ok(Json(result))
 }
 
@@ -341,6 +347,10 @@ pub(crate) async fn delete_account(
             "No account found for this device token".into(),
         ));
     }
+    e621_account_parser_api::audit::event("account.deleted")
+        .field("account_id", account_id)
+        .field("removed_links", removed)
+        .emit();
     Ok(())
 }
 

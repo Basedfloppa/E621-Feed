@@ -10,7 +10,7 @@ use rocket_okapi::openapi;
 use crate::db_blocking;
 use e621_account_parser_api::auth::OwnerToken;
 use e621_account_parser_api::{
-    api,
+    api, audit,
     db::{
         self, collect_local_candidate_ids, find_similar_post_ids, get_account_by_id,
         get_account_preference_profile, get_owned_post_ids, get_post_by_id,
@@ -46,9 +46,17 @@ pub(crate) async fn log_feed_interaction(
     // Per-device cap: feed scrolling fires impressions per card; anything
     // higher than this is either a re-render storm or a write-flood attempt.
     ratelimit::check(&format!("interaction:owner:{owner_token}"), 120, 60)?;
+    let account_id = body.account_id;
+    let post_id = body.post_id;
+    let event_str = body.event_type.to_string();
     db_blocking(move || record_feed_interaction(&owner_token, &body))
         .await
         .map_err(ApiError::from)?;
+    audit::event("feed.interaction")
+        .field("account_id", account_id)
+        .field("post_id", post_id)
+        .field("event", event_str)
+        .emit();
     Ok(())
 }
 
@@ -66,9 +74,15 @@ pub(crate) async fn log_feed_interaction_batch(
     // the effective per-interaction limit is higher than the single
     // endpoint, but the overall write throughput is bounded.
     ratelimit::check(&format!("interaction:owner:{owner_token}"), 240, 60)?;
+    let count = body.interactions.len();
+    let primary_account = body.interactions.first().map(|i| i.account_id);
     db_blocking(move || record_feed_interactions_batch(&owner_token, &body.interactions))
         .await
         .map_err(ApiError::from)?;
+    audit::event("feed.batch")
+        .field_opt("account_id", primary_account)
+        .field("count", count)
+        .emit();
     Ok(())
 }
 
@@ -342,6 +356,12 @@ pub(crate) async fn get_recommendations(
 
     pipe.finish_and_log();
 
+    audit::event("feed.recommend")
+        .field("account_id", account_id)
+        .field("returned", scored.len())
+        .field_opt("page", page)
+        .emit();
+
     Ok(Json(scored))
 }
 
@@ -412,6 +432,17 @@ pub(crate) async fn get_recommendations_continue(
         })
         .await?;
     }
+
+    let session_state_str = match session_state {
+        db::FeedSessionState::Fresh => "fresh",
+        db::FeedSessionState::Active => "active",
+        db::FeedSessionState::Expired => "expired",
+    };
+    audit::event("feed.continue")
+        .field("account_id", account_id)
+        .field("session_state", session_state_str)
+        .field("returned", posts.len())
+        .emit();
 
     Ok(Json(ContinueResponse {
         posts,
@@ -513,6 +544,12 @@ pub(crate) async fn get_similar_posts(
     // Sort by similarity descending.
     scored.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
     scored.truncate(limit as usize);
+
+    audit::event("feed.similar")
+        .field("account_id", account_id)
+        .field("post_id", post_id)
+        .field("returned", scored.len())
+        .emit();
 
     Ok(Json(scored))
 }

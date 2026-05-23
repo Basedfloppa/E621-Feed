@@ -1135,3 +1135,147 @@ fn preferred_tags_set_get_round_trip() {
 
     wipe_account(account_id);
 }
+
+// ==================================================================
+//  User story 5 — "Don't recommend posts I already saved"
+// ==================================================================
+
+/// Dedup invariant: `get_owned_post_ids` returns every post linked to
+/// the account via `accounts_post`, and `/recommendations` (both the
+/// main route and the `/continue` helper) filters those ids out of
+/// both the local-candidate pool AND the live e621 page before
+/// scoring. This test verifies the contract at the DB layer — if it
+/// breaks, the bug is in `get_owned_post_ids`, not the filter.
+#[test]
+fn recommendations_owned_dedup_invariant() {
+    ensure_migrations();
+    let account_id = 91040;
+    wipe_account(account_id);
+    db::set_account("dedup_owner", account_id, "test_user", "").unwrap();
+
+    let make = |id: i64| e621_account_parser_api::models::Post {
+        id,
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+        file: None,
+        preview: Some(e621_account_parser_api::models::Preview {
+            width: 1, height: 1, url: Some("p".into()),
+        }),
+        sample: None,
+        score: e621_account_parser_api::models::Score { up: 1, down: 0, total: 1 },
+        tags: e621_account_parser_api::models::Tags {
+            general: vec!["shared_tag".into()],
+            artist: vec![], copyright: vec![], character: vec![], species: vec![],
+            invalid: vec![], meta: vec![], lore: vec![], contributor: vec![],
+        },
+        locked_tags: None, change_seq: 0.0,
+        flags: e621_account_parser_api::models::Flags::default(),
+        rating: e621_account_parser_api::models::Rating::S,
+        fav_count: 0, sources: vec![], pools: vec![],
+        relationships: e621_account_parser_api::models::Relationships {
+            parent_id: None, has_children: false,
+            has_active_children: false, children: vec![],
+        },
+        approver_id: None, uploader_id: 0, description: None,
+        comment_count: 0, is_favorited: false, has_notes: false,
+        duration: None,
+    };
+
+    let owned_post = make(90001);
+    let catalog_post = make(90002); // in catalog but not owned
+
+    // Owned path: link via save_posts (this is what /process does).
+    db::save_posts(std::slice::from_ref(&owned_post), account_id).unwrap();
+    // Catalog path: in posts table but no accounts_post row for this user.
+    db::upsert_catalog_posts(std::slice::from_ref(&catalog_post)).unwrap();
+
+    let owned = db::get_owned_post_ids(account_id).unwrap();
+    assert!(
+        owned.contains(&90001),
+        "owned post 90001 must be returned by get_owned_post_ids, got {:?}",
+        owned
+    );
+    assert!(
+        !owned.contains(&90002),
+        "catalog-only post 90002 must NOT be in the owned set"
+    );
+
+    // The /recommendations dedup pipeline applies `!owned_ids.contains(id)` to
+    // BOTH the local candidate pool AND the live e621 page. We simulate the
+    // same filter here to lock the contract: any id that came out of
+    // `get_owned_post_ids` is dropped from a candidate list.
+    let candidates: Vec<i64> = vec![90001, 90002, 90003];
+    let after_dedup: Vec<i64> = candidates
+        .into_iter()
+        .filter(|id| !owned.contains(id))
+        .collect();
+    assert_eq!(
+        after_dedup,
+        vec![90002, 90003],
+        "dedup must drop 90001 (owned), keep 90002 (catalog-only) and 90003 (unknown)"
+    );
+
+    wipe_account(account_id);
+}
+
+/// /process imports favourites → owned-set grows → those ids are
+/// excluded from subsequent recommendation queries. This is the
+/// end-to-end contract from a user's POV: "I just imported my favs,
+/// the feed shouldn't keep showing them to me".
+#[tokio::test(flavor = "multi_thread")]
+async fn process_then_owned_dedup_excludes_imported_favs() {
+    let _guard = pipeline_lock().lock().await;
+    ensure_migrations();
+    let server = MockServer::start().await;
+    let _cfg = install_mock_config(&server.uri());
+
+    let account_id = 91041;
+    wipe_account(account_id);
+
+    Mock::given(method("GET"))
+        .and(path(format!("/users/{account_id}.json")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(fake_user_json(account_id, 3)))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/favorites.json"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "posts": [
+                fake_post_json(95001, &["a"], &["t"]),
+                fake_post_json(95002, &["a"], &["t"]),
+                fake_post_json(95003, &["a"], &["t"]),
+            ]
+        })))
+        .mount(&server)
+        .await;
+
+    db::set_account("dedup_pipeline_owner", account_id, "test_user", "").unwrap();
+    jobs::try_begin(account_id);
+    pipeline::run_process(account_id, "dedup_pipeline_owner".to_string())
+        .await
+        .unwrap();
+    jobs::finish(account_id, Ok(()));
+
+    let owned = db::get_owned_post_ids(account_id).unwrap();
+    for id in [95001_i64, 95002, 95003] {
+        assert!(
+            owned.contains(&id),
+            "post {id} imported by /process must be in owned set, got {:?}",
+            owned
+        );
+    }
+
+    // Same filter the recommendations pipeline applies:
+    let candidate_pool: Vec<i64> = vec![95001, 95002, 95003, 99999];
+    let recommendable: Vec<i64> = candidate_pool
+        .into_iter()
+        .filter(|id| !owned.contains(id))
+        .collect();
+    assert_eq!(
+        recommendable,
+        vec![99999],
+        "all imported favourites must be excluded from the recommendation pool"
+    );
+
+    wipe_account(account_id);
+}

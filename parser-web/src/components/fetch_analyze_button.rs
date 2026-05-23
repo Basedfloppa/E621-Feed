@@ -10,7 +10,7 @@ use crate::models::{
 };
 use crate::pages::{TagCount, UserInfo};
 
-const STATUS_POLL_INTERVAL_MS: i32 = 3600;
+const STATUS_POLL_INTERVAL_MS: i32 = 60000;
 
 #[derive(Properties, PartialEq)]
 pub struct AnalyzeButtonProps {
