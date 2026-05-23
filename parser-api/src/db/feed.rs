@@ -1,6 +1,6 @@
 use chrono::Utc;
 use rusqlite::{Connection, params};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::models::{FeedInteractionRequest, FeedInteractionType};
 
@@ -106,6 +106,131 @@ pub fn record_feed_interaction(
                 ],
             )
             .map_err(|e| format!("Failed to update tag feedback aggregates: {e}"))?;
+        }
+
+        Ok(())
+    })
+}
+
+/// Batch version of `record_feed_interaction`. Processes up to 100
+/// interactions in a single write transaction. Ownership is verified
+/// per distinct account_id (cheaper than per-interaction).
+pub fn record_feed_interactions_batch(
+    owner_token: &str,
+    interactions: &[FeedInteractionRequest],
+) -> Result<(), String> {
+    if interactions.is_empty() {
+        return Ok(());
+    }
+    super::with_write_tx(|tx| {
+        // Pre-verify ownership for each distinct account_id in the batch.
+        let distinct_accounts: HashSet<i32> = interactions.iter().map(|i| i.account_id).collect();
+        // Build a single query per account.
+        for aid in &distinct_accounts {
+            let linked: bool = tx
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM account_device_links WHERE owner_token = ?1 AND account_id = ?2)",
+                    params![owner_token, aid],
+                    |row| row.get(0),
+                )
+                .map_err(|e| format!("Failed to validate feed interaction owner link: {e}"))?;
+            if !linked {
+                return Err(format!("Account {} is not linked to this device token", aid));
+            }
+        }
+
+        // Pre-resolve experiment buckets for each account.
+        let mut buckets: HashMap<i32, Option<String>> = HashMap::with_capacity(distinct_accounts.len());
+        for aid in &distinct_accounts {
+            let explicit: Option<String> = tx
+                .query_row(
+                    "SELECT experiment_bucket FROM accounts WHERE id = ?1",
+                    params![aid],
+                    |r| r.get::<_, Option<String>>(0),
+                )
+                .unwrap_or(None);
+            let bucket = crate::models::cfg()
+                .pick_bucket(*aid, explicit.as_deref())
+                .0;
+            buckets.insert(*aid, bucket);
+        }
+
+        let now_iso = Utc::now().to_rfc3339();
+
+        // Prepare static statements.
+        let mut insert_interaction = tx
+            .prepare_cached(
+                "INSERT OR IGNORE INTO feed_interactions (
+                    account_id, post_id, event_type, position, session_id, created_at, experiment_bucket
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            )
+            .map_err(|e| format!("Failed to prepare batch interaction insert: {e}"))?;
+
+        let mut update_feedback = tx
+            .prepare_cached(
+                "INSERT INTO account_tag_feedback (
+                    account_id, tag_name, group_type,
+                    impression_count, positive_count, negative_count,
+                    last_interaction_at, last_decayed_at
+                )
+                SELECT
+                    ?1,
+                    t.name,
+                    t.group_type,
+                    ?2,
+                    ?3,
+                    ?4,
+                    ?5,
+                    ?5
+                FROM tags t
+                INNER JOIN tags_posts tp ON tp.tag_id = t.id
+                WHERE tp.post_id = ?6
+                ON CONFLICT(account_id, tag_name, group_type) DO UPDATE SET
+                    impression_count = account_tag_feedback.impression_count + excluded.impression_count,
+                    positive_count = account_tag_feedback.positive_count + excluded.positive_count,
+                    negative_count = account_tag_feedback.negative_count + excluded.negative_count,
+                    last_interaction_at = excluded.last_interaction_at,
+                    last_decayed_at = excluded.last_decayed_at",
+            )
+            .map_err(|e| format!("Failed to prepare batch feedback update: {e}"))?;
+
+        for interaction in interactions {
+            let bucket = buckets
+                .get(&interaction.account_id)
+                .and_then(|b| b.clone());
+
+            let inserted = insert_interaction
+                .execute(params![
+                    interaction.account_id,
+                    interaction.post_id,
+                    interaction.event_type.to_string(),
+                    interaction.position,
+                    interaction.session_id,
+                    now_iso,
+                    bucket,
+                ])
+                .map_err(|e| format!("Failed to record batch feed interaction: {e}"))?;
+
+            if inserted > 0 {
+                let (impression_delta, positive_delta, negative_delta) = match interaction.event_type
+                {
+                    FeedInteractionType::QualifiedImpression => (1, 0, 0),
+                    FeedInteractionType::Open => (0, 1, 0),
+                    FeedInteractionType::Hide => (0, 0, 1),
+                    FeedInteractionType::Unknown => (0, 0, 0),
+                };
+
+                update_feedback
+                    .execute(params![
+                        interaction.account_id,
+                        impression_delta,
+                        positive_delta,
+                        negative_delta,
+                        now_iso,
+                        interaction.post_id,
+                    ])
+                    .map_err(|e| format!("Failed to update batch tag feedback: {e}"))?;
+            }
         }
 
         Ok(())

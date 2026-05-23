@@ -1,7 +1,7 @@
 use chrono::Utc;
 use rusqlite::params;
 
-use crate::models::{cfg, TruncatedAccount};
+use crate::models::{cfg, PreferredTag, TruncatedAccount};
 
 use super::open_db;
 
@@ -252,5 +252,49 @@ pub fn get_account_experiment_bucket(account_id: i32) -> Result<Option<String>, 
     .or_else(|e| match e {
         rusqlite::Error::QueryReturnedNoRows => Ok(None),
         other => Err(format!("get_account_experiment_bucket: {other}")),
+    })
+}
+
+/// Replace the full preferred-tags list for an account. Verifies device
+/// ownership, deletes existing rows, then bulk-inserts the new list.
+/// Max 50 tags — caller should validate before calling.
+pub fn set_preferred_tags(
+    owner_token: &str,
+    account_id: i32,
+    preferred_tags: &[PreferredTag],
+) -> Result<(), String> {
+    super::with_write_tx(|tx| {
+        let linked: bool = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM account_device_links WHERE owner_token = ?1 AND account_id = ?2)",
+                params![owner_token, account_id],
+                |row| row.get(0),
+            )
+            .map_err(|e| format!("Failed to verify account ownership: {e}"))?;
+
+        if !linked {
+            return Err("Account is not linked to this device token".to_string());
+        }
+
+        tx.execute(
+            "DELETE FROM account_preferred_tags WHERE account_id = ?1",
+            params![account_id],
+        )
+        .map_err(|e| format!("Failed to clear preferred tags: {e}"))?;
+
+        if !preferred_tags.is_empty() {
+            let mut stmt = tx
+                .prepare_cached(
+                    "INSERT INTO account_preferred_tags (account_id, tag_name, group_type, weight) VALUES (?1, ?2, ?3, ?4)",
+                )
+                .map_err(|e| format!("Failed to prepare preferred tag insert: {e}"))?;
+
+            for pt in preferred_tags {
+                stmt.execute(params![account_id, pt.tag, pt.group, pt.weight])
+                    .map_err(|e| format!("Failed to insert preferred tag '{}': {}", pt.tag, e))?;
+            }
+        }
+
+        Ok(())
     })
 }

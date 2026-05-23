@@ -227,6 +227,14 @@ pub struct FeedInteractionRequest {
     pub session_id: String,
 }
 
+/// Batch interaction submission for offline sync. Max 100 interactions
+/// per batch to avoid overloading the server.
+#[derive(Debug, Serialize, Deserialize, JsonSchema, Clone)]
+#[serde(crate = "rocket::serde")]
+pub struct BatchInteractionRequest {
+    pub interactions: Vec<FeedInteractionRequest>,
+}
+
 #[derive(Serialize, Deserialize, JsonSchema, Clone)]
 pub struct ScoredPost {
     pub post: Post,

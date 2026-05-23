@@ -66,6 +66,11 @@ pub struct AccountPreferenceProfile {
     /// `None` = never refreshed (legacy accounts).
     #[serde(default)]
     pub last_refreshed_at: Option<DateTime<Utc>>,
+    /// Positive preferences: tags the user wants to see more of (soft boost).
+    /// Applied as IDF-weight multipliers in `ScoringContext`. Blacklist takes
+    /// priority over preferred_tags.
+    #[serde(default)]
+    pub preferred_tags: Vec<crate::models::PreferredTag>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, JsonSchema)]

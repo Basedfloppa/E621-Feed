@@ -21,8 +21,8 @@ use e621_account_parser_api::{
     },
     errors::ApiError,
     models::{
-        cfg, BlacklistPayload, DeviceScopedAccount, TagCount, TagRelationScoring,
-        TruncatedAccount, UserApiResponse,
+        cfg, BlacklistPayload, DeviceScopedAccount, PreferredTagPayload, TagCount,
+        TagRelationScoring, TruncatedAccount, UserApiResponse,
     },
     ratelimit::{self, ClientIp},
     validation,
@@ -371,4 +371,57 @@ pub(crate) async fn update_account_blacklist(
     api::clear_api_cache();
 
     Ok(Json(updated))
+}
+
+#[openapi(tag = "Accounts")]
+#[get("/account/<account_id>/preferred_tags")]
+pub(crate) async fn get_account_preferred_tags(
+    account_id: i32,
+    owner: OwnerToken,
+) -> Result<Json<PreferredTagPayload>, ApiError> {
+    validation::validate_account_id(account_id)?;
+    let owner_token = owner.0;
+    ratelimit::check(&format!("read:owner:{owner_token}"), 240, 60)?;
+    let tags = db_blocking(move || {
+        get_account_by_id(&owner_token, account_id)
+            .map_err(|e| format!("Failed to get account: {e}"))?;
+        db::get_account_preferred_tags(account_id)
+            .map_err(|e| format!("Failed to get preferred tags: {e}"))
+    })
+    .await?;
+    Ok(Json(PreferredTagPayload {
+        preferred_tags: tags,
+    }))
+}
+
+#[openapi(tag = "Accounts")]
+#[put("/account/<account_id>/preferred_tags", data = "<payload>")]
+pub(crate) async fn set_account_preferred_tags(
+    account_id: i32,
+    owner: OwnerToken,
+    payload: Json<PreferredTagPayload>,
+) -> Result<Json<PreferredTagPayload>, ApiError> {
+    validation::validate_account_id(account_id)?;
+    validation::validate_preferred_tag_payload(&payload)?;
+    let owner_token = owner.0;
+    let body = payload.into_inner();
+    let tags_for_write = body.preferred_tags.clone();
+    let owner_for_write = owner_token.clone();
+    db_blocking(move || {
+        db::set_preferred_tags(&owner_for_write, account_id, &tags_for_write).map_err(|e| {
+            let m = format!("Failed to set preferred tags: {e}");
+            error!("{m}");
+            m
+        })
+    })
+    .await?;
+    // Return current state (re-read to confirm).
+    let tags = db_blocking(move || {
+        db::get_account_preferred_tags(account_id)
+            .map_err(|e| format!("Failed to get preferred tags: {e}"))
+    })
+    .await?;
+    Ok(Json(PreferredTagPayload {
+        preferred_tags: tags,
+    }))
 }

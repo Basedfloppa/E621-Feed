@@ -70,6 +70,24 @@ pub struct BlacklistPayload {
     pub blacklist: Option<String>,
 }
 
+/// A single preferred tag with a boost weight for the scoring system.
+/// `weight` ∈ [0.1, 10.0]; blacklist takes priority over preferred_tags.
+#[derive(Debug, Serialize, Deserialize, Clone, JsonSchema)]
+#[serde(crate = "rocket::serde")]
+pub struct PreferredTag {
+    pub tag: String,
+    pub group: String,
+    pub weight: f32,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, JsonSchema)]
+#[serde(crate = "rocket::serde")]
+pub struct PreferredTagPayload {
+    /// Max 50 tags per account. Replaces the entire list on write
+    /// (like blacklist).
+    pub preferred_tags: Vec<PreferredTag>,
+}
+
 #[derive(Debug, Deserialize, Clone)]
 pub struct UserSearchResult {
     pub id: i32,

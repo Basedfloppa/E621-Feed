@@ -9,7 +9,7 @@
 //! * `owner_token` — 16..=128 chars from `[A-Za-z0-9_-]`.
 
 use crate::errors::ApiError;
-use crate::models::{BlacklistPayload, DeviceScopedAccount, FeedInteractionRequest};
+use crate::models::{BatchInteractionRequest, BlacklistPayload, DeviceScopedAccount, FeedInteractionRequest, PreferredTagPayload};
 
 const MAX_ACCOUNT_ID: i32 = 100_000_000;
 const MAX_NAME_LEN: usize = 64;
@@ -204,6 +204,55 @@ pub fn validate_feed_interaction(req: &FeedInteractionRequest) -> Result<(), Api
     Ok(())
 }
 
+pub fn validate_batch_interaction(req: &BatchInteractionRequest) -> Result<(), ApiError> {
+    if req.interactions.is_empty() {
+        return Err(ApiError::BadRequest(
+            "batch must contain at least 1 interaction".into(),
+        ));
+    }
+    if req.interactions.len() > 100 {
+        return Err(ApiError::BadRequest(
+            "batch max 100 interactions per request".into(),
+        ));
+    }
+    for interaction in &req.interactions {
+        validate_feed_interaction(interaction)?;
+    }
+    Ok(())
+}
+
+const MAX_PREFERRED_TAGS: usize = 50;
+const MAX_TAG_NAME_LEN: usize = 64;
+
+pub fn validate_preferred_tag_payload(payload: &PreferredTagPayload) -> Result<(), ApiError> {
+    if payload.preferred_tags.len() > MAX_PREFERRED_TAGS {
+        return Err(ApiError::BadRequest(format!(
+            "max {MAX_PREFERRED_TAGS} preferred tags per account"
+        )));
+    }
+    for pt in &payload.preferred_tags {
+        let trimmed = pt.tag.trim();
+        if trimmed.is_empty() {
+            return Err(ApiError::BadRequest("tag name must not be empty".into()));
+        }
+        if trimmed.len() > MAX_TAG_NAME_LEN {
+            return Err(ApiError::BadRequest(format!(
+                "tag name too long (max {MAX_TAG_NAME_LEN} chars)"
+            )));
+        }
+        let weight = pt.weight;
+        if !weight.is_finite() || !(0.1..=10.0).contains(&weight) {
+            return Err(ApiError::BadRequest(format!(
+                "weight {weight} out of range [0.1, 10.0]"
+            )));
+        }
+        if pt.group.trim().is_empty() {
+            return Err(ApiError::BadRequest("group must not be empty".into()));
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -346,6 +395,101 @@ mod tests {
         assert!(is_bad(validate_feed_interaction(&FeedInteractionRequest {
             session_id: "s".repeat(MAX_SESSION_ID_LEN + 1),
             ..ok.clone()
+        })));
+    }
+
+    #[test]
+    fn batch_interaction_validation() {
+        let single = FeedInteractionRequest {
+            account_id: 7,
+            post_id: 1234,
+            event_type: FeedInteractionType::Open,
+            position: 3,
+            session_id: "sess-1".to_string(),
+        };
+        assert!(is_bad(validate_batch_interaction(&BatchInteractionRequest {
+            interactions: vec![],
+        })));
+        assert!(validate_batch_interaction(&BatchInteractionRequest {
+            interactions: vec![single.clone()],
+        })
+        .is_ok());
+        let many = vec![single.clone(); 100];
+        assert!(validate_batch_interaction(&BatchInteractionRequest {
+            interactions: many,
+        })
+        .is_ok());
+        let too_many = vec![single; 101];
+        assert!(is_bad(validate_batch_interaction(&BatchInteractionRequest {
+            interactions: too_many,
+        })));
+    }
+
+    #[test]
+    fn preferred_tag_payload_validation() {
+        use crate::models::PreferredTag;
+        let ok = PreferredTagPayload {
+            preferred_tags: vec![
+                PreferredTag {
+                    tag: "fluffy".to_string(),
+                    group: "general".to_string(),
+                    weight: 2.0,
+                },
+            ],
+        };
+        assert!(validate_preferred_tag_payload(&ok).is_ok());
+
+        // Empty tag name
+        let bad = PreferredTagPayload {
+            preferred_tags: vec![PreferredTag {
+                tag: "".to_string(),
+                group: "general".to_string(),
+                weight: 1.0,
+            }],
+        };
+        assert!(is_bad(validate_preferred_tag_payload(&bad)));
+
+        // Weight out of range
+        let bad = PreferredTagPayload {
+            preferred_tags: vec![PreferredTag {
+                tag: "fluffy".to_string(),
+                group: "general".to_string(),
+                weight: 20.0,
+            }],
+        };
+        assert!(is_bad(validate_preferred_tag_payload(&bad)));
+
+        // Weight negative
+        let bad = PreferredTagPayload {
+            preferred_tags: vec![PreferredTag {
+                tag: "fluffy".to_string(),
+                group: "general".to_string(),
+                weight: -0.1,
+            }],
+        };
+        assert!(is_bad(validate_preferred_tag_payload(&bad)));
+
+        // Empty group
+        let bad = PreferredTagPayload {
+            preferred_tags: vec![PreferredTag {
+                tag: "fluffy".to_string(),
+                group: "".to_string(),
+                weight: 1.0,
+            }],
+        };
+        assert!(is_bad(validate_preferred_tag_payload(&bad)));
+
+        // Too many tags
+        let many = vec![
+            PreferredTag {
+                tag: "a".to_string(),
+                group: "general".to_string(),
+                weight: 1.0,
+            };
+            MAX_PREFERRED_TAGS + 1
+        ];
+        assert!(is_bad(validate_preferred_tag_payload(&PreferredTagPayload {
+            preferred_tags: many,
         })));
     }
 }

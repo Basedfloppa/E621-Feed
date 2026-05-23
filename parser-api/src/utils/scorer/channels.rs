@@ -860,6 +860,7 @@ mod tests {
             },
             uploaders: vec![],
             last_refreshed_at: None,
+            preferred_tags: vec![],
         }
     }
 

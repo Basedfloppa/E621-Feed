@@ -538,6 +538,7 @@ fn build_profile(train_posts: &[Post]) -> AccountPreferenceProfile {
         },
         uploaders: Vec::new(),
         last_refreshed_at: None,
+        preferred_tags: Vec::new(),
     }
 }
 

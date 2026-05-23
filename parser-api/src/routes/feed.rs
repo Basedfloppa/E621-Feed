@@ -14,11 +14,11 @@ use e621_account_parser_api::{
     db::{
         self, collect_local_candidate_ids, get_account_by_id, get_account_preference_profile,
         get_owned_post_ids, get_recently_seen_post_ids, get_tag_counts, hydrate_posts_by_ids,
-        record_feed_interaction, upsert_catalog_posts,
+        record_feed_interaction, record_feed_interactions_batch, upsert_catalog_posts,
     },
     errors::ApiError,
     models::{
-        self, cfg, FeedInteractionRequest, Post, ScoredPost,
+        self, cfg, BatchInteractionRequest, FeedInteractionRequest, Post, ScoredPost,
     },
     ratelimit, validation,
 };
@@ -45,6 +45,26 @@ pub(crate) async fn log_feed_interaction(
     // higher than this is either a re-render storm or a write-flood attempt.
     ratelimit::check(&format!("interaction:owner:{owner_token}"), 120, 60)?;
     db_blocking(move || record_feed_interaction(&owner_token, &body))
+        .await
+        .map_err(ApiError::from)?;
+    Ok(())
+}
+
+#[openapi(tag = "Recommendations")]
+#[post("/interaction/batch", data = "<payload>")]
+pub(crate) async fn log_feed_interaction_batch(
+    payload: Json<BatchInteractionRequest>,
+    owner: OwnerToken,
+) -> Result<(), ApiError> {
+    let body = payload.into_inner();
+    let owner_token = owner.0;
+    validation::validate_batch_interaction(&body)?;
+
+    // Per-device cap — batch can carry up to 100 interactions, so
+    // the effective per-interaction limit is higher than the single
+    // endpoint, but the overall write throughput is bounded.
+    ratelimit::check(&format!("interaction:owner:{owner_token}"), 240, 60)?;
+    db_blocking(move || record_feed_interactions_batch(&owner_token, &body.interactions))
         .await
         .map_err(ApiError::from)?;
     Ok(())

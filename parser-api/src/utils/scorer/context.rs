@@ -207,6 +207,36 @@ impl ContextBase {
             .map(|u| (u.uploader_id, u.clone()))
             .collect();
 
+        // Option 2 (Positive preferences): synthetic entries for preferred
+        // tags that aren't already in the user map. Each gets a synthetic
+        // count computed from coldstart_smoothing_boost so they contribute
+        // to tag_similarity even without post history.
+        for pt in &profile.preferred_tags {
+            let tlc = normalize_tag(&pt.tag);
+            let Some(group) = Group::from_str(pt.group.as_str()) else {
+                continue;
+            };
+            let g = group_wts[group as usize];
+            if g <= 0.0 {
+                continue;
+            }
+            // Skip if the user already has this tag in their map.
+            if user[group as usize].contains_key(tlc.as_ref()) {
+                continue;
+            }
+            let idf_w = idf.idf_tempered(&tlc, df_floor, idf_max, rsj, lambda, alpha);
+            // Synthetic tf: coldstart_smoothing_boost so the tag registers
+            // but doesn't dominate real preference signals.
+            let tf = priors.coldstart_smoothing_boost.max(0.1);
+            let saturated = (tf * (bm25_k + 1.0)) / (tf + bm25_k);
+            let w = saturated.powf(priors.freq_alpha) * g * idf_w * pt.weight;
+            if w > 0.0 {
+                *user[group as usize].entry(tlc.into_owned()).or_insert(0.0) += w;
+                u_norm_sq += w * w;
+                user_tag_count += 1;
+            }
+        }
+
         Self {
             user,
             user_tag_count,
@@ -599,6 +629,7 @@ mod tests {
             recency: AccountRecencyProfile::default(),
             uploaders: vec![],
             last_refreshed_at: None,
+            preferred_tags: vec![],
         }
     }
 
@@ -770,6 +801,7 @@ mod tests {
             recency: AccountRecencyProfile::default(),
             uploaders: vec![],
             last_refreshed_at: None,
+            preferred_tags: vec![],
         };
         let counts = vec![TagCount {
             name: "skeb".to_string(),

@@ -419,7 +419,34 @@ pub fn get_account_preference_profile(account_id: i32) -> Result<AccountPreferen
         recency: get_account_recency_profile(account_id)?,
         uploaders: get_account_uploader_profile(account_id)?,
         last_refreshed_at,
+        preferred_tags: get_account_preferred_tags(account_id)?,
     })
+}
+
+/// Load preferred tags for an account. Returns empty vec if none set.
+pub fn get_account_preferred_tags(account_id: i32) -> Result<Vec<crate::models::PreferredTag>, String> {
+    let conn = open_db()?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT tag_name, group_type, weight
+             FROM account_preferred_tags
+             WHERE account_id = ?
+             ORDER BY tag_name",
+        )
+        .map_err(|e| format!("Failed to prepare preferred tags query: {e}"))?;
+
+    let rows = stmt
+        .query_map([account_id], |row| {
+            Ok(crate::models::PreferredTag {
+                tag: row.get(0)?,
+                group: row.get(1)?,
+                weight: row.get(2)?,
+            })
+        })
+        .map_err(|e| format!("Failed to query preferred tags: {e}"))?;
+
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("Failed to enumerate preferred tags: {e}"))
 }
 
 pub fn get_account_tag_feedback(account_id: i32) -> Result<Vec<AccountTagFeedback>, String> {
