@@ -144,8 +144,13 @@ fn stratified_sample(
 
 /// Full personalised digest: runs the scoring pipeline on local candidates
 /// and applies stratified sampling.
+///
+/// When `exclude_saved` is true, posts already in the user's owned set are
+/// filtered out of every candidate stream before stratification so the
+/// final digest never echoes back items the user has already favourited.
 async fn build_personalized_digest(
     account_id: i32,
+    exclude_saved: bool,
 ) -> Result<Vec<ScoredPost>, ApiError> {
     use rocket::tokio;
 
@@ -188,14 +193,24 @@ async fn build_personalized_digest(
         HashSet::new(), // no additional blacklist for digest
     );
 
+    // Owned post IDs serve double duty: as a source for the "recent added"
+    // stratum below, and (when exclude_saved is on) as the dedup set against
+    // every other candidate stream.
+    let owned: HashSet<i64> = db::get_owned_post_ids(account_id).unwrap_or_default();
+    let drop_owned = exclude_saved;
+
     // Get local candidate posts.
     let local_ids = db::collect_local_candidate_ids(account_id, cfg().runtime.local_candidate_limit)
         .map_err(|e| format!("Failed to collect local candidates: {e}"))?;
     let local_posts = if local_ids.is_empty() {
         Vec::new()
     } else {
-        db::hydrate_posts_by_ids(&local_ids)
-            .map_err(|e| format!("Failed to hydrate local posts: {e}"))?
+        let mut posts = db::hydrate_posts_by_ids(&local_ids)
+            .map_err(|e| format!("Failed to hydrate local posts: {e}"))?;
+        if drop_owned {
+            posts.retain(|p| !owned.contains(&p.id));
+        }
+        posts
     };
 
     if local_posts.is_empty() {
@@ -209,7 +224,7 @@ async fn build_personalized_digest(
         .map(|post| CachedPostFeatures::from_post_with_user(post, &idf, &global_relation, Some(&user_relation)))
         .collect();
 
-    let scored: Vec<ScoredPost> = local_posts
+    let mut scored: Vec<ScoredPost> = local_posts
         .into_par_iter()
         .zip(cached.into_par_iter())
         .map(|(post, cf)| {
@@ -221,28 +236,43 @@ async fn build_personalized_digest(
             }
         })
         .collect();
+    scored.sort_by(|a, b| {
+        b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    let filter_owned = |list: Vec<ScoredPost>| -> Vec<ScoredPost> {
+        if drop_owned {
+            list.into_iter().filter(|sp| !owned.contains(&sp.post.id)).collect()
+        } else {
+            list
+        }
+    };
 
     // Build supporting lists for stratification.
     let mut rng = rand::thread_rng();
-    let trending = db::get_trending_posts(7, 6).unwrap_or_default();
-    let wildcards = db::get_random_posts_by_group(account_id, 5).unwrap_or_default();
-    let recent_added = db::get_owned_post_ids(account_id)
-        .ok()
-        .and_then(|ids| {
-            if ids.is_empty() {
-                return None;
-            }
-            let v: Vec<i64> = ids.into_iter().collect();
-            db::hydrate_posts_by_ids(&v[..v.len().min(3)]).ok()
-        })
-        .unwrap_or_default()
-        .into_iter()
-        .map(|post| ScoredPost { post, score: 0.0, breakdown: None })
-        .collect::<Vec<_>>();
-    let popular_new = db::get_popular_posts_since(
-        Utc::now() - chrono::Duration::days(2), 3,
-    )
-    .unwrap_or_default();
+    let trending = filter_owned(db::get_trending_posts(7, 6).unwrap_or_default());
+    let wildcards = filter_owned(db::get_random_posts_by_group(account_id, 5).unwrap_or_default());
+    // "Recent added" surfaces the user's own posts on purpose, so skip it
+    // entirely when the user asked to hide saved items.
+    let recent_added = if drop_owned {
+        Vec::new()
+    } else {
+        let mut ids: Vec<i64> = owned.iter().copied().collect();
+        ids.truncate(3);
+        if ids.is_empty() {
+            Vec::new()
+        } else {
+            db::hydrate_posts_by_ids(&ids)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|post| ScoredPost { post, score: 0.0, breakdown: None })
+                .collect()
+        }
+    };
+    let popular_new = filter_owned(
+        db::get_popular_posts_since(Utc::now() - chrono::Duration::days(2), 3)
+            .unwrap_or_default(),
+    );
 
     let digest = stratified_sample(&scored, trending, wildcards, recent_added, popular_new, &mut rng);
 
@@ -254,7 +284,10 @@ async fn build_personalized_digest(
 
 /// Generic (non-personalised) digest — just trending + popular + random.
 /// No scoring pipeline, no user profile needed.
-async fn build_generic_digest() -> Result<Vec<ScoredPost>, ApiError> {
+async fn build_generic_digest(
+    account_id: i32,
+    exclude_saved: bool,
+) -> Result<Vec<ScoredPost>, ApiError> {
     let mut rng = rand::thread_rng();
     let trending = db::get_trending_posts(7, 10).unwrap_or_default();
     let popular_new = db::get_popular_posts_since(
@@ -267,6 +300,14 @@ async fn build_generic_digest() -> Result<Vec<ScoredPost>, ApiError> {
     digest.extend(trending);
     digest.extend(popular_new);
     digest.extend(random);
+
+    if exclude_saved {
+        let owned: HashSet<i64> = db::get_owned_post_ids(account_id).unwrap_or_default();
+        if !owned.is_empty() {
+            digest.retain(|sp| !owned.contains(&sp.post.id));
+        }
+    }
+
     digest.shuffle(&mut rng);
     digest.truncate(20);
     Ok(digest)
@@ -277,10 +318,11 @@ async fn build_generic_digest() -> Result<Vec<ScoredPost>, ApiError> {
 // ---------------------------------------------------------------------------
 
 #[openapi(tag = "Digest")]
-#[get("/digest/<account_id>?<full>")]
+#[get("/digest/<account_id>?<full>&<exclude_saved>")]
 pub(crate) async fn get_daily_digest(
     account_id: i32,
     full: Option<bool>,
+    exclude_saved: Option<bool>,
     owner: OwnerToken,
 ) -> Result<Json<Vec<ScoredPost>>, ApiError> {
     validation::validate_account_id(account_id)?;
@@ -296,14 +338,19 @@ pub(crate) async fn get_daily_digest(
     // Update visit tracker (fire-and-forget; failure is non-fatal).
     let _ = db::update_visit_tracker(account_id);
 
-    // Determine cache key.
+    // Determine cache key. Each toggle (full / exclude_saved) yields a
+    // distinct cached payload so users flipping the switch don't see a
+    // stale list from the opposite mode.
     let today = Utc::now().format("%Y-%m-%d");
     let force_full = full.unwrap_or(false);
-    let cache_key = if force_full {
-        format!("digest:{}:{}:full", account_id, today)
-    } else {
-        format!("digest:{}:{}", account_id, today)
-    };
+    let hide_saved = exclude_saved.unwrap_or(false);
+    let cache_key = format!(
+        "digest:{}:{}{}{}",
+        account_id,
+        today,
+        if force_full { ":full" } else { "" },
+        if hide_saved { ":nosaved" } else { "" },
+    );
 
     // Check cache.
     if let Some(cached) = cache_get(&cache_key) {
@@ -317,9 +364,9 @@ pub(crate) async fn get_daily_digest(
             .unwrap_or(false);
 
     let posts = if use_personalized {
-        build_personalized_digest(account_id).await?
+        build_personalized_digest(account_id, hide_saved).await?
     } else {
-        build_generic_digest().await?
+        build_generic_digest(account_id, hide_saved).await?
     };
 
     cache_set(cache_key, posts.clone());

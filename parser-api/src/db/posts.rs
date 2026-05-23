@@ -102,13 +102,53 @@ pub fn drop_account_posts(account_id: i32) -> Result<(), String> {
             params![account_id],
         )
         .map_err(|e| format!("Failed to clear accounts_post: {e}"))?;
-        tx.execute(
-            "DELETE FROM account_tag_cooccurrence WHERE account_id = ?1",
-            params![account_id],
-        )
-        .map_err(|e| format!("Failed to clear account_tag_cooccurrence: {e}"))?;
         Ok(())
     })
+}
+
+/// Delete this account's cooccurrence rows in chunks.
+///
+/// `account_tag_cooccurrence` can hold millions of rows for a single
+/// account (one row per (tag1, tag2) pair, materialised across the user's
+/// favourites). A single DELETE locks the writer mutex for the entire
+/// scan, which we've measured at 200+ seconds on a 2.6M-row account —
+/// long enough that `/process` looked frozen before any e621 request
+/// could fire. Chunking releases the mutex between batches so the rest
+/// of the API (status polling, prefetch, cache pruner) keeps moving,
+/// and emits a callback per batch so the caller can log progress.
+///
+/// Returns the total number of rows deleted.
+pub fn drop_account_cooccurrence_batched(
+    account_id: i32,
+    batch_size: usize,
+    mut on_batch: impl FnMut(usize, usize),
+) -> Result<usize, String> {
+    let batch_size = batch_size.max(1) as i64;
+    let mut total: usize = 0;
+    loop {
+        let deleted = super::with_write_tx(|tx| {
+            // `DELETE ... LIMIT` requires SQLITE_ENABLE_UPDATE_DELETE_LIMIT,
+            // which the bundled SQLite doesn't ship with. Subselect on
+            // rowid is the portable equivalent.
+            let n = tx
+                .execute(
+                    "DELETE FROM account_tag_cooccurrence \
+                     WHERE rowid IN ( \
+                         SELECT rowid FROM account_tag_cooccurrence \
+                         WHERE account_id = ?1 LIMIT ?2 \
+                     )",
+                    params![account_id, batch_size],
+                )
+                .map_err(|e| format!("Failed to clear account_tag_cooccurrence batch: {e}"))?;
+            Ok(n)
+        })?;
+        if deleted == 0 {
+            break;
+        }
+        total += deleted;
+        on_batch(deleted, total);
+    }
+    Ok(total)
 }
 
 pub fn save_posts(posts: &[Post], account_id: i32) -> Result<(), String> {

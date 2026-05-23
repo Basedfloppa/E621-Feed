@@ -95,9 +95,18 @@ async fn process_status(
     Ok(Json(jobs::get_state(account_id)))
 }
 
+// The macro reassigns `phase_start` after every phase; the final
+// reassignment is intentional but unread (function returns), which
+// trips `unused_assignments`. Allowed at function scope so the
+// macro body stays uniform.
+#[allow(unused_assignments)]
 async fn run_process(account_id: i32, owner_token: String) -> Result<(), String> {
     let mut pipe = PipelineMetrics::new("process");
-    let phase_start = std::time::Instant::now();
+    // `phase_start` is rebased after every `record_phase!` so the recorded
+    // `elapsed_ms` is the delta since the previous phase (matching the
+    // docstring on `JobPhaseRecord`), rather than a monotonically growing
+    // total since the start of the function.
+    let mut phase_start = std::time::Instant::now();
 
     let cfg = cfg();
     let blacklist: HashSet<String> = cfg.tag_blacklist.iter().map(|s| s.to_lowercase()).collect();
@@ -119,6 +128,7 @@ async fn run_process(account_id: i32, owner_token: String) -> Result<(), String>
             pipe.mark($name);
             let secs = elapsed / 1000.0;
             info!("[process {account_id}] phase '{name}' done in {secs:.1}s", name = $name);
+            phase_start = std::time::Instant::now();
         }};
     }
     record_phase!("init");
@@ -128,6 +138,29 @@ async fn run_process(account_id: i32, owner_token: String) -> Result<(), String>
     })
     .await?;
     record_phase!("drop_old");
+
+    // Cooccurrence rows can run into the millions for a single account; a
+    // monolithic DELETE pins the writer mutex for the full scan and starves
+    // every other write (including the status polling-side metadata
+    // updates) for minutes. Batch the delete so we release the lock between
+    // chunks and emit a log line per batch — gives the user a visible
+    // heartbeat instead of a frozen UI.
+    let drop_cooc_batch = cfg.runtime.drop_cooc_batch_size.max(1_000);
+    let deleted_cooc = db_blocking(move || {
+        db::drop_account_cooccurrence_batched(
+            account_id,
+            drop_cooc_batch,
+            |batch, total| {
+                info!(
+                    "[process {account_id}] drop_cooc batch -{batch} (total deleted: {total})"
+                );
+            },
+        )
+        .map_err(|e| format!("Failed to drop account cooccurrence: {e}"))
+    })
+    .await?;
+    info!("[process {account_id}] drop_cooc complete: {deleted_cooc} rows");
+    record_phase!("drop_cooc");
 
     // Fetch pages in parallel; writes stay serial (SQLite is single-writer).
     let account_for_fetch = account.clone();

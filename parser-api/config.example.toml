@@ -204,6 +204,7 @@ diversity_semantic_max_tags = 10     # top-K tags per group for the O(T²) PMI l
 local_candidate_limit            = 400    # local-catalog candidates per /recommendations page
 dedup_lookback_days              = 14     # hide posts seen within this window
 process_fetch_concurrency        = 4      # parallel pages during /process import
+drop_cooc_batch_size             = 50000  # batched DELETE chunk for per-account cooc wipe at /process start
 idf_rebuild_cooldown_secs        = 15
 idf_bump_drift_threshold         = 200    # full IDF rebuild after this many incremental bumps
 tag_relation_rebuild_cooldown_secs = 15

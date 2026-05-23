@@ -71,6 +71,16 @@ pub struct RuntimeConfig {
     /// Parallel pages fetched during /process favourites import.
     #[serde(default = "default_process_fetch_concurrency")]
     pub process_fetch_concurrency: usize,
+    /// Chunk size for the per-account cooccurrence wipe done at the start
+    /// of `/process`. The full table holds one row per (tag1, tag2) pair
+    /// per account; for active users that's commonly hundreds of
+    /// thousands of rows, sometimes millions. A monolithic DELETE pins
+    /// the writer mutex and starves every other write for the entire
+    /// duration — we've measured 200+ seconds on a 2.6M-row account.
+    /// Splitting into batches releases the mutex between chunks and
+    /// surfaces visible progress in the logs. Default 50_000.
+    #[serde(default = "default_drop_cooc_batch_size")]
+    pub drop_cooc_batch_size: usize,
 
     /// Cooldown after an IDF rebuild — burst of dirty marks coalesces into
     /// one rebuild.
@@ -162,6 +172,7 @@ impl Default for RuntimeConfig {
             local_candidate_limit: default_local_candidate_limit(),
             dedup_lookback_days: default_dedup_lookback_days(),
             process_fetch_concurrency: default_process_fetch_concurrency(),
+            drop_cooc_batch_size: default_drop_cooc_batch_size(),
             idf_rebuild_cooldown_secs: default_rebuild_cooldown_secs(),
             idf_bump_drift_threshold: default_idf_bump_drift_threshold(),
             tag_relation_rebuild_cooldown_secs: default_rebuild_cooldown_secs(),
@@ -210,6 +221,9 @@ fn default_dedup_lookback_days() -> i64 {
 }
 fn default_process_fetch_concurrency() -> usize {
     4
+}
+fn default_drop_cooc_batch_size() -> usize {
+    50_000
 }
 fn default_rebuild_cooldown_secs() -> u64 {
     15
