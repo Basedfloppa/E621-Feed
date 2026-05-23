@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use crate::models::Post;
 
-use super::{open_db, open_db_for_prefetch, parse_db_datetime};
+use super::{open_db, parse_db_datetime};
 
 /// Delete catalog posts that aren't favourited by anyone and haven't been
 /// re-touched within `retention_secs`. Used by the cache-validator worker
@@ -41,19 +41,11 @@ pub fn prune_orphan_candidates(retention_secs: u64) -> Result<(usize, usize), St
     }
     drop(conn);
 
-    let deleted = super::with_write_tx(|tx| {
-        let n = tx
-            .execute(
-                "
-                DELETE FROM posts
-                WHERE last_seen_at < ?1
-                  AND NOT EXISTS (SELECT 1 FROM accounts_post ap WHERE ap.post_id = posts.id)
-                ",
-                params![cutoff],
-            )
-            .map_err(|e| format!("prune_orphan_candidates delete: {e}"))?;
-        Ok(n)
-    })?;
+    // Batched delete: each `DELETE FROM posts` cascades into `tags_posts`
+    // and `accounts_post` via the FK CASCADE, so even modest catalog
+    // backlogs translate into large per-row work inside the tx. Cap
+    // each chunk to keep the writer mutex available between batches.
+    let deleted = prune_orphan_posts_batched(&cutoff, ORPHAN_PRUNE_BATCH)?;
 
     if deleted > 0 {
         crate::utils::mark_idf_dirty();
@@ -62,6 +54,36 @@ pub fn prune_orphan_candidates(retention_secs: u64) -> Result<(usize, usize), St
 
     let after = (before as usize).saturating_sub(deleted);
     Ok((before as usize, after))
+}
+
+const ORPHAN_PRUNE_BATCH: i64 = 5_000;
+
+fn prune_orphan_posts_batched(cutoff: &str, batch_size: i64) -> Result<usize, String> {
+    let mut total: usize = 0;
+    loop {
+        let deleted = super::with_write_tx(|tx| {
+            let n = tx
+                .execute(
+                    "DELETE FROM posts \
+                     WHERE id IN ( \
+                         SELECT p.id FROM posts p \
+                         WHERE p.last_seen_at < ?1 \
+                           AND NOT EXISTS ( \
+                               SELECT 1 FROM accounts_post ap WHERE ap.post_id = p.id \
+                           ) \
+                         LIMIT ?2 \
+                     )",
+                    params![cutoff, batch_size],
+                )
+                .map_err(|e| format!("prune_orphan_posts batch: {e}"))?;
+            Ok(n)
+        })?;
+        if deleted == 0 {
+            break;
+        }
+        total += deleted;
+    }
+    Ok(total)
 }
 
 /// Longer-lived catalog cleanup run on `cleanup_interval_secs` (default 6h).
@@ -73,19 +95,15 @@ pub fn prune_orphan_candidates(retention_secs: u64) -> Result<(usize, usize), St
 /// Returns the number of deleted posts. Marks IDF + global-relation dirty when
 /// anything was pruned so in-memory caches shrink on the next rebuild.
 pub fn prune_stale_catalog_posts(retention_days: i64) -> Result<i64, String> {
-    let conn = open_db_for_prefetch()?;
     let cutoff = (Utc::now() - chrono::Duration::days(retention_days)).to_rfc3339();
 
-    let deleted = conn
-        .execute(
-            "
-            DELETE FROM posts
-            WHERE last_seen_at < ?1
-              AND NOT EXISTS (SELECT 1 FROM accounts_post ap WHERE ap.post_id = posts.id)
-            ",
-            params![cutoff],
-        )
-        .map_err(|e| format!("delete stale catalog posts: {e}"))?;
+    // Previously this ran the DELETE on a pool connection, which bypasses
+    // `WRITE_CONN` and races every other writer at the SQLite level —
+    // visible as SQLITE_BUSY after a 60s busy_timeout when the dedicated
+    // writer holds the connection during a long /process or backfill
+    // batch. Route through the shared writer mutex, in chunks, so the
+    // long-running maintenance path can't starve out interactive writes.
+    let deleted = prune_orphan_posts_batched(&cutoff, ORPHAN_PRUNE_BATCH)?;
 
     if deleted > 0 {
         crate::utils::mark_idf_dirty();
@@ -121,25 +139,62 @@ pub fn drop_account_posts(account_id: i32) -> Result<(), String> {
 pub fn drop_account_cooccurrence_batched(
     account_id: i32,
     batch_size: usize,
+    on_batch: impl FnMut(usize, usize),
+) -> Result<usize, String> {
+    delete_by_account_in_batches(
+        "account_tag_cooccurrence",
+        account_id,
+        batch_size,
+        on_batch,
+    )
+}
+
+/// Drop this account's feed interactions in chunks. Same shape as the
+/// cooccurrence wipe — long-running accounts accumulate thousands of
+/// interaction rows and a single DELETE during account teardown can
+/// hold the writer mutex long enough to look like a hang.
+pub fn drop_account_feed_interactions_batched(
+    account_id: i32,
+    batch_size: usize,
+    on_batch: impl FnMut(usize, usize),
+) -> Result<usize, String> {
+    delete_by_account_in_batches("feed_interactions", account_id, batch_size, on_batch)
+}
+
+/// Shared implementation behind the per-account batched deletes. Picks
+/// rowids in chunks of `batch_size`, deletes them inside their own
+/// `with_write_tx`, and yields the writer mutex between batches so
+/// concurrent writers (prefetch, profile refresh, status polling) keep
+/// moving. Loops until a batch deletes zero rows.
+fn delete_by_account_in_batches(
+    table: &'static str,
+    account_id: i32,
+    batch_size: usize,
     mut on_batch: impl FnMut(usize, usize),
 ) -> Result<usize, String> {
     let batch_size = batch_size.max(1) as i64;
+    // Whitelist the table name since we splice it directly into SQL.
+    // Caller passes a static str but we still gate the values to be
+    // explicit about the intent — the table list is closed.
+    let sql = match table {
+        "account_tag_cooccurrence" => {
+            "DELETE FROM account_tag_cooccurrence \
+             WHERE rowid IN (SELECT rowid FROM account_tag_cooccurrence \
+                             WHERE account_id = ?1 LIMIT ?2)"
+        }
+        "feed_interactions" => {
+            "DELETE FROM feed_interactions \
+             WHERE rowid IN (SELECT rowid FROM feed_interactions \
+                             WHERE account_id = ?1 LIMIT ?2)"
+        }
+        other => return Err(format!("delete_by_account_in_batches: unknown table {other}")),
+    };
     let mut total: usize = 0;
     loop {
         let deleted = super::with_write_tx(|tx| {
-            // `DELETE ... LIMIT` requires SQLITE_ENABLE_UPDATE_DELETE_LIMIT,
-            // which the bundled SQLite doesn't ship with. Subselect on
-            // rowid is the portable equivalent.
             let n = tx
-                .execute(
-                    "DELETE FROM account_tag_cooccurrence \
-                     WHERE rowid IN ( \
-                         SELECT rowid FROM account_tag_cooccurrence \
-                         WHERE account_id = ?1 LIMIT ?2 \
-                     )",
-                    params![account_id, batch_size],
-                )
-                .map_err(|e| format!("Failed to clear account_tag_cooccurrence batch: {e}"))?;
+                .execute(sql, params![account_id, batch_size])
+                .map_err(|e| format!("Failed to batch delete from {table}: {e}"))?;
             Ok(n)
         })?;
         if deleted == 0 {

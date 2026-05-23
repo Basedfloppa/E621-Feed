@@ -327,7 +327,10 @@ pub fn get_account_by_id(owner_token: &str, id: i32) -> Result<TruncatedAccount,
 /// removed; 0 means this device never owned the account (callers should
 /// map to 404 so the click isn't silently a no-op).
 pub fn delete_device_link(owner_token: &str, account_id: i32) -> Result<usize, String> {
-    super::with_write_tx(|tx| {
+    // Step 1: drop the link itself, and decide whether the account row
+    // should be torn down. Kept in its own short tx so concurrent device
+    // operations can't observe a half-broken account.
+    let (removed, cascade) = super::with_write_tx(|tx| {
         let n = tx
             .execute(
                 "DELETE FROM account_device_links \
@@ -335,7 +338,7 @@ pub fn delete_device_link(owner_token: &str, account_id: i32) -> Result<usize, S
                 params![owner_token, account_id],
             )
             .map_err(|e| format!("Failed to delete device link: {e}"))?;
-        if n > 0 {
+        let cascade = if n > 0 {
             let remaining: i64 = tx
                 .query_row(
                     "SELECT COUNT(*) FROM account_device_links WHERE account_id = ?1",
@@ -343,27 +346,58 @@ pub fn delete_device_link(owner_token: &str, account_id: i32) -> Result<usize, S
                     |r| r.get(0),
                 )
                 .map_err(|e| format!("Failed to count remaining device links: {e}"))?;
-            if remaining == 0 {
-                for stmt in [
-                    "DELETE FROM accounts_post WHERE account_id = ?1",
-                    "DELETE FROM account_tag_counts WHERE account_id = ?1",
-                    "DELETE FROM account_rating_profile WHERE account_id = ?1",
-                    "DELETE FROM account_media_profile WHERE account_id = ?1",
-                    "DELETE FROM account_quality_profile WHERE account_id = ?1",
-                    "DELETE FROM account_tag_feedback WHERE account_id = ?1",
-                    "DELETE FROM account_tag_cooccurrence WHERE account_id = ?1",
-                    "DELETE FROM feed_interactions WHERE account_id = ?1",
-                    "DELETE FROM accounts WHERE id = ?1",
-                ] {
-                    let _ = tx.execute(stmt, params![account_id]).map_err(|e| {
-                        warn!("delete_device_link cascade '{stmt}': {e}");
-                        e.to_string()
-                    });
-                }
-            }
+            remaining == 0
+        } else {
+            false
+        };
+        Ok((n, cascade))
+    })?;
+
+    if !cascade {
+        return Ok(removed);
+    }
+
+    // Step 2: the two unbounded per-account tables can reach millions of
+    // rows on heavy users. Running them inside the cascade tx pinned the
+    // writer mutex for minutes during account teardown. Wipe in batched
+    // chunks so the writer can yield to other operations between
+    // chunks. Non-atomic with the rest of the cascade: if we crash here
+    // the account row survives with empty cooc/feed history, which is
+    // self-healing on the next /process run.
+    let batch_size = crate::models::cfg().runtime.drop_cooc_batch_size.max(1_000);
+    let cooc_dropped = super::drop_account_cooccurrence_batched(account_id, batch_size, |_, _| {})?;
+    let feed_dropped = super::drop_account_feed_interactions_batched(
+        account_id,
+        batch_size,
+        |_, _| {},
+    )?;
+    if cooc_dropped > 0 || feed_dropped > 0 {
+        info!(
+            "delete_device_link {account_id}: pre-cascade dropped cooc={cooc_dropped} feed_int={feed_dropped}"
+        );
+    }
+
+    // Step 3: the remaining cascade tables are bounded (a few hundred
+    // rows per account at most), so finish atomically in one short tx.
+    super::with_write_tx(|tx| {
+        for stmt in [
+            "DELETE FROM accounts_post WHERE account_id = ?1",
+            "DELETE FROM account_tag_counts WHERE account_id = ?1",
+            "DELETE FROM account_rating_profile WHERE account_id = ?1",
+            "DELETE FROM account_media_profile WHERE account_id = ?1",
+            "DELETE FROM account_quality_profile WHERE account_id = ?1",
+            "DELETE FROM account_tag_feedback WHERE account_id = ?1",
+            "DELETE FROM accounts WHERE id = ?1",
+        ] {
+            let _ = tx.execute(stmt, params![account_id]).map_err(|e| {
+                warn!("delete_device_link cascade '{stmt}': {e}");
+                e.to_string()
+            });
         }
-        Ok(n)
-    })
+        Ok(())
+    })?;
+
+    Ok(removed)
 }
 
 pub fn cleanup_orphan_accounts() -> Result<i64, String> {
