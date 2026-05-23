@@ -141,9 +141,20 @@ pub fn save_posts_tags_batch(
             }
 
             let has_multi_tags = post_tag_ids.len() >= 2;
-            if track_cooccurrence && !had_tags && has_multi_tags {
+            // Sort+dedup once per post — unconditional so the account-cooc
+            // branch below can never see duplicate tag_ids (which would
+            // produce phantom self-pairs in `account_tag_cooccurrence`).
+            // The previous "skip if cooc_dirty" optimisation conflated a
+            // batch-level flag with a per-post invariant: once any earlier
+            // post had triggered the global branch, this branch would skip
+            // the sort+dedup on every subsequent post regardless of whether
+            // those posts had been sorted.
+            if has_multi_tags {
                 post_tag_ids.sort_unstable();
                 post_tag_ids.dedup();
+            }
+
+            if track_cooccurrence && !had_tags && has_multi_tags {
                 super::cooccurrence::upsert_cooccurrence_pairs(tx, &post_tag_ids)?;
                 cooc_dirty = true;
             }
@@ -159,12 +170,6 @@ pub fn save_posts_tags_batch(
                 }
             }
             if account_id.is_some() && track_cooccurrence && has_multi_tags {
-                // post_tag_ids was sorted+deduped in the global cooc branch above;
-                // if that branch wasn't taken, dedup here.
-                if !cooc_dirty {
-                    post_tag_ids.sort_unstable();
-                    post_tag_ids.dedup();
-                }
                 // Build the per-post meta map from our global reverse map.
                 let id_to_meta: std::collections::HashMap<i64, (String, String)> = post_tag_ids
                     .iter()

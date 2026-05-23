@@ -4,10 +4,33 @@
 //! Sessions: create/update/touch/prune for feed continuation.
 
 use chrono::Utc;
-use rusqlite::params;
+use rusqlite::{params, OptionalExtension};
 use std::collections::HashSet;
 
 use crate::db::{open_db, with_write_tx};
+
+/// Feed-session sliding TTL in minutes. Centralised so the touch path
+/// (in `touch_or_create_feed_session`) and the prune path (in
+/// `prune_expired_sessions`) can't drift apart silently.
+pub const FEED_SESSION_TTL_MIN: i64 = 30;
+
+/// Outcome of `touch_or_create_feed_session`. Drives whether the caller
+/// should load the dedup set, record new shown posts, and whether to
+/// signal `fresh_start` to the client (which prompts the frontend to
+/// rotate the session_id).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FeedSessionState {
+    /// Session row didn't exist; we just created it. No dedup history yet,
+    /// but the session is now live — record shown posts as usual.
+    Fresh,
+    /// Session existed and was still within TTL; we touched
+    /// `last_accessed_at`. Load the dedup set and continue normally.
+    Active,
+    /// Session row existed but `last_accessed_at` was older than TTL. We
+    /// did NOT touch — the client should rotate the session token. Caller
+    /// should return `fresh_start=true` and skip recording.
+    Expired,
+}
 
 // ── Revocation ──────────────────────────────────────────────────────
 
@@ -57,65 +80,68 @@ pub fn prune_revoked_tokens(retention_secs: i64) -> Result<(usize, usize), Strin
 
 // ── Feed Sessions ───────────────────────────────────────────────────
 
-/// Create or update a feed session (upsert on session_id).
-/// Returns true if this was a new session.
-pub fn upsert_feed_session(session_id: &str, account_id: i32) -> Result<bool, String> {
-    let now = Utc::now().to_rfc3339();
+/// Atomic check-or-create-or-touch for a feed session.
+///
+/// Replaces the previous `upsert_feed_session` + `validate_feed_session`
+/// pair, which had two latent bugs:
+///   1. Caller-side, `validate` always succeeded because the preceding
+///      `upsert` had just set `last_accessed_at = now` — the expiry
+///      branch was unreachable and `fresh_start` was dead code.
+///   2. `validate` read on a pool connection and touched on a separate
+///      writer connection, leaving a TOCTOU window where another
+///      connection could prune the session between the two.
+///
+/// This function does the read, the expiry check, and the
+/// create/touch in a single write transaction so the three operations
+/// either all happen or none do — and the caller learns the actual
+/// state (`Fresh` / `Active` / `Expired`) rather than a binary OK.
+pub fn touch_or_create_feed_session(
+    session_id: &str,
+    account_id: i32,
+) -> Result<FeedSessionState, String> {
     with_write_tx(|tx| {
-        let existing: bool = tx
+        let existing: Option<String> = tx
             .query_row(
-                "SELECT EXISTS(SELECT 1 FROM feed_sessions WHERE session_id = ?1)",
-                params![session_id],
+                "SELECT last_accessed_at FROM feed_sessions \
+                 WHERE session_id = ?1 AND account_id = ?2",
+                params![session_id, account_id],
                 |r| r.get(0),
             )
-            .map_err(|e| format!("Failed to check session existence: {e}"))?;
+            .optional()
+            .map_err(|e| format!("Failed to read feed session: {e}"))?;
 
-        tx.execute(
-            "INSERT INTO feed_sessions (session_id, account_id, created_at, last_accessed_at)
-             VALUES (?1, ?2, ?3, ?3)
-             ON CONFLICT(session_id) DO UPDATE SET
-                last_accessed_at = excluded.last_accessed_at",
-            params![session_id, account_id, now],
-        )
-        .map_err(|e| format!("Failed to upsert feed session: {e}"))?;
-
-        Ok(!existing)
-    })
-}
-
-/// Validate and touch a session. Returns Ok(()) if the session exists,
-/// belongs to the account, and hasn't expired (TTL = 30 min).
-pub fn validate_feed_session(session_id: &str, account_id: i32) -> Result<(), String> {
-    let conn = open_db()?;
-    let row: Option<(String, String)> = conn
-        .query_row(
-            "SELECT created_at, last_accessed_at FROM feed_sessions
-             WHERE session_id = ?1 AND account_id = ?2",
-            params![session_id, account_id],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .ok();
-
-    match row {
-        None => Err("Session not found or does not belong to this account".to_string()),
-        Some((_created, last_accessed)) => {
-            let last = crate::db::parse_db_datetime(&last_accessed)
-                .map_err(|e| format!("Failed to parse session timestamp: {e}"))?;
-            let elapsed = (Utc::now() - last).num_minutes();
-            if elapsed > 30 {
-                return Err("Session expired (TTL 30 min)".to_string());
-            }
-            // Touch last_accessed_at.
-            with_write_tx(|tx| {
+        match existing {
+            None => {
+                let now = Utc::now().to_rfc3339();
                 tx.execute(
-                    "UPDATE feed_sessions SET last_accessed_at = ?1 WHERE session_id = ?2",
-                    params![Utc::now().to_rfc3339(), session_id],
+                    "INSERT INTO feed_sessions \
+                     (session_id, account_id, created_at, last_accessed_at) \
+                     VALUES (?1, ?2, ?3, ?3) \
+                     ON CONFLICT(session_id) DO NOTHING",
+                    params![session_id, account_id, now],
+                )
+                .map_err(|e| format!("Failed to create feed session: {e}"))?;
+                Ok(FeedSessionState::Fresh)
+            }
+            Some(last_raw) => {
+                let last = crate::db::parse_db_datetime(&last_raw)
+                    .map_err(|e| format!("Failed to parse session timestamp: {e}"))?;
+                let elapsed_min = (Utc::now() - last).num_minutes();
+                if elapsed_min > FEED_SESSION_TTL_MIN {
+                    // Don't touch — let the prune sweep collect it.
+                    return Ok(FeedSessionState::Expired);
+                }
+                let now = Utc::now().to_rfc3339();
+                tx.execute(
+                    "UPDATE feed_sessions SET last_accessed_at = ?1 \
+                     WHERE session_id = ?2",
+                    params![now, session_id],
                 )
                 .map_err(|e| format!("Failed to touch feed session: {e}"))?;
-                Ok(())
-            })
+                Ok(FeedSessionState::Active)
+            }
         }
-    }
+    })
 }
 
 /// Record a batch of shown post_ids for a session (for dedup).
@@ -160,7 +186,8 @@ pub fn get_session_shown_post_ids(session_id: &str) -> Result<HashSet<i64>, Stri
 /// Prune expired sessions and their shown posts.
 /// Returns the number of pruned sessions.
 pub fn prune_expired_sessions() -> Result<usize, String> {
-    let cutoff = (Utc::now() - chrono::Duration::minutes(30)).to_rfc3339();
+    let cutoff =
+        (Utc::now() - chrono::Duration::minutes(FEED_SESSION_TTL_MIN)).to_rfc3339();
     with_write_tx(|tx| {
         // CASCADE will handle feed_session_posts rows.
         let n = tx

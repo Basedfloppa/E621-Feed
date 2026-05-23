@@ -353,6 +353,8 @@ pub(crate) async fn get_recommendations_continue(
     count: Option<i32>,
     owner: OwnerToken,
 ) -> Result<Json<ContinueResponse>, ApiError> {
+    use std::collections::HashSet;
+
     validation::validate_account_id(account_id)?;
     validation::validate_session_token(&session)?;
     let count = validation::validate_continue_count(count)?;
@@ -360,68 +362,60 @@ pub(crate) async fn get_recommendations_continue(
 
     ratelimit::check(&format!("recs:owner:{owner_token}"), 60, 30)?;
 
-    // Validate and touch the session. If it fails, return fresh_start.
+    // Single atomic read/check/touch. Three outcomes:
+    //   Fresh    — first time this (session_id, account_id) is seen
+    //   Active   — existing valid session, touched
+    //   Expired  — existed but past TTL; do NOT touch, tell client to rotate
     let session_for_check = session.clone();
-    let session_valid = db_blocking(move || {
-        db::upsert_feed_session(&session_for_check, account_id)?;
-        db::validate_feed_session(&session_for_check, account_id)?;
-        Ok::<_, String>(())
+    let session_state = db_blocking(move || {
+        db::touch_or_create_feed_session(&session_for_check, account_id)
     })
-    .await;
+    .await?;
 
-    match session_valid {
-        Err(_) => {
-            // Session expired or doesn't exist — fresh start.
-            // Return a fresh recommendations page without session tracking.
-            let owner_clone = owner_token.clone();
-            let mut fresh_posts = build_recommendations_inner(account_id, &owner_clone, None, None, None)
-                .await?;
-            fresh_posts.truncate(count as usize);
-            return Ok(Json(ContinueResponse {
-                posts: fresh_posts,
-                fresh_start: true,
-            }));
-        }
-        Ok(()) => {}
+    let fresh_start = matches!(session_state, db::FeedSessionState::Expired);
+
+    // Only an Active session has a dedup history to load. Fresh sessions
+    // start with an empty set; Expired ones are about to be rotated so
+    // anything we've recorded is no longer authoritative.
+    let shown_ids: HashSet<i64> = if matches!(session_state, db::FeedSessionState::Active) {
+        let session_for_dedup = session.clone();
+        db_blocking(move || {
+            db::get_session_shown_post_ids(&session_for_dedup)
+                .map_err(|e| format!("Failed to load session shown posts: {e}"))
+        })
+        .await?
+    } else {
+        HashSet::new()
+    };
+
+    // Build, dedup against the session's shown set, then truncate.
+    // `build_recommendations_inner` returns posts already sorted (and
+    // diversified) so `truncate` keeps the top-N, not an arbitrary N.
+    let mut posts =
+        build_recommendations_inner(account_id, &owner_token, None, None, None).await?;
+    if !shown_ids.is_empty() {
+        posts.retain(|sp| !shown_ids.contains(&sp.post.id));
     }
-
-    // Load session-shown post IDs for dedup.
-    let session_for_dedup = session.clone();
-    let shown_ids = db_blocking(move || {
-        db::get_session_shown_post_ids(&session_for_dedup)
-            .map_err(|e| format!("Failed to load session shown posts: {e}"))
-    })
-    .await?;
-
-    // Build fresh recommendations.
-    let mut posts = build_recommendations_inner(
-        account_id,
-        &owner_token,
-        None,
-        None,
-        None,
-    )
-    .await?;
-
-    // Filter out already-shown posts.
-    posts.retain(|sp| !shown_ids.contains(&sp.post.id));
     posts.truncate(count as usize);
 
-    // Record shown posts for this session.
-    let session_for_record = session.clone();
-    let shown_for_record: Vec<(i64, i32)> = posts
-        .iter()
-        .enumerate()
-        .map(|(i, sp)| (sp.post.id, i as i32))
-        .collect();
-    db_blocking(move || {
-        db::record_session_shown_posts(&session_for_record, &shown_for_record)
-    })
-    .await?;
+    // Skip recording on Expired — the client is about to switch session_id,
+    // so this set will never be queried again.
+    if !matches!(session_state, db::FeedSessionState::Expired) {
+        let session_for_record = session.clone();
+        let shown_for_record: Vec<(i64, i32)> = posts
+            .iter()
+            .enumerate()
+            .map(|(i, sp)| (sp.post.id, i as i32))
+            .collect();
+        db_blocking(move || {
+            db::record_session_shown_posts(&session_for_record, &shown_for_record)
+        })
+        .await?;
+    }
 
     Ok(Json(ContinueResponse {
         posts,
-        fresh_start: false,
+        fresh_start,
     }))
 }
 
@@ -524,8 +518,12 @@ pub(crate) async fn get_similar_posts(
 }
 
 /// Build a recommendations page using the standard pipeline.
-/// Shared by both the main endpoint and the continue endpoint.
-#[allow(unused_variables)]
+///
+/// Returns posts already sorted by score (DESC), thresholded against
+/// `affinity_threshold` if supplied, and diversified via the same MMR
+/// helper as the main `/recommendations` endpoint. The caller may
+/// `truncate` the result to a page size and trust that the kept slice
+/// is the top-N, not an arbitrary N.
 async fn build_recommendations_inner(
     account_id: i32,
     owner_token: &str,
@@ -676,7 +674,7 @@ async fn build_recommendations_inner(
         .map(|post| CachedPostFeatures::from_post_with_user(post, &idf, &global_relation, Some(&user_relation)))
         .collect();
 
-    let scored: Vec<ScoredPost> = combined
+    let mut scored: Vec<ScoredPost> = combined
         .into_par_iter()
         .zip(cached.into_par_iter())
         .map(|(post, cf)| {
@@ -684,6 +682,23 @@ async fn build_recommendations_inner(
             ScoredPost { post, score: s, breakdown: Some(breakdown) }
         })
         .collect();
+
+    // Threshold (if requested) before diversification so we don't pay
+    // MMR cost on posts we're going to drop anyway.
+    if let Some(threshold) = affinity_threshold
+        && threshold > 0.0
+    {
+        scored.retain(|sp| sp.score >= threshold);
+    }
+
+    // Diversify via MMR — same helper the main `/recommendations` route
+    // uses. The returned order interleaves diverse picks with high-score
+    // ones; we DON'T sort by score after, because that would undo the
+    // MMR interleaving. Callers can `truncate(N)` to keep the top-N
+    // best-balanced posts.
+    let scored = diversify_scored_posts(scored, &global_relation, &priors);
+
+    let _ = bucket_name; // bucket logging is the caller's responsibility
 
     Ok(scored)
 }

@@ -281,6 +281,19 @@ pub fn validate_batch_interaction(req: &BatchInteractionRequest) -> Result<(), A
 
 const MAX_PREFERRED_TAGS: usize = 50;
 const MAX_TAG_NAME_LEN: usize = 64;
+/// Whitelist of tag groups the scoring pipeline knows how to weight.
+/// Mirrors the keys used in `account_tag_counts.group_type` and the
+/// `Group` enum inside the scorer. Storing anything else just produces
+/// rows that downstream code silently skips — better to reject upfront.
+const VALID_TAG_GROUPS: &[&str] = &[
+    "artist",
+    "character",
+    "copyright",
+    "general",
+    "lore",
+    "meta",
+    "species",
+];
 
 pub fn validate_preferred_tag_payload(payload: &PreferredTagPayload) -> Result<(), ApiError> {
     if payload.preferred_tags.len() > MAX_PREFERRED_TAGS {
@@ -288,6 +301,11 @@ pub fn validate_preferred_tag_payload(payload: &PreferredTagPayload) -> Result<(
             "max {MAX_PREFERRED_TAGS} preferred tags per account"
         )));
     }
+    // Track (lowercased tag, lowercased group) so the same logical entry
+    // can't be sent twice in one payload and silently double its weight
+    // on the next read.
+    let mut seen: std::collections::HashSet<(String, String)> =
+        std::collections::HashSet::with_capacity(payload.preferred_tags.len());
     for pt in &payload.preferred_tags {
         let trimmed = pt.tag.trim();
         if trimmed.is_empty() {
@@ -304,8 +322,21 @@ pub fn validate_preferred_tag_payload(payload: &PreferredTagPayload) -> Result<(
                 "weight {weight} out of range [0.1, 10.0]"
             )));
         }
-        if pt.group.trim().is_empty() {
+        let group_trimmed = pt.group.trim();
+        if group_trimmed.is_empty() {
             return Err(ApiError::BadRequest("group must not be empty".into()));
+        }
+        let group_lc = group_trimmed.to_ascii_lowercase();
+        if !VALID_TAG_GROUPS.contains(&group_lc.as_str()) {
+            return Err(ApiError::BadRequest(format!(
+                "group '{group_trimmed}' not one of {VALID_TAG_GROUPS:?}"
+            )));
+        }
+        let key = (trimmed.to_ascii_lowercase(), group_lc);
+        if !seen.insert(key) {
+            return Err(ApiError::BadRequest(format!(
+                "duplicate preferred tag: {trimmed} ({group_trimmed})"
+            )));
         }
     }
     Ok(())

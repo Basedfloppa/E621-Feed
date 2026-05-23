@@ -96,7 +96,13 @@ fn incremental_cooccurrence_roundtrip() {
     assert!(count2 >= count, "cooc should persist across batches ({count} → {count2})");
 
     // ---- Drop + re-save: verify cooccurrence is rebuilt correctly ----
+    //
+    // `drop_account_posts` clears `accounts_post`; the cooc wipe lives in
+    // `drop_account_cooccurrence_batched` so the two destructive paths
+    // can be staged separately (progress logging for the long one). The
+    // /process pipeline calls both back-to-back; tests mirror that.
     db::drop_account_posts(account_id).unwrap();
+    db::drop_account_cooccurrence_batched(account_id, 1024, |_, _| {}).unwrap();
     let count_after_drop = count_account_cooc(account_id);
     assert_eq!(count_after_drop, 0, "cooc should be empty after drop");
 
@@ -110,6 +116,7 @@ fn incremental_cooccurrence_roundtrip() {
 
     // Clean up
     db::drop_account_posts(account_id).unwrap();
+    db::drop_account_cooccurrence_batched(account_id, 1024, |_, _| {}).unwrap();
 }
 
 /// Verify that `refresh_account_profiles_skip_cooc` does NOT rebuild
@@ -216,4 +223,9 @@ fn setup_test(account_id: i32) {
     ensure_migrations();
     let _ = e621_account_parser_api::db::set_account("test_owner", account_id, "test_user", "");
     let _ = e621_account_parser_api::db::drop_account_posts(account_id);
+    let _ = e621_account_parser_api::db::drop_account_cooccurrence_batched(
+        account_id,
+        1024,
+        |_, _| {},
+    );
 }
