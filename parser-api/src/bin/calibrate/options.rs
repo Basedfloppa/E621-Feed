@@ -22,12 +22,16 @@ impl SplitStrategy {
     }
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq)]
 pub(crate) enum NegMode {
     /// Uniform xorshift over `posts.id` (legacy).
     Uniform,
     /// 40% uniform + 30% popularity-decile + 30% age-window matched.
     Mixed,
+    /// 70% mixed + 30% tag-similarity-based hard negatives (Option C).
+    /// `hard_ratio` controls the fraction of negatives that are hard-mined
+    /// via `ctx.tag_similarity()` against config priors.
+    Hybrid { hard_ratio: f32 },
 }
 
 impl NegMode {
@@ -35,6 +39,7 @@ impl NegMode {
         match self {
             NegMode::Uniform => "uniform",
             NegMode::Mixed => "mixed-hard",
+            NegMode::Hybrid { .. } => "hybrid-hard",
         }
     }
 }
@@ -59,7 +64,7 @@ impl Default for GridOptions {
             run_paired: true,
             diversify: false,
             split: SplitStrategy::PostId,
-            neg_mode: NegMode::Mixed,
+            neg_mode: NegMode::Hybrid { hard_ratio: 0.3 },
             verbose: false,
         }
     }

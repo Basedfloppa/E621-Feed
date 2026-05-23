@@ -14,12 +14,13 @@ use e621_account_parser_api::models::{
     AccountRecencyProfile, Post, TagCount,
 };
 use e621_account_parser_api::utils::{
-    CachedPostFeatures, DiversityFeatures, IdfIndex, TagRelationGraph,
+    CachedPostFeatures, DiversityFeatures, IdfIndex, ScoringContext, TagRelationGraph,
 };
 
 use crate::options::{GridOptions, NegMode, SplitStrategy};
 use crate::sampling::{
-    sample_negatives_mixed, sample_negatives_uniform, split_train_test, split_train_test_time,
+    sample_hard_pool, sample_negatives_mixed, sample_negatives_uniform, split_train_test,
+    split_train_test_time,
 };
 
 // Thread-local scratch HashSet reused across account hydrations within
@@ -175,7 +176,7 @@ pub(crate) fn prepare_eval_dataset(opts: &GridOptions) -> anyhow::Result<EvalDat
     log_mem("after global graph load");
     let t = std::time::Instant::now();
     let catalog: CatalogIndex = match opts.neg_mode {
-        NegMode::Mixed => {
+        NegMode::Mixed | NegMode::Hybrid { .. } => {
             eprintln!("[prep] loading catalog index (id + fav_count + created_at)...");
             let c = load_catalog_index()?;
             eprintln!(
@@ -290,6 +291,72 @@ pub(crate) fn prepare_eval_dataset(opts: &GridOptions) -> anyhow::Result<EvalDat
                         account_id,
                         &mut scratch,
                     ),
+                    NegMode::Hybrid { hard_ratio } => {
+                        let n_mixed = (target_negs as f32 * (1.0 - hard_ratio)).round() as usize;
+                        let n_hard = target_negs.saturating_sub(n_mixed);
+
+                        // 70% mixed (existing mixed-strategy negatives).
+                        let mut negs = if n_mixed > 0 {
+                            sample_negatives_mixed(
+                                &catalog,
+                                &excluded_ids,
+                                &test_posts,
+                                n_mixed,
+                                account_id,
+                                &mut scratch,
+                            )
+                        } else {
+                            Vec::new()
+                        };
+
+                        // 30% tag-similarity-based hard negatives.
+                        if n_hard > 0 {
+                            let pool_mult = 5;
+                            let pool_size = n_hard.saturating_mul(pool_mult);
+                            let pool_ids =
+                                sample_hard_pool(&catalog.ids, pool_size, account_id, &mut scratch);
+
+                            if !pool_ids.is_empty() {
+                                let pool_posts =
+                                    db::hydrate_posts_by_ids(&pool_ids).unwrap_or_default();
+
+                                if !pool_posts.is_empty() {
+                                    // Scoring context uses config priors ("контекст бери из
+                                    // конфига"). tag_similarity() only reads priors, IDF, and
+                                    // the profile's tag vectors — it never touches global_relation
+                                    // or user_relation, so we safely pass empty graphs here.
+                                    let empty_graph = TagRelationGraph::empty();
+                                    let config_priors = cfg().priors.clone();
+                                    let ctx = ScoringContext::new(
+                                        &tags,
+                                        &config_priors,
+                                        &idf,
+                                        &profile,
+                                        &empty_graph,
+                                        &empty_graph,
+                                    );
+
+                                    let mut scored: Vec<(i64, f32)> = pool_posts
+                                        .iter()
+                                        .map(|p| (p.id, ctx.tag_similarity(p)))
+                                        .collect();
+                                    scored.sort_by(|a, b| {
+                                        b.1.partial_cmp(&a.1)
+                                            .unwrap_or(std::cmp::Ordering::Equal)
+                                    });
+
+                                    let take = n_hard.min(scored.len());
+                                    for i in 0..take {
+                                        let id = scored[i].0;
+                                        scratch.insert(id);
+                                        negs.push(id);
+                                    }
+                                }
+                            }
+                        }
+
+                        negs
+                    }
                 }
             });
             let mut candidate_ids = neg_ids;

@@ -233,3 +233,37 @@ pub(crate) fn sample_negatives_mixed(
 
     out
 }
+
+/// Sample a pool of candidate IDs for hard-negative mining.
+/// Avoids IDs already in `scratch` (which should contain excluded train/test
+/// IDs and any already-chosen negatives). Adds pool IDs to `scratch` to
+/// prevent overlap with subsequent sampling passes.
+/// Returns up to `pool_size` unique IDs.
+pub(crate) fn sample_hard_pool(
+    catalog: &[i64],
+    pool_size: usize,
+    account_id: i32,
+    scratch: &mut HashSet<i64>,
+) -> Vec<i64> {
+    if catalog.is_empty() || pool_size == 0 {
+        return Vec::new();
+    }
+    let mut rng: u64 = NEG_SAMPLE_SEED ^ (account_id as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    let n = catalog.len();
+    let mut out: Vec<i64> = Vec::with_capacity(pool_size);
+    scratch.reserve(pool_size.saturating_sub(scratch.len()));
+    let mut tries = 0usize;
+    let max_tries = pool_size.saturating_mul(10).max(100);
+    while out.len() < pool_size && tries < max_tries {
+        rng ^= rng << 13;
+        rng ^= rng >> 7;
+        rng ^= rng << 17;
+        let idx = (rng as usize) % n;
+        let id = catalog[idx];
+        if scratch.insert(id) {
+            out.push(id);
+        }
+        tries += 1;
+    }
+    out
+}

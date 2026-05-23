@@ -18,10 +18,12 @@
 
    Negatives are sampled from the catalog (default: mixed hard-negatives
    — popularity- and time-matched; switchable to pure-random via
-   `neg=uniform`). Each test fixture also carries a **per-account
-   tag-relation graph** built from `train_posts` cooccurrences, so the
-   personal `tag_relation` channel and its `*_user_*` knobs see real
-   signal under the synthetic split (added in v5.7).
+   `neg=uniform` or hybrid via `neg=hybrid` for 70% mixed + 30%
+   tag-similarity-based hard negatives). Each test fixture also carries a
+   **per-account tag-relation graph** built from `train_posts`
+   cooccurrences, so the personal `tag_relation` channel and its
+   `*_user_*` knobs see real signal under the synthetic split (added in
+   v5.7).
 
    Reports **NDCG@20**, **Recall@50**, **MRR** with **bootstrap 95% CI**
    on NDCG. Probe acceptance during grid uses an SE-aware threshold
