@@ -580,6 +580,76 @@ mod tests {
         assert!(is_bad(validate_preferred_tag_payload(&PreferredTagPayload {
             preferred_tags: many,
         })));
+
+        // Unknown group — rejected against the whitelist.
+        let bad = PreferredTagPayload {
+            preferred_tags: vec![PreferredTag {
+                tag: "fluffy".to_string(),
+                group: "supergroup".to_string(),
+                weight: 1.0,
+            }],
+        };
+        assert!(is_bad(validate_preferred_tag_payload(&bad)));
+
+        // Whitelist accepts every documented group.
+        for g in ["artist", "character", "copyright", "general", "lore", "meta", "species"] {
+            let payload = PreferredTagPayload {
+                preferred_tags: vec![PreferredTag {
+                    tag: "fluffy".to_string(),
+                    group: g.to_string(),
+                    weight: 1.0,
+                }],
+            };
+            assert!(
+                validate_preferred_tag_payload(&payload).is_ok(),
+                "group '{g}' should be accepted"
+            );
+        }
+
+        // Case-insensitive group matching.
+        let ok_mixed_case = PreferredTagPayload {
+            preferred_tags: vec![PreferredTag {
+                tag: "fluffy".to_string(),
+                group: "General".to_string(),
+                weight: 1.0,
+            }],
+        };
+        assert!(validate_preferred_tag_payload(&ok_mixed_case).is_ok());
+
+        // Duplicate (tag, group) — rejected so the next read can't see
+        // doubled weight from a single round-trip.
+        let dup = PreferredTagPayload {
+            preferred_tags: vec![
+                PreferredTag {
+                    tag: "fluffy".to_string(),
+                    group: "general".to_string(),
+                    weight: 1.0,
+                },
+                PreferredTag {
+                    tag: "FLUFFY".to_string(), // case-insensitive dedup
+                    group: "general".to_string(),
+                    weight: 2.0,
+                },
+            ],
+        };
+        assert!(is_bad(validate_preferred_tag_payload(&dup)));
+
+        // Same tag, different group — NOT a duplicate.
+        let ok_cross_group = PreferredTagPayload {
+            preferred_tags: vec![
+                PreferredTag {
+                    tag: "fluffy".to_string(),
+                    group: "general".to_string(),
+                    weight: 1.0,
+                },
+                PreferredTag {
+                    tag: "fluffy".to_string(),
+                    group: "species".to_string(),
+                    weight: 1.0,
+                },
+            ],
+        };
+        assert!(validate_preferred_tag_payload(&ok_cross_group).is_ok());
     }
 
     #[test]

@@ -1,7 +1,7 @@
 #[macro_use]
 extern crate rocket;
 
-use rocket::futures::{lock::Mutex, stream::StreamExt};
+use rocket::futures::lock::Mutex;
 use rocket::http::CookieJar;
 use rocket::request::Request;
 use rocket::serde::json::{serde_json, Json};
@@ -9,20 +9,17 @@ use rocket::shield::Shield;
 #[cfg(debug_assertions)]
 use rocket::State;
 use rusqlite::Result;
-use std::collections::HashSet;
 
 use e621_account_parser_api::{
-    api,
     auth::{self, OwnerToken},
-    db,
-    db::{get_account_by_id, refresh_account_profiles_skip_cooc, DbInit},
+    db::{get_account_by_id, DbInit},
     errors::ApiError,
     jobs,
     jobs::{BeginResult, ProcessJobState},
-    models::{cfg, default_path, reload_from, start_config_watcher, Post, UserApiResponse},
+    models::{cfg, default_path, reload_from, start_config_watcher},
+    pipeline,
     prefetch,
     ratelimit::{self, ClientIp},
-    utils::{mark_idf_dirty, PipelineMetrics},
     validation,
 };
 #[cfg(debug_assertions)]
@@ -71,7 +68,7 @@ async fn process_posts(
         BeginResult::AlreadyRunning(state) => Ok(Json(state)),
         BeginResult::Started(state) => {
             tokio::spawn(async move {
-                let result = run_process(account_id, owner_token).await;
+                let result = pipeline::run_process(account_id, owner_token).await;
                 if let Err(ref e) = result {
                     warn!("/process for {account_id} failed: {e}");
                 }
@@ -93,134 +90,6 @@ async fn process_status(
     db_blocking(move || get_account_by_id(&owner_token, account_id).map_err(|e| e.to_string()))
         .await?;
     Ok(Json(jobs::get_state(account_id)))
-}
-
-// The macro reassigns `phase_start` after every phase; the final
-// reassignment is intentional but unread (function returns), which
-// trips `unused_assignments`. Allowed at function scope so the
-// macro body stays uniform.
-#[allow(unused_assignments)]
-async fn run_process(account_id: i32, owner_token: String) -> Result<(), String> {
-    let mut pipe = PipelineMetrics::new("process");
-    // `phase_start` is rebased after every `record_phase!` so the recorded
-    // `elapsed_ms` is the delta since the previous phase (matching the
-    // docstring on `JobPhaseRecord`), rather than a monotonically growing
-    // total since the start of the function.
-    let mut phase_start = std::time::Instant::now();
-
-    let cfg = cfg();
-    let blacklist: HashSet<String> = cfg.tag_blacklist.iter().map(|s| s.to_lowercase()).collect();
-
-    let account =
-        db_blocking(move || get_account_by_id(&owner_token, account_id).map_err(|e| e.to_string()))
-            .await?;
-    let user = api::get_account(&account).await?;
-    let favcount = match user {
-        UserApiResponse::FullCurrentUser(u) => u.favorite_count,
-        UserApiResponse::FullUser(u) => u.favorite_count,
-    };
-    let pages = (favcount / cfg.posts_limit) + (if favcount % cfg.posts_limit > 0 { 1 } else { 0 });
-    jobs::set_pages_total(account_id, pages);
-    macro_rules! record_phase {
-        ($name:expr) => {{
-            let elapsed = phase_start.elapsed().as_secs_f64() * 1000.0;
-            jobs::record_phase(account_id, $name, elapsed);
-            pipe.mark($name);
-            let secs = elapsed / 1000.0;
-            info!("[process {account_id}] phase '{name}' done in {secs:.1}s", name = $name);
-            phase_start = std::time::Instant::now();
-        }};
-    }
-    record_phase!("init");
-
-    db_blocking(move || {
-        db::drop_account_posts(account_id).map_err(|e| format!("Failed to drop account posts: {e}"))
-    })
-    .await?;
-    record_phase!("drop_old");
-
-    // Cooccurrence rows can run into the millions for a single account; a
-    // monolithic DELETE pins the writer mutex for the full scan and starves
-    // every other write (including the status polling-side metadata
-    // updates) for minutes. Batch the delete so we release the lock between
-    // chunks and emit a log line per batch — gives the user a visible
-    // heartbeat instead of a frozen UI.
-    let drop_cooc_batch = cfg.runtime.drop_cooc_batch_size.max(1_000);
-    let deleted_cooc = db_blocking(move || {
-        db::drop_account_cooccurrence_batched(
-            account_id,
-            drop_cooc_batch,
-            |batch, total| {
-                info!(
-                    "[process {account_id}] drop_cooc batch -{batch} (total deleted: {total})"
-                );
-            },
-        )
-        .map_err(|e| format!("Failed to drop account cooccurrence: {e}"))
-    })
-    .await?;
-    info!("[process {account_id}] drop_cooc complete: {deleted_cooc} rows");
-    record_phase!("drop_cooc");
-
-    // Fetch pages in parallel; writes stay serial (SQLite is single-writer).
-    let account_for_fetch = account.clone();
-    let blacklist_for_fetch = blacklist.clone();
-    let mut stream = rocket::futures::stream::iter(1..=pages)
-        .map(move |i| {
-            let acc = account_for_fetch.clone();
-            let bl = blacklist_for_fetch.clone();
-            async move {
-                let raw = api::get_favorites(&acc, i).await;
-                let posts: Vec<Post> = raw
-                    .into_iter()
-                    .map(|p| strip_blacklisted_tags(p, &bl))
-                    .collect();
-                (i, posts)
-            }
-        })
-        .buffer_unordered(cfg.runtime.process_fetch_concurrency.max(1));
-
-    let acc_id = account.id;
-    while let Some((i, posts)) = stream.next().await {
-        let posts_len = posts.len();
-        info!("{posts_len} post(s) found on page {i}");
-        let bl = blacklist.clone();
-        db_blocking(move || -> Result<(), String> {
-            db::save_posts(&posts, acc_id).map_err(|e| format!("Failed to save posts: {e}"))?;
-            db::save_posts_tags_batch(&posts, &bl, true, Some(acc_id))
-                .map_err(|e| format!("Failed to save tags for page {i}: {e}"))?;
-            Ok(())
-        })
-        .await?;
-        jobs::record_page_done(account_id);
-    }
-    mark_idf_dirty();
-    record_phase!("fetch_and_save");
-
-    db_blocking(move || {
-        // Cooccurrence was built incrementally during save_posts_tags_batch,
-        // so skip the expensive full rebuild here.
-        refresh_account_profiles_skip_cooc(account_id)
-            .map_err(|e| format!("Failed to refresh account profiles: {e}"))
-    })
-    .await?;
-    record_phase!("profile_refresh");
-    pipe.finish_and_log();
-    Ok(())
-}
-
-fn strip_blacklisted_tags(mut p: Post, blacklist: &HashSet<String>) -> Post {
-    let filter = |v: &mut Vec<String>| {
-        v.retain(|t| !blacklist.contains(&t.to_lowercase().trim().to_string()));
-    };
-    filter(&mut p.tags.artist);
-    filter(&mut p.tags.character);
-    filter(&mut p.tags.copyright);
-    filter(&mut p.tags.general);
-    filter(&mut p.tags.lore);
-    filter(&mut p.tags.meta);
-    filter(&mut p.tags.species);
-    p
 }
 
 #[openapi(tag = "Accounts")]

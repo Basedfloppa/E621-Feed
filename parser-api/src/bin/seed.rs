@@ -200,7 +200,19 @@ async fn import_user(uid: i32, name: &str) -> anyhow::Result<usize> {
 
     let mut total = 0usize;
     for page in 1..=pages {
-        let raw = api::get_favorites(&account, page).await;
+        let raw = match api::get_favorites(&account, page).await {
+            Ok(Some(p)) => p,
+            Ok(None) => {
+                // Malformed body. Already logged inside get_favorites;
+                // treat as end-of-stream.
+                break;
+            }
+            Err(e) => {
+                // Hard fetch failure after all retries — surface so the
+                // seed tool reports concrete reason, not a silent stop.
+                return Err(anyhow::anyhow!("get_favorites page {page}: {e}"));
+            }
+        };
         if raw.is_empty() {
             // Either rate-limit hit (already retried inside send_with_retry)
             // or the user's favourites went private mid-import. Stop early

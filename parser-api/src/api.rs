@@ -309,7 +309,24 @@ async fn send_with_retry(builder: reqwest::RequestBuilder) -> Result<Response, S
     Err("unreachable".into())
 }
 
-pub async fn get_favorites(account: &TruncatedAccount, page: i32) -> Vec<Post> {
+/// Fetch one page of favourites for `account`.
+///
+/// Returns:
+///   * `Ok(Some(posts))` — request succeeded. `posts` may be empty if the
+///     page is genuinely past the end of the user's favourites.
+///   * `Ok(None)` — the body parsed but didn't match the expected
+///     `PostsApiResponse` shape (e621 returned an error envelope or
+///     something the deserialiser can't handle). Treated as an empty
+///     page upstream.
+///   * `Err(_)` — the HTTP call itself failed after all retries
+///     (timeout, DNS, 5xx that exhausted backoff). Caller decides
+///     whether to bail; the previous "return Vec::new()" silently
+///     fabricated empty pages, leaving `/process` with dropped
+///     favourites the user never sees.
+pub async fn get_favorites(
+    account: &TruncatedAccount,
+    page: i32,
+) -> Result<Option<Vec<Post>>, String> {
     info!("Fetching favorites: user_id={} page={}", account.id, page);
 
     let cfg = cfg();
@@ -327,7 +344,7 @@ pub async fn get_favorites(account: &TruncatedAccount, page: i32) -> Vec<Post> {
         Ok(b) => b,
         Err(e) => {
             warn!("favorites request failed: {e}");
-            return Vec::new();
+            return Err(format!("favorites page {page}: {e}"));
         }
     };
 
@@ -336,12 +353,12 @@ pub async fn get_favorites(account: &TruncatedAccount, page: i32) -> Vec<Post> {
         Err(e) => {
             let preview = body_preview(&body);
             warn!("favorites parse failed: {e}; first bytes: {preview}");
-            return Vec::new();
+            return Ok(None);
         }
     };
 
     info!("Fetched {} favorite posts", posts.len());
-    posts
+    Ok(Some(posts))
 }
 
 pub async fn get_account(account: &TruncatedAccount) -> Result<UserApiResponse, String> {

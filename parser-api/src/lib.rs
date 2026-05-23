@@ -15,6 +15,7 @@ pub mod db;
 pub mod errors;
 pub mod jobs;
 pub mod models;
+pub mod pipeline;
 pub mod prefetch;
 pub mod ratelimit;
 pub mod utils;

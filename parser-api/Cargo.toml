@@ -57,3 +57,11 @@ tikv-jemallocator = { version = "0.6", optional = true }
 
 [target.'cfg(debug_assertions)'.dependencies]
 rocket_cors = "0.6.0"
+
+[dev-dependencies]
+# Mock HTTP server for the e621 client in integration tests. Lets the
+# /process pipeline tests stand up a fake e621 on a random port and
+# point `cfg().posts_domain` at it instead of hitting the live API.
+wiremock = "0.6"
+tempfile = "3"
+serde_json = "1"
