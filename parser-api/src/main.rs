@@ -48,10 +48,14 @@ where
 /// Kicks off a background `/process` job and returns immediately with the
 /// current job state. If a job for this account is already running, returns
 /// the existing state instead of starting a new one.
+///
+/// `mode` query: `auto` (default), `full`, or `incremental`. See
+/// [`pipeline::ProcessMode`].
 #[openapi(tag = "Processing")]
-#[post("/process/<account_id>")]
+#[post("/process/<account_id>?<mode>")]
 async fn process_posts(
     account_id: i32,
+    mode: Option<String>,
     owner: OwnerToken,
     client_ip: ClientIp,
 ) -> Result<Json<ProcessJobState>, ApiError> {
@@ -64,6 +68,8 @@ async fn process_posts(
     let owner_for_check = owner_token.clone();
     db_blocking(move || get_account_by_id(&owner_for_check, account_id).map_err(|e| e.to_string()))
         .await?;
+    let process_mode = pipeline::ProcessMode::from_str(mode.as_deref().unwrap_or(""))
+        .map_err(ApiError::BadRequest)?;
 
     match jobs::try_begin(account_id) {
         BeginResult::AlreadyRunning(state) => {
@@ -74,7 +80,8 @@ async fn process_posts(
         }
         BeginResult::Started(state) => {
             tokio::spawn(async move {
-                let result = pipeline::run_process(account_id, owner_token).await;
+                let result =
+                    pipeline::run_process_with_mode(account_id, owner_token, process_mode).await;
                 if let Err(ref e) = result {
                     warn!("/process for {account_id} failed: {e}");
                     audit::event("process.failed")

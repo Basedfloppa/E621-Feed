@@ -594,9 +594,16 @@ async fn analyze_account_re_analyze_replaces_state() {
         .await;
 
     jobs::try_begin(account_id);
-    pipeline::run_process(account_id, "pipeline_owner".to_string())
-        .await
-        .expect("re-analyze completes");
+    // Explicit Full mode: Auto would pick Incremental when local_count (2)
+    // >= remote_count (2), which only adds new posts without dropping old
+    // ones — this test asserts the old set is replaced entirely.
+    pipeline::run_process_with_mode(
+        account_id,
+        "pipeline_owner".to_string(),
+        pipeline::ProcessMode::Full,
+    )
+    .await
+    .expect("re-analyze completes");
     jobs::finish(account_id, Ok(()));
 
     // Linked set is exactly the new posts.

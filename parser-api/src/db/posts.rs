@@ -138,15 +138,28 @@ pub fn drop_account_posts(account_id: i32) -> Result<(), String> {
 /// Returns the total number of rows deleted.
 pub fn drop_account_cooccurrence_batched(
     account_id: i32,
-    batch_size: usize,
+    _batch_size: usize,
     on_batch: impl FnMut(usize, usize),
 ) -> Result<usize, String> {
-    delete_by_account_in_batches(
-        "account_tag_cooccurrence",
-        account_id,
-        batch_size,
-        on_batch,
-    )
+    // account_tag_cooccurrence has an index on (account_id, ...), so a
+    // single unbounded DELETE is O(log n) — the old rowid-IN-subquery
+    // pattern took 27 minutes on 1.7M rows because SQLite materialised
+    // the subquery as a temp table for each batch and then scanned the
+    // outer table against it. Just delete everything at once.
+    let deleted = super::with_write_tx(|tx| {
+        let n = tx
+            .execute(
+                "DELETE FROM account_tag_cooccurrence WHERE account_id = ?1",
+                params![account_id],
+            )
+            .map_err(|e| format!("Failed to drop account cooccurrence: {e}"))?;
+        Ok(n)
+    })?;
+    let mut cb = on_batch;
+    if deleted > 0 {
+        cb(deleted, deleted);
+    }
+    Ok(deleted)
 }
 
 /// Drop this account's feed interactions in chunks. Same shape as the

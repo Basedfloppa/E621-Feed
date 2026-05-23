@@ -33,7 +33,7 @@ pub struct Config {
     /// `tokio::time::timeout(attempt_timeout_secs)` as a non-negotiable
     /// stop. Set generously enough to allow a real slow response
     /// (~10s p99 for /favorites.json with many posts), tight enough
-    /// that two failed retries can't burn five minutes. Default 45.
+    /// that two failed retries can't burn five minutes. Default 30.
     #[serde(default = "default_attempt_timeout_secs")]
     pub attempt_timeout_secs: u64,
 
@@ -220,7 +220,7 @@ fn default_e621_cache_ttl_secs() -> u64 {
     600
 }
 fn default_attempt_timeout_secs() -> u64 {
-    45
+    30
 }
 fn default_e621_cache_max_entries() -> usize {
     5000

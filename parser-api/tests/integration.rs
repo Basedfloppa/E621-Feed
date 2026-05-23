@@ -508,7 +508,9 @@ fn drop_account_cooccurrence_batched_loops_until_empty() {
     let before = count_account_cooc(account_id);
     assert!(before >= 10, "expected ≥10 cooc rows, got {before}");
 
-    // Drive batching by forcing batch_size=4 → at least 3 iterations.
+    // The function now does a single unbounded DELETE (the index on
+    // account_id makes it O(log n)) and fires one callback with the
+    // total deleted count.
     use std::cell::Cell;
     let calls = Cell::new(0usize);
     let total_seen = Cell::new(0usize);
@@ -518,7 +520,6 @@ fn drop_account_cooccurrence_batched_loops_until_empty() {
         |batch, total| {
             calls.set(calls.get() + 1);
             total_seen.set(total);
-            assert!(batch <= 4, "batch must respect batch_size, got {batch}");
         },
     )
     .unwrap();
@@ -527,10 +528,10 @@ fn drop_account_cooccurrence_batched_loops_until_empty() {
         deleted as i64, before,
         "total deleted must equal initial row count"
     );
-    assert!(
-        calls.get() >= 2,
-        "should have fired ≥2 batches for {before} rows at batch_size=4, got {}",
-        calls.get()
+    assert_eq!(
+        calls.get(),
+        1,
+        "single unbounded DELETE must fire exactly 1 callback"
     );
     assert_eq!(total_seen.get() as i64, before);
     assert_eq!(count_account_cooc(account_id), 0);
