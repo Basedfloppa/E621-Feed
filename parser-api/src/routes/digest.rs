@@ -277,7 +277,15 @@ async fn build_personalized_digest(
     let digest = stratified_sample(&scored, trending, wildcards, recent_added, popular_new, &mut rng);
 
     // Mark that a personalised digest was built for this user today.
-    let _ = db::mark_digest_built(account_id);
+    // Non-fatal failure: the next request still works, the user just
+    // won't have last_digest_date updated. Surface via audit so silent
+    // staleness shows up in operator logs.
+    if let Err(e) = db::mark_digest_built(account_id) {
+        e621_account_parser_api::audit::event("digest.mark_built_failed")
+            .field("account_id", account_id)
+            .field("error", e)
+            .emit_err();
+    }
 
     Ok(digest)
 }
@@ -335,8 +343,16 @@ pub(crate) async fn get_daily_digest(
     })
     .await?;
 
-    // Update visit tracker (fire-and-forget; failure is non-fatal).
-    let _ = db::update_visit_tracker(account_id);
+    // Update visit tracker (fire-and-forget; failure is non-fatal but
+    // affects the personalised-vs-generic dispatch below — losing
+    // visit-streak makes the user perpetually "cold", so silent
+    // failure here changes behaviour in a confusing way).
+    if let Err(e) = db::update_visit_tracker(account_id) {
+        e621_account_parser_api::audit::event("digest.visit_tracker_failed")
+            .field("account_id", account_id)
+            .field("error", e)
+            .emit_err();
+    }
 
     // Determine cache key. Each toggle (full / exclude_saved) yields a
     // distinct cached payload so users flipping the switch don't see a

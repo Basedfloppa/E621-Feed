@@ -216,10 +216,22 @@ pub(crate) async fn get_recommendations(
                 Ok(())
             })
             .await;
+            // Fire-and-forget — caller already returned the response,
+            // so audit-stderr is the only thing that surfaces failures
+            // here. `warn!` is kept too for operators who read the
+            // regular log stream.
             if let Ok(Err(e)) = res {
                 warn!("background recommendation persist failed: {e}");
+                audit::event("feed.persist_failed")
+                    .field("kind", "task_error")
+                    .field("error", e)
+                    .emit_err();
             } else if let Err(e) = res {
                 warn!("background recommendation persist task panicked: {e}");
+                audit::event("feed.persist_failed")
+                    .field("kind", "panic")
+                    .field("error", e)
+                    .emit_err();
             }
         });
     }
@@ -659,8 +671,18 @@ async fn build_recommendations_inner(
             .await;
             if let Ok(Err(e)) = res {
                 warn!("background recommendation persist failed: {e}");
+                audit::event("feed.persist_failed")
+                    .field("kind", "task_error")
+                    .field("ctx", "continue")
+                    .field("error", e)
+                    .emit_err();
             } else if let Err(e) = res {
                 warn!("background recommendation persist task panicked: {e}");
+                audit::event("feed.persist_failed")
+                    .field("kind", "panic")
+                    .field("ctx", "continue")
+                    .field("error", e)
+                    .emit_err();
             }
         });
     }

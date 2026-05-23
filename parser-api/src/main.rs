@@ -242,7 +242,16 @@ fn attach_cors(rocket: rocket::Rocket<rocket::Build>) -> rocket::Rocket<rocket::
 #[launch]
 async fn rocket() -> _ {
     let path = default_path().unwrap();
-    let _ = reload_from(&path);
+    // Startup config load: failure here means defaults are used, which
+    // can subtly change behaviour (e621 base URL, blacklist, etc.).
+    // Surface so an operator notices instead of silently running with
+    // unintended defaults.
+    if let Err(e) = reload_from(&path) {
+        audit::event("startup.config_load_failed")
+            .field("path", path.display())
+            .field("error", e)
+            .emit_err();
+    }
     let watcher = start_config_watcher(path).unwrap();
 
     let settings = OpenApiSettings::new();
