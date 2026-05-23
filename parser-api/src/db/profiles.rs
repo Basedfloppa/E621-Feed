@@ -213,7 +213,11 @@ fn refresh_account_profiles_impl(account_id: i32, skip_cooccurrence: bool) -> Re
         )
         .map_err(|e| format!("Failed to set profile_refreshed_at: {e}"))?;
         Ok(())
-    })
+    })?;
+    // Invalidate the in-memory tag-counts cache so the next request
+    // re-reads the fresh data.
+    super::tags::clear_tag_counts_cache(account_id);
+    Ok(())
 }
 
 /// Multiplies per-tag feedback counts by `0.5 ^ (elapsed / half_life)` and

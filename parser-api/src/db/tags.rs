@@ -1,9 +1,43 @@
 use rusqlite::params;
 use std::collections::{HashMap, HashSet};
+use std::sync::{LazyLock, Mutex};
 
 use crate::models::{Post, TagCount};
 
 use super::open_db;
+
+/// TTL cache for `get_tag_counts`. Tag counts only change during `/process`
+/// (profile refresh), which calls `clear_tag_counts_cache()`. Between
+/// refreshes they're static, so a short TTL (30s) saves redundant PK lookups
+/// during infinite-scroll pagination.
+struct CachedTagCounts {
+    counts: Vec<TagCount>,
+    inserted_at: std::time::Instant,
+}
+
+static TAG_COUNTS_CACHE: LazyLock<Mutex<HashMap<i32, CachedTagCounts>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Cache TTL for tag counts. 30 seconds is long enough to dedup
+/// infinite-scroll pages for the same account, short enough that stale
+/// data after a `/process` refresh resolves within half a minute.
+const TAG_COUNTS_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Clear the tag counts cache for a specific account.
+/// Called after `/process` updates an account's tag counts.
+pub fn clear_tag_counts_cache(account_id: i32) {
+    if let Ok(mut cache) = TAG_COUNTS_CACHE.lock() {
+        cache.remove(&account_id);
+    }
+}
+
+/// Clear the entire tag counts cache. Used when bulk operations may have
+/// invalidated multiple accounts at once.
+pub fn clear_all_tag_counts_caches() {
+    if let Ok(mut cache) = TAG_COUNTS_CACHE.lock() {
+        cache.clear();
+    }
+}
 
 pub fn save_posts_tags_batch(
     posts: &[Post],
@@ -272,6 +306,16 @@ pub fn set_tag_counts(account_id: i32) -> Result<(), String> {
 }
 
 pub fn get_tag_counts(account_id: i32) -> Result<Vec<TagCount>, String> {
+    // Check TTL cache first (dedups repeated lookups for the same account
+    // within a 30-second window, e.g. infinite-scroll pagination).
+    if let Ok(cache) = TAG_COUNTS_CACHE.lock() {
+        if let Some(entry) = cache.get(&account_id) {
+            if entry.inserted_at.elapsed() < TAG_COUNTS_CACHE_TTL {
+                return Ok(entry.counts.clone());
+            }
+        }
+    }
+
     let conn = open_db()?;
 
     let mut stmt = conn
@@ -289,6 +333,17 @@ pub fn get_tag_counts(account_id: i32) -> Result<Vec<TagCount>, String> {
         .map_err(|e| format!("Failed to get accounts: {e}"))?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| format!("Failed to enumerate accounts: {e}"))?;
+
+    // Store in cache before returning.
+    if let Ok(mut cache) = TAG_COUNTS_CACHE.lock() {
+        cache.insert(
+            account_id,
+            CachedTagCounts {
+                counts: counts.clone(),
+                inserted_at: std::time::Instant::now(),
+            },
+        );
+    }
 
     Ok(counts)
 }

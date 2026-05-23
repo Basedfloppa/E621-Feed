@@ -51,16 +51,18 @@ pub(crate) async fn log_feed_interaction(
 }
 
 #[openapi(tag = "Recommendations")]
-#[get("/recommendations/<account_id>?<page>&<affinity_threshold>")]
+#[get("/recommendations/<account_id>?<page>&<affinity_threshold>&<exploration>")]
 pub(crate) async fn get_recommendations(
     account_id: i32,
     owner: OwnerToken,
     page: Option<i32>,
     affinity_threshold: Option<f32>,
+    exploration: Option<f32>,
 ) -> Result<Json<Vec<ScoredPost>>, ApiError> {
     validation::validate_account_id(account_id)?;
     validation::validate_recommendations_page(page)?;
     let affinity_threshold = validation::validate_affinity_threshold(affinity_threshold)?;
+    let exploration = validation::validate_exploration(exploration)?;
     let owner_token = owner.0;
     // Cap per device — admin-authenticated round-trip per request, so an
     // infinite-scroll loop must not burn through the admin quota.
@@ -148,6 +150,14 @@ pub(crate) async fn get_recommendations(
         debug!("recommendations account={account_id} bucket={bucket}");
     }
     priors.now = Utc::now();
+
+    // 9.2 — Exploration mode ("Surprise me" button): when the client passes
+    // `?exploration=<0..1>`, it overrides `exploration_epsilon` to broaden
+    // the feed beyond the user's established preferences.
+    if let Some(explore) = exploration {
+        priors.exploration_epsilon = explore.min(0.5).max(0.0);
+        debug!("recommendations account={account_id} exploration_mode={explore}");
+    }
 
     let live_posts: Vec<Post> = api::get_posts(&account, page)
         .await
@@ -298,10 +308,11 @@ pub(crate) async fn get_recommendations(
         for sp in sorted_for_log.iter().rev().take(10) {
             if let Some(b) = &sp.breakdown {
                 info!(
-                    "  post_id={} score={:.4}  sim={:.3} qual={:.3} rec={:.3} rate={:.3} med={:.3} pop={:.3} inter={:.3} rel={:.3} upl={:.3}",
+                    "  post_id={} score={:.4}  sim={:.3} qual={:.3} rec={:.3} rate={:.3} med={:.3} pop={:.3} inter={:.3} rel={:.3} upl={:.3} exc={:.3} nov={:.3}",
                     sp.post.id, sp.score,
                     b.tag_similarity, b.quality_fit, b.recency_fit, b.rating_fit,
                     b.media_fit, b.popularity_fit, b.interaction_fit, b.tag_relation_fit, b.uploader_fit,
+                    b.exclusivity_fit, b.novelty_fit,
                 );
             }
         }

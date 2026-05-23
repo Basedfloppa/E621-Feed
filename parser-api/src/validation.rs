@@ -158,6 +158,19 @@ pub fn validate_blacklist_payload(payload: &BlacklistPayload) -> Result<(), ApiE
 /// Bound the `page` query param on `/recommendations`. `None` (caller
 /// omitted the param) is the route's default, accepted as-is. Page 0 is
 /// rejected because e621 uses 1-indexed pages and returns 410 Gone for 0.
+/// Validate exploration mode parameter. Accepts `None` (disabled) or
+/// a finite f32 clamped to `[0.0, 0.5]`. 0 = deterministic (default),
+/// higher values = more exploratory / "surprise me".
+pub fn validate_exploration(t: Option<f32>) -> Result<Option<f32>, ApiError> {
+    let Some(t) = t else { return Ok(None); };
+    if !t.is_finite() {
+        return Err(ApiError::BadRequest(
+            "exploration must be a finite number".into(),
+        ));
+    }
+    Ok(Some(t.clamp(0.0, 0.5)))
+}
+
 pub fn validate_recommendations_page(page: Option<i32>) -> Result<(), ApiError> {
     let Some(p) = page else { return Ok(()); };
     if !(1..=MAX_RECOMMENDATIONS_PAGE).contains(&p) {
