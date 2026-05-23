@@ -1,4 +1,4 @@
-use crate::components::{ConfirmModal, UserSearchForm};
+use crate::components::{ConfirmModal, ReanalyzeButton, UserSearchForm};
 use crate::models::{
     api_delete, api_get, api_patch, api_post, dispatch_account_list_changed, humanize_error_body,
     read_config_from_head,
@@ -47,7 +47,6 @@ pub fn account_creator() -> Html {
     let edit_draft = use_state(String::new);
     let edit_saving = use_state(|| false);
     let remove_error: UseStateHandle<Option<String>> = use_state(|| None);
-    let processing_ids: UseStateHandle<std::collections::HashSet<i64>> = use_state(|| std::collections::HashSet::new());
     let experiment_buckets: UseStateHandle<HashMap<i64, String>> = use_state(HashMap::new);
     let pending_remove: UseStateHandle<Option<UserInfo>> = use_state(|| None);
     let default_blacklist: UseStateHandle<Vec<String>> = use_state(Vec::new);
@@ -350,54 +349,20 @@ pub fn account_creator() -> Html {
         })
     };
 
-    let reanalyze_account = {
-        let processing_ids = processing_ids.clone();
+    let on_reanalyze_complete = {
         let message = message.clone();
         let error = error.clone();
-
-        Callback::from(move |account_id: i64| {
-            let Some(cfg) = read_config_from_head() else {
-                return;
-            };
-            if processing_ids.contains(&account_id) {
-                return; // already in flight
-            }
-            {
-                let mut ids = (*processing_ids).clone();
-                ids.insert(account_id);
-                processing_ids.set(ids);
-            }
-
-            let url = format!("{}/process/{}", cfg.backend_domain, account_id);
-            let processing_ids = processing_ids.clone();
-            let message = message.clone();
-            let error = error.clone();
-
-            wasm_bindgen_futures::spawn_local(async move {
-                match api_post(&url).send().await {
-                    Ok(resp) if resp.ok() => {
-                        message.set("Analysis started successfully — you can check progress on the home page.".to_string());
-                        error.set(false);
-                    }
-                    Ok(resp) => {
-                        let status = resp.status();
-                        let text = resp.text().await.unwrap_or_default();
-                        let humanized = humanize_error_body(status, &text);
-                        web_sys::console::error_1(
-                            &format!("re-analyze failed (HTTP {status}): {text}").into(),
-                        );
-                        message.set(humanized);
-                        error.set(true);
-                    }
-                    Err(e) => {
-                        message.set(format!("Network error: {e}"));
-                        error.set(true);
-                    }
+        Callback::from(move |result: Result<String, String>| {
+            match result {
+                Ok(msg) => {
+                    message.set(msg);
+                    error.set(false);
                 }
-                let mut ids = (*processing_ids).clone();
-                ids.remove(&account_id);
-                processing_ids.set(ids);
-            });
+                Err(e) => {
+                    message.set(e);
+                    error.set(true);
+                }
+            }
         })
     };
 
@@ -692,7 +657,6 @@ pub fn account_creator() -> Html {
                                         let cancel_edit = cancel_edit.clone();
                                         let save_edit = save_edit.clone();
                                         let on_remove = on_remove.clone();
-                                        let reanalyze_account = reanalyze_account.clone();
                                         let on_draft_change = on_edit_draft_change.clone();
                                         let draft_value = (*edit_draft).clone();
                                         let is_saving = *edit_saving;
@@ -728,23 +692,11 @@ pub fn account_creator() -> Html {
                                                             >
                                                                 {"Edit blacklist"}
                                                             </button>
-                                                            <button
-                                                                class="btn btn-outline-success"
-                                                                title="Re-analyse this account's favourites to refresh recommendations"
-                                                                onclick={Callback::from(move |_| reanalyze_account.emit(acc_id))}
-                                                                disabled={processing_ids.contains(&acc_id)}
-                                                            >
-                                                                { if processing_ids.contains(&acc_id) {
-                                                                    html! {
-                                                                        <span>
-                                                                            <span class="spinner-border spinner-border-sm me-1" role="status" aria-hidden="true"></span>
-                                                                            {"Re-analyzing"}
-                                                                        </span>
-                                                                    }
-                                                                } else {
-                                                                    "Re-analyze".into()
-                                                                }}
-                                                            </button>
+                                                            <ReanalyzeButton
+                                                                account_id={acc_id}
+                                                                api_base={backend_domain.clone()}
+                                                                on_complete={on_reanalyze_complete.clone()}
+                                                            />
                                                             <button
                                                                 class="btn btn-outline-danger"
                                                                 title="Unlink this account from the device"

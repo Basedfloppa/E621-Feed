@@ -95,7 +95,7 @@ pub fn fetch_analyze_button(props: &AnalyzeButtonProps) -> Html {
             is_loading.set(true);
             error.set(None);
 
-            let url = format!("{}/process/{}", api_base, user.id);
+            let url = format!("{}/process/{}?mode=full", api_base, user.id);
             let job_status = job_status.clone();
             let is_loading = is_loading.clone();
             let error = error.clone();

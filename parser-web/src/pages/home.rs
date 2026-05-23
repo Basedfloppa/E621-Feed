@@ -109,6 +109,18 @@ pub fn home_page() -> Html {
         .map(|u| saved_accounts.iter().any(|sa| sa.id == u.id))
         .unwrap_or(false);
 
+    // Toast-like message handler for ReanalyzeButton completion events.
+    // We re-use the existing `error` state to show the outcome.
+    let on_reanalyze_msg = {
+        let error = error.clone();
+        Callback::from(move |result: Result<String, String>| {
+            match result {
+                Ok(msg) => error.set(Some(msg)),
+                Err(e) => error.set(Some(e)),
+            }
+        })
+    };
+
     // Click → navigate to `/account` with the looked-up id and name as
     // query params so the form arrives pre-filled. Uses
     // `push_with_query` (yew_router soft nav) rather than a hard `<a>`
@@ -160,6 +172,41 @@ pub fn home_page() -> Html {
                                     user={selected_user.clone()}
                                     error={error.clone()}
                                 />
+
+                                // Saved accounts quick-actions — show a
+                                // compact list of every saved account with
+                                // a one-click Re-analyze button so the user
+                                // doesn't have to switch to /account to
+                                // trigger an update.
+                                if !saved_accounts.is_empty() {
+                                    <div class="mb-3">
+                                        <details open={saved_accounts.len() <= 3}>
+                                            <summary class="text-body-secondary small mb-2" style="cursor: pointer;">
+                                                { format!("Saved accounts ({} total)", saved_accounts.len()) }
+                                            </summary>
+                                            <ul class="list-group list-group-flush">
+                                                {for saved_accounts.iter().map(|acc| {
+                                                    let acc_id = acc.id;
+                                                    let name = acc.name.clone();
+                                                    let on_msg = on_reanalyze_msg.clone();
+                                                    html! {
+                                                        <li class="list-group-item d-flex justify-content-between align-items-center py-1 px-2">
+                                                            <span class="small">
+                                                                <strong>{ &name }</strong>
+                                                                { format!(" (ID {})", acc.id) }
+                                                            </span>
+                                                            <ReanalyzeButton
+                                                                account_id={acc_id}
+                                                                api_base={cfg.backend_domain.clone()}
+                                                                on_complete={on_msg}
+                                                            />
+                                                        </li>
+                                                    }
+                                                })}
+                                            </ul>
+                                        </details>
+                                    </div>
+                                }
 
                                 // "Looked up but not saved" prompt. The
                                 // search routes fall back to an e621 lookup
