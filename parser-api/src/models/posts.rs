@@ -242,6 +242,27 @@ pub struct ScoredPost {
     pub breakdown: Option<ScoreBreakdown>,
 }
 
+/// Response wrapper for session-based feed continuation.
+/// `fresh_start` is true when the session expired or didn't exist,
+/// signalling the client to discard the old session token.
+#[derive(Serialize, Deserialize, JsonSchema, Clone)]
+#[serde(crate = "rocket::serde")]
+pub struct ContinueResponse {
+    pub posts: Vec<ScoredPost>,
+    pub fresh_start: bool,
+}
+
+/// Query parameters for `/posts/<id>/similar`.
+#[derive(Deserialize, JsonSchema, Clone)]
+#[serde(crate = "rocket::serde")]
+pub struct SimilarPostsQuery {
+    pub account_id: i32,
+    pub limit: Option<i32>,
+    /// Minimum number of overlapping tags (default 2).
+    pub min_overlap: Option<i32>,
+    pub page: Option<i32>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

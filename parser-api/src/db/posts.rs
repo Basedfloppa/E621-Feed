@@ -516,3 +516,191 @@ pub fn hydrate_posts_by_ids(ids: &[i64]) -> Result<Vec<Post>, String> {
 
     Ok(posts.into_values().collect())
 }
+
+/// Find post IDs similar to `post_id` via tag overlap. Returns candidates
+/// that share at least `min_overlap` tags with the source post, ordered by
+/// overlap count DESC, score_total DESC. Excludes owned and recently-seen
+/// posts. Supports pagination via `page` / `limit`.
+pub fn find_similar_post_ids(
+    post_id: i64,
+    account_id: i32,
+    min_overlap: i32,
+    limit: i64,
+    page: i64,
+) -> Result<Vec<i64>, String> {
+    let conn = open_db()?;
+    let offset = page.saturating_sub(1).max(0) * limit;
+    let mut stmt = conn
+        .prepare(
+            "
+            SELECT p.id
+            FROM posts p
+            INNER JOIN tags_posts tp ON tp.post_id = p.id
+            WHERE tp.tag_id IN (
+                SELECT tp2.tag_id FROM tags_posts tp2 WHERE tp2.post_id = ?1
+            )
+              AND p.id != ?1
+              AND p.is_deleted = 0
+              AND p.preview_url IS NOT NULL
+              AND NOT EXISTS (SELECT 1 FROM accounts_post ap WHERE ap.account_id = ?2 AND ap.post_id = p.id)
+              AND NOT EXISTS (
+                  SELECT 1 FROM feed_interactions fi
+                  WHERE fi.account_id = ?2 AND fi.post_id = p.id
+                    AND fi.event_type IN ('qualified_impression', 'hide', 'open')
+              )
+            GROUP BY p.id
+            HAVING COUNT(DISTINCT tp.tag_id) >= ?3
+            ORDER BY COUNT(DISTINCT tp.tag_id) DESC, p.score_total DESC
+            LIMIT ?4 OFFSET ?5
+            ",
+        )
+        .map_err(|e| format!("Failed to prepare similar posts query: {e}"))?;
+
+    let rows = stmt
+        .query_map(params![post_id, account_id, min_overlap, limit, offset], |r| {
+            r.get::<_, i64>(0)
+        })
+        .map_err(|e| format!("Failed to query similar posts: {e}"))?;
+
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("Failed to collect similar posts: {e}"))
+}
+
+/// Fetch a single post by ID from the local DB. Returns None if not found.
+pub fn get_post_by_id(post_id: i64) -> Result<Option<Post>, String> {
+    let conn = open_db()?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, created_at, updated_at, score_total, fav_count, rating,
+                    comment_count, has_notes, is_deleted, has_children,
+                    preview_url, sample_url, file_url, score_up, score_down,
+                    sample_width, sample_height, preview_width, preview_height,
+                    uploader_id, file_ext, file_width, file_height, file_size,
+                    is_animated, duration
+             FROM posts
+             WHERE id = ?1",
+        )
+        .map_err(|e| format!("Failed to prepare get_post_by_id: {e}"))?;
+
+    let mut rows = stmt
+        .query_map(params![post_id], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, i64>(3)?,
+                r.get::<_, i64>(4)?,
+                r.get::<_, String>(5)?,
+                r.get::<_, i64>(6)?,
+                r.get::<_, bool>(7)?,
+                r.get::<_, bool>(8)?,
+                r.get::<_, bool>(9)?,
+                r.get::<_, Option<String>>(10)?,
+                r.get::<_, Option<String>>(11)?,
+                r.get::<_, Option<String>>(12)?,
+                r.get::<_, i64>(13)?,
+                r.get::<_, i64>(14)?,
+                r.get::<_, Option<i64>>(15)?,
+                r.get::<_, Option<i64>>(16)?,
+                r.get::<_, Option<i64>>(17)?,
+                r.get::<_, Option<i64>>(18)?,
+                r.get::<_, Option<i64>>(19)?,
+                r.get::<_, Option<String>>(20)?,
+                r.get::<_, Option<i64>>(21)?,
+                r.get::<_, Option<i64>>(22)?,
+                r.get::<_, Option<i64>>(23)?,
+                r.get::<_, Option<i64>>(24)?,
+                r.get::<_, Option<f64>>(25)?,
+            ))
+        })
+        .map_err(|e| format!("Failed to query post by id: {e}"))?;
+
+    match rows.next() {
+        Some(Ok(row)) => {
+            let (id, created_at, updated_at, score_total, fav_count, rating,
+                 comment_count, has_notes, is_deleted, has_children,
+                 preview_url, sample_url, file_url, score_up, score_down,
+                 sample_width, sample_height, preview_width, preview_height,
+                 uploader_id, file_ext, file_width, file_height, file_size,
+                 _is_animated, duration) = row;
+
+            let parse_dt = |s: String| -> Result<chrono::DateTime<Utc>, String> {
+                crate::db::parse_db_datetime(&s)
+            };
+
+            Ok(Some(Post {
+                id,
+                created_at: parse_dt(created_at)?,
+                updated_at: parse_dt(updated_at)?,
+                score: crate::models::Score {
+                    up: score_up.max(0),
+                    down: score_down.max(0),
+                    total: score_total.max(0),
+                },
+                fav_count: fav_count.max(0),
+                rating: match rating.to_lowercase().as_str() {
+                    "s" => crate::models::Rating::S,
+                    "q" => crate::models::Rating::Q,
+                    "e" => crate::models::Rating::E,
+                    _ => crate::models::Rating::S,
+                },
+                tags: crate::models::Tags {
+                    general: vec![],
+                    artist: vec![],
+                    copyright: vec![],
+                    character: vec![],
+                    species: vec![],
+                    invalid: vec![],
+                    meta: vec![],
+                    lore: vec![],
+                    contributor: vec![],
+                },
+                comment_count: comment_count.max(0),
+                has_notes,
+                flags: crate::models::Flags {
+                    deleted: is_deleted,
+                    ..Default::default()
+                },
+                file: file_ext.map(|ext| crate::models::FileInfo {
+                    ext: Some(ext),
+                    width: file_width.unwrap_or(0),
+                    height: file_height.unwrap_or(0),
+                    size: file_size.unwrap_or(0),
+                    md5: None,
+                    url: file_url,
+                }),
+                preview: preview_url.map(|url| crate::models::Preview {
+                    width: preview_width.unwrap_or(0),
+                    height: preview_height.unwrap_or(0),
+                    url: Some(url),
+                }),
+                sample: sample_url.map(|url| crate::models::Sample {
+                    has: Some(true),
+                    height: sample_height,
+                    width: sample_width,
+                    url: Some(url),
+                    alternates: None,
+                    variants: None,
+                    samples: None,
+                }),
+                uploader_id: uploader_id.unwrap_or(0),
+                duration,
+                sources: vec![],
+                pools: vec![],
+                relationships: crate::models::Relationships {
+                    parent_id: None,
+                    has_children,
+                    has_active_children: false,
+                    children: vec![],
+                },
+                approver_id: None,
+                description: None,
+                is_favorited: false,
+                change_seq: 0.0,
+                locked_tags: None,
+            }))
+        }
+        Some(Err(e)) => Err(format!("Failed to read post row: {e}")),
+        None => Ok(None),
+    }
+}

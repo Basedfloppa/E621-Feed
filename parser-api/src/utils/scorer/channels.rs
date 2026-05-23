@@ -658,6 +658,182 @@ impl<'a> ScoringContext<'a> {
     }
 }
 
+// ── Standalone helpers ──────────────────────────────────────────────
+
+/// IDF-weighted cosine similarity between two posts (pure content-based).
+/// Unlike `ScoringContext::tag_similarity`, this does **not** consider the
+/// user profile — it's symmetric content similarity.
+///
+/// Each tag's weight = `group_w * idf(tag)`, with no frequency or BM25
+/// saturation (binary presence: 0 or 1). This keeps it a pure content
+/// signal suitable for "more like this" recommendations.
+pub fn post_pair_similarity(
+    a: &Post,
+    b: &Post,
+    idf: &crate::utils::idf::IdfIndex,
+    priors: &super::priors::Priors,
+) -> f32 {
+    let df_floor = priors.df_floor;
+    let idf_max = priors.idf_max;
+    let rsj = priors.idf_rsj_smoothing;
+    let lambda = priors.idf_lambda;
+    let lambda_meta = if priors.idf_lambda_meta.is_nan() {
+        lambda
+    } else {
+        priors.idf_lambda_meta
+    };
+
+    // Extract tag groups as (group, tags) pairs.
+    let posts_a: [(Group, &[String]); 7] = [
+        (Group::Artist, &a.tags.artist),
+        (Group::Character, &a.tags.character),
+        (Group::Copyright, &a.tags.copyright),
+        (Group::General, &a.tags.general),
+        (Group::Lore, &a.tags.lore),
+        (Group::Meta, &a.tags.meta),
+        (Group::Species, &a.tags.species),
+    ];
+    let posts_b: [(Group, &[String]); 7] = [
+        (Group::Artist, &b.tags.artist),
+        (Group::Character, &b.tags.character),
+        (Group::Copyright, &b.tags.copyright),
+        (Group::General, &b.tags.general),
+        (Group::Lore, &b.tags.lore),
+        (Group::Meta, &b.tags.meta),
+        (Group::Species, &b.tags.species),
+    ];
+
+    // Build a flat list of (group, tag, weight) for each post.
+    let mut vec_a: Vec<(Group, f32)> = Vec::new();
+    let mut vec_b: Vec<(Group, f32)> = Vec::new();
+
+    macro_rules! collect_tags {
+        ($target:expr, $pairs:expr) => {
+            for (group, tags) in $pairs {
+                if !group.is_scoring() {
+                    continue;
+                }
+                let g = match group {
+                    Group::Artist => priors.group_w_artist,
+                    Group::Character => priors.group_w_character,
+                    Group::Copyright => priors.group_w_copyright,
+                    Group::Species => priors.group_w_species,
+                    Group::General => priors.group_w_general,
+                    Group::Lore => priors.group_w_lore,
+                    Group::Meta => 0.0,
+                };
+                if g <= 0.0 {
+                    continue;
+                }
+                let lam = if matches!(group, Group::Meta) {
+                    lambda_meta
+                } else {
+                    lambda
+                };
+                for t in tags {
+                    if t.is_empty() {
+                        continue;
+                    }
+                    let tlc = normalize_tag(t);
+                    let idf_w = idf.idf_tempered(&tlc, df_floor, idf_max, rsj, lam, lambda);
+                    let w = g * idf_w;
+                    if w > 0.0 {
+                        $target.push((group, w));
+                    }
+                }
+            }
+        };
+    }
+
+    collect_tags!(vec_a, posts_a);
+    collect_tags!(vec_b, posts_b);
+
+    // Compute dot product and norms per-group (like tag_similarity but
+    // between two posts instead of user vs post).
+    let mut dot = 0.0f32;
+    let mut norm_a_sq = 0.0f32;
+    let mut norm_b_sq = 0.0f32;
+
+    for (group, w_a) in &vec_a {
+        norm_a_sq += w_a * w_a;
+        for (_, w_b) in vec_b.iter().filter(|(g, _)| g == group) {
+            dot += w_a * w_b;
+        }
+    }
+    for (_, w_b) in &vec_b {
+        norm_b_sq += w_b * w_b;
+    }
+
+    if norm_a_sq <= 0.0 || norm_b_sq <= 0.0 {
+        return 0.0;
+    }
+    (dot / (norm_a_sq.sqrt() * norm_b_sq.sqrt())).clamp(0.0, 1.0)
+}
+
+/// Build a tag-weight vector for a single post (for `post_pair_similarity`).
+/// Returns a Vec of (group_index, weight) sorted by group for efficient comparison.
+pub fn post_tag_vector(
+    post: &Post,
+    idf: &crate::utils::idf::IdfIndex,
+    priors: &super::priors::Priors,
+) -> Vec<(usize, f32)> {
+    let df_floor = priors.df_floor;
+    let idf_max = priors.idf_max;
+    let rsj = priors.idf_rsj_smoothing;
+    let lambda = priors.idf_lambda;
+    let lambda_meta = if priors.idf_lambda_meta.is_nan() {
+        lambda
+    } else {
+        priors.idf_lambda_meta
+    };
+
+    let groups: [(Group, &[String]); 7] = [
+        (Group::Artist, &post.tags.artist),
+        (Group::Character, &post.tags.character),
+        (Group::Copyright, &post.tags.copyright),
+        (Group::General, &post.tags.general),
+        (Group::Lore, &post.tags.lore),
+        (Group::Meta, &post.tags.meta),
+        (Group::Species, &post.tags.species),
+    ];
+
+    let mut out = Vec::new();
+    for (group, tags) in groups {
+        if !group.is_scoring() {
+            continue;
+        }
+        let g = match group {
+            Group::Artist => priors.group_w_artist,
+            Group::Character => priors.group_w_character,
+            Group::Copyright => priors.group_w_copyright,
+            Group::Species => priors.group_w_species,
+            Group::General => priors.group_w_general,
+            Group::Lore => priors.group_w_lore,
+            Group::Meta => 0.0,
+        };
+        if g <= 0.0 {
+            continue;
+        }
+        let lam = if matches!(group, Group::Meta) {
+            lambda_meta
+        } else {
+            lambda
+        };
+        for t in tags {
+            if t.is_empty() {
+                continue;
+            }
+            let tlc = normalize_tag(t);
+            let idf_w = idf.idf_tempered(&tlc, df_floor, idf_max, rsj, lam, lambda);
+            let w = g * idf_w;
+            if w > 0.0 {
+                out.push((group as usize, w));
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

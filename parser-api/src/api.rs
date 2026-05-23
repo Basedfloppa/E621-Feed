@@ -470,6 +470,32 @@ pub async fn get_posts_by_tags(
     Ok(posts)
 }
 
+/// Fetch posts by their IDs from e621. Uses `id:12345,67890` syntax.
+/// Respects the global rate gate and TTL cache.
+pub async fn get_posts_by_ids(ids: &[i64]) -> Result<Vec<Post>, String> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let id_list: Vec<String> = ids.iter().map(|id| id.to_string()).collect();
+    let tags = format!("id:{}", id_list.join(","));
+    let cfg = cfg();
+    let url = build_url(
+        "posts.json",
+        &[
+            ("limit", cfg.posts_limit.to_string()),
+            ("tags", tags),
+            ("page", "1".to_string()),
+        ],
+    );
+    let body = fetch_authed_text(url, true, 0)
+        .await
+        .map_err(|e| format!("posts by ids request: {e}"))?;
+    let posts = json::from_str::<PostsApiResponse>(&body)
+        .map_err(|e| format!("posts parse failed: {e}"))?
+        .posts;
+    Ok(posts)
+}
+
 /// Per-page TTL so the first feed page (which users see most often)
 /// refreshes faster than deeper scroll pages. Page 1: 2 minutes, other
 /// pages: configured global TTL.

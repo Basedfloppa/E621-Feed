@@ -348,6 +348,8 @@ async fn rocket() -> _ {
         routes::account::set_account_preferred_tags,
         routes::account::get_account_experiment_bucket,
         routes::feed::get_recommendations,
+        routes::feed::get_recommendations_continue,
+        routes::feed::get_similar_posts,
         get_default_blacklist,
         session_bootstrap,
         session_clear

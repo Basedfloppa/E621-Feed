@@ -193,6 +193,64 @@ pub fn validate_affinity_threshold(t: Option<f32>) -> Result<Option<f32>, ApiErr
     Ok(Some(t.clamp(0.0, 1.0)))
 }
 
+/// Validate a session token for feed continuation. Accepts UUID v4/v7
+/// or any alphanumeric token 8..=128 chars (no security, just navigation).
+pub fn validate_session_token(token: &str) -> Result<(), ApiError> {
+    let len = token.len();
+    if !(8..=128).contains(&len) {
+        return Err(ApiError::BadRequest(format!(
+            "session_token length {len} not in 8..=128"
+        )));
+    }
+    if !token.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+        return Err(ApiError::BadRequest(
+            "session_token must contain only [A-Za-z0-9_-]".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Validate count parameter for continuation requests.
+pub fn validate_continue_count(count: Option<i32>) -> Result<i32, ApiError> {
+    match count {
+        None => Ok(20),
+        Some(c) if (1..=100).contains(&c) => Ok(c),
+        Some(c) => Err(ApiError::BadRequest(format!(
+            "count {c} out of range [1, 100]"
+        ))),
+    }
+}
+
+pub fn validate_similar_posts_limit(limit: Option<i32>) -> Result<i64, ApiError> {
+    match limit {
+        None => Ok(20),
+        Some(l) if (1..=100).contains(&l) => Ok(l as i64),
+        Some(l) => Err(ApiError::BadRequest(format!(
+            "limit {l} out of range [1, 100]"
+        ))),
+    }
+}
+
+pub fn validate_similar_posts_min_overlap(overlap: Option<i32>) -> Result<i32, ApiError> {
+    match overlap {
+        None => Ok(2),
+        Some(o) if o >= 1 && o <= 20 => Ok(o),
+        Some(o) => Err(ApiError::BadRequest(format!(
+            "min_overlap {o} out of range [1, 20]"
+        ))),
+    }
+}
+
+pub fn validate_similar_posts_page(page: Option<i32>) -> Result<i64, ApiError> {
+    match page {
+        None => Ok(1),
+        Some(p) if p >= 1 && p <= 100 => Ok(p as i64),
+        Some(p) => Err(ApiError::BadRequest(format!(
+            "page {p} out of range [1, 100]"
+        ))),
+    }
+}
+
 pub fn validate_feed_interaction(req: &FeedInteractionRequest) -> Result<(), ApiError> {
     validate_account_id(req.account_id)?;
     if req.session_id.len() > MAX_SESSION_ID_LEN {
@@ -491,5 +549,40 @@ mod tests {
         assert!(is_bad(validate_preferred_tag_payload(&PreferredTagPayload {
             preferred_tags: many,
         })));
+    }
+
+    #[test]
+    fn session_token_validation() {
+        assert!(is_bad(validate_session_token("short"))); // 7 chars
+        assert!(validate_session_token("01234567").is_ok()); // 8 chars
+        assert!(validate_session_token(&"a".repeat(128)).is_ok());
+        assert!(is_bad(validate_session_token(&"a".repeat(129))));
+        assert!(validate_session_token("550e8400-e29b-41d4-a716-446655440000").is_ok());
+        assert!(is_bad(validate_session_token("hello world!")));
+    }
+
+    #[test]
+    fn continue_count_validation() {
+        assert_eq!(validate_continue_count(None).unwrap(), 20);
+        assert!(validate_continue_count(Some(0)).is_err());
+        assert!(validate_continue_count(Some(101)).is_err());
+        assert_eq!(validate_continue_count(Some(50)).unwrap(), 50);
+    }
+
+    #[test]
+    fn similar_posts_validation() {
+        assert_eq!(validate_similar_posts_limit(None).unwrap(), 20);
+        assert_eq!(validate_similar_posts_limit(Some(50)).unwrap(), 50);
+        assert!(validate_similar_posts_limit(Some(0)).is_err());
+        assert!(validate_similar_posts_limit(Some(101)).is_err());
+
+        assert_eq!(validate_similar_posts_min_overlap(None).unwrap(), 2);
+        assert_eq!(validate_similar_posts_min_overlap(Some(3)).unwrap(), 3);
+        assert!(validate_similar_posts_min_overlap(Some(0)).is_err());
+
+        assert_eq!(validate_similar_posts_page(None).unwrap(), 1);
+        assert_eq!(validate_similar_posts_page(Some(5)).unwrap(), 5);
+        assert!(validate_similar_posts_page(Some(0)).is_err());
+        assert!(validate_similar_posts_page(Some(101)).is_err());
     }
 }
