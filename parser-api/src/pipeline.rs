@@ -38,7 +38,7 @@
 use std::collections::HashSet;
 
 use crate::{
-    api, audit, db,
+    api, audit, db, db_blocking,
     db::{get_account_by_id, refresh_account_profiles_skip_cooc},
     jobs,
     models::{cfg, Post, TruncatedAccount, UserApiResponse},
@@ -100,18 +100,6 @@ pub fn strip_blacklisted_tags(mut p: Post, blacklist: &HashSet<String>) -> Post 
     p
 }
 
-/// Run a blocking rusqlite closure on `spawn_blocking`. Mirror of the
-/// private helper in `main.rs` so this module is self-contained.
-async fn db_blocking<F, T>(f: F) -> Result<T, String>
-where
-    F: FnOnce() -> Result<T, String> + Send + 'static,
-    T: Send + 'static,
-{
-    match rocket::tokio::task::spawn_blocking(f).await {
-        Ok(res) => res,
-        Err(e) => Err(format!("DB task panicked: {e}")),
-    }
-}
 
 /// Two adjacent hard fetch failures abort the whole job — e621 is
 /// reliably unhappy at that point and we'd just burn ~2 minutes per

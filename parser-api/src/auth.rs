@@ -150,3 +150,69 @@ impl<'r> OpenApiFromRequest<'r> for OwnerToken {
         Ok(rocket_okapi::okapi::openapi3::Responses::default())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn build_owner_cookie_properties() {
+        let token = "test-token-abc123";
+        let cookie = build_owner_cookie(token.to_string());
+
+        assert_eq!(cookie.name(), OWNER_TOKEN_COOKIE);
+        assert_eq!(cookie.value(), token);
+        assert_eq!(cookie.http_only(), Some(true));
+        assert_eq!(cookie.same_site(), Some(SameSite::Lax));
+        assert_eq!(cookie.path(), Some("/api"));
+        assert_eq!(
+            cookie.max_age(),
+            Some(Duration::days(OWNER_TOKEN_MAX_AGE_DAYS))
+        );
+    }
+
+    #[test]
+    fn build_owner_cookie_clear_has_zero_max_age() {
+        let cookie = build_owner_cookie_clear();
+
+        assert_eq!(cookie.name(), OWNER_TOKEN_COOKIE);
+        assert!(cookie.value().is_empty());
+        assert_eq!(cookie.max_age(), Some(Duration::ZERO));
+    }
+
+    #[test]
+    fn build_owner_cookie_in_debug_secure_false() {
+        // `build_owner_cookie` uses `cfg!(not(debug_assertions))` for Secure.
+        // Under `cargo test` (debug profile) it must be false.
+        let cookie = build_owner_cookie("x".into());
+        assert_eq!(cookie.secure(), Some(false), "Secure must be false in debug/test profile");
+    }
+
+    #[test]
+    fn is_revoked_known_and_unknown() {
+        let set = revoked_set();
+        // Recover from any prior poison and reset.
+        let mut g = set.write().unwrap_or_else(|p| p.into_inner());
+        g.clear();
+        g.insert("known_revoked".into());
+        drop(g);
+
+        assert!(is_revoked("known_revoked"));
+        assert!(!is_revoked("unknown_token"));
+    }
+
+    #[test]
+    fn is_revoked_empty_set() {
+        let set = revoked_set();
+        match set.write() {
+            Ok(mut g) => g.clear(),
+            Err(p) => {
+                // Recover from poisoned lock left by a prior test.
+                let mut g = p.into_inner();
+                g.clear();
+            }
+        }
+        assert!(!is_revoked("any_token"));
+        assert!(!is_revoked(""));
+    }
+}

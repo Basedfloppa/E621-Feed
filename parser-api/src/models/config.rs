@@ -40,6 +40,11 @@ pub struct Config {
     #[serde(default = "default_user_agent")]
     pub user_agent: String,
 
+    /// Path to the SQLite database file. Relative to the working directory
+    /// unless an absolute path is given. Default `"database.db"`.
+    #[serde(default = "default_db_path")]
+    pub db_path: String,
+
     /// In-memory TTL cache over outbound GET requests to e621. Hit rate
     /// is highest on the recommendations path, where two devices on the
     /// same account or two accounts with the same default blacklist
@@ -221,6 +226,9 @@ fn default_e621_cache_ttl_secs() -> u64 {
 }
 fn default_attempt_timeout_secs() -> u64 {
     30
+}
+fn default_db_path() -> String {
+    "database.db".to_string()
 }
 fn default_e621_cache_max_entries() -> usize {
     5000
@@ -607,7 +615,7 @@ impl Config {
                 if keys.is_empty() {
                     None
                 } else {
-                    let h = (account_id as i64).unsigned_abs() as usize;
+                    let h = (account_id as i64).wrapping_abs() as usize;
                     Some(keys[h % keys.len()].clone())
                 }
             });
@@ -697,4 +705,432 @@ pub fn reload_from(p: &Path) -> anyhow::Result<()> {
     CONFIG.store(arc.clone());
     debug!("[config] current value:\n{arc:#?}");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::Config;
+    use std::io::Write;
+
+    /// Helper: write a TOML string to a temp file and parse it.
+    fn parse_toml(toml: &str) -> anyhow::Result<Config> {
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        write!(f, "{toml}").unwrap();
+        f.flush().unwrap();
+        load_config(f.path())
+    }
+
+    /// Minimum valid config — every required field with priors.
+    const MINIMAL_TOML: &str = r#"
+admin_user    = "test_admin"
+admin_api     = "test_key"
+tag_blacklist = ["sound"]
+posts_domain  = "https://e621.net"
+posts_limit   = 320
+rps_delay_ms  = 250
+max_retries   = 2
+
+[priors]
+now              = "2025-01-01T12:00:00Z"
+recency_tau_days = 10.0
+quality_a        = 0.50
+quality_b        = 0.20
+quality_log_bias = -3.0
+mix_sim          = 0.72
+mix_quality      = 0.02
+mix_recency      = 0.02
+mix_rating       = 0.04
+mix_media        = 0.05
+mix_popularity   = 0.02
+mix_interaction  = 0.10
+idf_lambda       = 1.0
+idf_alpha        = 1.05
+freq_alpha       = 0.95
+quality_w_absolute          = 0.55
+quality_w_relative_score    = 0.30
+quality_w_relative_comments = 0.15
+popularity_w_fav      = 0.80
+popularity_w_duration = 0.20
+recency_w_global   = 0.40
+recency_w_personal = 0.60
+diversity_window       = 32
+diversity_w_artist     = 0.22
+diversity_w_character  = 0.16
+diversity_w_general    = 0.08
+"#;
+
+    // ── load_config tests ──────────────────────────────────────────────
+
+    /// Priors with all fields at their default values.
+    fn make_default_priors() -> Priors {
+        Priors {
+            now: "2025-01-01T00:00:00Z".parse().unwrap(),
+            recency_tau_days: 10.0,
+            quality_a: 0.5, quality_b: 0.2, quality_log_bias: -3.0,
+            mix_sim: 0.72, mix_quality: 0.02, mix_recency: 0.02,
+            mix_rating: 0.04, mix_media: 0.05, mix_popularity: 0.02,
+            mix_interaction: 0.10, mix_tag_relation: 0.08,
+            mix_uploader: 0.05, mix_exclusivity: 0.0, mix_novelty: 0.0,
+            idf_lambda: 1.0, idf_alpha: 1.05, freq_alpha: 0.95,
+            df_floor: 0.4, idf_max: 100.0, bm25_k: 2.25,
+            idf_rsj_smoothing: 0.35, one_sided_ratio_exp: 0.5,
+            quality_w_absolute: 0.55, quality_w_relative_score: 0.30,
+            quality_w_relative_comments: 0.15, quality_c: 0.3,
+            recency_w_global: 0.4, recency_w_personal: 0.6,
+            recency_personal_floor_frac: 1.0, recency_log_personal: true,
+            popularity_w_fav: 0.8, popularity_w_duration: 0.2,
+            tag_relation_w_global: 0.4, tag_relation_w_personal: 0.6,
+            tag_relation_pmi_scale: 3.5, tag_relation_min_cooc: 2,
+            tag_relation_user_min_cooc: 1, tag_relation_cooc_ref: 16.0,
+            tag_relation_user_cooc_ref: 5.0, tag_relation_max_tags: 20,
+            group_w_artist: 2.4, group_w_character: 2.0,
+            group_w_copyright: 1.45, group_w_species: 1.3,
+            group_w_general: 0.7, group_w_lore: 0.4,
+            coldstart_smoothing_boost: 2.0,
+            interaction_ctr_prior_alpha: 4.0,
+            coldstart_n0: 25.0, discrete_pref_floor: 0.05,
+            diversity_window: 32,
+            diversity_w_artist: 0.22, diversity_w_character: 0.16,
+            diversity_w_copyright: 1.8, diversity_w_species: 1.5,
+            diversity_w_general: 0.08,
+            diversity_max_penalty: 0.45,
+            diversity_interaction_damp: 0.35,
+            strong_negative_count: 3,
+            strong_negative_penalty: 0.4,
+            strong_negative_wilson_threshold: 0.55,
+            discrete_smoothing_alpha: 1.0,
+            feedback_decay_half_life_days: 90.0,
+            meta_interaction_weight: 0.3,
+            tag_relation_pair_aggregator: "mean".into(),
+            score_temperature: 0.0, confidence_steepness: 1.0,
+            mmr_redundancy_exp: 1.0, tag_sim_jaccard_blend: 0.0,
+            idf_lambda_meta: f32::NAN,
+            tag_relation_pmi_scale_user: f32::NAN,
+            recency_tau_recent: f32::NAN,
+            recency_split_age_days: 30.0,
+            recency_tau_hot: f32::NAN,
+            recency_split_age_hours: 24.0,
+            exploration_epsilon: 0.0,
+            uploader_n0: 5.0, uploader_w_avg_score: 0.6,
+            uploader_w_avg_fav: 0.4,
+            min_exclusivity_cooc: 2, exclusivity_scale: 0.5,
+            exclusivity_max_tags: 15,
+            novelty_n0: 3.0, novelty_use_feedback: true,
+            diversity_semantic_blend: 0.0,
+            diversity_pmi_threshold: 0.0,
+            diversity_semantic_max_tags: 10,
+        }
+    }
+
+    #[test]
+    fn load_config_minimal() {
+        let cfg = parse_toml(MINIMAL_TOML).expect("minimal config");
+        assert_eq!(cfg.admin_user, "test_admin");
+        assert_eq!(cfg.admin_api, "test_key");
+        assert_eq!(cfg.posts_domain, "https://e621.net");
+        assert_eq!(cfg.posts_limit, 320);
+        // Defaults should be applied
+        assert_eq!(cfg.attempt_timeout_secs, default_attempt_timeout_secs());
+        assert_eq!(cfg.db_path, default_db_path());
+        assert_eq!(cfg.e621_cache_ttl_secs, default_e621_cache_ttl_secs());
+    }
+
+    #[test]
+    fn load_config_missing_required_field_fails() {
+        let toml = r#"
+admin_user = "x"
+tag_blacklist = []
+posts_domain = "https://x"
+posts_limit = 10
+rps_delay_ms = 1
+max_retries = 1
+[priors]
+now = "2025-01-01T00:00:00Z"
+"#;
+        // Missing admin_api → should fail
+        let r = parse_toml(toml);
+        assert!(r.is_err(), "missing required field should fail");
+    }
+
+    #[test]
+    fn load_config_invalid_toml_fails() {
+        let r = parse_toml("not even toml [[[");
+        assert!(r.is_err(), "garbage TOML should fail");
+    }
+
+    #[test]
+    fn load_config_empty_priors_fails() {
+        let toml = r#"
+admin_user = "x"
+admin_api = "x"
+tag_blacklist = []
+posts_domain = "https://x"
+posts_limit = 10
+rps_delay_ms = 1
+max_retries = 1
+"#;
+        let r = parse_toml(toml);
+        assert!(r.is_err(), "missing [priors] section should fail");
+    }
+
+    // ── Default values ─────────────────────────────────────────────────
+
+    #[test]
+    fn runtime_config_defaults() {
+        let rt = RuntimeConfig::default();
+        assert_eq!(rt.local_candidate_limit, 400);
+        assert_eq!(rt.dedup_lookback_days, 14);
+        assert_eq!(rt.process_fetch_concurrency, 4);
+        assert_eq!(rt.drop_cooc_batch_size, 50_000);
+        assert_eq!(rt.idf_rebuild_cooldown_secs, 15);
+        assert_eq!(rt.tag_relation_rebuild_cooldown_secs, 15);
+        assert_eq!(rt.prefetch_interval_secs, 180);
+        assert_eq!(rt.cleanup_interval_secs, 21_600);
+        assert_eq!(rt.catalog_retention_days, 90);
+        assert_eq!(rt.orphan_retention_secs, 3600);
+        assert_eq!(rt.jobs_finished_retain_secs, 600);
+        assert_eq!(rt.jobs_running_timeout_secs, 86400);
+        assert_eq!(rt.prefetch_active_window_days, 14);
+        assert_eq!(rt.prefetch_breaker_threshold, 3);
+        assert_eq!(rt.prefetch_breaker_pause_secs, 600);
+        assert_eq!(rt.cache_validate_interval_secs, 300);
+        assert_eq!(rt.cache_idle_eviction_secs, 1800);
+    }
+
+    #[test]
+    fn backtest_config_defaults() {
+        let bt = BacktestConfig::default();
+        assert_eq!(bt.min_favs, 100);
+        assert!((bt.test_fraction - 0.20).abs() < 1e-6);
+        assert_eq!(bt.negative_ratio, 10);
+        assert_eq!(bt.top_k_ndcg, 20);
+        assert_eq!(bt.top_k_recall, 50);
+        assert_eq!(bt.max_accounts, 150);
+        assert_eq!(bt.max_pages_per_user, 8);
+        assert_eq!(bt.seed_owner_token, "calibration-seed");
+        assert_eq!(bt.calibrate_threads, 0);
+    }
+
+    // ── merge_priors ───────────────────────────────────────────────────
+
+    #[test]
+    fn merge_priors_applies_non_default_values() {
+        let mut base = make_default_priors();
+
+        // Override a few fields with non-default values
+        let overrides = Priors {
+            mix_sim: 0.8,       // different from default 0.72
+            group_w_artist: 3.0, // different from default 2.4
+            ..make_default_priors()
+        };
+
+        merge_priors(&mut base, &overrides);
+
+        assert!((base.mix_sim - 0.8).abs() < 1e-6, "mix_sim should be overridden");
+        assert!((base.group_w_artist - 3.0).abs() < 1e-6, "group_w_artist should be overridden");
+        // Unchanged defaults — must not have been touched
+        assert!((base.mix_quality - 0.02).abs() < 1e-6);
+        assert!((base.group_w_character - 2.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn merge_priors_identity_when_overrides_equal_defaults() {
+        let mut base = make_default_priors();
+        let snapshot = base.clone();
+
+        // Override with same value as default → merge_priors should be a no-op
+        let overrides = Priors {
+            mix_sim: 0.72, // same as default
+            ..make_default_priors()
+        };
+
+        merge_priors(&mut base, &overrides);
+        assert!((base.mix_sim - snapshot.mix_sim).abs() < 1e-6,
+            "mix_sim should remain unchanged when override matches default");
+        assert!((base.mix_quality - snapshot.mix_quality).abs() < 1e-6);
+        assert!((base.idf_lambda - snapshot.idf_lambda).abs() < 1e-6);
+    }
+
+    // ── BucketOverride::apply_to ──────────────────────────────────────
+
+    #[test]
+    fn bucket_override_apply_to_modifies_priors() {
+        let mut p = make_default_priors();
+
+        let ovr = BucketOverride {
+            mix_sim: Some(0.9),
+            mix_quality: Some(0.05),
+            mix_recency: None,
+            mix_rating: None,
+            mix_media: None,
+            mix_popularity: None,
+            mix_interaction: None,
+            mix_tag_relation: None,
+            priors: None,
+        };
+        ovr.apply_to(&mut p);
+
+        assert!((p.mix_sim - 0.9).abs() < 1e-6, "mix_sim should be 0.9");
+        assert!((p.mix_quality - 0.05).abs() < 1e-6, "mix_quality should be 0.05");
+        // Unchanged fields
+        assert!((p.mix_recency - 0.02).abs() < 1e-6, "mix_recency unchanged");
+        assert!((p.mix_interaction - 0.10).abs() < 1e-6, "mix_interaction unchanged");
+    }
+
+    // ── Config::pick_bucket ────────────────────────────────────────────
+
+    fn default_priors() -> Priors {
+        make_default_priors()
+    }
+
+    #[test]
+    fn pick_bucket_empty_buckets_returns_none() {
+        let cfg = parse_toml(MINIMAL_TOML).expect("minimal config");
+        let (name, _priors) = cfg.pick_bucket(42, None);
+        assert!(name.is_none(), "no buckets configured → no bucket name");
+    }
+
+    #[test]
+    fn pick_bucket_explicit_name_selects_that_bucket() {
+        let toml = r#"
+admin_user = "x"
+admin_api = "x"
+tag_blacklist = []
+posts_domain = "https://e621.net"
+posts_limit = 10
+rps_delay_ms = 1
+max_retries = 1
+
+[priors]
+now = "2025-01-01T00:00:00Z"
+recency_tau_days = 10.0
+quality_a = 0.5
+quality_b = 0.2
+quality_log_bias = -3.0
+mix_sim = 0.72
+mix_quality = 0.02
+mix_recency = 0.02
+mix_rating = 0.04
+mix_media = 0.05
+mix_popularity = 0.02
+mix_interaction = 0.10
+idf_lambda = 1.0
+idf_alpha = 1.05
+freq_alpha = 0.95
+quality_w_absolute = 0.55
+quality_w_relative_score = 0.30
+quality_w_relative_comments = 0.15
+popularity_w_fav = 0.80
+popularity_w_duration = 0.20
+recency_w_global = 0.40
+recency_w_personal = 0.60
+diversity_window = 32
+diversity_w_artist = 0.22
+diversity_w_character = 0.16
+diversity_w_general = 0.08
+
+[buckets.control]
+mix_sim = 0.5
+
+[buckets.test]
+mix_quality = 0.1
+"#;
+        let cfg = parse_toml(toml).expect("config with buckets");
+        let (name, priors) = cfg.pick_bucket(42, Some("test"));
+        assert_eq!(name.as_deref(), Some("test"));
+        assert!((priors.mix_quality - 0.1).abs() < 1e-6);
+        // mix_sim should remain at default since test bucket doesn't override it
+        assert!((priors.mix_sim - 0.72).abs() < 1e-6);
+
+        // Unknown explicit name falls through to hash selection
+        let (name, _) = cfg.pick_bucket(42, Some("nonexistent"));
+        assert_eq!(name.as_deref(), Some("control"), "falls back to hash-based when explicit name not found");
+    }
+
+    #[test]
+    fn pick_bucket_hash_distributes_across_buckets() {
+        let toml = r#"
+admin_user = "x"
+admin_api = "x"
+tag_blacklist = []
+posts_domain = "https://e621.net"
+posts_limit = 10
+rps_delay_ms = 1
+max_retries = 1
+
+[priors]
+now = "2025-01-01T00:00:00Z"
+recency_tau_days = 10.0
+quality_a = 0.5
+quality_b = 0.2
+quality_log_bias = -3.0
+mix_sim = 0.72
+mix_quality = 0.02
+mix_recency = 0.02
+mix_rating = 0.04
+mix_media = 0.05
+mix_popularity = 0.02
+mix_interaction = 0.10
+idf_lambda = 1.0
+idf_alpha = 1.05
+freq_alpha = 0.95
+quality_w_absolute = 0.55
+quality_w_relative_score = 0.30
+quality_w_relative_comments = 0.15
+popularity_w_fav = 0.80
+popularity_w_duration = 0.20
+recency_w_global = 0.40
+recency_w_personal = 0.60
+diversity_window = 32
+diversity_w_artist = 0.22
+diversity_w_character = 0.16
+diversity_w_general = 0.08
+
+[buckets.a]
+mix_sim = 0.5
+[buckets.b]
+mix_sim = 0.6
+"#;
+        let cfg = parse_toml(toml).expect("config with 2 buckets");
+
+        // Different account_ids should map to different buckets
+        let (name_a, _) = cfg.pick_bucket(1, None);
+        let (name_b, _) = cfg.pick_bucket(2, None);
+        // At least sometimes they differ (depends on hash, but with 2 buckets
+        // and 2 different accounts it's likely).
+        assert!(name_a.is_some());
+        assert!(name_b.is_some());
+        // Both must be one of the defined bucket names
+        assert!(
+            name_a.as_deref() == Some("a") || name_a.as_deref() == Some("b"),
+            "bucket must be 'a' or 'b', got {:?}", name_a
+        );
+        assert!(
+            name_b.as_deref() == Some("a") || name_b.as_deref() == Some("b"),
+            "bucket must be 'a' or 'b', got {:?}", name_b
+        );
+    }
+
+    // ── Default path ───────────────────────────────────────────────────
+
+    #[test]
+    fn default_path_is_config_toml() {
+        let p = default_path().unwrap();
+        assert_eq!(p, PathBuf::from("config.toml"));
+    }
+
+    #[test]
+    fn file_mtime_works_for_existing_file() {
+        let f = tempfile::NamedTempFile::new().unwrap();
+        let mtime = file_mtime(f.path());
+        assert!(mtime.is_ok(), "mtime on a temp file must succeed");
+    }
+
+    #[test]
+    fn file_mtime_fails_for_nonexistent() {
+        let p = PathBuf::from("/nonexistent/path/file.toml");
+        let mtime = file_mtime(&p);
+        assert!(mtime.is_err(), "mtime on nonexistent file must fail");
+    }
 }

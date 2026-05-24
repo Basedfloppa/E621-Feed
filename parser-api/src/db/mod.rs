@@ -73,7 +73,8 @@ static POOL: OnceLock<DbPool> = OnceLock::new();
 
 fn pool() -> &'static DbPool {
     POOL.get_or_init(|| {
-        let manager = SqliteConnectionManager::file("database.db").with_init(|conn| {
+        let path = crate::models::cfg().db_path.clone();
+        let manager = SqliteConnectionManager::file(&path).with_init(|conn| {
             conn.execute_batch(
                 "
                 PRAGMA foreign_keys = ON;
@@ -102,7 +103,8 @@ static WRITE_CONN: OnceLock<Mutex<rusqlite::Connection>> = OnceLock::new();
 
 fn write_conn() -> &'static Mutex<rusqlite::Connection> {
     WRITE_CONN.get_or_init(|| {
-        let conn = rusqlite::Connection::open("database.db").expect("open writer connection");
+        let path = crate::models::cfg().db_path.clone();
+        let conn = rusqlite::Connection::open(&path).expect("open writer connection");
         conn.execute_batch(
             "
             PRAGMA foreign_keys = ON;

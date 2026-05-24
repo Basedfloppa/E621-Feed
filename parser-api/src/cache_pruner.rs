@@ -2,7 +2,7 @@
 //! configurable cadence and drops entries past their validity window.
 //!
 //! Caches owned by this worker:
-//!  * `api::API_CACHE` — outbound e621 GET cache, TTL-driven
+//!  * `api::API_CACHE` — outbound e621 GET cache, TTL + idle-eviction
 //!  * `jobs::JOBS` — /process job state map; finished entries past
 //!    `runtime.jobs_finished_retain_secs`
 //!  * `ratelimit::BUCKETS` — token-bucket map; idle and oversized entries
@@ -91,8 +91,15 @@ pub fn spawn_cache_pruner() {
                 };
 
                 let idle_evict_secs = cfg().runtime.cache_idle_eviction_secs;
+                let api_evicted = api::evict_api_cache_if_idle(idle_evict_secs);
                 let idf_evicted = evict_idf_if_idle(idle_evict_secs);
                 let relation_evicted = evict_global_relation_if_idle(idle_evict_secs);
+                if api_evicted.0 > 0 {
+                    info!(
+                        "[cache-pruner] idle-evict API cache after {}s: dropped {} entries",
+                        idle_evict_secs, api_evicted.0,
+                    );
+                }
                 if idf_evicted.0 > 0 || idf_evicted.1 > 0 {
                     info!(
                         "[cache-pruner] idle-evict IDF after {}s: dropped {} tags / {} posts",
@@ -141,15 +148,17 @@ pub fn spawn_cache_pruner() {
                 // ── Summary ─────────────────────────────────────────────
 
                 let total_dropped = (api_diff.0 - api_diff.1)
+                    + (api_evicted.0 - api_evicted.1)
                     + (jobs_diff.0 - jobs_diff.1)
                     + (rl_diff.0 - rl_diff.1)
                     + (candidate_diff.0 - candidate_diff.1)
                     + (revoked_diff.0 - revoked_diff.1);
                 if total_dropped > 0 {
                     info!(
-                        "[cache-pruner] dropped {} entries (api {}->{}, jobs {}->{}, ratelimit {}->{}, candidates {}->{}, revoked {}->{})",
+                        "[cache-pruner] dropped {} entries (api-ttl {}->{}, api-idle {}->{}, jobs {}->{}, ratelimit {}->{}, candidates {}->{}, revoked {}->{})",
                         total_dropped,
                         api_diff.0, api_diff.1,
+                        api_evicted.0, api_evicted.1,
                         jobs_diff.0, jobs_diff.1,
                         rl_diff.0, rl_diff.1,
                         candidate_diff.0, candidate_diff.1,
@@ -157,8 +166,8 @@ pub fn spawn_cache_pruner() {
                     );
                 } else {
                     debug!(
-                        "[cache-pruner] tick clean (api={}, jobs={}, ratelimit={}, candidates={}, revoked={})",
-                        api_diff.1, jobs_diff.1, rl_diff.1, candidate_diff.1, revoked_diff.1
+                        "[cache-pruner] tick clean (api-ttl={}, api-idle={}, jobs={}, ratelimit={}, candidates={}, revoked={})",
+                        api_diff.1, api_evicted.1, jobs_diff.1, rl_diff.1, candidate_diff.1, revoked_diff.1
                     );
                 }
             }

@@ -512,3 +512,363 @@ pub fn evict_if_idle(idle_secs: u64) -> (usize, usize) {
     }
     (prev_pairs, prev_tags)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── Construction & empty state ─────────────────────────────────────
+
+    #[test]
+    fn empty_graph_defaults() {
+        let g = TagRelationGraph::empty();
+        assert!(g.is_empty());
+        assert_eq!(g.n_tags(), 0);
+        assert_eq!(g.n_pairs(), 0);
+        assert_eq!(g.n_posts(), 0);
+    }
+
+    #[test]
+    fn with_posts_sets_n_posts() {
+        let g = TagRelationGraph::with_posts(42);
+        assert_eq!(g.n_posts(), 42);
+    }
+
+    #[test]
+    fn with_posts_negative_clamps_to_zero() {
+        let g = TagRelationGraph::with_posts(-5);
+        assert_eq!(g.n_posts(), 0);
+    }
+
+    // ── intern / tag_id ────────────────────────────────────────────────
+
+    #[test]
+    fn intern_assigns_incrementing_ids() {
+        let mut g = TagRelationGraph::empty();
+        let id_a = g.intern(0, "artist_a");
+        let id_b = g.intern(0, "artist_b");
+        assert_eq!(id_a, 0);
+        assert_eq!(id_b, 1);
+        // Re-interning same tag returns same id
+        assert_eq!(g.intern(0, "artist_a"), id_a);
+    }
+
+    #[test]
+    fn intern_separate_groups_have_separate_namespaces() {
+        let mut g = TagRelationGraph::empty();
+        let id1 = g.intern(0, "fluffy");
+        let id2 = g.intern(4, "fluffy");
+        // Different groups, so different ids
+        // Intern uses marginals.len(), so they're sequential
+        assert_ne!(id1, id2, "same tag in different groups gives different ids");
+    }
+
+    #[test]
+    fn tag_id_returns_none_for_empty_tag() {
+        let g = TagRelationGraph::empty();
+        assert!(g.tag_id(0, "").is_none());
+    }
+
+    #[test]
+    fn tag_id_returns_none_for_unknown() {
+        let g = TagRelationGraph::empty();
+        assert!(g.tag_id(0, "nonexistent").is_none());
+    }
+
+    #[test]
+    fn tag_id_returns_some_for_interned() {
+        let mut g = TagRelationGraph::empty();
+        let id = g.intern(1, "char");
+        assert_eq!(g.tag_id(1, "char"), Some(id));
+    }
+
+    // ── insert_pair ────────────────────────────────────────────────────
+
+    #[test]
+    fn insert_pair_stores_and_query() {
+        let mut g = TagRelationGraph::empty();
+        g.insert_pair(0, "artist_a", 4, "fluffy", 3);
+        // Cross-group pair: artist(0) + general(4)
+        let id_a = g.tag_id(0, "artist_a").unwrap();
+        let id_f = g.tag_id(4, "fluffy").unwrap();
+        assert_eq!(g.cooc_by_id(id_a, id_f), 3);
+        // Order shouldn't matter
+        assert_eq!(g.cooc_by_id(id_f, id_a), 3);
+    }
+
+    #[test]
+    fn insert_pair_zero_count_is_noop() {
+        let mut g = TagRelationGraph::empty();
+        g.insert_pair(0, "artist_a", 4, "fluffy", 0);
+        assert!(g.is_empty());
+    }
+
+    #[test]
+    fn insert_pair_empty_tag_is_noop() {
+        let mut g = TagRelationGraph::empty();
+        g.insert_pair(0, "artist_a", 4, "", 5);
+        assert!(g.is_empty());
+    }
+
+    #[test]
+    fn insert_pair_self_pair_is_noop() {
+        let mut g = TagRelationGraph::empty();
+        g.insert_pair(0, "tag", 0, "tag", 5);
+        assert_eq!(g.n_pairs(), 0, "self-pair must be skipped");
+    }
+
+    #[test]
+    fn insert_pair_canonical_ordering() {
+        let mut g = TagRelationGraph::empty();
+        // Insert with (b,a) where b < a should still store canonically as (a,b)
+        let id_a = g.intern(0, "aaa");
+        let id_b = g.intern(0, "bbb");
+        g.insert_pair_by_id(id_b, id_a, 1);
+        assert_eq!(g.cooc_by_id(id_a, id_b), 1, "canonical order query");
+        assert_eq!(g.cooc_by_id(id_b, id_a), 1, "reverse order query should match");
+    }
+
+    // ── insert_pair_by_id ──────────────────────────────────────────────
+
+    #[test]
+    fn insert_pair_by_id_same_id_is_noop() {
+        let mut g = TagRelationGraph::empty();
+        let id = g.intern(0, "tag");
+        g.insert_pair_by_id(id, id, 10);
+        assert_eq!(g.n_pairs(), 0, "self-pair skipped");
+    }
+
+    #[test]
+    fn insert_pair_by_id_accumulates() {
+        let mut g = TagRelationGraph::empty();
+        let a = g.intern(0, "a");
+        let b = g.intern(4, "b");
+        g.insert_pair_by_id(a, b, 2);
+        g.insert_pair_by_id(a, b, 3);
+        assert_eq!(g.cooc_by_id(a, b), 5, "insert_pair_by_id should accumulate");
+    }
+
+    // ── set_marginal / marginal_by_id ──────────────────────────────────
+
+    #[test]
+    fn set_marginal_stores_and_queries() {
+        let mut g = TagRelationGraph::empty();
+        let id = g.intern(0, "tag");
+        g.set_marginal(0, "tag", 7);
+        assert_eq!(g.marginal_by_id(id), 7);
+    }
+
+    #[test]
+    fn set_marginal_negative_clamps_to_zero() {
+        let mut g = TagRelationGraph::empty();
+        g.set_marginal(0, "tag", -5);
+        let id = g.tag_id(0, "tag").unwrap();
+        assert_eq!(g.marginal_by_id(id), 0);
+    }
+
+    #[test]
+    fn set_marginal_empty_tag_is_noop() {
+        let mut g = TagRelationGraph::empty();
+        g.set_marginal(0, "", 5);
+        assert_eq!(g.n_tags(), 0);
+    }
+
+    #[test]
+    fn marginal_by_id_unknown_returns_zero() {
+        let g = TagRelationGraph::empty();
+        assert_eq!(g.marginal_by_id(999), 0);
+    }
+
+    // ── cooc_by_id ─────────────────────────────────────────────────────
+
+    #[test]
+    fn cooc_by_id_self_returns_marginal() {
+        let mut g = TagRelationGraph::empty();
+        let id = g.intern(0, "tag");
+        g.set_marginal(0, "tag", 10);
+        assert_eq!(g.cooc_by_id(id, id), 10, "self-cooc = marginal");
+    }
+
+    #[test]
+    fn cooc_by_id_unknown_pair_returns_zero() {
+        let g = TagRelationGraph::empty();
+        assert_eq!(g.cooc_by_id(0, 1), 0);
+    }
+
+    // ── freeze ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn freeze_converts_hot_to_frozen() {
+        let mut g = TagRelationGraph::empty();
+        let a = g.intern(0, "a");
+        let b = g.intern(4, "b");
+        g.insert_pair_by_id(a, b, 5);
+
+        assert!(matches!(g.pairs, PairStorage::Hot(_)));
+        g.freeze(1);
+        assert!(matches!(g.pairs, PairStorage::Frozen(_)));
+
+        // Query still works
+        assert_eq!(g.cooc_by_id(a, b), 5);
+    }
+
+    #[test]
+    fn freeze_filters_below_min_cooc() {
+        let mut g = TagRelationGraph::empty();
+        let a = g.intern(0, "a");
+        let b = g.intern(4, "b");
+        let c = g.intern(4, "c");
+        g.insert_pair_by_id(a, b, 2);
+        g.insert_pair_by_id(a, c, 5);
+
+        g.freeze(3); // min_cooc = 3
+        assert_eq!(g.cooc_by_id(a, b), 0, "pair with count=2 dropped");
+        assert_eq!(g.cooc_by_id(a, c), 5, "pair with count=5 kept");
+    }
+
+    #[test]
+    fn freeze_clears_tag_to_id() {
+        let mut g = TagRelationGraph::empty();
+        g.intern(0, "a");
+        g.intern(4, "b");
+        g.insert_pair_by_id(0, 1, 1);
+        g.freeze(1);
+        // After freeze, tag_to_id is cleared
+        assert!(g.tag_id(0, "a").is_none(), "tag_to_id cleared after freeze");
+        // But marginals are preserved
+        assert_eq!(g.marginal_by_id(0), 0, "marginals preserved");
+    }
+
+    // ── set_pairs_frozen_vec ───────────────────────────────────────────
+
+    #[test]
+    fn set_pairs_frozen_vec_canonicalises_and_dedups() {
+        let mut g = TagRelationGraph::with_posts(100);
+        // Supply unordered, non-canonical pairs with duplicates
+        let raw = vec![
+            (1u32, 0u32, 3u32), // non-canonical (1,0) → (0,1,3)
+            (0u32, 1u32, 2u32), // duplicate (0,1,2) → coalesced with above → (0,1,5)
+            (0u32, 2u32, 4u32),
+        ];
+        g.set_pairs_frozen_vec(raw);
+
+        // Query
+        assert_eq!(g.cooc_by_id(0, 1), 5, "pairs coalesced");
+        assert_eq!(g.cooc_by_id(0, 2), 4);
+        assert_eq!(g.cooc_by_id(1, 2), 0, "no pair between 1 and 2");
+    }
+
+    #[test]
+    fn set_pairs_frozen_vec_removes_self_pairs() {
+        let mut g = TagRelationGraph::with_posts(50);
+        let raw = vec![(0u32, 0u32, 10u32), (1u32, 2u32, 5u32)];
+        g.set_pairs_frozen_vec(raw);
+        assert_eq!(g.n_pairs(), 1, "self-pair (0,0) must be removed");
+    }
+
+    // ── freeze_with_query_set ──────────────────────────────────────────
+
+    #[test]
+    fn freeze_with_query_set_filters_unrelated_pairs() {
+        let mut g = TagRelationGraph::empty();
+        let a = g.intern(0, "a"); // 0
+        let b = g.intern(4, "b"); // 1
+        let c = g.intern(4, "c"); // 2
+        g.insert_pair_by_id(a, b, 3);
+        g.insert_pair_by_id(a, c, 4);
+
+        let mut queryable = std::collections::HashSet::new();
+        queryable.insert(a);  // a is in set
+        queryable.insert(b);  // b is in set
+        // c is NOT in set
+
+        g.freeze_with_query_set(&queryable, 1);
+        assert_eq!(g.cooc_by_id(a, b), 3, "both endpoints queryable → kept");
+        assert_eq!(g.cooc_by_id(a, c), 0, "c not queryable → dropped");
+    }
+
+    // ── from_train_posts ───────────────────────────────────────────────
+
+    #[test]
+    fn from_train_posts_builds_graph() {
+        use crate::models::{Post, Score, Tags, Flags, Rating, Relationships};
+        let post = Post {
+            id: 1,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            file: None, preview: None, sample: None,
+            score: Score { up: 1, down: 0, total: 1 },
+            tags: Tags {
+                artist: vec!["artist_a".into()],
+                general: vec!["fluffy".into(), "outdoor".into()],
+                copyright: vec![], character: vec![], species: vec![],
+                lore: vec![], meta: vec![], invalid: vec![], contributor: vec![],
+            },
+            locked_tags: None, change_seq: 0.0,
+            flags: Flags::default(), rating: Rating::S,
+            fav_count: 0, sources: vec![], pools: vec![],
+            relationships: Relationships {
+                parent_id: None, has_children: false,
+                has_active_children: false, children: vec![],
+            },
+            approver_id: None, uploader_id: 0, description: None,
+            comment_count: 0, is_favorited: false, has_notes: false,
+            duration: None,
+        };
+
+        let g = TagRelationGraph::from_train_posts(&[post]);
+        assert_eq!(g.n_posts(), 1);
+
+        // Tags interned: artist_a(grp0), fluffy(grp4), outdoor(grp4)
+        let artist_id = g.tag_id(0, "artist_a").expect("artist_a interned");
+        let fluffy_id = g.tag_id(4, "fluffy").expect("fluffy interned");
+        let outdoor_id = g.tag_id(4, "outdoor").expect("outdoor interned");
+
+        // Marginals: each appears in 1 post
+        assert_eq!(g.marginal_by_id(artist_id), 1);
+        assert_eq!(g.marginal_by_id(fluffy_id), 1);
+        assert_eq!(g.marginal_by_id(outdoor_id), 1);
+
+        // Co-occurrences: artist × fluffy, artist × outdoor, fluffy × outdoor
+        assert_eq!(g.cooc_by_id(artist_id, fluffy_id), 1);
+        assert_eq!(g.cooc_by_id(artist_id, outdoor_id), 1);
+        assert_eq!(g.cooc_by_id(fluffy_id, outdoor_id), 1);
+    }
+
+    #[test]
+    fn from_train_posts_empty_slice() {
+        let g = TagRelationGraph::from_train_posts(&[]);
+        assert!(g.is_empty());
+    }
+
+    #[test]
+    fn from_train_posts_lowercases_tags() {
+        use crate::models::{Post, Score, Tags, Flags, Rating, Relationships};
+        let post = Post {
+            id: 1,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            file: None, preview: None, sample: None,
+            score: Score { up: 1, down: 0, total: 1 },
+            tags: Tags {
+                general: vec!["Fluffy".into()],
+                artist: vec![], copyright: vec![], character: vec![],
+                species: vec![], lore: vec![], meta: vec![], invalid: vec![], contributor: vec![],
+            },
+            locked_tags: None, change_seq: 0.0,
+            flags: Flags::default(), rating: Rating::S,
+            fav_count: 0, sources: vec![], pools: vec![],
+            relationships: Relationships {
+                parent_id: None, has_children: false,
+                has_active_children: false, children: vec![],
+            },
+            approver_id: None, uploader_id: 0, description: None,
+            comment_count: 0, is_favorited: false, has_notes: false,
+            duration: None,
+        };
+        let g = TagRelationGraph::from_train_posts(&[post]);
+        // Tag should be lowercased to "fluffy"
+        assert!(g.tag_id(4, "fluffy").is_some(), "tag should be lowercased");
+        assert!(g.tag_id(4, "Fluffy").is_none(), "original case should not be stored");
+    }
+}

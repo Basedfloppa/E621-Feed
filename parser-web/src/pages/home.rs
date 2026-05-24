@@ -9,6 +9,9 @@ use crate::components::*;
 use crate::models::{ACCOUNT_LIST_CHANGED_EVENT, api_get, read_config_from_head};
 use crate::pages::account::AccountPrefill;
 
+/// MUST match `models::TagCount` on the backend (`parser-api/src/models/tags_info.rs`).
+/// Serde ignores unknown fields on deserialize, so adding a field is safe;
+/// removing or renaming one will silently produce `None`/default values.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct TagCount {
     pub name: String,
@@ -16,6 +19,8 @@ pub struct TagCount {
     pub count: i64,
 }
 
+/// MUST match `TruncatedAccount` on the backend (`parser-api/src/models/users.rs`).
+/// Same serde caveat as `TagCount`.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct UserInfo {
     pub id: i64,

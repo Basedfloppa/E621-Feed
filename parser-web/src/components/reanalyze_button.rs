@@ -237,14 +237,14 @@ pub fn reanalyze_button(props: &ReanalyzeButtonProps) -> Html {
     let label = if is_running {
         match job_status.as_ref() {
             Some(s) if s.pages_total > 0 => {
-                format!("Analyzing {}/{}", s.pages_done, s.pages_total)
+                format!("Scanning {}/{}", s.pages_done, s.pages_total)
             }
             _ => "Starting…".to_string(),
         }
     } else if is_failed {
-        "Retry".to_string()
+        "Retry (full)".to_string()
     } else {
-        "Re-analyze".to_string()
+        "Full re-analysis".to_string()
     };
 
     let progress_pct = job_status
@@ -266,7 +266,7 @@ pub fn reanalyze_button(props: &ReanalyzeButtonProps) -> Html {
                 class={btn_class}
                 onclick={on_click}
                 disabled={is_running || *in_flight}
-                title={if is_running { "Analysis in progress — status refreshes every 5s" } else { "Re-analyse this account's favourites to refresh recommendations" }}
+                title={if is_running { "Full scan in progress — status refreshes every 5s" } else { "Full re-download + rebuild of this account's tag profile" }}
             >
                 if is_running {
                     <span>

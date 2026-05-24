@@ -276,7 +276,7 @@ pub fn fetch_analyze_button(props: &AnalyzeButtonProps) -> Html {
     } else if props.tag_count.is_empty() {
         "Analyze Tags".to_string()
     } else {
-        "Re-analyze Tags".to_string()
+        "Full re-analysis".to_string()
     };
 
     let progress_pct = job_status

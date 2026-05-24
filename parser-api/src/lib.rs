@@ -21,3 +21,17 @@ pub mod prefetch;
 pub mod ratelimit;
 pub mod utils;
 pub mod validation;
+
+/// Run a blocking rusqlite closure on `spawn_blocking` so the SQLite
+/// call doesn't park the request's Tokio worker. Translates JoinHandle
+/// panics to `Err`.
+pub async fn db_blocking<F, T>(f: F) -> Result<T, String>
+where
+    F: FnOnce() -> Result<T, String> + Send + 'static,
+    T: Send + 'static,
+{
+    match rocket::tokio::task::spawn_blocking(f).await {
+        Ok(res) => res,
+        Err(e) => Err(format!("DB task panicked: {e}")),
+    }
+}

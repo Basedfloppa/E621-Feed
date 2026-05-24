@@ -2,7 +2,7 @@ use reqwest::{Client, Response, StatusCode};
 use rocket::serde::json;
 use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex as StdMutex};
-use std::time::Duration;
+use std::time::{Duration, Instant as StdInstant};
 use tokio::sync::Mutex;
 use tokio::time::{Instant, sleep, timeout};
 use urlencoding::encode;
@@ -34,6 +34,13 @@ async fn rate_gate_wait() {
 /// Bodies are stored as raw text (cheap re-parse, avoids `Any`-typed
 /// values). Only 2xx is cached: 4xx/5xx must be retried so transient
 /// Cloudflare blocks don't pin themselves for a full TTL.
+///
+/// The cache also supports idle-eviction (see `evict_api_cache_if_idle`):
+/// every user-facing read/write touches a last-access timestamp; the
+/// background cache-pruner checks this timestamp against
+/// `runtime.cache_idle_eviction_secs` and drops the entire cache when
+/// the box has been quiet long enough, so the ~1 GB of response bodies
+/// doesn't stay resident indefinitely on an idle server.
 struct CachedBody {
     body: String,
     inserted_at: std::time::Instant,
@@ -42,6 +49,21 @@ struct CachedBody {
 static API_CACHE: LazyLock<StdMutex<HashMap<String, CachedBody>>> =
     LazyLock::new(|| StdMutex::new(HashMap::new()));
 
+/// Tracks the last user-facing access to the API cache (read or write).
+/// The cache pruner uses this to decide if the cache has been idle long
+/// enough to justify a full eviction — same pattern as `IDF_CACHE` /
+/// `GLOBAL_CACHE`. Background prefetch traffic (`bypass_cache=true`)
+/// must NOT touch this timer so it doesn't prevent idle-eviction.
+static API_CACHE_LAST_ACCESS: LazyLock<StdMutex<StdInstant>> =
+    LazyLock::new(|| StdMutex::new(StdInstant::now()));
+
+fn touch_api_cache_access() {
+    let mut g = API_CACHE_LAST_ACCESS
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    *g = StdInstant::now();
+}
+
 fn api_cache_get(url: &str, ttl: Duration) -> Option<String> {
     if ttl.is_zero() {
         return None;
@@ -49,6 +71,7 @@ fn api_cache_get(url: &str, ttl: Duration) -> Option<String> {
     let map = API_CACHE.lock().expect("api cache poisoned");
     let entry = map.get(url)?;
     if entry.inserted_at.elapsed() < ttl {
+        touch_api_cache_access();
         Some(entry.body.clone())
     } else {
         None
@@ -77,6 +100,43 @@ pub fn prune_api_cache() -> (usize, usize) {
     (before, after)
 }
 
+/// Drop the entire API cache if no user-facing request has read or written
+/// it for at least `idle_secs`. Returns `(before, after)` entry counts, or
+/// `(0, 0)` if eviction was skipped (idle timer still fresh or cache empty).
+///
+/// After eviction the next user request will cold-fill the cache as usual.
+/// `idle_secs == 0` disables idle eviction.
+pub fn evict_api_cache_if_idle(idle_secs: u64) -> (usize, usize) {
+    if idle_secs == 0 {
+        return (0, 0);
+    }
+    let elapsed = {
+        let g = API_CACHE_LAST_ACCESS
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        g.elapsed()
+    };
+    if elapsed.as_secs() < idle_secs {
+        return (0, 0);
+    }
+    let mut map = API_CACHE.lock().expect("api cache poisoned");
+    let before = map.len();
+    if before == 0 {
+        return (0, 0);
+    }
+    map.clear();
+    let after = 0usize;
+    // Reset the access timer so consecutive pruner ticks don't log
+    // spurious "cleared 0 entries" against an already-empty cache.
+    {
+        let mut g = API_CACHE_LAST_ACCESS
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        *g = StdInstant::now();
+    }
+    (before, after)
+}
+
 fn api_cache_put(url: &str, body: String, ttl: Duration, max_entries: usize) {
     if ttl.is_zero() || max_entries == 0 {
         return;
@@ -98,6 +158,7 @@ fn api_cache_put(url: &str, body: String, ttl: Duration, max_entries: usize) {
         // Also drop everything past the TTL boundary regardless.
         map.retain(|_, v| now.duration_since(v.inserted_at) < ttl);
     }
+    touch_api_cache_access();
     map.insert(
         url.to_string(),
         CachedBody {

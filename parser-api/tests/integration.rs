@@ -13,6 +13,7 @@ use e621_account_parser_api::db;
 use e621_account_parser_api::models::{
     Flags, Post, Rating, Relationships, Score, Tags,
 };
+use e621_account_parser_api::models::FileInfo;
 
 /// Helper: build a minimal Post for testing.
 fn make_post(id: i64, tags: Tags, uploader_id: i64) -> Post {
@@ -965,4 +966,293 @@ fn delete_device_link_three_phase_cascade() {
     let _ = db::drop_account_posts(account_id);
     let _ = db::drop_account_cooccurrence_batched(account_id, 1024, |_, _| {});
     let _ = db::drop_account_feed_interactions_batched(account_id, 1024, |_, _| {});
+}
+
+// ==================================================================
+//  Profile computation tests
+// ==================================================================
+
+/// Build a post with the given parameters — reduced copy to avoid importing
+/// the test crate's helper from the pipeline test file.
+fn profile_post(
+    id: i64,
+    rating: &str,
+    ext: &str,
+    duration: Option<f64>,
+    score_total: i64,
+    fav_count: i64,
+    comment_count: i64,
+    uploader_id: i64,
+) -> Post {
+    let r = match rating {
+        "s" => Rating::S,
+        "q" => Rating::Q,
+        "e" => Rating::E,
+        _ => Rating::S,
+    };
+    Post {
+        id,
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+        file: Some(FileInfo {
+            width: 100, height: 100, ext: Some(ext.into()), size: 1234,
+            md5: Some("dummy".into()), url: Some("https://example.com/img".into()),
+        }),
+        preview: None, sample: None,
+        score: Score { up: score_total.max(0), down: 0, total: score_total },
+        tags: Tags {
+            general: vec!["tag".into()],
+            artist: vec!["art".into()],
+            copyright: vec![], character: vec![], species: vec![],
+            lore: vec![], meta: vec![], invalid: vec![], contributor: vec![],
+        },
+        locked_tags: None, change_seq: 0.0,
+        flags: Flags::default(),
+        rating: r,
+        fav_count,
+        sources: vec![], pools: vec![],
+        relationships: Relationships {
+            parent_id: None, has_children: false,
+            has_active_children: false, children: vec![],
+        },
+        approver_id: None, uploader_id,
+        description: None,
+        comment_count,
+        is_favorited: false, has_notes: false,
+        duration,
+    }
+}
+
+/// Verify rating profile counts match expected distribution.
+#[test]
+fn profile_rating_profile() {
+    let acc = TestAccount::new(90020);
+
+    let posts = vec![
+        profile_post(200001, "s", "jpg", None, 10, 5, 2, 100),
+        profile_post(200002, "s", "jpg", None, 20, 3, 1, 100),
+        profile_post(200003, "q", "jpg", None, 15, 8, 0, 200),
+    ];
+    db::save_posts(&posts, acc.id).unwrap();
+
+    // Run profiles individually
+    db::set_rating_profile(acc.id).unwrap();
+    let profile = db::get_account_rating_profile(acc.id).unwrap();
+
+    // Should have 2 S-rated and 1 Q-rated
+    let s_count = profile.iter().find(|r| r.rating == "s").map(|r| r.count).unwrap_or(0);
+    let q_count = profile.iter().find(|r| r.rating == "q").map(|r| r.count).unwrap_or(0);
+    assert_eq!(s_count, 2, "should have 2 S-rated posts");
+    assert_eq!(q_count, 1, "should have 1 Q-rated post");
+}
+
+/// Verify media profile classifies file extensions correctly.
+#[test]
+fn profile_media_profile() {
+    let acc = TestAccount::new(90021);
+
+    let posts = vec![
+        profile_post(200011, "s", "jpg", None, 1, 0, 0, 1),   // image
+        profile_post(200012, "s", "png", None, 1, 0, 0, 1),   // image
+        profile_post(200013, "s", "gif", None, 1, 0, 0, 1),   // animated (gif)
+        profile_post(200014, "s", "webm", None, 1, 0, 0, 1),  // video
+        profile_post(200015, "s", "mp4", None, 1, 0, 0, 1),   // video
+        // Post with duration > 0 but no file_ext (should be video)
+        e621_account_parser_api::models::Post {
+            id: 200016,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            file: None, preview: None, sample: None,
+            score: e621_account_parser_api::models::Score { up: 1, down: 0, total: 1 },
+            tags: e621_account_parser_api::models::Tags {
+                general: vec!["tag".into()], artist: vec!["art".into()],
+                copyright: vec![], character: vec![], species: vec![],
+                lore: vec![], meta: vec![], invalid: vec![], contributor: vec![],
+            },
+            locked_tags: None, change_seq: 0.0,
+            flags: e621_account_parser_api::models::Flags::default(),
+            rating: e621_account_parser_api::models::Rating::S,
+            fav_count: 0, sources: vec![], pools: vec![],
+            relationships: Relationships {
+                parent_id: None, has_children: false,
+                has_active_children: false, children: vec![],
+            },
+            approver_id: None, uploader_id: 1, description: None,
+            comment_count: 0, is_favorited: false, has_notes: false,
+            duration: Some(10.0),
+        },
+    ];
+    db::save_posts(&posts, acc.id).unwrap();
+
+    e621_account_parser_api::db::set_media_profile(acc.id).unwrap();
+    let profile = db::get_account_media_profile(acc.id).unwrap();
+
+    let image_count = profile.iter().find(|m| m.media_type == "image").map(|m| m.count).unwrap_or(0);
+    let animated = profile.iter().find(|m| m.media_type == "animated").map(|m| m.count).unwrap_or(0);
+    let video_count = profile.iter().find(|m| m.media_type == "video").map(|m| m.count).unwrap_or(0);
+    assert_eq!(image_count, 2, "jpg + png = 2 images");
+    assert_eq!(animated, 1, "gif = 1 animated");
+    assert_eq!(video_count, 3, "webm + mp4 + duration>0 = 3 video");
+}
+
+/// Verify quality profile computes averages correctly.
+#[test]
+fn profile_quality_profile() {
+    let acc = TestAccount::new(90022);
+
+    let posts = vec![
+        profile_post(200021, "s", "jpg", Some(5.0), 100, 50, 10, 1),
+        profile_post(200022, "s", "jpg", Some(15.0), 200, 30, 20, 1),
+    ];
+    db::save_posts(&posts, acc.id).unwrap();
+
+    e621_account_parser_api::db::set_quality_profile(acc.id).unwrap();
+    let q = db::get_account_quality_profile(acc.id).unwrap();
+
+    assert!((q.avg_score_total - 150.0).abs() < 1.0, "avg score = 150, got {}", q.avg_score_total);
+    assert!((q.avg_fav_count - 40.0).abs() < 1.0, "avg fav = 40, got {}", q.avg_fav_count);
+    assert!((q.avg_comment_count - 15.0).abs() < 1.0, "avg comments = 15, got {}", q.avg_comment_count);
+    assert!((q.avg_duration - 10.0).abs() < 1.0, "avg duration = 10, got {}", q.avg_duration);
+}
+
+/// Verify recency profile computes averages correctly.
+#[test]
+fn profile_recency_profile() {
+    let acc = TestAccount::new(90023);
+
+    use chrono::{Duration, Utc};
+    let now = Utc::now();
+    let make_post = |id: i64, days_ago: f64| -> e621_account_parser_api::models::Post {
+        e621_account_parser_api::models::Post {
+            id,
+            created_at: now - Duration::seconds((days_ago * 86_400.0) as i64),
+            updated_at: now,
+            file: None, preview: None, sample: None,
+            score: e621_account_parser_api::models::Score { up: 1, down: 0, total: 1 },
+            tags: e621_account_parser_api::models::Tags {
+                general: vec!["tag".into()], artist: vec!["art".into()],
+                copyright: vec![], character: vec![], species: vec![],
+                lore: vec![], meta: vec![], invalid: vec![], contributor: vec![],
+            },
+            locked_tags: None, change_seq: 0.0,
+            flags: e621_account_parser_api::models::Flags::default(),
+            rating: e621_account_parser_api::models::Rating::S,
+            fav_count: 0, sources: vec![], pools: vec![],
+            relationships: Relationships {
+                parent_id: None, has_children: false,
+                has_active_children: false, children: vec![],
+            },
+            approver_id: None, uploader_id: 1, description: None,
+            comment_count: 0, is_favorited: false, has_notes: false,
+            duration: None,
+        }
+    };
+
+    let posts = vec![
+        make_post(200031, 30.0), // 30 days old
+        make_post(200032, 10.0), // 10 days old
+    ];
+    db::save_posts(&posts, acc.id).unwrap();
+
+    e621_account_parser_api::db::set_recency_profile(acc.id).unwrap();
+    let r = db::get_account_recency_profile(acc.id).unwrap();
+
+    // Mean age = (30+10)/2 = 20 days. Allow 1 day tolerance for test timing.
+    assert!(
+        (r.avg_age_days - 20.0).abs() < 2.0,
+        "avg_age_days ≈ 20, got {}",
+        r.avg_age_days
+    );
+    // Mean absolute deviation = (|30-20| + |10-20|)/2 = (10+10)/2 = 10
+    assert!(
+        (r.avg_abs_dev_days - 10.0).abs() < 2.0,
+        "avg_abs_dev_days ≈ 10, got {}",
+        r.avg_abs_dev_days
+    );
+}
+
+/// Verify uploader profile groups by uploader_id.
+#[test]
+fn profile_uploader_profile() {
+    let acc = TestAccount::new(90024);
+
+    let posts = vec![
+        profile_post(200041, "s", "jpg", None, 10, 5, 0, 100),
+        profile_post(200042, "s", "jpg", None, 30, 15, 0, 100),
+        profile_post(200043, "s", "jpg", None, 20, 10, 0, 200),
+    ];
+    db::save_posts(&posts, acc.id).unwrap();
+
+    e621_account_parser_api::db::set_uploader_profile(acc.id).unwrap();
+    let uploaders = db::get_account_uploader_profile(acc.id).unwrap();
+
+    // Uploader 100 has 2 posts (score 10 and 30 → avg 20; fav 5 and 15 → avg 10)
+    let u100 = uploaders.iter().find(|u| u.uploader_id == 100).expect("uploader 100 present");
+    assert!((u100.avg_score - 20.0).abs() < 1.0, "uploader 100 avg_score=20, got {}", u100.avg_score);
+    assert!((u100.avg_fav - 10.0).abs() < 1.0, "uploader 100 avg_fav=10, got {}", u100.avg_fav);
+
+    // Uploader 200 has 1 post (score 20, fav 10)
+    let u200 = uploaders.iter().find(|u| u.uploader_id == 200).expect("uploader 200 present");
+    assert!((u200.avg_score - 20.0).abs() < 1.0);
+    assert!((u200.avg_fav - 10.0).abs() < 1.0);
+}
+
+/// Verify full refresh sets all profiles and the profile_refreshed_at timestamp.
+#[test]
+fn profile_refresh_full_sets_profiles_and_timestamp() {
+    let acc = TestAccount::new(90025);
+
+    let p = profile_post(200051, "e", "jpg", None, 5, 0, 0, 42);
+    db::save_posts(std::slice::from_ref(&p), acc.id).unwrap();
+    db::save_posts_tags_batch(
+        std::slice::from_ref(&p),
+        &std::collections::HashSet::new(),
+        true,
+        Some(acc.id),
+    ).unwrap();
+
+    e621_account_parser_api::db::refresh_account_profiles(acc.id).unwrap();
+
+    let rating = db::get_account_rating_profile(acc.id).unwrap();
+    assert!(!rating.is_empty(), "rating profile populated");
+
+    let media = db::get_account_media_profile(acc.id).unwrap();
+    assert!(!media.is_empty(), "media profile populated");
+
+    let quality = db::get_account_quality_profile(acc.id).unwrap();
+    assert!(quality.avg_score_total > 0.0, "quality profile populated");
+
+    let recency = db::get_account_recency_profile(acc.id).unwrap();
+    assert!(recency.avg_age_days >= 0.0, "recency profile populated");
+
+    // Verify profile_refreshed_at was set
+    let pref = db::get_account_preference_profile(acc.id).unwrap();
+    assert!(
+        pref.last_refreshed_at.is_some(),
+        "last_refreshed_at should be set after refresh"
+    );
+}
+
+/// Verify get_account_preference_profile aggregates all sub-profiles.
+#[test]
+fn profile_preference_profile_aggregates_all() {
+    let acc = TestAccount::new(90026);
+
+    let posts = vec![
+        profile_post(200061, "s", "jpg", None, 10, 5, 0, 100),
+        profile_post(200062, "q", "webm", Some(8.0), 20, 3, 2, 100),
+    ];
+    db::save_posts(&posts, acc.id).unwrap();
+    // Full refresh builds all profiles
+    e621_account_parser_api::db::refresh_account_profiles(acc.id).unwrap();
+
+    let pref = db::get_account_preference_profile(acc.id).unwrap();
+    assert_eq!(pref.rating.len(), 2, "two rating categories");
+    assert_eq!(pref.media.len(), 2, "image + video");
+    assert!(pref.quality.avg_score_total > 0.0);
+    assert!(pref.recency.avg_age_days >= 0.0);
+    assert!(
+        pref.last_refreshed_at.is_some(),
+        "refresh should set timestamp"
+    );
 }

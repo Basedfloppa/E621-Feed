@@ -11,6 +11,9 @@ admin_user    = "username"
 admin_api     = "api_key"
 
 # --- Top-level ---------------------------------------------------------------
+# SQLite database file path (relative or absolute).
+db_path       = "database.db"
+
 # Tags stripped from imported posts (audio metadata, DNP markers).
 # Plain tag names only — no e621 search syntax.
 tag_blacklist = ["sound", "sound_warning", "conditional_dnp", "avoid_posting"]
@@ -35,11 +38,14 @@ attempt_timeout_secs = 30  # hard tokio::time::timeout per HTTP attempt (defeats
 # HTTP User-Agent sent to e621.
 user_agent    = "E621AccountParser/0.1 (+https://github.com/Basedfloppa/E621-Feed; contact: you@example.com)"
 
-# In-memory TTL cache for outbound GET requests to e621. Hit rate is
-# highest on /recommendations (two devices on the same account, or two
-# accounts with the same default blacklist, dedup into one round-trip).
+# In-memory TTL + idle-eviction cache for outbound GET requests to e621.
+# Hit rate is highest on /recommendations (two devices on the same account,
+# or two accounts with the same default blacklist, dedup into one round-trip).
 # Set ttl=0 to disable; max_entries caps memory under abuse / typos.
-e621_cache_ttl_secs     = 600    # 10 minutes — longer = fewer requests, but staler /process counts
+# The cache is also subject to idle-eviction (see `cache_idle_eviction_secs`
+# under [runtime]): after the configured period of user-request inactivity
+# the entire cache is dropped so memory can return to the OS.
+e621_cache_ttl_secs     = 600    # 10 minutes
 e621_cache_max_entries  = 5000
 
 # --- Scoring priors ---------------------------------------------------------
@@ -217,8 +223,8 @@ jobs_finished_retain_secs        = 600    # 10 min — Done/Failed /process job 
 prefetch_active_window_days      = 14     # only prefetch for accounts active in this window
 prefetch_breaker_threshold       = 3      # open circuit breaker after N consecutive e621 failures (0 = disabled)
 prefetch_breaker_pause_secs      = 600    # how long to pause when the breaker is open (10m)
-cache_validate_interval_secs     = 300    # 5 min
-cache_idle_eviction_secs         = 1800   # 30 min — drop IDF + tag-relation graph if no requests within this window (0 = keep resident)
+cache_validate_interval_secs     = 300    # 5 min — cleans TTL-expired entries + checks idle-eviction for all caches
+cache_idle_eviction_secs         = 1800   # 30 min — drop API_CACHE + IDF + tag-relation graph if no requests within this window (0 = keep resident)
 
 # --- Calibration / seed knobs (see ../docs/calibration.md) ------------------
 [backtest]

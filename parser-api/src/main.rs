@@ -14,6 +14,7 @@ use e621_account_parser_api::{
     audit,
     auth::{self, OwnerToken},
     db::{get_account_by_id, DbInit},
+    db_blocking,
     errors::ApiError,
     jobs,
     jobs::{BeginResult, ProcessJobState},
@@ -31,19 +32,6 @@ use rocket_okapi::swagger_ui::{make_swagger_ui, SwaggerUIConfig};
 
 mod routes;
 
-/// Run a blocking rusqlite closure on `spawn_blocking` so the SQLite
-/// call doesn't park the request's Tokio worker. Translates JoinHandle
-/// panics to `Err`.
-pub(crate) async fn db_blocking<F, T>(f: F) -> Result<T, String>
-where
-    F: FnOnce() -> Result<T, String> + Send + 'static,
-    T: Send + 'static,
-{
-    match rocket::tokio::task::spawn_blocking(f).await {
-        Ok(res) => res,
-        Err(e) => Err(format!("DB task panicked: {e}")),
-    }
-}
 
 /// Kicks off a background `/process` job and returns immediately with the
 /// current job state. If a job for this account is already running, returns
