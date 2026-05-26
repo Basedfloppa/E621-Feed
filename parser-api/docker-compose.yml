@@ -31,3 +31,40 @@ services:
       - ./database.db:/app/database.db
     environment:
       - CONFIG_PATH=/app/config.toml
+
+  app-jemalloc:
+    profiles: ["jemalloc"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        FEATURES: "jemalloc"
+    container_name: app-jemalloc
+    ports:
+      - "8181:8181"
+    volumes:
+      - ./config.toml:/app/config.toml:ro
+      - ./Rocket.toml:/app/Rocket.toml:ro
+      - ./database.db:/app/database.db
+    environment:
+      - CONFIG_PATH=/app/config.toml
+      # Return freed pages to the kernel promptly after cache eviction.
+      - MALLOC_CONF=dirty_decay_ms:0,muzzy_decay_ms:0
+
+  app-full:
+    profiles: ["full"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        FEATURES: "jemalloc perf_metrics"
+    container_name: app-full
+    ports:
+      - "8181:8181"
+    volumes:
+      - ./config.toml:/app/config.toml:ro
+      - ./Rocket.toml:/app/Rocket.toml:ro
+      - ./database.db:/app/database.db
+    environment:
+      - CONFIG_PATH=/app/config.toml
+      - MALLOC_CONF=dirty_decay_ms:0,muzzy_decay_ms:0

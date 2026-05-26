@@ -5,10 +5,13 @@ WORKDIR /app
 # Build features (e.g. "perf_metrics"); override with --build-arg FEATURES=perf_metrics
 ARG FEATURES=""
 
+# make is needed by tikv-jemalloc-sys (its build.rs invokes make for the
+# C jemalloc library). gcc is pulled in by the rust toolchain already.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config \
     libssl-dev \
     ca-certificates \
+    make \
     && rm -rf /var/lib/apt/lists/*
 
 RUN cargo install cargo-chef --locked

@@ -224,6 +224,14 @@ prefetch_active_window_days      = 14     # only prefetch for accounts active in
 prefetch_breaker_threshold       = 3      # open circuit breaker after N consecutive e621 failures (0 = disabled)
 prefetch_breaker_pause_secs      = 600    # how long to pause when the breaker is open (10m)
 cache_validate_interval_secs     = 300    # 5 min — cleans TTL-expired entries + checks idle-eviction for all caches
+# Idle-eviction clears Rust's in-memory data structures, but glibc's
+# default malloc does not necessarily return freed pages to the kernel.
+# For real RSS reduction after eviction, build with jemalloc:
+#   cargo build --release --features jemalloc
+# Or set at runtime:
+#   MALLOC_CONF=dirty_decay_ms:0 ./e621-account-parser-api
+# Without jemalloc, env vars MALLOC_ARENA_MAX=2 / MALLOC_TRIM_THRESHOLD_=65536
+# reduce glibc waste ~30-50%.
 cache_idle_eviction_secs         = 1800   # 30 min — drop API_CACHE + IDF + tag-relation graph if no requests within this window (0 = keep resident)
 
 # --- Calibration / seed knobs (see ../docs/calibration.md) ------------------

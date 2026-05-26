@@ -69,6 +69,28 @@ Per-knob "lower vs. higher" guide for every scoring variable lives in
 weights, quality, popularity, recency, diversity, feedback, tag
 relations).
 
+### Memory & allocator
+
+By default the server uses glibc's malloc, which keeps freed memory pages
+in internal free-lists instead of returning them to the kernel. As a result,
+RSS in `top` / Grafana stays high (1.3–1.4 GB) even after idle-eviction
+clears the in-memory caches.
+
+Build with jemalloc for prompt page return:
+
+```bash
+cargo build --release --features jemalloc
+```
+
+For even more aggressive releases at runtime, add:
+
+```bash
+MALLOC_CONF=dirty_decay_ms:0,muzzy_decay_ms:0 ./target/release/e621-account-parser-api
+```
+
+Without jemalloc, the `MALLOC_ARENA_MAX=2` / `MALLOC_TRIM_THRESHOLD_=65536`
+env vars cut glibc waste by ~30–50% without a rebuild.
+
 http://localhost:8080
 
 ```bash

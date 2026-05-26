@@ -17,6 +17,27 @@ Both are gated behind `TRUNK_PROFILE=release` and soft-fail (the hook
 logs and skips) if a binary is missing — `trunk serve` and the default
 `trunk build` work without them.
 
+## Memory allocator
+
+The server keeps in-memory caches (IDF, tag-relation graph, e621 API
+responses) that can total 1.3–1.4 GB RSS under load. Idle-eviction clears
+the Rust data structures, but glibc's default malloc holds freed pages
+in internal free-lists rather than returning them to the kernel.
+
+**Build the server binary with jemalloc** for prompt RSS release:
+
+```bash
+cargo build --release --bin e621-account-parser-api --features jemalloc
+```
+
+For even more aggressive page return at runtime, add:
+```bash
+MALLOC_CONF=dirty_decay_ms:0,muzzy_decay_ms:0 ./target/release/e621-account-parser-api
+```
+
+Without jemalloc, `MALLOC_ARENA_MAX=2 MALLOC_TRIM_THRESHOLD_=65536` env
+vars cut glibc waste by ~30–50% without a rebuild.
+
 ## nginx
 
 The shipped [`nginx-template`](../nginx-template) is a working server

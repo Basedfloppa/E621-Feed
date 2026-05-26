@@ -1,6 +1,16 @@
 #[macro_use]
 extern crate rocket;
 
+// jemalloc: cuts RSS by returning freed pages to the kernel promptly.
+// Build with:
+//   cargo build --release --features jemalloc
+// Without it, glibc's ptmalloc keeps freed HashMap pages in internal
+// free-lists, so `top` / Grafana RSS stays high even after idle-eviction
+// clears the IDF, tag-relation graph, and API caches.
+#[cfg(all(target_os = "linux", feature = "jemalloc"))]
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 use rocket::futures::lock::Mutex;
 use rocket::http::CookieJar;
 use rocket::request::Request;

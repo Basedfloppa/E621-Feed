@@ -36,17 +36,20 @@ compact_str = "0.9"
 getrandom = "0.2"
 rand = "0.8"
 
-# jemalloc — required for any non-trivial calibrate run. glibc's default
-# ptmalloc holds many small-allocation arenas hostage on the calibrate
-# hydration + grid path (each account churns ~10K small `String`
-# allocations from `Post` tags/description/sources), and never returns
-# them to the kernel.
+# jemalloc — frees pages back to the kernel promptly after cache eviction.
+# Without it, glibc's ptmalloc keeps freed small allocations (HashMap
+# buckets, Strings) in internal free-lists, so RSS in `top`/Grafana stays
+# high even after idle-eviction clears IDF, tag-relation, and API caches.
 #
-# Default-off only because building jemalloc-sys needs `make` + a C
-# toolchain on the build host. Always build with:
-#   cargo build --release --bin calibrate --features jemalloc
-# If that's not an option, `MALLOC_ARENA_MAX=2 ./calibrate ...` cuts
-# glibc fragmentation roughly in half at runtime without a rebuild.
+# Works for all three binaries (main server, calibrate, seed). Win is
+# most dramatic on calibrate (10K small String churn per account) and
+# the main server (1.4 GB RSS → 300 MB on idle).
+#
+# Default-off only because jemalloc-sys needs `make` + a C toolchain on
+# the build host. Build with:
+#   cargo build --release --features jemalloc
+# Without it, `MALLOC_ARENA_MAX=2 MALLOC_TRIM_THRESHOLD_=65536` env vars
+# cut glibc waste ~30-50% without a rebuild.
 [features]
 default = []
 jemalloc = ["dep:tikv-jemallocator"]
