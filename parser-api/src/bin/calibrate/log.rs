@@ -45,6 +45,8 @@ pub(crate) fn print_diff(baseline: &Priors, best: &Priors) -> Vec<String> {
     diff!("mix_popularity", mix_popularity, "{:.3}");
     diff!("mix_interaction", mix_interaction, "{:.3}");
     diff!("mix_tag_relation", mix_tag_relation, "{:.3}");
+    diff!("mix_exclusivity", mix_exclusivity, "{:.3}");
+    diff!("mix_novelty", mix_novelty, "{:.3}");
 
     // L1-normalised mix block — actual scoring uses ratios, not absolute
     // values, so 0.945+0.013+...=1.07 in the grid is equivalent to
@@ -68,7 +70,10 @@ pub(crate) fn print_diff(baseline: &Priors, best: &Priors) -> Vec<String> {
         println!("  mix_media        = {:.3}", best.mix_media / mix_sum);
         println!("  mix_popularity   = {:.3}", best.mix_popularity / mix_sum);
         println!("  mix_interaction  = {:.3}", best.mix_interaction / mix_sum);
-        println!("  mix_tag_relation = {:.3}", best.mix_tag_relation / mix_sum);
+        println!(
+            "  mix_tag_relation = {:.3}",
+            best.mix_tag_relation / mix_sum
+        );
     }
     diff!("idf_lambda", idf_lambda, "{:.3}");
     diff!("idf_alpha", idf_alpha, "{:.3}");
@@ -81,26 +86,54 @@ pub(crate) fn print_diff(baseline: &Priors, best: &Priors) -> Vec<String> {
     diff!("quality_b", quality_b, "{:.3}");
     diff!("quality_log_bias", quality_log_bias, "{:.3}");
     diff!("quality_w_absolute", quality_w_absolute, "{:.3}");
-    diff!("quality_w_relative_score", quality_w_relative_score, "{:.3}");
-    diff!("quality_w_relative_comments", quality_w_relative_comments, "{:.3}");
+    diff!(
+        "quality_w_relative_score",
+        quality_w_relative_score,
+        "{:.3}"
+    );
+    diff!(
+        "quality_w_relative_comments",
+        quality_w_relative_comments,
+        "{:.3}"
+    );
     diff!("recency_tau_days", recency_tau_days, "{:.2}");
     diff!("recency_w_global", recency_w_global, "{:.3}");
     diff!("recency_w_personal", recency_w_personal, "{:.3}");
-    diff!("recency_personal_floor_frac", recency_personal_floor_frac, "{:.3}");
+    diff!(
+        "recency_personal_floor_frac",
+        recency_personal_floor_frac,
+        "{:.3}"
+    );
     diff!("popularity_w_fav", popularity_w_fav, "{:.3}");
     diff!("popularity_w_duration", popularity_w_duration, "{:.3}");
-    diff!("discrete_smoothing_alpha", discrete_smoothing_alpha, "{:.3}");
+    diff!(
+        "discrete_smoothing_alpha",
+        discrete_smoothing_alpha,
+        "{:.3}"
+    );
     diff!("discrete_pref_floor", discrete_pref_floor, "{:.3}");
     diff!("tag_relation_pmi_scale", tag_relation_pmi_scale, "{:.3}");
     diff!("tag_relation_w_global", tag_relation_w_global, "{:.3}");
     diff!("tag_relation_w_personal", tag_relation_w_personal, "{:.3}");
     diff!("tag_relation_cooc_ref", tag_relation_cooc_ref, "{:.2}");
-    diff!("tag_relation_user_cooc_ref", tag_relation_user_cooc_ref, "{:.2}");
+    diff!(
+        "tag_relation_user_cooc_ref",
+        tag_relation_user_cooc_ref,
+        "{:.2}"
+    );
     diff!("coldstart_n0", coldstart_n0, "{:.1}");
     // v5.3 Class A
     diff!("idf_rsj_smoothing", idf_rsj_smoothing, "{:.3}");
-    diff!("coldstart_smoothing_boost", coldstart_smoothing_boost, "{:.3}");
-    diff!("interaction_ctr_prior_alpha", interaction_ctr_prior_alpha, "{:.3}");
+    diff!(
+        "coldstart_smoothing_boost",
+        coldstart_smoothing_boost,
+        "{:.3}"
+    );
+    diff!(
+        "interaction_ctr_prior_alpha",
+        interaction_ctr_prior_alpha,
+        "{:.3}"
+    );
     // v5.3 Class B
     diff!("group_w_artist", group_w_artist, "{:.3}");
     diff!("group_w_character", group_w_character, "{:.3}");
@@ -139,6 +172,44 @@ pub(crate) fn print_diff(baseline: &Priors, best: &Priors) -> Vec<String> {
         );
     }
 
+    // v5.11: exclusivity channel
+    diff!("exclusivity_scale", exclusivity_scale, "{:.3}");
+    diff!(
+        "exclusivity_cross_group_weight",
+        exclusivity_cross_group_weight,
+        "{:.3}"
+    );
+    // Integer knobs printed as-is (diff! uses {:.3} for f32)
+    if (baseline.min_exclusivity_cooc - best.min_exclusivity_cooc).abs() > 0 {
+        println!(
+            "{:<32} = {}    (was {})",
+            "min_exclusivity_cooc", best.min_exclusivity_cooc, baseline.min_exclusivity_cooc
+        );
+    }
+    if baseline.exclusivity_max_tags != best.exclusivity_max_tags {
+        println!(
+            "{:<32} = {}    (was {})",
+            "exclusivity_max_tags", best.exclusivity_max_tags, baseline.exclusivity_max_tags
+        );
+    }
+
+    // v5.11: novelty channel
+    diff!("novelty_n0", novelty_n0, "{:.1}");
+    // novelty_use_feedback is a boolean toggle — print when different
+    if best.novelty_use_feedback != baseline.novelty_use_feedback {
+        println!(
+            "{:<32} = {}    (was {})",
+            "novelty_use_feedback", best.novelty_use_feedback, baseline.novelty_use_feedback
+        );
+    }
+
+    // v5.12: diversity user-PMI amplification
+    diff!(
+        "diversity_user_pmi_weight",
+        diversity_user_pmi_weight,
+        "{:.3}"
+    );
+
     // Clamp-saturation: mirrors the clamps in knobs::GRID_KNOBS.
     check_clamp!("idf_lambda", idf_lambda, 0.0_f32, 1.5_f32);
     check_clamp!("idf_alpha", idf_alpha, 0.0_f32, 1.5_f32);
@@ -146,13 +217,48 @@ pub(crate) fn print_diff(baseline: &Priors, best: &Priors) -> Vec<String> {
     check_clamp!("df_floor", df_floor, 0.05_f32, 5.0_f32);
     check_clamp!("idf_max", idf_max, 1.0_f32, 200.0_f32);
     check_clamp!("bm25_k", bm25_k, 0.1_f32, 10.0_f32);
-    check_clamp!("one_sided_ratio_exp", one_sided_ratio_exp, 0.05_f32, 3.0_f32);
-    check_clamp!("recency_personal_floor_frac", recency_personal_floor_frac, 0.0_f32, 2.0_f32);
+    check_clamp!(
+        "one_sided_ratio_exp",
+        one_sided_ratio_exp,
+        0.05_f32,
+        3.0_f32
+    );
+    check_clamp!(
+        "recency_personal_floor_frac",
+        recency_personal_floor_frac,
+        0.0_f32,
+        2.0_f32
+    );
     check_clamp!("discrete_pref_floor", discrete_pref_floor, 0.0_f32, 0.5_f32);
     check_clamp!("idf_rsj_smoothing", idf_rsj_smoothing, 0.05_f32, 5.0_f32);
-    check_clamp!("confidence_steepness", confidence_steepness, 0.1_f32, 5.0_f32);
+    check_clamp!(
+        "confidence_steepness",
+        confidence_steepness,
+        0.1_f32,
+        5.0_f32
+    );
     check_clamp!("mmr_redundancy_exp", mmr_redundancy_exp, 0.1_f32, 5.0_f32);
-    check_clamp!("tag_sim_jaccard_blend", tag_sim_jaccard_blend, 0.0_f32, 1.0_f32);
+    check_clamp!(
+        "tag_sim_jaccard_blend",
+        tag_sim_jaccard_blend,
+        0.0_f32,
+        1.0_f32
+    );
+    check_clamp!("mix_exclusivity", mix_exclusivity, 0.0_f32, 1.0_f32);
+    check_clamp!("mix_novelty", mix_novelty, 0.0_f32, 1.0_f32);
+    check_clamp!("novelty_n0", novelty_n0, 1.0_f32, 50.0_f32);
+    check_clamp!(
+        "exclusivity_cross_group_weight",
+        exclusivity_cross_group_weight,
+        0.1_f32,
+        10.0_f32
+    );
+    check_clamp!(
+        "diversity_user_pmi_weight",
+        diversity_user_pmi_weight,
+        0.1_f32,
+        10.0_f32
+    );
     if !best.idf_lambda_meta.is_nan() {
         check_clamp!("idf_lambda_meta", idf_lambda_meta, 0.0_f32, 1.5_f32);
     }
@@ -175,7 +281,10 @@ pub(crate) fn write_grid_log(
     let path = dir.join(format!("grid_{ts}.toml"));
 
     let mut s = String::new();
-    s.push_str(&format!("# calibrate grid result — {}\n", Utc::now().to_rfc3339()));
+    s.push_str(&format!(
+        "# calibrate grid result — {}\n",
+        Utc::now().to_rfc3339()
+    ));
     s.push_str(&format!(
         "# split={} neg={} diversify={} pairs_only={} run_paired={}\n",
         opts.split.label(),
@@ -274,6 +383,20 @@ pub(crate) fn write_grid_log(
         "diversity_window = {}\ndiversity_w_artist = {:.3}\ndiversity_w_character = {:.3}\ndiversity_w_general = {:.3}\ndiversity_max_penalty = {:.3}\ndiversity_interaction_damp = {:.3}\n",
         best.diversity_window, best.diversity_w_artist, best.diversity_w_character,
         best.diversity_w_general, best.diversity_max_penalty, best.diversity_interaction_damp
+    ));
+    // v5.11: exclusivity + novelty channel knobs
+    s.push_str(&format!(
+        "exclusivity_scale = {:.3}\nexclusivity_cross_group_weight = {:.3}\nexclusivity_max_tags = {}\n",
+        best.exclusivity_scale, best.exclusivity_cross_group_weight, best.exclusivity_max_tags
+    ));
+    s.push_str(&format!(
+        "novelty_n0 = {:.1}\nnovelty_use_feedback = {}\n",
+        best.novelty_n0, best.novelty_use_feedback
+    ));
+    // v5.12: diversity user-PMI amplification
+    s.push_str(&format!(
+        "diversity_user_pmi_weight = {:.3}\n",
+        best.diversity_user_pmi_weight
     ));
 
     fs::write(&path, s)?;

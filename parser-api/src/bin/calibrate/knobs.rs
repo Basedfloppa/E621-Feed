@@ -19,8 +19,8 @@
 use e621_account_parser_api::utils::Priors;
 
 use crate::cache::{
-    M_CONFIDENCE_DERIVED, M_DISCRETE, M_EXCLUSIVITY, M_GROUP_W, M_INTERACTION, M_NONE,
-    M_NOVELTY, M_RATIO_EXP, M_RECENCY, M_SIM, M_TAG_RELATION, M_UPLOADER,
+    M_CONFIDENCE_DERIVED, M_DISCRETE, M_EXCLUSIVITY, M_GROUP_W, M_INTERACTION, M_NONE, M_NOVELTY,
+    M_RATIO_EXP, M_RECENCY, M_SIM, M_TAG_RELATION, M_UPLOADER,
 };
 
 /// One tunable parameter for the grid search. `apply` mutates the trial
@@ -75,6 +75,9 @@ pub(crate) const PAIRED_KNOBS: &[(&str, &str)] = &[
     // v5.11 Class J: diversity semantic similarity
     ("diversity_semantic_blend", "diversity_pmi_threshold"),
     ("diversity_semantic_blend", "diversity_semantic_max_tags"),
+    // v5.12: exclusivity cross-group + user-graph diversity
+    ("mix_exclusivity", "exclusivity_cross_group_weight"),
+    ("diversity_semantic_blend", "diversity_user_pmi_weight"),
 ];
 
 /// Per-pass scale on probe-deltas. Lets coarse direction emerge quickly
@@ -286,9 +289,7 @@ pub(crate) const GRID_KNOBS: &[KnobSpec] = &[
     },
     KnobSpec {
         name: "quality_w_relative_comments",
-        apply: |p, v| {
-            p.quality_w_relative_comments = (p.quality_w_relative_comments + v).max(0.0)
-        },
+        apply: |p, v| p.quality_w_relative_comments = (p.quality_w_relative_comments + v).max(0.0),
         probes: PROBES_WEIGHT,
         invalidates: M_QUALITY,
         diversify_only: false,
@@ -493,9 +494,7 @@ pub(crate) const GRID_KNOBS: &[KnobSpec] = &[
     },
     KnobSpec {
         name: "interaction_ctr_prior_alpha",
-        apply: |p, v| {
-            p.interaction_ctr_prior_alpha = (p.interaction_ctr_prior_alpha + v).max(0.1)
-        },
+        apply: |p, v| p.interaction_ctr_prior_alpha = (p.interaction_ctr_prior_alpha + v).max(0.1),
         probes: PROBES_CTR_PRIOR,
         invalidates: M_INTERACTION,
         diversify_only: false,
@@ -755,9 +754,7 @@ pub(crate) const GRID_KNOBS: &[KnobSpec] = &[
     },
     KnobSpec {
         name: "diversity_pmi_threshold",
-        apply: |p, v| {
-            p.diversity_pmi_threshold = (p.diversity_pmi_threshold + v).clamp(0.0, 5.0)
-        },
+        apply: |p, v| p.diversity_pmi_threshold = (p.diversity_pmi_threshold + v).clamp(0.0, 5.0),
         probes: &[-0.5, -0.2, 0.2, 0.5],
         invalidates: M_NONE,
         diversify_only: true,
@@ -769,6 +766,26 @@ pub(crate) const GRID_KNOBS: &[KnobSpec] = &[
             p.diversity_semantic_max_tags = next.clamp(1.0, 50.0) as usize;
         },
         probes: &[-3.0, -1.0, 1.0, 3.0],
+        invalidates: M_NONE,
+        diversify_only: true,
+    },
+    // -- v5.12: exclusivity cross-group weight + user-graph PMI amplification --
+    KnobSpec {
+        name: "exclusivity_cross_group_weight",
+        apply: |p, v| {
+            p.exclusivity_cross_group_weight =
+                (p.exclusivity_cross_group_weight + v).clamp(0.1, 10.0);
+        },
+        probes: &[0.25, 0.5, 1.0, 2.0, 5.0],
+        invalidates: M_EXCLUSIVITY,
+        diversify_only: false,
+    },
+    KnobSpec {
+        name: "diversity_user_pmi_weight",
+        apply: |p, v| {
+            p.diversity_user_pmi_weight = (p.diversity_user_pmi_weight + v).clamp(0.1, 10.0)
+        },
+        probes: &[0.5, 1.0, 2.0, 5.0],
         invalidates: M_NONE,
         diversify_only: true,
     },
@@ -857,9 +874,20 @@ pub(crate) const MIX_ONLY_KNOBS: &[KnobSpec] = &[
 ];
 
 /// v5.3 Class E: enum-valued knob registry.
-pub(crate) const CATEGORICAL_KNOBS: &[CategoricalKnob] = &[CategoricalKnob {
-    name: "tag_relation_pair_aggregator",
-    candidates: &["mean", "max", "geomean"],
-    apply: |p, v| p.tag_relation_pair_aggregator = v.to_string(),
-    invalidates: M_TAG_RELATION,
-}];
+pub(crate) const CATEGORICAL_KNOBS: &[CategoricalKnob] = &[
+    CategoricalKnob {
+        name: "tag_relation_pair_aggregator",
+        candidates: &["mean", "max", "geomean"],
+        apply: |p, v| p.tag_relation_pair_aggregator = v.to_string(),
+        invalidates: M_TAG_RELATION,
+    },
+    // v5.12: novelty channel — switch on user-feedback mode.
+    // Uses feed_interactions data; skip if no synthetic feedback rows
+    // exist (same rationale as feedback_decay / meta_interaction_weight).
+    CategoricalKnob {
+        name: "novelty_use_feedback",
+        candidates: &["true", "false"],
+        apply: |p, v| p.novelty_use_feedback = v == "true",
+        invalidates: M_NOVELTY,
+    },
+];

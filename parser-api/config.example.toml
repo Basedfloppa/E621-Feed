@@ -82,6 +82,7 @@ mix_exclusivity = 0.02
 min_exclusivity_cooc = 2  # pairs with cooc < this get full exclusivity credit
 exclusivity_scale = 0.5   # sigmoid scale; larger = sharper threshold
 exclusivity_max_tags = 15 # top-K tags by group weight in O(T²) loop (0 = no limit)
+exclusivity_cross_group_weight = 0.5  # cross-group cooc weight; >1 = rare multi-group combos score higher
 
 # Tag novelty channel (v5.11): ranks posts higher when they contain tags the
 # user hasn't seen before.
