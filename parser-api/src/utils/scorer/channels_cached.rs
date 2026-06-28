@@ -102,22 +102,7 @@ impl<'a> ScoringContext<'a> {
             .clamp(0.05, 0.99);
         let p0 = self.user_base_positive_rate;
         let meta_w = self.priors.meta_interaction_weight.max(0.0);
-
-        // Class F: time-weighted decay — mirrors channels.rs interaction_fit.
-        let staleness = match self.profile.last_refreshed_at {
-            Some(last) => {
-                let elapsed_days =
-                    (self.priors.now - last).num_seconds() as f32 / 86_400.0;
-                if elapsed_days > 0.0 {
-                    (-std::f32::consts::LN_2 * elapsed_days
-                        / self.priors.feedback_decay_half_life_days.max(1.0))
-                    .exp()
-                } else {
-                    1.0
-                }
-            }
-            None => 1.0,
-        };
+        let half_life = self.priors.feedback_decay_half_life_days.max(1.0) as f64;
 
         for ct in &post.tags {
             let g_idx = ct.group as usize;
@@ -134,7 +119,22 @@ impl<'a> ScoringContext<'a> {
                 let pos = fb.positive.max(0) as f32;
                 let neg = fb.negative.max(0) as f32;
                 let imp = fb.impressions.max(0) as f32;
-                let conf = (pos + neg + imp).ln_1p() * staleness;
+
+                // Per-tag staleness decay — mirrors channels.rs.
+                let tag_staleness = match fb.last_interaction_secs {
+                    Some(secs) => {
+                        let elapsed_days =
+                            ((self.priors.now.timestamp() as f64 - secs) / 86_400.0).max(0.0);
+                        if elapsed_days > 0.0 {
+                            (-std::f32::consts::LN_2 * elapsed_days as f32
+                                / half_life as f32).exp()
+                        } else {
+                            1.0
+                        }
+                    }
+                    None => 1.0,
+                };
+                let conf = (pos + neg + imp).ln_1p() * tag_staleness;
                 if conf <= 0.0 {
                     continue;
                 }
@@ -771,6 +771,7 @@ mod tests {
                     impression_count: 100,
                     positive_count: 80,
                     negative_count: 5,
+                    last_interaction_at: Utc::now().to_rfc3339(),
                 },
                 AccountTagFeedback {
                     tag_name: "cat".to_string(),
@@ -778,6 +779,7 @@ mod tests {
                     impression_count: 50,
                     positive_count: 40,
                     negative_count: 2,
+                    last_interaction_at: Utc::now().to_rfc3339(),
                 },
             ],
             quality: AccountQualityProfile {

@@ -1,6 +1,6 @@
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
 use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Clone, JsonSchema)]
 pub struct TagCount {
@@ -28,6 +28,7 @@ pub struct AccountTagFeedback {
     pub impression_count: i64,
     pub positive_count: i64,
     pub negative_count: i64,
+    pub last_interaction_at: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, JsonSchema, Default)]

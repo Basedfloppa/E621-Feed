@@ -221,24 +221,7 @@ impl<'a> ScoringContext<'a> {
             .clamp(0.05, 0.99);
         let p0 = self.user_base_positive_rate;
         let meta_w = self.priors.meta_interaction_weight.max(0.0);
-
-        // Class F: time-weighted decay — supplementary decay since the last
-        // profile refresh. If the profile hasn't been refreshed recently,
-        // the feedback counts are stale and should carry less weight.
-        let staleness = match self.profile.last_refreshed_at {
-            Some(last) => {
-                let elapsed_days =
-                    (self.priors.now - last).num_seconds() as f32 / 86_400.0;
-                if elapsed_days > 0.0 {
-                    (-std::f32::consts::LN_2 * elapsed_days
-                        / self.priors.feedback_decay_half_life_days.max(1.0))
-                    .exp()
-                } else {
-                    1.0
-                }
-            }
-            None => 1.0,
-        };
+        let half_life = self.priors.feedback_decay_half_life_days.max(1.0) as f64;
 
         let groups: [(Group, &Vec<String>, f32); 7] = [
             (Group::Artist, &post.tags.artist, self.group_wts[Group::Artist as usize]),
@@ -264,7 +247,29 @@ impl<'a> ScoringContext<'a> {
                     let pos = fb.positive.max(0) as f32;
                     let neg = fb.negative.max(0) as f32;
                     let imp = fb.impressions.max(0) as f32;
-                    let conf = (pos + neg + imp).ln_1p() * staleness;
+
+                    // Per-tag staleness decay: use the tag's own
+                    // last_interaction_at instead of the global
+                    // last_refreshed_at, so a tag with recent
+                    // interaction keeps full weight even if the
+                    // overall profile is stale. Counts are already
+                    // decayed by the /process worker, so we only
+                    // apply the decay factor to the confidence
+                    // (ln_1p) scaling — not a second decay on counts.
+                    let tag_staleness = match fb.last_interaction_secs {
+                        Some(secs) => {
+                            let elapsed_days =
+                                ((self.priors.now.timestamp() as f64 - secs) / 86_400.0).max(0.0);
+                            if elapsed_days > 0.0 {
+                                (-std::f32::consts::LN_2 * elapsed_days as f32
+                                    / half_life as f32).exp()
+                            } else {
+                                1.0
+                            }
+                        }
+                        None => 1.0,
+                    };
+                    let conf = (pos + neg + imp).ln_1p() * tag_staleness;
                     if conf <= 0.0 {
                         continue;
                     }
@@ -1041,6 +1046,7 @@ mod tests {
                     impression_count: 100,
                     positive_count: 80,
                     negative_count: 5,
+                    last_interaction_at: Utc::now().to_rfc3339(),
                 },
                 AccountTagFeedback {
                     tag_name: "cat".to_string(),
@@ -1048,6 +1054,7 @@ mod tests {
                     impression_count: 50,
                     positive_count: 40,
                     negative_count: 2,
+                    last_interaction_at: Utc::now().to_rfc3339(),
                 },
             ],
             quality: AccountQualityProfile {
@@ -1512,6 +1519,7 @@ mod tests {
             impression_count: 10,
             positive_count: 0,
             negative_count: 10,
+            last_interaction_at: Utc::now().to_rfc3339(),
         });
         let priors = default_priors();
         let idf = build_idf();
@@ -1530,21 +1538,36 @@ mod tests {
     #[test]
     fn interaction_fit_staleness_decay() {
         let mut profile = default_profile();
-        profile.last_refreshed_at = Some(Utc::now() - ChronoDuration::days(180));
+        // The old test used last_refreshed_at (global staleness) but we
+        // now use per-tag last_interaction_secs. We need a feedback entry
+        // with a stale last_interaction_at.
         let mut priors = default_priors();
         priors.feedback_decay_half_life_days = 90.0;
         let idf = build_idf();
         let global_graph = build_global_graph();
         let user_graph = build_user_graph();
         let counts = default_tag_counts();
+
+        // Build a profile with feedback for "skeb" that's 180 days old.
+        // This replaces the old last_refreshed_at approach with per-tag decay.
+        let stale_secs = (Utc::now() - ChronoDuration::days(180)).timestamp() as f64;
+        profile.feedback.push(AccountTagFeedback {
+            tag_name: "skeb".to_string(),
+            group_type: "artist".to_string(),
+            impression_count: 5,
+            positive_count: 3,
+            negative_count: 1,
+            last_interaction_at: (Utc::now() - ChronoDuration::days(180)).to_rfc3339(),
+        });
         let ctx = ScoringContext::new(&counts, &priors, &idf, &profile, &global_graph, &user_graph);
 
         let mut tags = make_empty_tags();
         tags.artist.push("skeb".to_string());
         let post = make_post(tags, 0, 0, Rating::S);
         let (score, _veto) = ctx.interaction_fit(&post);
-        // staleness = exp(-ln2 * 180/90) = 0.25 → score should be < fresh case
-        assert!(score > 0.0 && score < 0.921, "expected decayed score < 0.921 got {score}");
+        // Per-tag staleness = exp(-ln2 * 180/90) = 0.25 → score should be
+        // noticeably below neutral (FEEDBACK_NEUTRAL ≈ 0.5) but > 0.
+        assert!(score > 0.0 && score < 0.85, "expected decayed score < 0.85 got {score}");
     }
 
     // ==================================================================
@@ -1702,6 +1725,7 @@ mod tests {
             impression_count: 1,
             positive_count: 0,
             negative_count: 5,
+            last_interaction_at: Utc::now().to_rfc3339(),
         });
 
         let idf = build_idf();

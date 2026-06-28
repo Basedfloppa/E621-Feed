@@ -3,7 +3,9 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::models::{AccountPreferenceProfile, AccountUploaderStat, Post, ScoreBreakdown, TagCount};
+use crate::models::{
+    AccountPreferenceProfile, AccountUploaderStat, Post, ScoreBreakdown, TagCount,
+};
 use crate::utils::idf::IdfIndex;
 use crate::utils::tag_relation::TagRelationGraph;
 
@@ -12,6 +14,7 @@ use super::util::{
     confidence, normalize_tag, sigmoid, CompactFeedback, MixWeights, PairAggregator,
 };
 use super::{Group, GROUP_COUNT};
+use crate::db::parse_db_datetime;
 
 pub struct ScoringContext<'a> {
     pub(super) priors: &'a Priors,
@@ -178,6 +181,9 @@ impl ContextBase {
                     positive: fb.positive_count,
                     negative: fb.negative_count,
                     impressions: fb.impression_count,
+                    last_interaction_secs: parse_db_datetime(&fb.last_interaction_at)
+                        .ok()
+                        .map(|dt| dt.timestamp() as f64),
                 },
             );
         }
@@ -449,8 +455,7 @@ impl<'a> ScoringContext<'a> {
         features: &super::cached::CachedPostFeatures,
     ) -> (f32, ScoreBreakdown) {
         let sim = self.tag_similarity_cached(features);
-        let age_days =
-            (self.priors.now - features.created_at).num_seconds() as f32 / 86_400.0;
+        let age_days = (self.priors.now - features.created_at).num_seconds() as f32 / 86_400.0;
         let quality = self.quality_fit_cached(features);
         let popularity = self.popularity_fit_cached(features);
         let rating = self.rating_fit_cached(features);
@@ -498,8 +503,8 @@ impl<'a> ScoringContext<'a> {
 mod tests {
     use super::*;
     use crate::models::{
-        AccountMediaStat, AccountPreferenceProfile, AccountQualityProfile,
-        AccountRatingStat, AccountRecencyProfile, AccountTagFeedback, TagCount,
+        AccountMediaStat, AccountPreferenceProfile, AccountQualityProfile, AccountRatingStat,
+        AccountRecencyProfile, AccountTagFeedback, TagCount,
     };
     use crate::utils::idf::IdfIndex;
     use crate::utils::scorer::priors::Priors;
@@ -788,15 +793,14 @@ mod tests {
                     count: 30,
                 },
             ],
-            feedback: vec![
-                AccountTagFeedback {
-                    tag_name: "skeb".to_string(),
-                    group_type: "artist".to_string(),
-                    impression_count: 10,
-                    positive_count: 8,
-                    negative_count: 1,
-                },
-            ],
+            feedback: vec![AccountTagFeedback {
+                tag_name: "skeb".to_string(),
+                group_type: "artist".to_string(),
+                impression_count: 10,
+                positive_count: 8,
+                negative_count: 1,
+                last_interaction_at: Utc::now().to_rfc3339(),
+            }],
             quality: AccountQualityProfile::default(),
             recency: AccountRecencyProfile::default(),
             uploaders: vec![],
@@ -872,15 +876,18 @@ mod tests {
 
         // Input score > 0.5 → temperature pushes it higher.
         let s_no = ctx_no.final_blend(0.6, 0.6, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, false);
-        let s_yes = ctx_yes.final_blend(0.6, 0.6, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, false);
+        let s_yes =
+            ctx_yes.final_blend(0.6, 0.6, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, false);
         assert!(
             s_yes >= s_no,
             "temperature should push >0.5 scores higher: {s_no} -> {s_yes}"
         );
 
         // Input score < 0.5 → temperature pushes it lower.
-        let s_no2 = ctx_no.final_blend(0.3, 0.3, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, false);
-        let s_yes2 = ctx_yes.final_blend(0.3, 0.3, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, false);
+        let s_no2 =
+            ctx_no.final_blend(0.3, 0.3, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, false);
+        let s_yes2 =
+            ctx_yes.final_blend(0.3, 0.3, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, false);
         assert!(
             s_yes2 <= s_no2,
             "temperature should push <0.5 scores lower: {s_no2} -> {s_yes2}"
@@ -897,8 +904,10 @@ mod tests {
         let counts = empty_counts();
         let ctx = ScoringContext::new(&counts, &p, &idf, &profile, &graph, &graph);
 
-        let _without = ctx.final_blend(0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, false);
-        let with_veto = ctx.final_blend(0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, true);
+        let _without =
+            ctx.final_blend(0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, false);
+        let with_veto =
+            ctx.final_blend(0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, true);
         // The total mix weight sums to 1.0, no temperature, so raw=1.0, score=1.0
         // With veto: 1.0 * (1 - 0.25) = 0.75
         assert!(close(with_veto, 0.75), "expected 0.75 got {with_veto}");
@@ -944,11 +953,11 @@ mod tests {
         }];
 
         let base = ContextBase::new(&counts, &p, &idf, &profile);
-        let ctx_from_base =
-            ScoringContext::from_base(base, &p, &idf, &profile, &graph, &graph);
+        let ctx_from_base = ScoringContext::from_base(base, &p, &idf, &profile, &graph, &graph);
         let ctx_new = ScoringContext::new(&counts, &p, &idf, &profile, &graph, &graph);
 
-        let s1 = ctx_from_base.final_blend(0.3, 0.6, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, false);
+        let s1 =
+            ctx_from_base.final_blend(0.3, 0.6, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, false);
         let s2 = ctx_new.final_blend(0.3, 0.6, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, false);
         assert!(
             close(s1, s2),
@@ -962,10 +971,7 @@ mod tests {
         let mut p2 = default_priors();
         p1.confidence_steepness = 1.0;
         p2.confidence_steepness = 2.0;
-        assert_ne!(
-            context_fingerprint(&p1),
-            context_fingerprint(&p2)
-        );
+        assert_ne!(context_fingerprint(&p1), context_fingerprint(&p2));
     }
 
     #[test]
@@ -974,9 +980,6 @@ mod tests {
         let mut p2 = default_priors();
         p1.coldstart_n0 = 10.0;
         p2.coldstart_n0 = 50.0;
-        assert_ne!(
-            context_fingerprint(&p1),
-            context_fingerprint(&p2)
-        );
+        assert_ne!(context_fingerprint(&p1), context_fingerprint(&p2));
     }
 }

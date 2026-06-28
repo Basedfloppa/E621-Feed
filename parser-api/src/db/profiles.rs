@@ -424,7 +424,9 @@ pub fn get_account_preference_profile(account_id: i32) -> Result<AccountPreferen
 }
 
 /// Load preferred tags for an account. Returns empty vec if none set.
-pub fn get_account_preferred_tags(account_id: i32) -> Result<Vec<crate::models::PreferredTag>, String> {
+pub fn get_account_preferred_tags(
+    account_id: i32,
+) -> Result<Vec<crate::models::PreferredTag>, String> {
     let conn = open_db()?;
     let mut stmt = conn
         .prepare(
@@ -454,7 +456,7 @@ pub fn get_account_tag_feedback(account_id: i32) -> Result<Vec<AccountTagFeedbac
     let mut stmt = conn
         .prepare(
             "
-            SELECT tag_name, group_type, impression_count, positive_count, negative_count
+            SELECT tag_name, group_type, impression_count, positive_count, negative_count, last_interaction_at
             FROM account_tag_feedback
             WHERE account_id = ?
             ORDER BY (positive_count - negative_count) DESC, impression_count DESC
@@ -469,6 +471,7 @@ pub fn get_account_tag_feedback(account_id: i32) -> Result<Vec<AccountTagFeedbac
             impression_count: row.get(2)?,
             positive_count: row.get(3)?,
             negative_count: row.get(4)?,
+            last_interaction_at: row.get(5)?,
         })
     })
     .map_err(|e| format!("Failed to fetch tag feedback: {e}"))?

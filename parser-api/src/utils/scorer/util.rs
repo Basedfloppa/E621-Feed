@@ -117,6 +117,11 @@ pub(super) struct CompactFeedback {
     pub positive: i64,
     pub negative: i64,
     pub impressions: i64,
+    /// When this tag was last interacted with. Used for per-tag staleness
+    /// decay in the interaction channel — replaces the old global
+    /// `last_refreshed_at` approach so each tag's feedback age is tracked
+    /// independently.
+    pub last_interaction_secs: Option<f64>,
 }
 
 /// Class E v5.3: how to combine global+user PMI inside a single tag pair.
@@ -233,7 +238,10 @@ mod tests {
             FEEDBACK_NEUTRAL
         ));
         // Perfect match, no smoothing → 1.0.
-        assert!(close(discrete_preference_smooth(100, 100, 3, 0.0, 0.0), 1.0));
+        assert!(close(
+            discrete_preference_smooth(100, 100, 3, 0.0, 0.0),
+            1.0
+        ));
         // Zero matches honours the floor.
         assert!(close(discrete_preference_smooth(100, 0, 3, 0.0, 0.2), 0.2));
     }
@@ -284,7 +292,10 @@ mod tests {
         assert_eq!(PairAggregator::from_str("max"), PairAggregator::Max);
         assert_eq!(PairAggregator::from_str("  MAX "), PairAggregator::Max);
         assert_eq!(PairAggregator::from_str("geomean"), PairAggregator::GeoMean);
-        assert_eq!(PairAggregator::from_str("geo_mean"), PairAggregator::GeoMean);
+        assert_eq!(
+            PairAggregator::from_str("geo_mean"),
+            PairAggregator::GeoMean
+        );
         assert_eq!(PairAggregator::from_str("mean"), PairAggregator::Mean);
         // Unknown strings fall back to the Mean default.
         assert_eq!(PairAggregator::from_str("nonsense"), PairAggregator::Mean);
