@@ -110,7 +110,7 @@ group_w_artist = 2.40
 group_w_character = 2.00
 group_w_copyright = 1.45
 group_w_species = 1.30
-group_w_general = 0.70   # v5.10: 6 independent grids (v5.9 + v5.10) agree on 0.70
+group_w_general = 0.60
 group_w_lore = 0.40
 
 # Cold-start / Bayesian priors (v5.3 — promoted from hardcoded constants)
