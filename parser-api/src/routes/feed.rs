@@ -87,13 +87,14 @@ pub(crate) async fn log_feed_interaction_batch(
 }
 
 #[openapi(tag = "Recommendations")]
-#[get("/recommendations/<account_id>?<page>&<affinity_threshold>&<exploration>")]
+#[get("/recommendations/<account_id>?<page>&<affinity_threshold>&<exploration>&<session>")]
 pub(crate) async fn get_recommendations(
     account_id: i32,
     owner: OwnerToken,
     page: Option<i32>,
     affinity_threshold: Option<f32>,
     exploration: Option<f32>,
+    session: Option<String>,
 ) -> Result<Json<Vec<ScoredPost>>, ApiError> {
     validation::validate_account_id(account_id)?;
     validation::validate_recommendations_page(page)?;
@@ -110,9 +111,44 @@ pub(crate) async fn get_recommendations(
     // and exploration bonus). The shared function applies the exploration
     // bonus so both endpoints behave identically — fixing the original bug
     // where build_recommendations_inner skipped it entirely.
-    let scored =
+    let mut scored =
         build_recommendations_shared(account_id, &owner_token, page, affinity_threshold, exploration, "recommendations", Some(&mut pipe))
             .await?;
+
+    // Cross-page dedup: if a session_id is provided, filter out posts
+    // already shown in previous pages and record the new page's IDs.
+    // All I/O is against SQLite — nothing accumulates in process memory.
+    if let Some(ref sess) = session {
+        // Ensure the session row exists (first page of a scroll creates it).
+        let sess_for_touch = sess.clone();
+        db_blocking(move || db::touch_or_create_feed_session(&sess_for_touch, account_id))
+            .await?;
+        let session_for_dedup = sess.clone();
+        let shown_ids = match db_blocking(move || db::get_session_shown_post_ids(&session_for_dedup)).await {
+            Ok(ids) => ids,
+            Err(_) => std::collections::HashSet::new(), // session doesn't exist yet or expired
+        };
+
+        if !shown_ids.is_empty() {
+            let before = scored.len();
+            scored.retain(|sp| !shown_ids.contains(&sp.post.id));
+            if scored.len() < before {
+                debug!("[feed] cross-page dedup: dropped {} posts already shown", before - scored.len());
+            }
+        }
+
+        // Record this page's shown posts for future dedup.
+        let posts_to_record: Vec<(i64, i32)> = scored
+            .iter()
+            .enumerate()
+            .map(|(i, sp)| (sp.post.id, (i + 1) as i32))
+            .collect();
+        if !posts_to_record.is_empty() {
+            let session_for_record = sess.clone();
+            db_blocking(move || db::record_session_shown_posts(&session_for_record, &posts_to_record))
+                .await?;
+        }
+    }
 
     // Bucket logging (main endpoint only — continue caller handles it).
     let (bucket_name, _) = cfg().pick_bucket(account_id, None);
