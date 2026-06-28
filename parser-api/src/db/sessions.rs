@@ -186,7 +186,15 @@ pub fn get_session_shown_post_ids(session_id: &str) -> Result<HashSet<i64>, Stri
 pub fn prune_expired_sessions() -> Result<usize, String> {
     let cutoff = (Utc::now() - chrono::Duration::minutes(FEED_SESSION_TTL_MIN)).to_rfc3339();
     with_write_tx(|tx| {
-        // CASCADE will handle feed_session_posts rows.
+        // Delete orphaned feed_session_posts first (the FK was removed
+        // when session_id became non-unique in V22). Then delete expired
+        // session rows.
+        let _ = tx.execute(
+            "DELETE FROM feed_session_posts \
+             WHERE session_id IN (SELECT session_id FROM feed_sessions \
+                                  WHERE last_accessed_at < ?1)",
+            params![cutoff],
+        );
         let n = tx
             .execute(
                 "DELETE FROM feed_sessions WHERE last_accessed_at < ?1",
