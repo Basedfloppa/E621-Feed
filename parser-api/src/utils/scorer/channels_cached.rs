@@ -121,6 +121,11 @@ impl<'a> ScoringContext<'a> {
                 let imp = fb.impressions.max(0) as f32;
 
                 // Per-tag staleness decay — mirrors channels.rs.
+                // IMPORTANT: raw counts (pos/neg/imp) are already decayed
+                // by the /process worker's decay_account_tag_feedback().
+                // We only apply the half-life factor to the confidence
+                // scaling (ln_1p term) — applying it to raw counts again
+                // would be a double-decay bug.
                 let tag_staleness = match fb.last_interaction_secs {
                     Some(secs) => {
                         let elapsed_days =
@@ -508,8 +513,11 @@ impl<'a> ScoringContext<'a> {
             }
         }
 
-        let mut pairs = 0u32;
-        let mut total_cooc = 0i64;
+        // Track within-group and cross-group pairs separately.
+        let mut pairs_in = 0u32;
+        let mut total_cooc_in = 0i64;
+        let mut pairs_cross = 0u32;
+        let mut total_cooc_cross = 0i64;
 
         // Within-group pairs: tag co-occurrence computed inside each group.
         for entries in group_tags.iter() {
@@ -518,8 +526,8 @@ impl<'a> ScoringContext<'a> {
                 for j in i + 1..entries.len() {
                     let tid_b = entries[j].1;
                     let cooc = self.global_relation.cooc_by_id(tid_a, tid_b);
-                    total_cooc += cooc.max(0);
-                    pairs += 1;
+                    total_cooc_in += cooc.max(0);
+                    pairs_in += 1;
                 }
             }
         }
@@ -538,15 +546,21 @@ impl<'a> ScoringContext<'a> {
                     for b_tag in b_tags {
                         let tid_b = b_tag.1;
                         let cooc = self.global_relation.cooc_by_id(tid_a, tid_b);
-                        total_cooc += cooc.max(0);
-                        pairs += 1;
+                        total_cooc_cross += cooc.max(0);
+                        pairs_cross += 1;
                     }
                 }
             }
         }
 
-        if pairs == 0 { return 0.0; }
-        let avg_cooc = total_cooc as f32 / pairs as f32;
+        if pairs_in + pairs_cross == 0 { return 0.0; }
+
+        // Blend: cross-group pairs get weighted by `exclusivity_cross_group_weight`.
+        // Default 0.5 → cross-group pairs contribute ~⅓ of total.
+        let cw = p.exclusivity_cross_group_weight;
+        let weighted_cooc = total_cooc_in + (total_cooc_cross as f32 * cw) as i64;
+        let weighted_pairs = pairs_in + (pairs_cross as f32 * cw) as u32;
+        let avg_cooc = weighted_cooc as f32 / weighted_pairs as f32;
         1.0 - sigmoid(avg_cooc / scale - min_cooc)
     }
 
@@ -711,6 +725,7 @@ mod tests {
             diversity_pmi_threshold: 0.0,
             diversity_semantic_max_tags: 10,
             diversity_user_pmi_weight: 1.0,
+            exclusivity_cross_group_weight: 0.5,
         }
     }
 

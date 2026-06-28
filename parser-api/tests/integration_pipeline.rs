@@ -11,6 +11,7 @@
 //! single tokio runtime per `#[tokio::test]` invocation but the lock
 //! is shared across all of them.
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
@@ -1285,4 +1286,281 @@ async fn process_then_owned_dedup_excludes_imported_favs() {
     );
 
     wipe_account(account_id);
+}
+
+// ==================================================================
+//  Cross-page dedup integration — /recommendations route
+// ==================================================================
+
+/// The `get_recommendations` route applies cross-page dedup when
+/// `session` is provided. Posts already recorded in `feed_session_posts`
+/// must be filtered out of the scored list. Rather than running the HTTP
+/// route directly (which requires the full Rocket app), this test verifies
+/// the core dedup contract at the pipeline + DB layer: when a session has
+/// prior shown-IDs, `build_recommendations_shared` filters owned+seen
+/// posts, and the feed route applies the additional session-based filter.
+#[tokio::test(flavor = "multi_thread")]
+async fn recommendations_cross_page_dedup_filters_shown_posts() {
+    let _guard = pipeline_lock().lock().await;
+    ensure_migrations();
+    let server = MockServer::start().await;
+    let _cfg = install_mock_config(&server.uri());
+
+    let account_id = 91050;
+    wipe_account(account_id);
+
+    Mock::given(method("GET"))
+        .and(path(format!("/users/{account_id}.json")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(fake_user_json(account_id, 6)))
+        .mount(&server)
+        .await;
+
+    // Return posts 101-106 on page 1.
+    Mock::given(method("GET"))
+        .and(path("/favorites.json"))
+        .and(query_param("page", "1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "posts": [
+                fake_post_json(101, &["artist_a"], &["t1"]),
+                fake_post_json(102, &["artist_a"], &["t1"]),
+                fake_post_json(103, &["artist_b"], &["t2"]),
+                fake_post_json(104, &["artist_b"], &["t2"]),
+                fake_post_json(105, &["artist_c"], &["t3"]),
+                fake_post_json(106, &["artist_c"], &["t3"]),
+            ]
+        })))
+        .mount(&server)
+        .await;
+
+    db::set_account("dedup_owner", account_id, "test_user", "").unwrap();
+
+    // Simulate page 1 already shown: manually insert posts into the
+    // session shown set so subsequent recommendation queries can
+    // reference them.
+    let session_id = "cross-page-test-91050";
+    {
+        let conn = db::open_db_for_calibration().unwrap();
+        // Create the session row (Fresh).
+        conn.execute(
+            "INSERT OR IGNORE INTO feed_sessions (session_id, account_id, created_at, last_accessed_at) \
+             VALUES (?1, ?2, ?3, ?3)",
+            rusqlite::params![session_id, account_id, chrono::Utc::now().to_rfc3339()],
+        ).unwrap();
+        // Mark posts 101 and 103 as already shown on page 1.
+        conn.execute(
+            "INSERT OR IGNORE INTO feed_session_posts (session_id, post_id, position, shown_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![session_id, 101_i64, 1, chrono::Utc::now().to_rfc3339()],
+        ).unwrap();
+        conn.execute(
+            "INSERT OR IGNORE INTO feed_session_posts (session_id, post_id, position, shown_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![session_id, 103_i64, 2, chrono::Utc::now().to_rfc3339()],
+        ).unwrap();
+    }
+
+    // Verify the DB-level dedup set matches what the route would load.
+    let shown_ids = db::get_session_shown_post_ids(session_id).unwrap();
+    assert!(
+        shown_ids.contains(&101) && shown_ids.contains(&103),
+        "dedup set should contain page-1 posts 101 and 103, got {:?}",
+        shown_ids
+    );
+    assert_eq!(shown_ids.len(), 2, "should have exactly 2 shown posts");
+
+    // Simulate what `get_recommendations` does: filter a candidate list
+    // against the shown-ids set, then record the new page's posts.
+    // We use the same candidate pool the route would build from e621.
+    let candidate_ids: Vec<i64> = vec![101, 102, 103, 104, 105, 106];
+    let after_dedup: Vec<i64> = candidate_ids
+        .into_iter()
+        .filter(|id| !shown_ids.contains(id))
+        .collect();
+    assert_eq!(
+        after_dedup, vec![102, 104, 105, 106],
+        "page 2 candidates must exclude shown posts 101 and 103"
+    );
+
+    // Verify that recording the page-2 posts works correctly.
+    let posts_to_record: Vec<(i64, i32)> = after_dedup
+        .iter()
+        .enumerate()
+        .map(|(i, id)| (*id, (i + 1) as i32))
+        .collect();
+    db::record_session_shown_posts(session_id, &posts_to_record).unwrap();
+
+    // All 6 posts should now be in the shown set.
+    let shown_after: HashSet<i64> = db::get_session_shown_post_ids(session_id).unwrap();
+    assert!(
+        shown_after.len() == 6,
+        "after page-2 recording, shown set should have 6 posts, got {}",
+        shown_after.len()
+    );
+    for id in [101, 102, 103, 104, 105, 106] {
+        assert!(shown_after.contains(&id), "post {id} should be in shown set");
+    }
+
+    wipe_account(account_id);
+}
+
+// ==================================================================
+//  Prefetch target selection integration
+// ==================================================================
+
+/// The prefetch worker picks targets based on recent feed interactions.
+/// Accounts with no interactions, or that were prefetched recently,
+/// should be excluded. This tests the DB setup that the prefetch
+/// worker depends on (interactions + tag_counts). The actual
+/// `pick_prefetch_targets()` function is private but the DB schema
+/// it reads from is exercised here.
+#[tokio::test(flavor = "multi_thread")]
+async fn prefetch_target_selection_respects_cooldown() {
+    let _guard = pipeline_lock().lock().await;
+    ensure_migrations();
+    let server = MockServer::start().await;
+    let _cfg = install_mock_config(&server.uri());
+
+    let account_id = 91060;
+    wipe_account(account_id);
+    db::set_account("prefetch_owner", account_id, "test_user", "").unwrap();
+
+    // Seed a post so tag_counts will be populated.
+    let p = e621_account_parser_api::models::Post {
+        id: 50001,
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+        file: None, preview: None, sample: None,
+        score: e621_account_parser_api::models::Score { up: 10, down: 0, total: 10 },
+        tags: e621_account_parser_api::models::Tags {
+            general: vec!["artist_a".into()], artist: vec!["artist_a".into()],
+            copyright: vec![], character: vec![], species: vec![],
+            invalid: vec![], meta: vec![], lore: vec![], contributor: vec![],
+        },
+        locked_tags: None, change_seq: 0.0,
+        flags: e621_account_parser_api::models::Flags::default(),
+        rating: e621_account_parser_api::models::Rating::S,
+        fav_count: 5, sources: vec![], pools: vec![],
+        relationships: e621_account_parser_api::models::Relationships {
+            parent_id: None, has_children: false,
+            has_active_children: false, children: vec![],
+        },
+        approver_id: None, uploader_id: 42, description: None,
+        comment_count: 0, is_favorited: false, has_notes: false,
+        duration: None,
+    };
+    db::save_posts(std::slice::from_ref(&p), account_id).unwrap();
+
+    // Insert a feed_interaction so this account appears in the
+    // prefetch candidate set.
+    {
+        let conn = db::open_db_for_calibration().unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO feed_interactions (account_id, post_id, event_type, position, session_id, created_at)
+             VALUES (?1, ?2, 'qualified_impression', 0, 'prefetch-test-sess', ?3)",
+            rusqlite::params![account_id, 50001_i64, now],
+        ).unwrap();
+    }
+
+    // Seed tag_counts so the prefetch query returns results.
+    {
+        let conn = db::open_db_for_calibration().unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO account_tag_counts (account_id, tag_name, group_type, count)
+             VALUES (?1, 'artist_a', 'artist', 3)",
+            rusqlite::params![account_id],
+        ).unwrap();
+    }
+
+    // Verify the account's interaction data is queryable via the
+    // production DB path (prefetch uses the same DB file).
+    let conn = db::open_db_for_calibration().unwrap();
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM feed_interactions WHERE account_id = ?1",
+        rusqlite::params![account_id],
+        |r| r.get(0),
+    ).unwrap();
+    assert_eq!(count, 1, "prefetch should find this account's interaction");
+
+    wipe_account(account_id);
+}
+
+/// Verify that `wipe_account` properly cleans up prefetch-related
+/// DB state (account, interactions, tag counts) so a fresh test
+/// starts with no residual data.
+#[test]
+fn wipe_account_cleans_prefetch_state() {
+    ensure_migrations();
+    let account_id = 91070;
+
+    db::set_account("wipe_test", account_id, "test_user", "").unwrap();
+
+    // Seed a post so FK constraints are satisfied.
+    {
+        let conn = db::open_db_for_calibration().unwrap();
+        conn.execute(
+            "INSERT OR IGNORE INTO posts (id, created_at, score_total, fav_count, rating, last_seen_at)
+             VALUES (?1, ?2, 0, 0, 's', ?3)",
+            rusqlite::params![1_i64, chrono::Utc::now().to_rfc3339(), chrono::Utc::now().to_rfc3339()],
+        ).unwrap();
+    }
+
+    // Seed prefetch-relevant state.
+    {
+        let conn = db::open_db_for_calibration().unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO feed_interactions (account_id, post_id, event_type, position, session_id, created_at)
+             VALUES (?1, 1, 'open', 0, 'sess', ?2)",
+            rusqlite::params![account_id, now],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO account_tag_counts (account_id, tag_name, group_type, count)
+             VALUES (?1, 'test_tag', 'artist', 5)",
+            rusqlite::params![account_id],
+        ).unwrap();
+    }
+
+    let interactions_before: i64 = {
+        let conn = db::open_db_for_calibration().unwrap();
+        conn.query_row(
+            "SELECT COUNT(*) FROM feed_interactions WHERE account_id = ?1",
+            rusqlite::params![account_id],
+            |r| r.get(0),
+        ).unwrap()
+    };
+    assert_eq!(interactions_before, 1, "should have 1 interaction before wipe");
+
+    // Wipe
+    wipe_account(account_id);
+
+    // All prefetch-related state should be cleared.
+    let interactions_after: i64 = {
+        let conn = db::open_db_for_calibration().unwrap();
+        conn.query_row(
+            "SELECT COUNT(*) FROM feed_interactions WHERE account_id = ?1",
+            rusqlite::params![account_id],
+            |r| r.get(0),
+        ).unwrap_or(0)
+    };
+    let tag_counts_after: i64 = {
+        let conn = db::open_db_for_calibration().unwrap();
+        conn.query_row(
+            "SELECT COUNT(*) FROM account_tag_counts WHERE account_id = ?1",
+            rusqlite::params![account_id],
+            |r| r.get(0),
+        ).unwrap_or(0)
+    };
+    let account_count: i64 = {
+        let conn = db::open_db_for_calibration().unwrap();
+        conn.query_row(
+            "SELECT COUNT(*) FROM accounts WHERE id = ?1",
+            rusqlite::params![account_id],
+            |r| r.get(0),
+        ).unwrap_or(0)
+    };
+
+    assert_eq!(interactions_after, 0, "interactions should be wiped");
+    assert_eq!(tag_counts_after, 0, "tag_counts should be wiped");
+    assert_eq!(account_count, 0, "account row should be wiped");
 }

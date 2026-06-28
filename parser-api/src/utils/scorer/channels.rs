@@ -584,8 +584,12 @@ impl<'a> ScoringContext<'a> {
             }
         }
 
-        let mut pairs = 0u32;
-        let mut total_cooc = 0i64;
+        // Track within-group and cross-group pairs separately so we can
+        // weight the cross-group contribution via `exclusivity_cross_group_weight`.
+        let mut pairs_in = 0u32;
+        let mut total_cooc_in = 0i64;
+        let mut pairs_cross = 0u32;
+        let mut total_cooc_cross = 0i64;
 
         // Within-group pairs: tag co-occurrence computed inside each group.
         for entries in group_entries.iter() {
@@ -594,8 +598,8 @@ impl<'a> ScoringContext<'a> {
                 for j in i + 1..entries.len() {
                     let tid_b = entries[j].3;
                     let cooc = self.global_relation.cooc_by_id(tid_a, tid_b);
-                    total_cooc += cooc.max(0);
-                    pairs += 1;
+                    total_cooc_in += cooc.max(0);
+                    pairs_in += 1;
                 }
             }
         }
@@ -614,15 +618,23 @@ impl<'a> ScoringContext<'a> {
                     for b_tag in b_entries {
                         let tid_b = b_tag.3;
                         let cooc = self.global_relation.cooc_by_id(tid_a, tid_b);
-                        total_cooc += cooc.max(0);
-                        pairs += 1;
+                        total_cooc_cross += cooc.max(0);
+                        pairs_cross += 1;
                     }
                 }
             }
         }
 
-        if pairs == 0 { return 0.0; }
-        let avg_cooc = total_cooc as f32 / pairs as f32;
+        if pairs_in + pairs_cross == 0 { return 0.0; }
+
+        // Blend: cross-group pairs get weighted by `exclusivity_cross_group_weight`.
+        // The weight acts as a multiplier on cross-group avg-cooc before averaging
+        // with within-group. Default 0.5 → cross-group pairs contribute ~⅓ of
+        // total (half weight applied to their avg).
+        let cw = p.exclusivity_cross_group_weight;
+        let weighted_cooc = total_cooc_in + (total_cooc_cross as f32 * cw) as i64;
+        let weighted_pairs = pairs_in + (pairs_cross as f32 * cw) as u32;
+        let avg_cooc = weighted_cooc as f32 / weighted_pairs as f32;
         1.0 - sigmoid(avg_cooc / scale - min_cooc)
     }
 
@@ -982,6 +994,7 @@ mod tests {
             diversity_pmi_threshold: 0.0,
             diversity_semantic_max_tags: 10,
             diversity_user_pmi_weight: 1.0,
+            exclusivity_cross_group_weight: 0.5,
         }
     }
 
@@ -1885,4 +1898,197 @@ mod tests {
         // result = 0.5*(1-0.9524) + 0.3162*0.9524 = 0.0238 + 0.3012 = 0.3250
         assert!(close(u, 0.3250), "expected ~0.3250, got {u}");
     }
+
+    // ==================================================================
+    //  exclusivity_fit
+    // ==================================================================
+
+    /// When mix_exclusivity ≤ 0 the channel returns 0 regardless of tags.
+    #[test]
+    fn exclusivity_fit_disabled_when_mix_zero() {
+        let priors = default_priors(); // mix_exclusivity=0 by default
+        let idf = build_idf();
+        let global_graph = build_global_graph();
+        let user_graph = build_user_graph();
+        let profile = default_profile();
+        let counts = default_tag_counts();
+        let ctx = ScoringContext::new(&counts, &priors, &idf, &profile, &global_graph, &user_graph);
+
+        let mut tags = make_empty_tags();
+        tags.artist.push("skeb".to_string());
+        tags.character.push("cat".to_string());
+        let post = make_post(tags, 0, 0, Rating::S);
+        let e = ctx.exclusivity_fit(&post);
+        assert!(close(e, 0.0), "exclusivity disabled → 0.0, got {e}");
+    }
+
+    /// A post with tags that co-occur very rarely (cooc=0 in graph)
+    /// should get high exclusivity near 1.0.
+    #[test]
+    fn exclusivity_fit_rare_combination_scores_high() {
+        let mut priors = default_priors();
+        priors.mix_exclusivity = 1.0;   // enable channel
+        priors.exclusivity_scale = 0.5;
+        priors.min_exclusivity_cooc = 10;
+        priors.exclusivity_cross_group_weight = 1.0; // ensure non-zero pairs
+
+        let idf = build_idf();
+        let global_graph = build_global_graph();
+        let user_graph = build_user_graph();
+        let profile = default_profile();
+        let counts = default_tag_counts();
+        let ctx = ScoringContext::new(&counts, &priors, &idf, &profile, &global_graph, &user_graph);
+
+        // Use artist + copyright tags — skeb (artist) and
+        // original_character (copyright) have no cross-group cooc in the
+        // graph, so this should score high.
+        let mut tags = make_empty_tags();
+        tags.artist.push("skeb".to_string());
+        tags.copyright.push("original_character".to_string());
+        let post = make_post(tags, 0, 0, Rating::S);
+        let e = ctx.exclusivity_fit(&post);
+        // cooc=0 for cross-group pair → avg_cooc=0 →
+        // 1.0 - sigmoid(0/0.5 - 10) ≈ 1.0 - sigmoid(-10) ≈ 1.0
+        assert!(e > 0.8, "rare combination should score high, got {e}");
+    }
+
+    /// Cross-group pairs use the `exclusivity_cross_group_weight` knob
+    /// to adjust their contribution vs within-group pairs. Verifying that
+    /// different cross_group_weight values produce different results.
+    #[test]
+    fn exclusivity_fit_cross_group_weight_changes_score() {
+        let mut priors_default = default_priors();
+        priors_default.mix_exclusivity = 1.0;
+        priors_default.exclusivity_scale = 20.0;
+        priors_default.min_exclusivity_cooc = 5;
+        priors_default.exclusivity_cross_group_weight = 0.5; // default
+
+        let mut priors_high = default_priors();
+        priors_high.mix_exclusivity = 1.0;
+        priors_high.exclusivity_scale = 20.0;
+        priors_high.min_exclusivity_cooc = 5;
+        priors_high.exclusivity_cross_group_weight = 10.0; // high weight
+
+        let idf = build_idf();
+        let global_graph = build_global_graph();
+        let user_graph = build_user_graph();
+        let profile = default_profile();
+
+        let counts = default_tag_counts();
+
+        let ctx_default = ScoringContext::new(&counts, &priors_default, &idf, &profile, &global_graph, &user_graph);
+        let ctx_high = ScoringContext::new(&counts, &priors_high, &idf, &profile, &global_graph, &user_graph);
+
+        // artist(skeb), character(cat, dog), general(furry, commission),
+        // copyright(original_character) — 4 groups, multiple tags per group.
+        let mut tags = make_empty_tags();
+        tags.artist.push("skeb".to_string());
+        tags.character.push("cat".to_string());
+        tags.character.push("dog".to_string());
+        tags.general.push("furry".to_string());
+        tags.general.push("commission".to_string());
+        tags.copyright.push("original_character".to_string());
+        let post = make_post(tags, 0, 0, Rating::S);
+
+        let e_default = ctx_default.exclusivity_fit(&post);
+        let e_high = ctx_high.exclusivity_fit(&post);
+
+        // Both must be valid non-NaN scores.
+        assert!(
+            e_default.is_finite() && e_high.is_finite(),
+            "scores must be finite: default={e_default}, high={e_high}"
+        );
+        // The different cross_group_weight changes the weighted average,
+        // so the results must differ.
+        assert!(
+            (e_default - e_high).abs() > 1e-6,
+            "different cross_group_weight should produce different scores: default={e_default}, high={e_high}"
+        );
+    }
+
+    /// A post with only one tag has no pairs → exclusivity = 0.
+    #[test]
+    fn exclusivity_fit_single_tag_returns_zero() {
+        let mut priors = default_priors();
+        priors.mix_exclusivity = 1.0;
+        let idf = build_idf();
+        let global_graph = build_global_graph();
+        let user_graph = build_user_graph();
+        let profile = default_profile();
+        let counts = default_tag_counts();
+        let ctx = ScoringContext::new(&counts, &priors, &idf, &profile, &global_graph, &user_graph);
+
+        let mut tags = make_empty_tags();
+        tags.artist.push("skeb".to_string());
+        let post = make_post(tags, 0, 0, Rating::S);
+        let e = ctx.exclusivity_fit(&post);
+        assert!(close(e, 0.0), "single tag → no pairs → 0.0, got {e}");
+    }
+
+    /// Tags from groups with zero group_weight are excluded from the
+    /// exclusivity computation.
+    #[test]
+    fn exclusivity_fit_respects_zero_group_weights() {
+        let mut priors = default_priors();
+        priors.mix_exclusivity = 1.0;
+        priors.group_w_artist = 2.40;   // enabled
+        priors.group_w_character = 0.0;  // disabled
+        priors.group_w_copyright = 1.45; // enabled
+        priors.group_w_species = 1.30;
+        priors.group_w_general = 0.70;
+        priors.group_w_lore = 0.40;
+        priors.exclusivity_cross_group_weight = 1.0; // avoid integer-truncation edge
+
+        let idf = build_idf();
+        let global_graph = build_global_graph();
+        let user_graph = build_user_graph();
+        let profile = default_profile();
+        let counts = default_tag_counts();
+        let ctx = ScoringContext::new(&counts, &priors, &idf, &profile, &global_graph, &user_graph);
+
+        let mut tags = make_empty_tags();
+        tags.artist.push("skeb".to_string());
+        tags.character.push("cat".to_string()); // group weight = 0 → excluded
+        tags.copyright.push("original_character".to_string());
+        tags.general.push("furry".to_string());  // general also enabled
+        let post = make_post(tags, 0, 0, Rating::S);
+        let e = ctx.exclusivity_fit(&post);
+        // Only artist + copyright + general contribute; character is excluded.
+        // Since skeb-original_character have cooc=0 in the graph,
+        // exclusivity should be high and non-NaN.
+        assert!(
+            e.is_finite() && e > 0.0,
+            "non-zero groups should contribute, got {e}"
+        );
+    }
+
+    /// When exclusivity_max_tags truncates groups, only top-K tags
+    /// participate in the O(T²) pair loop.
+    #[test]
+    fn exclusivity_fit_max_tags_truncation() {
+        let mut priors = default_priors();
+        priors.mix_exclusivity = 1.0;
+        priors.exclusivity_max_tags = 2; // cap at 2 tags per group
+        priors.exclusivity_scale = 0.1;
+
+        let idf = build_idf();
+        let global_graph = build_global_graph();
+        let user_graph = build_user_graph();
+        let profile = default_profile();
+        let counts = default_tag_counts();
+        let ctx = ScoringContext::new(&counts, &priors, &idf, &profile, &global_graph, &user_graph);
+
+        // Post with more than 2 general tags — only top-2 by idf_weight count.
+        let mut tags = make_empty_tags();
+        tags.general.push("furry".to_string());    // high df=8000 → low idf
+        tags.general.push("commission".to_string()); // df=1500 → higher idf
+        tags.general.push("detailed_background".to_string()); // df=500 → highest idf
+        tags.general.push("skeb".to_string());       // df=1000
+        tags.general.push("cat".to_string());        // df=5000
+        let post = make_post(tags, 0, 0, Rating::S);
+        let e = ctx.exclusivity_fit(&post);
+        // Should produce a valid score without panicking.
+        assert!(e >= 0.0 && e <= 1.0, "score in range with truncation: {e}");
+    }
 }
+

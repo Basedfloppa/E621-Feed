@@ -143,7 +143,7 @@ quality_w_relative_score = 0.30
 quality_w_relative_comments = 0.15
 # Upvote-ratio weight (Class F): blend `up / (up + down)` into quality.
 # 0 = disabled (legacy behaviour). Default 0.3.
-# quality_c = 0.3
+quality_c = 0.3
 
 # Popularity channel internals (sum to 1.0)
 popularity_w_fav = 0.80

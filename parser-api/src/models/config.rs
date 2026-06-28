@@ -849,6 +849,7 @@ diversity_w_general    = 0.08
             diversity_pmi_threshold: 0.0,
             diversity_semantic_max_tags: 10,
             diversity_user_pmi_weight: 1.0,
+            exclusivity_cross_group_weight: 0.5,
         }
     }
 

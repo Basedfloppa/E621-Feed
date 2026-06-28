@@ -225,6 +225,13 @@ pub struct Priors {
     /// Maximum tags to consider in the O(T²) exclusivity loop (0 = no limit).
     #[serde(default = "default_exclusivity_max_tags")]
     pub exclusivity_max_tags: usize,
+    /// Relative weight of cross-group co-occurrence vs within-group in the
+    /// exclusivity channel. The effective cross-group weight is
+    /// `cross_group_weight / (cross_group_weight + 1.0)`. Default 0.5 means
+    /// cross-group pairs contribute ~⅓ of total weight (50% of within-group
+    /// pairs). Higher values give more credit to rare multi-group tag combos.
+    #[serde(default = "default_exclusivity_cross_group_weight")]
+    pub exclusivity_cross_group_weight: f32,
 
     // ---- Class I: tag novelty channel ----
     /// Mix weight for the tag novelty channel. 0 = disabled.
@@ -430,6 +437,9 @@ fn default_exclusivity_scale() -> f32 {
 }
 fn default_exclusivity_max_tags() -> usize {
     15
+}
+fn default_exclusivity_cross_group_weight() -> f32 {
+    0.5
 }
 fn default_mix_novelty() -> f32 {
     0.0
