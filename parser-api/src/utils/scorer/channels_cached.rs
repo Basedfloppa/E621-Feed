@@ -558,9 +558,11 @@ impl<'a> ScoringContext<'a> {
         // Blend: cross-group pairs get weighted by `exclusivity_cross_group_weight`.
         // Default 0.5 → cross-group pairs contribute ~⅓ of total.
         let cw = p.exclusivity_cross_group_weight;
-        let weighted_cooc = total_cooc_in + (total_cooc_cross as f32 * cw) as i64;
-        let weighted_pairs = pairs_in + (pairs_cross as f32 * cw) as u32;
-        let avg_cooc = weighted_cooc as f32 / weighted_pairs as f32;
+        // Keep pair counts as f32 so fractional cross-group weights don't
+        // truncate to 0 when there are few cross-group pairs (which would
+        // cause division-by-zero → NaN downstream).
+        let weighted_pairs = (pairs_in as f32) + (pairs_cross as f32) * cw;
+        let avg_cooc = (total_cooc_in as f32 + (total_cooc_cross as f32) * cw) / weighted_pairs;
         1.0 - sigmoid(avg_cooc / scale - min_cooc)
     }
 

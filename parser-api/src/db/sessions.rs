@@ -117,7 +117,7 @@ pub fn touch_or_create_feed_session(
                     "INSERT INTO feed_sessions \
                      (session_id, account_id, created_at, last_accessed_at) \
                      VALUES (?1, ?2, ?3, ?3) \
-                     ON CONFLICT(session_id) DO NOTHING",
+                     ON CONFLICT(session_id, account_id) DO NOTHING",
                     params![session_id, account_id, now],
                 )
                 .map_err(|e| format!("Failed to create feed session: {e}"))?;
@@ -134,8 +134,8 @@ pub fn touch_or_create_feed_session(
                 let now = Utc::now().to_rfc3339();
                 tx.execute(
                     "UPDATE feed_sessions SET last_accessed_at = ?1 \
-                     WHERE session_id = ?2",
-                    params![now, session_id],
+                     WHERE session_id = ?2 AND account_id = ?3",
+                    params![now, session_id, account_id],
                 )
                 .map_err(|e| format!("Failed to touch feed session: {e}"))?;
                 Ok(FeedSessionState::Active)
@@ -172,9 +172,7 @@ pub fn record_session_shown_posts(
 pub fn get_session_shown_post_ids(session_id: &str) -> Result<HashSet<i64>, String> {
     let conn = open_db()?;
     let mut stmt = conn
-        .prepare(
-            "SELECT post_id FROM feed_session_posts WHERE session_id = ?1",
-        )
+        .prepare("SELECT post_id FROM feed_session_posts WHERE session_id = ?1")
         .map_err(|e| format!("Failed to prepare session shown posts query: {e}"))?;
     let rows = stmt
         .query_map(params![session_id], |r| r.get::<_, i64>(0))
@@ -186,8 +184,7 @@ pub fn get_session_shown_post_ids(session_id: &str) -> Result<HashSet<i64>, Stri
 /// Prune expired sessions and their shown posts.
 /// Returns the number of pruned sessions.
 pub fn prune_expired_sessions() -> Result<usize, String> {
-    let cutoff =
-        (Utc::now() - chrono::Duration::minutes(FEED_SESSION_TTL_MIN)).to_rfc3339();
+    let cutoff = (Utc::now() - chrono::Duration::minutes(FEED_SESSION_TTL_MIN)).to_rfc3339();
     with_write_tx(|tx| {
         // CASCADE will handle feed_session_posts rows.
         let n = tx

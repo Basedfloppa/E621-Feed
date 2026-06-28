@@ -10,10 +10,8 @@
 use std::collections::HashSet;
 
 use e621_account_parser_api::db;
-use e621_account_parser_api::models::{
-    Flags, Post, Rating, Relationships, Score, Tags,
-};
 use e621_account_parser_api::models::FileInfo;
+use e621_account_parser_api::models::{Flags, Post, Rating, Relationships, Score, Tags};
 
 /// Helper: build a minimal Post for testing.
 fn make_post(id: i64, tags: Tags, uploader_id: i64) -> Post {
@@ -24,7 +22,11 @@ fn make_post(id: i64, tags: Tags, uploader_id: i64) -> Post {
         file: None,
         preview: None,
         sample: None,
-        score: Score { up: 10, down: 0, total: 10 },
+        score: Score {
+            up: 10,
+            down: 0,
+            total: 10,
+        },
         tags,
         locked_tags: None,
         change_seq: 0.0,
@@ -63,7 +65,7 @@ fn make_tags(artist: &[&str], character: &[&str], general: &[&str]) -> Tags {
     }
 }
 
-/// Verify that `save_posts_tags_batch` with `account_id = Some(...)` 
+/// Verify that `save_posts_tags_batch` with `account_id = Some(...)`
 /// incrementally populates `account_tag_cooccurrence`, and that the
 /// entries survive `drop_account_posts` + re-save correctly.
 #[test]
@@ -77,7 +79,11 @@ fn incremental_cooccurrence_roundtrip() {
     // ---- Save batch 1: two posts sharing some tags ----
     let posts1 = vec![
         make_post(11001, make_tags(&["skeb"], &["cat"], &["furry"]), 42),
-        make_post(11002, make_tags(&["skeb"], &["dog"], &["furry", "commission"]), 42),
+        make_post(
+            11002,
+            make_tags(&["skeb"], &["dog"], &["furry", "commission"]),
+            42,
+        ),
     ];
     db::save_posts(&posts1, account_id).unwrap();
     db::save_posts_tags_batch(&posts1, &blacklist, true, Some(account_id)).unwrap();
@@ -121,14 +127,19 @@ fn incremental_cooccurrence_roundtrip() {
     assert_eq!(self_pairs, 0, "no self-pairs in account_tag_cooccurrence");
 
     // ---- Save batch 2: overlapping tags should increment counts ----
-    let posts2 = vec![
-        make_post(11003, make_tags(&["skeb"], &["cat"], &["furry"]), 42),
-    ];
+    let posts2 = vec![make_post(
+        11003,
+        make_tags(&["skeb"], &["cat"], &["furry"]),
+        42,
+    )];
     db::save_posts(&posts2, account_id).unwrap();
     db::save_posts_tags_batch(&posts2, &blacklist, true, Some(account_id)).unwrap();
 
     let count2 = count_account_cooc(account_id);
-    assert!(count2 >= count, "cooc should persist across batches ({count} → {count2})");
+    assert!(
+        count2 >= count,
+        "cooc should persist across batches ({count} → {count2})"
+    );
 
     // ---- Drop + re-save: verify cooccurrence is rebuilt correctly ----
     //
@@ -141,9 +152,11 @@ fn incremental_cooccurrence_roundtrip() {
     let count_after_drop = count_account_cooc(account_id);
     assert_eq!(count_after_drop, 0, "cooc should be empty after drop");
 
-    let posts3 = vec![
-        make_post(11001, make_tags(&["skeb"], &["cat"], &["furry"]), 42),
-    ];
+    let posts3 = vec![make_post(
+        11001,
+        make_tags(&["skeb"], &["cat"], &["furry"]),
+        42,
+    )];
     db::save_posts(&posts3, account_id).unwrap();
     db::save_posts_tags_batch(&posts3, &blacklist, true, Some(account_id)).unwrap();
     let count3 = count_account_cooc(account_id);
@@ -164,9 +177,11 @@ fn profile_refresh_skip_cooc_leaves_cooc_intact() {
     setup_test(account_id);
 
     // Save posts + incremental cooc
-    let posts = vec![
-        make_post(11010, make_tags(&["skeb"], &["cat"], &["furry"]), 42),
-    ];
+    let posts = vec![make_post(
+        11010,
+        make_tags(&["skeb"], &["cat"], &["furry"]),
+        42,
+    )];
     db::save_posts(&posts, account_id).unwrap();
     db::save_posts_tags_batch(&posts, &blacklist, true, Some(account_id)).unwrap();
     let cooc_before = count_account_cooc(account_id);
@@ -176,8 +191,10 @@ fn profile_refresh_skip_cooc_leaves_cooc_intact() {
 
     // Cooc should still be present (not wiped by a full rebuild)
     let cooc_after = count_account_cooc(account_id);
-    assert_eq!(cooc_before, cooc_after,
-        "skip_cooc should not change cooc count: before={cooc_before} after={cooc_after}");
+    assert_eq!(
+        cooc_before, cooc_after,
+        "skip_cooc should not change cooc count: before={cooc_before} after={cooc_after}"
+    );
 
     db::drop_account_posts(account_id).unwrap();
 }
@@ -192,9 +209,11 @@ fn profile_refresh_full_rebuilds_cooc() {
     setup_test(account_id);
 
     // Save posts WITHOUT incremental cooc (track_cooccurrence=false)
-    let posts = vec![
-        make_post(11020, make_tags(&["skeb"], &["cat"], &["furry"]), 42),
-    ];
+    let posts = vec![make_post(
+        11020,
+        make_tags(&["skeb"], &["cat"], &["furry"]),
+        42,
+    )];
     db::save_posts(&posts, account_id).unwrap();
     db::save_posts_tags_batch(&posts, &blacklist, false, None).unwrap();
 
@@ -215,9 +234,11 @@ fn catalog_save_does_not_write_account_cooc() {
 
     setup_test(account_id);
 
-    let posts = vec![
-        make_post(11030, make_tags(&["skeb"], &["cat"], &["furry"]), 42),
-    ];
+    let posts = vec![make_post(
+        11030,
+        make_tags(&["skeb"], &["cat"], &["furry"]),
+        42,
+    )];
     db::save_posts(&posts, account_id).unwrap();
     // account_id=None simulates the catalog path (feed.rs / prefetch.rs)
     db::save_posts_tags_batch(&posts, &blacklist, false, None).unwrap();
@@ -258,16 +279,18 @@ fn setup_test(account_id: i32) {
     ensure_migrations();
     let _ = e621_account_parser_api::db::set_account("test_owner", account_id, "test_user", "");
     let _ = e621_account_parser_api::db::drop_account_posts(account_id);
-    let _ = e621_account_parser_api::db::drop_account_cooccurrence_batched(
-        account_id,
-        1024,
-        |_, _| {},
-    );
+    let _ =
+        e621_account_parser_api::db::drop_account_cooccurrence_batched(account_id, 1024, |_, _| {});
     // Drop any stale feed_sessions a previous panicking run may have
     // left behind. Without this, the Fresh→Active→Expired tests are
     // order-dependent: a leftover row makes the first call return
-    // Active instead of Fresh.
+    // Active instead of Fresh. Also clean feed_session_posts since the
+    // cascade FK was removed when session_id became non-unique.
     if let Ok(conn) = e621_account_parser_api::db::open_db_for_calibration() {
+        let _ = conn.execute(
+            "DELETE FROM feed_session_posts WHERE session_id IN (SELECT session_id FROM feed_sessions WHERE account_id = ?1)",
+            rusqlite::params![account_id],
+        );
         let _ = conn.execute(
             "DELETE FROM feed_sessions WHERE account_id = ?1",
             rusqlite::params![account_id],
@@ -293,11 +316,7 @@ impl TestAccount {
         let owner = "test_owner";
         let _ = e621_account_parser_api::db::set_account(owner, id, "test_user", "");
         let _ = e621_account_parser_api::db::drop_account_posts(id);
-        let _ = e621_account_parser_api::db::drop_account_cooccurrence_batched(
-            id,
-            1024,
-            |_, _| {},
-        );
+        let _ = e621_account_parser_api::db::drop_account_cooccurrence_batched(id, 1024, |_, _| {});
         let _ = e621_account_parser_api::db::drop_account_feed_interactions_batched(
             id,
             1024,
@@ -356,7 +375,11 @@ fn get_post_by_id_returns_hydrated_tags() {
 
     let saved = make_post(
         12001,
-        make_tags(&["test_artist"], &["test_char"], &["test_general1", "test_general2"]),
+        make_tags(
+            &["test_artist"],
+            &["test_char"],
+            &["test_general1", "test_general2"],
+        ),
         42,
     );
     db::save_posts(std::slice::from_ref(&saved), account_id).unwrap();
@@ -414,6 +437,8 @@ fn touch_or_create_feed_session_lifecycle() {
     let account_id = 90006;
     setup_test(account_id);
 
+    // Use a unique session_id per test run to avoid collisions with
+    // parallel tests that may reuse the same session strings.
     let session_id = "test-sess-90006-abc123";
 
     // 1. First call → Fresh (row created).
@@ -453,12 +478,16 @@ fn touch_or_create_feed_session_lifecycle() {
     // 5. A different account using the same session_id is a different
     //    logical session: the row is keyed by (session_id, account_id).
     //    Account 90006's row exists but doesn't apply to 90007.
+    // Create account 90007 first so the FK check passes.
+    let _ = e621_account_parser_api::db::set_account("other_owner", 90007, "test_user", "");
     let state = db::touch_or_create_feed_session(session_id, 90007).unwrap();
     assert_eq!(
         state,
         db::FeedSessionState::Fresh,
         "different account_id must get its own Fresh row"
     );
+    // Clean up account 90007.
+    let _ = db::drop_account_posts(90007);
 
     // Cleanup
     {
@@ -490,21 +519,12 @@ fn drop_account_cooccurrence_batched_loops_until_empty() {
     // pairs (function picks canonical ordering); 3-batch is enough.
     let p = make_post(
         13001,
-        make_tags(
-            &["a"],
-            &[],
-            &["g1", "g2", "g3", "g4", "g5"],
-        ),
+        make_tags(&["a"], &[], &["g1", "g2", "g3", "g4", "g5"]),
         42,
     );
     db::save_posts(std::slice::from_ref(&p), account_id).unwrap();
-    db::save_posts_tags_batch(
-        std::slice::from_ref(&p),
-        &blacklist,
-        true,
-        Some(account_id),
-    )
-    .unwrap();
+    db::save_posts_tags_batch(std::slice::from_ref(&p), &blacklist, true, Some(account_id))
+        .unwrap();
 
     let before = count_account_cooc(account_id);
     assert!(before >= 10, "expected ≥10 cooc rows, got {before}");
@@ -515,14 +535,10 @@ fn drop_account_cooccurrence_batched_loops_until_empty() {
     use std::cell::Cell;
     let calls = Cell::new(0usize);
     let total_seen = Cell::new(0usize);
-    let deleted = db::drop_account_cooccurrence_batched(
-        account_id,
-        4,
-        |batch, total| {
-            calls.set(calls.get() + 1);
-            total_seen.set(total);
-        },
-    )
+    let deleted = db::drop_account_cooccurrence_batched(account_id, 4, |batch, total| {
+        calls.set(calls.get() + 1);
+        total_seen.set(total);
+    })
     .unwrap();
 
     assert_eq!(
@@ -570,16 +586,8 @@ fn save_posts_tags_batch_no_self_pairs() {
     // and at least 2 unique tags each so the global cooc branch fires
     // on post1 (priming `cooc_dirty`).
     let posts = vec![
-        make_post(
-            14001,
-            make_tags(&["a"], &["c"], &["g1", "g2"]),
-            42,
-        ),
-        make_post(
-            14002,
-            make_tags(&["a"], &["c"], &["g1", "g3"]),
-            42,
-        ),
+        make_post(14001, make_tags(&["a"], &["c"], &["g1", "g2"]), 42),
+        make_post(14002, make_tags(&["a"], &["c"], &["g1", "g3"]), 42),
     ];
     db::save_posts(&posts, account_id).unwrap();
     db::save_posts_tags_batch(&posts, &blacklist, true, Some(account_id)).unwrap();
@@ -622,13 +630,8 @@ fn drop_helpers_only_touch_their_target_table() {
     // Seed cooc rows but NO feed_interactions.
     let p = make_post(15001, make_tags(&["a"], &["c"], &["g1", "g2"]), 42);
     db::save_posts(std::slice::from_ref(&p), account_id).unwrap();
-    db::save_posts_tags_batch(
-        std::slice::from_ref(&p),
-        &blacklist,
-        true,
-        Some(account_id),
-    )
-    .unwrap();
+    db::save_posts_tags_batch(std::slice::from_ref(&p), &blacklist, true, Some(account_id))
+        .unwrap();
 
     let cooc_before = count_account_cooc(account_id);
     assert!(cooc_before > 0);
@@ -786,13 +789,7 @@ fn drop_account_feed_interactions_batched_loops_until_empty() {
                 "INSERT INTO feed_interactions \
                  (account_id, post_id, event_type, position, session_id, created_at) \
                  VALUES (?1, ?2, 'qualified_impression', ?3, ?4, ?5)",
-                rusqlite::params![
-                    acc.id,
-                    16001_i64,
-                    i,
-                    format!("test-sess-{i}"),
-                    now
-                ],
+                rusqlite::params![acc.id, 16001_i64, i, format!("test-sess-{i}"), now],
             )
             .unwrap();
         }
@@ -995,30 +992,50 @@ fn profile_post(
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
         file: Some(FileInfo {
-            width: 100, height: 100, ext: Some(ext.into()), size: 1234,
-            md5: Some("dummy".into()), url: Some("https://example.com/img".into()),
+            width: 100,
+            height: 100,
+            ext: Some(ext.into()),
+            size: 1234,
+            md5: Some("dummy".into()),
+            url: Some("https://example.com/img".into()),
         }),
-        preview: None, sample: None,
-        score: Score { up: score_total.max(0), down: 0, total: score_total },
+        preview: None,
+        sample: None,
+        score: Score {
+            up: score_total.max(0),
+            down: 0,
+            total: score_total,
+        },
         tags: Tags {
             general: vec!["tag".into()],
             artist: vec!["art".into()],
-            copyright: vec![], character: vec![], species: vec![],
-            lore: vec![], meta: vec![], invalid: vec![], contributor: vec![],
+            copyright: vec![],
+            character: vec![],
+            species: vec![],
+            lore: vec![],
+            meta: vec![],
+            invalid: vec![],
+            contributor: vec![],
         },
-        locked_tags: None, change_seq: 0.0,
+        locked_tags: None,
+        change_seq: 0.0,
         flags: Flags::default(),
         rating: r,
         fav_count,
-        sources: vec![], pools: vec![],
+        sources: vec![],
+        pools: vec![],
         relationships: Relationships {
-            parent_id: None, has_children: false,
-            has_active_children: false, children: vec![],
+            parent_id: None,
+            has_children: false,
+            has_active_children: false,
+            children: vec![],
         },
-        approver_id: None, uploader_id,
+        approver_id: None,
+        uploader_id,
         description: None,
         comment_count,
-        is_favorited: false, has_notes: false,
+        is_favorited: false,
+        has_notes: false,
         duration,
     }
 }
@@ -1040,8 +1057,16 @@ fn profile_rating_profile() {
     let profile = db::get_account_rating_profile(acc.id).unwrap();
 
     // Should have 2 S-rated and 1 Q-rated
-    let s_count = profile.iter().find(|r| r.rating == "s").map(|r| r.count).unwrap_or(0);
-    let q_count = profile.iter().find(|r| r.rating == "q").map(|r| r.count).unwrap_or(0);
+    let s_count = profile
+        .iter()
+        .find(|r| r.rating == "s")
+        .map(|r| r.count)
+        .unwrap_or(0);
+    let q_count = profile
+        .iter()
+        .find(|r| r.rating == "q")
+        .map(|r| r.count)
+        .unwrap_or(0);
     assert_eq!(s_count, 2, "should have 2 S-rated posts");
     assert_eq!(q_count, 1, "should have 1 Q-rated post");
 }
@@ -1052,33 +1077,54 @@ fn profile_media_profile() {
     let acc = TestAccount::new(90021);
 
     let posts = vec![
-        profile_post(200011, "s", "jpg", None, 1, 0, 0, 1),   // image
-        profile_post(200012, "s", "png", None, 1, 0, 0, 1),   // image
-        profile_post(200013, "s", "gif", None, 1, 0, 0, 1),   // animated (gif)
-        profile_post(200014, "s", "webm", None, 1, 0, 0, 1),  // video
-        profile_post(200015, "s", "mp4", None, 1, 0, 0, 1),   // video
+        profile_post(200011, "s", "jpg", None, 1, 0, 0, 1), // image
+        profile_post(200012, "s", "png", None, 1, 0, 0, 1), // image
+        profile_post(200013, "s", "gif", None, 1, 0, 0, 1), // animated (gif)
+        profile_post(200014, "s", "webm", None, 1, 0, 0, 1), // video
+        profile_post(200015, "s", "mp4", None, 1, 0, 0, 1), // video
         // Post with duration > 0 but no file_ext (should be video)
         e621_account_parser_api::models::Post {
             id: 200016,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
-            file: None, preview: None, sample: None,
-            score: e621_account_parser_api::models::Score { up: 1, down: 0, total: 1 },
-            tags: e621_account_parser_api::models::Tags {
-                general: vec!["tag".into()], artist: vec!["art".into()],
-                copyright: vec![], character: vec![], species: vec![],
-                lore: vec![], meta: vec![], invalid: vec![], contributor: vec![],
+            file: None,
+            preview: None,
+            sample: None,
+            score: e621_account_parser_api::models::Score {
+                up: 1,
+                down: 0,
+                total: 1,
             },
-            locked_tags: None, change_seq: 0.0,
+            tags: e621_account_parser_api::models::Tags {
+                general: vec!["tag".into()],
+                artist: vec!["art".into()],
+                copyright: vec![],
+                character: vec![],
+                species: vec![],
+                lore: vec![],
+                meta: vec![],
+                invalid: vec![],
+                contributor: vec![],
+            },
+            locked_tags: None,
+            change_seq: 0.0,
             flags: e621_account_parser_api::models::Flags::default(),
             rating: e621_account_parser_api::models::Rating::S,
-            fav_count: 0, sources: vec![], pools: vec![],
+            fav_count: 0,
+            sources: vec![],
+            pools: vec![],
             relationships: Relationships {
-                parent_id: None, has_children: false,
-                has_active_children: false, children: vec![],
+                parent_id: None,
+                has_children: false,
+                has_active_children: false,
+                children: vec![],
             },
-            approver_id: None, uploader_id: 1, description: None,
-            comment_count: 0, is_favorited: false, has_notes: false,
+            approver_id: None,
+            uploader_id: 1,
+            description: None,
+            comment_count: 0,
+            is_favorited: false,
+            has_notes: false,
             duration: Some(10.0),
         },
     ];
@@ -1087,9 +1133,21 @@ fn profile_media_profile() {
     e621_account_parser_api::db::set_media_profile(acc.id).unwrap();
     let profile = db::get_account_media_profile(acc.id).unwrap();
 
-    let image_count = profile.iter().find(|m| m.media_type == "image").map(|m| m.count).unwrap_or(0);
-    let animated = profile.iter().find(|m| m.media_type == "animated").map(|m| m.count).unwrap_or(0);
-    let video_count = profile.iter().find(|m| m.media_type == "video").map(|m| m.count).unwrap_or(0);
+    let image_count = profile
+        .iter()
+        .find(|m| m.media_type == "image")
+        .map(|m| m.count)
+        .unwrap_or(0);
+    let animated = profile
+        .iter()
+        .find(|m| m.media_type == "animated")
+        .map(|m| m.count)
+        .unwrap_or(0);
+    let video_count = profile
+        .iter()
+        .find(|m| m.media_type == "video")
+        .map(|m| m.count)
+        .unwrap_or(0);
     assert_eq!(image_count, 2, "jpg + png = 2 images");
     assert_eq!(animated, 1, "gif = 1 animated");
     assert_eq!(video_count, 3, "webm + mp4 + duration>0 = 3 video");
@@ -1109,10 +1167,26 @@ fn profile_quality_profile() {
     e621_account_parser_api::db::set_quality_profile(acc.id).unwrap();
     let q = db::get_account_quality_profile(acc.id).unwrap();
 
-    assert!((q.avg_score_total - 150.0).abs() < 1.0, "avg score = 150, got {}", q.avg_score_total);
-    assert!((q.avg_fav_count - 40.0).abs() < 1.0, "avg fav = 40, got {}", q.avg_fav_count);
-    assert!((q.avg_comment_count - 15.0).abs() < 1.0, "avg comments = 15, got {}", q.avg_comment_count);
-    assert!((q.avg_duration - 10.0).abs() < 1.0, "avg duration = 10, got {}", q.avg_duration);
+    assert!(
+        (q.avg_score_total - 150.0).abs() < 1.0,
+        "avg score = 150, got {}",
+        q.avg_score_total
+    );
+    assert!(
+        (q.avg_fav_count - 40.0).abs() < 1.0,
+        "avg fav = 40, got {}",
+        q.avg_fav_count
+    );
+    assert!(
+        (q.avg_comment_count - 15.0).abs() < 1.0,
+        "avg comments = 15, got {}",
+        q.avg_comment_count
+    );
+    assert!(
+        (q.avg_duration - 10.0).abs() < 1.0,
+        "avg duration = 10, got {}",
+        q.avg_duration
+    );
 }
 
 /// Verify recency profile computes averages correctly.
@@ -1127,23 +1201,44 @@ fn profile_recency_profile() {
             id,
             created_at: now - Duration::seconds((days_ago * 86_400.0) as i64),
             updated_at: now,
-            file: None, preview: None, sample: None,
-            score: e621_account_parser_api::models::Score { up: 1, down: 0, total: 1 },
-            tags: e621_account_parser_api::models::Tags {
-                general: vec!["tag".into()], artist: vec!["art".into()],
-                copyright: vec![], character: vec![], species: vec![],
-                lore: vec![], meta: vec![], invalid: vec![], contributor: vec![],
+            file: None,
+            preview: None,
+            sample: None,
+            score: e621_account_parser_api::models::Score {
+                up: 1,
+                down: 0,
+                total: 1,
             },
-            locked_tags: None, change_seq: 0.0,
+            tags: e621_account_parser_api::models::Tags {
+                general: vec!["tag".into()],
+                artist: vec!["art".into()],
+                copyright: vec![],
+                character: vec![],
+                species: vec![],
+                lore: vec![],
+                meta: vec![],
+                invalid: vec![],
+                contributor: vec![],
+            },
+            locked_tags: None,
+            change_seq: 0.0,
             flags: e621_account_parser_api::models::Flags::default(),
             rating: e621_account_parser_api::models::Rating::S,
-            fav_count: 0, sources: vec![], pools: vec![],
+            fav_count: 0,
+            sources: vec![],
+            pools: vec![],
             relationships: Relationships {
-                parent_id: None, has_children: false,
-                has_active_children: false, children: vec![],
+                parent_id: None,
+                has_children: false,
+                has_active_children: false,
+                children: vec![],
             },
-            approver_id: None, uploader_id: 1, description: None,
-            comment_count: 0, is_favorited: false, has_notes: false,
+            approver_id: None,
+            uploader_id: 1,
+            description: None,
+            comment_count: 0,
+            is_favorited: false,
+            has_notes: false,
             duration: None,
         }
     };
@@ -1187,12 +1282,26 @@ fn profile_uploader_profile() {
     let uploaders = db::get_account_uploader_profile(acc.id).unwrap();
 
     // Uploader 100 has 2 posts (score 10 and 30 → avg 20; fav 5 and 15 → avg 10)
-    let u100 = uploaders.iter().find(|u| u.uploader_id == 100).expect("uploader 100 present");
-    assert!((u100.avg_score - 20.0).abs() < 1.0, "uploader 100 avg_score=20, got {}", u100.avg_score);
-    assert!((u100.avg_fav - 10.0).abs() < 1.0, "uploader 100 avg_fav=10, got {}", u100.avg_fav);
+    let u100 = uploaders
+        .iter()
+        .find(|u| u.uploader_id == 100)
+        .expect("uploader 100 present");
+    assert!(
+        (u100.avg_score - 20.0).abs() < 1.0,
+        "uploader 100 avg_score=20, got {}",
+        u100.avg_score
+    );
+    assert!(
+        (u100.avg_fav - 10.0).abs() < 1.0,
+        "uploader 100 avg_fav=10, got {}",
+        u100.avg_fav
+    );
 
     // Uploader 200 has 1 post (score 20, fav 10)
-    let u200 = uploaders.iter().find(|u| u.uploader_id == 200).expect("uploader 200 present");
+    let u200 = uploaders
+        .iter()
+        .find(|u| u.uploader_id == 200)
+        .expect("uploader 200 present");
     assert!((u200.avg_score - 20.0).abs() < 1.0);
     assert!((u200.avg_fav - 10.0).abs() < 1.0);
 }
@@ -1209,7 +1318,8 @@ fn profile_refresh_full_sets_profiles_and_timestamp() {
         &std::collections::HashSet::new(),
         true,
         Some(acc.id),
-    ).unwrap();
+    )
+    .unwrap();
 
     e621_account_parser_api::db::refresh_account_profiles(acc.id).unwrap();
 

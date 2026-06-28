@@ -218,6 +218,7 @@ fn wipe_account(id: i32) {
             "DELETE FROM account_quality_profile WHERE account_id = ?1",
             "DELETE FROM account_tag_feedback WHERE account_id = ?1",
             "DELETE FROM feed_sessions WHERE account_id = ?1",
+            "DELETE FROM feed_session_posts WHERE session_id IN (SELECT session_id FROM feed_sessions WHERE account_id = ?1)",
             "DELETE FROM accounts WHERE id = ?1",
         ] {
             let _ = conn.execute(stmt, rusqlite::params![id]);
@@ -1336,10 +1337,18 @@ async fn recommendations_cross_page_dedup_filters_shown_posts() {
 
     // Simulate page 1 already shown: manually insert posts into the
     // session shown set so subsequent recommendation queries can
-    // reference them.
+    // reference them. Clean up first in case of a previous run.
     let session_id = "cross-page-test-91050";
     {
         let conn = db::open_db_for_calibration().unwrap();
+        conn.execute(
+            "DELETE FROM feed_session_posts WHERE session_id = ?1",
+            rusqlite::params![session_id],
+        ).unwrap();
+        conn.execute(
+            "DELETE FROM feed_sessions WHERE session_id = ?1",
+            rusqlite::params![session_id],
+        ).unwrap();
         // Create the session row (Fresh).
         conn.execute(
             "INSERT OR IGNORE INTO feed_sessions (session_id, account_id, created_at, last_accessed_at) \

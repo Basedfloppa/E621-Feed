@@ -115,11 +115,40 @@ pub fn prune_stale_catalog_posts(retention_days: i64) -> Result<i64, String> {
 
 pub fn drop_account_posts(account_id: i32) -> Result<(), String> {
     super::with_write_tx(|tx| {
+        // Collect post_ids owned by this account before clearing.
+        // We delete them from `posts` to avoid stale data leaking into
+        // profile/digest queries across test runs (the accounts_post FK
+        // is ON DELETE CASCADE, but deleting FROM accounts_post does not
+        // cascade back to posts).
+        let post_ids: Vec<i64> = {
+            let mut stmt = tx
+                .prepare_cached("SELECT post_id FROM accounts_post WHERE account_id = ?1")
+                .map_err(|e| format!("Failed to prepare account posts list: {e}"))?;
+            stmt.query_map(params![account_id], |r| r.get::<_, i64>(0))
+                .map_err(|e| format!("Failed to list account posts: {e}"))?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| format!("Failed to collect account post ids: {e}"))?
+        };
+
         tx.execute(
             "DELETE FROM accounts_post WHERE account_id = ?1",
             params![account_id],
         )
         .map_err(|e| format!("Failed to clear accounts_post: {e}"))?;
+
+        // Remove posts that were exclusively owned by this account.
+        for pid in &post_ids {
+            let cnt: i64 = {
+                let mut stmt = tx
+                    .prepare("SELECT COUNT(*) FROM accounts_post WHERE post_id = ?1")
+                    .map_err(|e| format!("prepare accounts_post count: {e}"))?;
+                stmt.query_row(params![pid], |r| r.get::<_, i64>(0))
+                    .unwrap_or(0)
+            };
+            if cnt == 0 {
+                let _ = tx.execute("DELETE FROM posts WHERE id = ?1", params![pid]);
+            }
+        }
         Ok(())
     })
 }
@@ -200,7 +229,11 @@ fn delete_by_account_in_batches(
              WHERE rowid IN (SELECT rowid FROM feed_interactions \
                              WHERE account_id = ?1 LIMIT ?2)"
         }
-        other => return Err(format!("delete_by_account_in_batches: unknown table {other}")),
+        other => {
+            return Err(format!(
+                "delete_by_account_in_batches: unknown table {other}"
+            ))
+        }
     };
     let mut total: usize = 0;
     loop {
@@ -401,7 +434,8 @@ pub fn hydrate_posts_by_ids(ids: &[i64]) -> Result<Vec<Post>, String> {
             .query_map(rusqlite::params_from_iter(params_vec), |row| {
                 let id: i64 = row.get(0)?;
                 let created_at_raw: String = row.get(1)?;
-                let updated_at_raw: String = row.get(2)?;
+                let updated_at_default = created_at_raw.clone();
+                let updated_at_raw: Option<String> = row.get(2)?;
                 let score_total: i64 = row.get(3)?;
                 let score_up: i64 = row.get(4)?;
                 let score_down: i64 = row.get(5)?;
@@ -427,7 +461,7 @@ pub fn hydrate_posts_by_ids(ids: &[i64]) -> Result<Vec<Post>, String> {
                 Ok((
                     id,
                     created_at_raw,
-                    updated_at_raw,
+                    updated_at_raw.unwrap_or(updated_at_default),
                     score_total,
                     score_up,
                     score_down,
@@ -665,9 +699,10 @@ pub fn find_similar_post_ids(
         .map_err(|e| format!("Failed to prepare similar posts query: {e}"))?;
 
     let rows = stmt
-        .query_map(params![post_id, account_id, min_overlap, limit, offset], |r| {
-            r.get::<_, i64>(0)
-        })
+        .query_map(
+            params![post_id, account_id, min_overlap, limit, offset],
+            |r| r.get::<_, i64>(0),
+        )
         .map_err(|e| format!("Failed to query similar posts: {e}"))?;
 
     rows.collect::<Result<Vec<_>, _>>()

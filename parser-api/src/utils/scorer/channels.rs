@@ -632,9 +632,11 @@ impl<'a> ScoringContext<'a> {
         // with within-group. Default 0.5 → cross-group pairs contribute ~⅓ of
         // total (half weight applied to their avg).
         let cw = p.exclusivity_cross_group_weight;
-        let weighted_cooc = total_cooc_in + (total_cooc_cross as f32 * cw) as i64;
-        let weighted_pairs = pairs_in + (pairs_cross as f32 * cw) as u32;
-        let avg_cooc = weighted_cooc as f32 / weighted_pairs as f32;
+        // Keep pair counts as f32 so fractional cross-group weights don't
+        // truncate to 0 when there are few cross-group pairs (which would
+        // cause division-by-zero → NaN downstream).
+        let weighted_pairs = (pairs_in as f32) + (pairs_cross as f32) * cw;
+        let avg_cooc = (total_cooc_in as f32 + (total_cooc_cross as f32) * cw) / weighted_pairs;
         1.0 - sigmoid(avg_cooc / scale - min_cooc)
     }
 
@@ -2089,6 +2091,36 @@ mod tests {
         let e = ctx.exclusivity_fit(&post);
         // Should produce a valid score without panicking.
         assert!(e >= 0.0 && e <= 1.0, "score in range with truncation: {e}");
+    }
+
+    /// Regression test: a post with exactly 1 tag per group produces
+    /// 0 within-group pairs and 1 cross-group pair. With a fractional
+    /// `exclusivity_cross_group_weight` (< 1.0), the old code would
+    /// truncate `(1 * cw) as u32` to 0, causing division-by-zero → NaN.
+    #[test]
+    fn exclusivity_fit_no_nan_with_single_cross_group_pair() {
+        let mut priors = default_priors();
+        priors.mix_exclusivity = 1.0;
+        priors.exclusivity_cross_group_weight = 0.5; // < 1.0 → old code truncates to 0
+
+        let idf = build_idf();
+        let global_graph = build_global_graph();
+        let user_graph = build_user_graph();
+        let profile = default_profile();
+        let counts = default_tag_counts();
+        let ctx = ScoringContext::new(&counts, &priors, &idf, &profile, &global_graph, &user_graph);
+
+        // 1 artist tag + 1 copyright tag → 0 within-group, 1 cross-group.
+        let mut tags = make_empty_tags();
+        tags.artist.push("skeb".to_string());
+        tags.copyright.push("original_character".to_string());
+        let post = make_post(tags, 0, 0, Rating::S);
+        let e = ctx.exclusivity_fit(&post);
+        assert!(
+            e.is_finite(),
+            "single cross-group pair with cw=0.5 must not produce NaN: {e}"
+        );
+        assert!(e > 0.0, "rare pair should score positive: {e}");
     }
 }
 
