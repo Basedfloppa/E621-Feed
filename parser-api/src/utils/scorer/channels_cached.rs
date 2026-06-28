@@ -483,8 +483,10 @@ impl<'a> ScoringContext<'a> {
         let scale = p.exclusivity_scale.max(0.01);
         let max_tags = p.exclusivity_max_tags;
 
-        // Group tags by group index, respecting exclusivity_max_tags.
-        let mut group_tags: [Vec<(f32, &CachedTag)>; 7] = Default::default();
+        // Collect tags per group with weights and truncated by max_tags.
+        // Each entry: (idf_weight, global_tid). group_tags[g_idx] holds
+        // tags from group g_idx.
+        let mut group_tags: [Vec<(f32, TagId)>; 7] = Default::default();
         for ct in &post.tags {
             let g = ct.group as usize;
             let gw = self.group_wts[g];
@@ -493,24 +495,52 @@ impl<'a> ScoringContext<'a> {
                 ct.df_raw, p.df_floor, p.idf_max, p.idf_rsj_smoothing,
                 p.idf_lambda, p.idf_alpha,
             );
-            if weight > 0.0 { group_tags[g].push((weight, ct)); }
+            if let Some(tid) = ct.global_tid {
+                group_tags[g].push((weight, tid));
+            }
+        }
+
+        // Truncate each group to top-K by weight.
+        if max_tags > 0 {
+            for entries in group_tags.iter_mut() {
+                entries.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+                entries.truncate(max_tags);
+            }
         }
 
         let mut pairs = 0u32;
         let mut total_cooc = 0i64;
 
-        for entries in group_tags.iter_mut() {
-            if max_tags > 0 && entries.len() > max_tags {
-                entries.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-                entries.truncate(max_tags);
-            }
+        // Within-group pairs: tag co-occurrence computed inside each group.
+        for entries in group_tags.iter() {
             for i in 0..entries.len() {
-                let tid_a = match entries[i].1.global_tid { Some(id) => id, None => continue };
+                let tid_a = entries[i].1;
                 for j in i + 1..entries.len() {
-                    let tid_b = match entries[j].1.global_tid { Some(id) => id, None => continue };
+                    let tid_b = entries[j].1;
                     let cooc = self.global_relation.cooc_by_id(tid_a, tid_b);
                     total_cooc += cooc.max(0);
                     pairs += 1;
+                }
+            }
+        }
+
+        // Cross-group pairs: tag co-occurrence computed across all group
+        // combinations, capturing rare multi-group patterns (e.g. an artist
+        // tag + a character tag that seldom appear together).
+        for ai in 0..group_tags.len() {
+            for bi in ai + 1..group_tags.len() {
+                let a_tags = &group_tags[ai];
+                let b_tags = &group_tags[bi];
+                if a_tags.is_empty() || b_tags.is_empty() { continue; }
+
+                for a_tag in a_tags {
+                    let tid_a = a_tag.1;
+                    for b_tag in b_tags {
+                        let tid_b = b_tag.1;
+                        let cooc = self.global_relation.cooc_by_id(tid_a, tid_b);
+                        total_cooc += cooc.max(0);
+                        pairs += 1;
+                    }
                 }
             }
         }

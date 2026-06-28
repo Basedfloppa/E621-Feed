@@ -551,39 +551,67 @@ impl<'a> ScoringContext<'a> {
             (Group::Meta, &post.tags.meta),
         ];
 
-        let mut pairs = 0u32;
-        let mut total_cooc = 0i64;
-
-        for (group, tags) in groups {
+        // Collect tags per group with their group weights and truncated by max_tags.
+        // Each entry: (idf_weight, normalized_tag, group_idx, tag_id).
+        let mut group_entries: [Vec<(f32, String, usize, TagId)>; 7] = Default::default();
+        for (group, tags) in groups.iter().copied() {
             let g = group as u8;
             let g_idx = group as usize;
             let group_w = self.group_wts[g_idx];
             if group_w <= 0.0 { continue; }
 
-            // Build tag list with group weights for truncation.
-            let mut entries: Vec<(f32, &str)> = tags
-                .iter()
-                .filter(|t| !t.is_empty())
-                .map(|t| (group_w * self.idf.idf_tempered(&normalize_tag(t), p.df_floor, p.idf_max, p.idf_rsj_smoothing, p.idf_lambda, p.idf_alpha), t.as_str()))
-                .collect();
-            if max_tags > 0 && entries.len() > max_tags {
+            for t in tags {
+                if t.is_empty() { continue; }
+                let lc = normalize_tag(t);
+                let idf_w = group_w * self.idf.idf_tempered(&lc, p.df_floor, p.idf_max, p.idf_rsj_smoothing, p.idf_lambda, p.idf_alpha);
+                let tid = self.global_relation.tag_id(g, lc.as_ref());
+                if let Some(id) = tid {
+                    group_entries[g_idx].push((idf_w, lc.to_string(), g_idx, id));
+                }
+            }
+        }
+
+        // Truncate each group to top-K by idf_weight.
+        if max_tags > 0 {
+            for entries in group_entries.iter_mut() {
                 entries.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
                 entries.truncate(max_tags);
             }
+        }
 
+        let mut pairs = 0u32;
+        let mut total_cooc = 0i64;
+
+        // Within-group pairs: tag co-occurrence computed inside each group.
+        for entries in group_entries.iter() {
             for i in 0..entries.len() {
-                let t_a = normalize_tag(entries[i].1);
-                let tid_a = self.global_relation.tag_id(g, t_a.as_ref());
-                let tid_a = match tid_a { Some(id) => id, None => continue };
-
+                let tid_a = entries[i].3;
                 for j in i + 1..entries.len() {
-                    let t_b = normalize_tag(entries[j].1);
-                    let tid_b = self.global_relation.tag_id(g, t_b.as_ref());
-                    let tid_b = match tid_b { Some(id) => id, None => continue };
-
+                    let tid_b = entries[j].3;
                     let cooc = self.global_relation.cooc_by_id(tid_a, tid_b);
                     total_cooc += cooc.max(0);
                     pairs += 1;
+                }
+            }
+        }
+
+        // Cross-group pairs: tag co-occurrence computed across all group
+        // combinations, capturing rare multi-group patterns (e.g. an artist
+        // tag + a character tag that seldom appear together).
+        for ai in 0..group_entries.len() {
+            for bi in ai + 1..group_entries.len() {
+                let a_entries = &group_entries[ai];
+                let b_entries = &group_entries[bi];
+                if a_entries.is_empty() || b_entries.is_empty() { continue; }
+
+                for a_tag in a_entries {
+                    let tid_a = a_tag.3;
+                    for b_tag in b_entries {
+                        let tid_b = b_tag.3;
+                        let cooc = self.global_relation.cooc_by_id(tid_a, tid_b);
+                        total_cooc += cooc.max(0);
+                        pairs += 1;
+                    }
                 }
             }
         }
