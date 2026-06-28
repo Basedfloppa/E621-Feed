@@ -157,6 +157,23 @@ pub struct RuntimeConfig {
     /// before resetting the counter and resuming normal cadence.
     #[serde(default = "default_prefetch_breaker_pause_secs")]
     pub prefetch_breaker_pause_secs: u64,
+    /// Number of top tags to fetch per group (artist, character). Default 1
+    /// (narrow). Higher values (e.g. 5–10) broaden catalog diversity at the
+    /// cost of more API quota per tick.
+    #[serde(default = "default_prefetch_tags_per_group")]
+    pub prefetch_tags_per_group: usize,
+    /// Whether to also fetch a “recent popular” stream (latest posts above
+    /// the user's avg fav count) as a third prefetch bucket. Default false.
+    /// When enabled the worker picks one additional top tag for artist/
+    /// character and fetches by popularity.
+    #[serde(default = "default_prefetch_include_recent_popular")]
+    pub prefetch_include_recent_popular: bool,
+    /// Per-user prefetch cooldown: only refetch an account's top tags if
+    /// that account hasn't been prefetched within this many seconds. Default
+    /// 3600 (1 h). Prevents the worker from hammering the same artist/
+    /// character every tick.
+    #[serde(default = "default_prefetch_cooldown_secs")]
+    pub prefetch_cooldown_secs: u64,
 
     /// Cadence for the unified cache-validator background worker. Walks
     /// every in-process cache (e621 outbound TTL cache, /process job
@@ -200,6 +217,9 @@ impl Default for RuntimeConfig {
             prefetch_active_window_days: default_prefetch_active_window_days(),
             prefetch_breaker_threshold: default_prefetch_breaker_threshold(),
             prefetch_breaker_pause_secs: default_prefetch_breaker_pause_secs(),
+            prefetch_tags_per_group: default_prefetch_tags_per_group(),
+            prefetch_include_recent_popular: default_prefetch_include_recent_popular(),
+            prefetch_cooldown_secs: default_prefetch_cooldown_secs(),
             cache_validate_interval_secs: default_cache_validate_interval_secs(),
             cache_idle_eviction_secs: default_cache_idle_eviction_secs(),
         }
@@ -278,6 +298,15 @@ fn default_prefetch_breaker_threshold() -> u32 {
 }
 fn default_prefetch_breaker_pause_secs() -> u64 {
     600
+}
+fn default_prefetch_tags_per_group() -> usize {
+    1
+}
+fn default_prefetch_include_recent_popular() -> bool {
+    false
+}
+fn default_prefetch_cooldown_secs() -> u64 {
+    3600
 }
 fn default_cache_validate_interval_secs() -> u64 {
     300 // 5 min
