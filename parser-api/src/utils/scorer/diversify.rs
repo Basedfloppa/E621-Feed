@@ -210,10 +210,15 @@ fn pmi_group_similarity(
 
 /// Blended group-level similarity: Jaccard (exact tag-match) and PMI
 /// (semantic soft-match). When `blend <= 0`, falls back to pure Jaccard.
+///
+/// When `user_graph` is provided, PMI queries use the user's co-occurrence
+/// statistics (capturing personalized tag associations) instead of the
+/// global graph. Jaccard exact-match uses the TagIds from `graph`.
 fn group_similarity(
     a: &[(u64, Option<TagId>)],
     b: &[(u64, Option<TagId>)],
     graph: &TagRelationGraph,
+    user_graph: Option<&TagRelationGraph>,
     blend: f32,
     pmi_threshold: f32,
     max_tags: usize,
@@ -222,7 +227,8 @@ fn group_similarity(
         return jaccard_hashes(a, b);
     }
     let jac = jaccard_hashes(a, b);
-    let pmi = pmi_group_similarity(a, b, graph, pmi_threshold, max_tags);
+    let graph_for_pmi = user_graph.unwrap_or(graph);
+    let pmi = pmi_group_similarity(a, b, graph_for_pmi, pmi_threshold, max_tags);
     (1.0 - blend) * jac + blend * pmi
 }
 
@@ -231,6 +237,7 @@ fn max_redundancy_indexed(
     selected: &[usize],
     features: &[DiversityFeatures],
     graph: &TagRelationGraph,
+    user_graph: Option<&TagRelationGraph>,
     priors: &Priors,
 ) -> f32 {
     let window = priors.diversity_window.max(1);
@@ -254,6 +261,7 @@ fn max_redundancy_indexed(
                 &cand.artist,
                 &chosen.artist,
                 graph,
+                user_graph,
                 blend,
                 pmi_threshold,
                 max_tags,
@@ -262,6 +270,7 @@ fn max_redundancy_indexed(
                     &cand.character,
                     &chosen.character,
                     graph,
+                    user_graph,
                     blend,
                     pmi_threshold,
                     max_tags,
@@ -270,6 +279,7 @@ fn max_redundancy_indexed(
                     &cand.copyright,
                     &chosen.copyright,
                     graph,
+                    user_graph,
                     blend,
                     pmi_threshold,
                     max_tags,
@@ -278,6 +288,7 @@ fn max_redundancy_indexed(
                     &cand.species,
                     &chosen.species,
                     graph,
+                    user_graph,
                     blend,
                     pmi_threshold,
                     max_tags,
@@ -286,6 +297,7 @@ fn max_redundancy_indexed(
                     &cand.general,
                     &chosen.general,
                     graph,
+                    user_graph,
                     blend,
                     pmi_threshold,
                     max_tags,
@@ -314,6 +326,7 @@ pub fn diversify_indices(
     entries: &[(f32, f32, i64)],
     features: &[DiversityFeatures],
     graph: &TagRelationGraph,
+    user_graph: Option<&TagRelationGraph>,
     priors: &Priors,
     head_limit: usize,
 ) -> Vec<usize> {
@@ -353,8 +366,14 @@ pub fn diversify_indices(
 
         for (pos, &i) in available.iter().enumerate() {
             let (score, interaction, tid) = entries[i];
-            let redundancy =
-                max_redundancy_indexed(&features[i], &selected, features, graph, priors);
+            let redundancy = max_redundancy_indexed(
+                &features[i],
+                &selected,
+                features,
+                graph,
+                user_graph,
+                priors,
+            );
             let gap = (top_score - score).max(0.0);
             let penalty = (redundancy * gap * (1.0 - damp * interaction)).clamp(0.0, max_penalty);
             let adj = score - penalty;
@@ -383,9 +402,18 @@ pub fn diversify_indices(
 /// Owning re-rank used by the production `/recommendations` route.
 /// Builds [`DiversityFeatures`] on the fly and runs MMR over the whole
 /// list (no top-K cutoff) to preserve historical behaviour.
+/// Owning re-rank used by the production `/recommendations` route.
+/// Builds [`DiversityFeatures`] on the fly and runs MMR over the whole
+/// list (no top-K cutoff) to preserve historical behaviour.
+///
+/// When `user_graph` is provided, PMI-based soft similarity (controlled
+/// by `diversity_semantic_blend`) uses the user's tag co-occurrence
+/// statistics instead of the global graph, allowing the diversity pass
+/// to personalise around per-account tag associations.
 pub fn diversify_scored_posts(
     posts: Vec<ScoredPost>,
     graph: &TagRelationGraph,
+    user_graph: Option<&TagRelationGraph>,
     priors: &Priors,
 ) -> Vec<ScoredPost> {
     if posts.is_empty() {
@@ -407,7 +435,7 @@ pub fn diversify_scored_posts(
         })
         .collect();
 
-    let order = diversify_indices(&entries, &features, graph, priors, posts.len());
+    let order = diversify_indices(&entries, &features, graph, user_graph, priors, posts.len());
 
     let mut slots: Vec<Option<ScoredPost>> = posts.into_iter().map(Some).collect();
     let mut out: Vec<ScoredPost> = Vec::with_capacity(slots.len());
@@ -956,10 +984,43 @@ mod tests {
         let b = vec![(2, None), (3, None)];
         // Jaccard = 1/3 ≈ 0.333
         let jac = jaccard_hashes(&a, &b);
-        let blended = group_similarity(&a, &b, &graph, 0.0, 0.0, 10);
+        let blended = group_similarity(&a, &b, &graph, None, 0.0, 0.0, 10);
         assert!(
             (blended - jac).abs() < 1e-6,
             "blend=0 should equal jaccard: {blended} vs {jac}"
+        );
+    }
+
+    /// When diversity_semantic_blend > 0 and user_graph is provided,
+    /// PMI queries should use the user graph's co-occurrence stats
+    /// instead of the global graph's.
+    #[test]
+    fn group_similarity_uses_user_graph_for_pmi() {
+        // Build a global graph with a low-cooc pair (low PMI).
+        let mut global = TagRelationGraph::with_posts(100);
+        global.set_marginal(0, "tagA", 50);
+        global.set_marginal(0, "tagB", 50);
+        global.insert_pair(0, "tagA", 0, "tagB", 2); // cooc=2 → PMI ≈ ln(0.04) ≈ -3.2
+
+        // Build a user graph with high co-occurrence (high PMI).
+        let mut user = TagRelationGraph::with_posts(100);
+        user.set_marginal(0, "tagA", 50);
+        user.set_marginal(0, "tagB", 50);
+        user.insert_pair(0, "tagA", 0, "tagB", 40); // cooc=40 → PMI ≈ ln(3.2) ≈ 1.16
+
+        let tid_a = global.tag_id(0, "tagA").unwrap();
+        let tid_b = global.tag_id(0, "tagB").unwrap();
+
+        let a = vec![(hash_tag("tagA"), Some(tid_a))];
+        let b = vec![(hash_tag("tagB"), Some(tid_b))];
+
+        // With blend=1.0 and PMI threshold=0, user_graph should yield
+        // high PMI (40 cooc) while global yields low PMI (2 cooc).
+        let with_user = group_similarity(&a, &b, &global, Some(&user), 1.0, 0.0, 10);
+        let without_user = group_similarity(&a, &b, &global, None, 1.0, 0.0, 10);
+        assert!(
+            with_user > without_user,
+            "user_graph PMI ({with_user}) should exceed global PMI ({without_user})"
         );
     }
 

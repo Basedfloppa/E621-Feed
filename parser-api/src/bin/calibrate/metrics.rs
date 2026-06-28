@@ -80,7 +80,11 @@ fn se_of_mean(xs: &[f64]) -> f64 {
 fn bootstrap_ci_95(xs: &[f64], n_resamples: usize) -> (f64, f64) {
     let n = xs.len();
     if n < 2 || n_resamples == 0 {
-        let mean = if n > 0 { xs.iter().sum::<f64>() / n as f64 } else { 0.0 };
+        let mean = if n > 0 {
+            xs.iter().sum::<f64>() / n as f64
+        } else {
+            0.0
+        };
         return (mean, mean);
     }
     let mut means: Vec<f64> = Vec::with_capacity(n_resamples);
@@ -89,7 +93,12 @@ fn bootstrap_ci_95(xs: &[f64], n_resamples: usize) -> (f64, f64) {
     for _ in 0..n_resamples {
         let mut sum = 0.0f64;
         for _ in 0..n {
-            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            // Linear-congruential generator (LCG) — Numerical Recipes constants
+            // chosen for full 2^64 period. We take the high bits (>> 33) to
+            // avoid the low-order bit's well-known poor randomness.
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             let idx = ((state >> 33) % n_u) as usize;
             sum += xs[idx];
         }
@@ -205,6 +214,7 @@ fn score_with_opts(
                         &entries,
                         &fx.diversity_features,
                         &dataset.global_relation,
+                        None,
                         priors,
                         head_limit,
                     );

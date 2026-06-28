@@ -398,8 +398,9 @@ async fn build_recommendations_shared(
     // uses. The returned order interleaves diverse picks with high-score
     // ones; we DON'T sort by score after, because that would undo the
     // MMR interleaving. Callers can `truncate(N)` to keep the top-N
-    // best-balanced posts.
-    let mut scored = diversify_scored_posts(scored, &global_relation, &priors);
+    // best-balanced posts. Passes `user_relation` so PMI-based soft
+    // similarity personalises around per-account tag co-occurrences.
+    let mut scored = diversify_scored_posts(scored, &global_relation, Some(&user_relation), &priors);
     if let Some(p) = &mut pipe { p.mark("diversify_post"); }
 
     // Class F: ε-greedy exploration bonus (applied in the shared pipeline

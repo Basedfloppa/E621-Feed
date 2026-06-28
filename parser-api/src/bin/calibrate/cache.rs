@@ -29,8 +29,7 @@ use chrono::{DateTime, Utc};
 use rayon::prelude::*;
 
 use e621_account_parser_api::utils::{
-    context_fingerprint, diversify_indices, CachedPostFeatures, ContextBase, Priors,
-    ScoringContext,
+    context_fingerprint, diversify_indices, CachedPostFeatures, ContextBase, Priors, ScoringContext,
 };
 
 use crate::dataset::EvalDataset;
@@ -258,8 +257,7 @@ pub(crate) fn score_with_cache(
                 let mut entries: Vec<(f32, f32, i64)> = Vec::with_capacity(total_posts);
                 for (i, features) in fx.test_features.iter().enumerate() {
                     let prior = prev_acc.map(|a| a.channels[i]).unwrap_or_default();
-                    let ch =
-                        recompute_one_post(&ctx, features, priors.now, prior, effective_mask);
+                    let ch = recompute_one_post(&ctx, features, priors.now, prior, effective_mask);
                     let score = blend_channel(&ctx, ch);
                     entries.push((score, ch.interaction, features.id));
                     next_channels.push(ch);
@@ -267,8 +265,7 @@ pub(crate) fn score_with_cache(
                 for (j, features) in fx.neg_features.iter().enumerate() {
                     let cache_idx = n_test + j;
                     let prior = prev_acc.map(|a| a.channels[cache_idx]).unwrap_or_default();
-                    let ch =
-                        recompute_one_post(&ctx, features, priors.now, prior, effective_mask);
+                    let ch = recompute_one_post(&ctx, features, priors.now, prior, effective_mask);
                     let score = blend_channel(&ctx, ch);
                     entries.push((score, ch.interaction, features.id));
                     next_channels.push(ch);
@@ -279,6 +276,7 @@ pub(crate) fn score_with_cache(
                         &entries,
                         &fx.diversity_features,
                         &dataset.global_relation,
+                        None,
                         priors,
                         head_limit,
                     );
@@ -296,9 +294,7 @@ pub(crate) fn score_with_cache(
                             (entries[i].2, entries[i].0, is_pos)
                         })
                         .collect();
-                    s.sort_by(|a, b| {
-                        b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
-                    });
+                    s.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
                     s
                 };
 
@@ -346,7 +342,12 @@ pub(crate) fn score_with_cache(
         totals.mrr_per_account.push(m);
     }
 
-    (totals, ScoreCache { accounts: accounts_out })
+    (
+        totals,
+        ScoreCache {
+            accounts: accounts_out,
+        },
+    )
 }
 
 #[inline]
@@ -366,4 +367,3 @@ fn blend_channel(ctx: &ScoringContext<'_>, ch: ChannelScores) -> f32 {
         ch.veto,
     )
 }
-
