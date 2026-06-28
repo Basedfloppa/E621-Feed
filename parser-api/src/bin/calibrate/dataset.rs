@@ -321,24 +321,31 @@ pub(crate) fn prepare_eval_dataset(opts: &GridOptions) -> anyhow::Result<EvalDat
                                     db::hydrate_posts_by_ids(&pool_ids).unwrap_or_default();
 
                                 if !pool_posts.is_empty() {
-                                    // Scoring context uses config priors ("контекст бери из
-                                    // конфига"). tag_similarity() only reads priors, IDF, and
-                                    // the profile's tag vectors — it never touches global_relation
-                                    // or user_relation, so we safely pass empty graphs here.
-                                    let empty_graph = TagRelationGraph::empty();
+                                    // Score hard negatives with the **full pipeline** (not just
+                                    // tag_similarity) so the pool reflects actual feed
+                                    // competition — quality, popularity, interaction, recency,
+                                    // and all channels are computed. This ensures hard negatives
+                                    // are genuinely difficult to distinguish from positives in
+                                    // the full ranking metric (NDCG / recall).
                                     let config_priors = cfg().priors.clone();
+                                    let user_graph = TagRelationGraph::empty();
                                     let ctx = ScoringContext::new(
                                         &tags,
                                         &config_priors,
                                         &idf,
                                         &profile,
-                                        &empty_graph,
-                                        &empty_graph,
+                                        &global_relation,
+                                        &user_graph,
                                     );
 
                                     let mut scored: Vec<(i64, f32)> = pool_posts
                                         .iter()
-                                        .map(|p| (p.id, ctx.tag_similarity(p)))
+                                        .map(|p| {
+                                            let cf = CachedPostFeatures::from_post_with_user(
+                                                p, &idf, &global_relation, Some(&user_graph),
+                                            );
+                                            (p.id, ctx.score_cached(&cf).0)
+                                        })
                                         .collect();
                                     scored.sort_by(|a, b| {
                                         b.1.partial_cmp(&a.1)
@@ -457,9 +464,8 @@ pub(crate) fn prepare_eval_dataset(opts: &GridOptions) -> anyhow::Result<EvalDat
     // pairs unreachable from that set are dead weight.
     let t_freeze = std::time::Instant::now();
     let pairs_before = global_relation.n_pairs();
-    let mut global_queryable: std::collections::HashSet<
-        e621_account_parser_api::utils::TagId,
-    > = std::collections::HashSet::new();
+    let mut global_queryable: std::collections::HashSet<e621_account_parser_api::utils::TagId> =
+        std::collections::HashSet::new();
     for fx in &fixtures {
         for cf in fx.test_features.iter().chain(fx.neg_features.iter()) {
             for ct in &cf.tags {

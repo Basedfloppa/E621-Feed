@@ -63,7 +63,7 @@ impl Default for GridOptions {
             pairs_only: false,
             run_paired: true,
             diversify: false,
-            split: SplitStrategy::PostId,
+            split: SplitStrategy::TimeCausal, // post_id biases recency (test posts always newer)
             neg_mode: NegMode::Hybrid { hard_ratio: 0.3 },
             verbose: false,
         }
