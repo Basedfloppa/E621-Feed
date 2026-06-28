@@ -103,238 +103,22 @@ pub(crate) async fn get_recommendations(
     // Cap per device — admin-authenticated round-trip per request, so an
     // infinite-scroll loop must not burn through the admin quota.
     ratelimit::check(&format!("recs:owner:{owner_token}"), 60, 30)?;
-    let cfg = cfg();
-    let runtime = cfg.runtime.clone();
 
     let mut pipe = PipelineMetrics::new("recommendations");
 
-    let owner = owner_token;
-    // Parallelise independent SQLite reads across r2d2 pool connections.
-    // load_account_tag_relation depends on get_tag_counts, so it runs
-    // in a second wave after tag counts are ready.
-    let rt = runtime.clone();
-    let (tags_res, profile_res, account_res, seen_res, owned_res, local_res, bucket_res) = rocket::tokio::join!(
-        rocket::tokio::task::spawn_blocking(move || {
-            get_tag_counts(account_id).map_err(|e| format!("Failed to get tag counts: {e}"))
-        }),
-        rocket::tokio::task::spawn_blocking(move || {
-            get_account_preference_profile(account_id).map_err(|e| format!("Failed to get account profile: {e}"))
-        }),
-        rocket::tokio::task::spawn_blocking(move || {
-            get_account_by_id(&owner, account_id).map_err(|e| format!("Failed to get account: {e}"))
-        }),
-        rocket::tokio::task::spawn_blocking(move || {
-            get_recently_seen_post_ids(account_id, rt.dedup_lookback_days).map_err(|e| format!("Failed to load seen post ids: {e}"))
-        }),
-        rocket::tokio::task::spawn_blocking(move || {
-            get_owned_post_ids(account_id).map_err(|e| format!("Failed to load owned post ids: {e}"))
-        }),
-        rocket::tokio::task::spawn_blocking(move || {
-            collect_local_candidate_ids(account_id, runtime.local_candidate_limit).map_err(|e| format!("Failed to collect local candidate ids: {e}"))
-        }),
-        rocket::tokio::task::spawn_blocking(move || {
-            db::get_account_experiment_bucket(account_id).map_err(|e| format!("Failed to load experiment bucket: {e}"))
-        }),
-    );
+    // Run the shared pipeline (scoring, threshold, MMR diversification,
+    // and exploration bonus). The shared function applies the exploration
+    // bonus so both endpoints behave identically — fixing the original bug
+    // where build_recommendations_inner skipped it entirely.
+    let scored =
+        build_recommendations_shared(account_id, &owner_token, page, affinity_threshold, exploration, "recommendations", Some(&mut pipe))
+            .await?;
 
-    let tags = tags_res.map_err(|e| format!("Join error: {e}"))??;
-    let profile = profile_res.map_err(|e| format!("Join error: {e}"))??;
-    let account = account_res.map_err(|e| format!("Join error: {e}"))??;
-    let seen_ids = seen_res.map_err(|e| format!("Join error: {e}"))??;
-    let owned_ids = owned_res.map_err(|e| format!("Join error: {e}"))??;
-    let mut local_candidate_ids = local_res.map_err(|e| format!("Join error: {e}"))??;
-    let explicit_bucket = bucket_res.map_err(|e| format!("Join error: {e}"))??;
-
-    // Filter local candidates through the account's blacklist. Live posts
-    // from e621 already have the blacklist applied (api.rs sends
-    // `-tag1 -tag2` to the e621 API), but local catalog candidates are
-    // queried without a blacklist filter — without this step blacklisted
-    // content can surface from the local pool.
-    //
-    // We only extract simple tag names (no e621 search syntax like
-    // `-rating:s` or `young furry`) — complex expressions are best-effort
-    // and will be ignored here; they still apply to live e621 posts.
-    let blacklisted_simple_tags: Vec<String> = account
-        .blacklist
-        .lines()
-        .flat_map(|l| l.split_whitespace().filter(|t| !t.is_empty()))
-        .filter(|t| !t.contains(':') && !t.starts_with('-'))
-        .map(|t| t.to_lowercase())
-        .collect();
-    if !blacklisted_simple_tags.is_empty() && !local_candidate_ids.is_empty() {
-        let ids_for_filter = local_candidate_ids.clone();
-        let tags_for_filter = blacklisted_simple_tags.clone();
-        let blacklisted_ids: HashSet<i64> = db_blocking(move || {
-            db::load_blacklisted_post_ids(&ids_for_filter, &tags_for_filter)
-        })
-        .await?;
-        local_candidate_ids.retain(|id| !blacklisted_ids.contains(id));
-    }
-
-    // Second wave: user_relation depends on tags.
-    let tags_for_relation = tags.clone();
-    let user_relation = rocket::tokio::task::spawn_blocking(move || {
-        db::load_account_tag_relation(account_id, &tags_for_relation)
-            .map_err(|e| format!("Failed to load user tag relation graph: {e}"))
-    })
-    .await
-    .map_err(|e| format!("Join error: {e}"))??;
-    pipe.mark("db_hydrate");
-
-    let (bucket_name, mut priors) = cfg.pick_bucket(account_id, explicit_bucket.as_deref());
+    // Bucket logging (main endpoint only — continue caller handles it).
+    let (bucket_name, _) = cfg().pick_bucket(account_id, None);
     if let Some(bucket) = &bucket_name {
         debug!("recommendations account={account_id} bucket={bucket}");
     }
-    priors.now = Utc::now();
-
-    // 9.2 — Exploration mode ("Surprise me" button): when the client passes
-    // `?exploration=<0..1>`, it overrides `exploration_epsilon` to broaden
-    // the feed beyond the user's established preferences.
-    if let Some(explore) = exploration {
-        priors.exploration_epsilon = explore.min(0.5).max(0.0);
-        debug!("recommendations account={account_id} exploration_mode={explore}");
-    }
-
-    let live_posts: Vec<Post> = api::get_posts(&account, page)
-        .await
-        .map_err(|e| ApiError::Internal(format!("Failed to fetch posts: {e}")))?;
-    pipe.mark("e621_fetch");
-
-    // Catalog persistence is fire-and-forget: SQLite is single-writer and
-    // infinite scroll fires this several times per second. Pull off the
-    // request path so response shape doesn't depend on flush order. IDF is
-    // bumped incrementally inside `save_posts_tags_batch`.
-    {
-        let posts_for_persist = live_posts.clone();
-        rocket::tokio::spawn(async move {
-            let res = rocket::tokio::task::spawn_blocking(move || -> Result<(), String> {
-                upsert_catalog_posts(&posts_for_persist)
-                    .map_err(|e| format!("Failed to store recommendation catalog posts: {e}"))?;
-                // Skip cooccurrence: candidate browse posts aren't user truth.
-                db::save_posts_tags_batch(&posts_for_persist, &HashSet::new(), false, None)
-                    .map_err(|e| format!("Failed to store recommendation tags: {e}"))?;
-                Ok(())
-            })
-            .await;
-            // Fire-and-forget — caller already returned the response,
-            // so audit-stderr is the only thing that surfaces failures
-            // here. `warn!` is kept too for operators who read the
-            // regular log stream.
-            if let Ok(Err(e)) = res {
-                warn!("background recommendation persist failed: {e}");
-                audit::event("feed.persist_failed")
-                    .field("kind", "task_error")
-                    .field("error", e)
-                    .emit_err();
-            } else if let Err(e) = res {
-                warn!("background recommendation persist task panicked: {e}");
-                audit::event("feed.persist_failed")
-                    .field("kind", "panic")
-                    .field("error", e)
-                    .emit_err();
-            }
-        });
-    }
-
-    // Hydrate locals (skip owned/seen/already-in-live).
-    let live_ids: HashSet<i64> = live_posts.iter().map(|p| p.id).collect();
-    let local_to_hydrate: Vec<i64> = local_candidate_ids
-        .into_iter()
-        .filter(|id| !live_ids.contains(id) && !owned_ids.contains(id) && !seen_ids.contains(id))
-        .collect();
-    let local_posts = if local_to_hydrate.is_empty() {
-        Vec::new()
-    } else {
-        db_blocking(move || hydrate_posts_by_ids(&local_to_hydrate)).await?
-    };
-
-    // Filter live posts through the same dedup lens.
-    let mut combined: Vec<Post> = Vec::with_capacity(live_posts.len() + local_posts.len());
-    for post in live_posts {
-        if owned_ids.contains(&post.id) || seen_ids.contains(&post.id) {
-            continue;
-        }
-        combined.push(post);
-    }
-    let mut combined_ids: HashSet<i64> = combined.iter().map(|p| p.id).collect();
-    for post in local_posts {
-        if combined_ids.insert(post.id) {
-            combined.push(post);
-        }
-    }
-
-    let idf = current_idf();
-    let global_relation = current_global_relation();
-
-    // Build the blacklist set for the IDF prior (scoring-level soft filter).
-    let blacklist_set: HashSet<String> = blacklisted_simple_tags.into_iter().collect();
-    let ctx = ScoringContext::new_with_blacklist(
-        &tags,
-        &priors,
-        &idf,
-        &profile,
-        &global_relation,
-        &user_relation,
-        blacklist_set,
-    );
-
-    // Pre-resolve per-post features once so the parallel scoring loop
-    // skips HashMap-by-string lookups in IDF and tag-relation graphs.
-    let cached: Vec<CachedPostFeatures> = combined
-        .iter()
-        .map(|post| CachedPostFeatures::from_post_with_user(post, &idf, &global_relation, Some(&user_relation)))
-        .collect();
-    pipe.mark("cache_build");
-
-    // Parallel scoring via rayon — the closure captures &ctx, &idf,
-    // &global_relation, &user_relation which are all Send + Sync.
-    let scored_and_timing: Vec<(ScoredPost, ChannelTiming)> = combined
-        .into_par_iter()
-        .zip(cached.into_par_iter())
-        .map(|(post, cf)| {
-            let (s, breakdown, timing) = ctx.score_cached_with_metrics(&cf);
-            let sp = ScoredPost {
-                post,
-                score: s,
-                breakdown: Some(breakdown),
-            };
-            (sp, timing)
-        })
-        .collect();
-
-    // Accumulate performance metrics (trivially cheap when perf_metrics is off).
-    let mut metrics = ScoringMetrics::default();
-    for (_, timing) in &scored_and_timing {
-        metrics.accumulate(timing);
-    }
-    metrics.log_summary();
-    pipe.mark("scoring");
-
-    let mut scored: Vec<ScoredPost> = scored_and_timing
-        .into_iter()
-        .map(|(sp, _)| sp)
-        .collect();
-
-    if let Some(threshold) = affinity_threshold {
-        scored.retain(|sp| sp.score >= threshold);
-    }
-    let mut scored = diversify_scored_posts(scored, &global_relation, &priors);
-
-    // Class F: ε-greedy exploration bonus.
-    // Boost posts with novel (low-similarity) tags so users see
-    // content outside their established preference bubble.
-    if priors.exploration_epsilon > 1e-4 {
-        let eps = priors.exploration_epsilon.min(0.5);
-        for sp in &mut scored {
-            let tag_novelty = 1.0 - sp
-                .breakdown
-                .as_ref()
-                .map(|b| b.tag_similarity)
-                .unwrap_or(0.0);
-            sp.score = (sp.score + eps * tag_novelty).clamp(0.0, 1.0);
-        }
-    }
-    pipe.mark("diversify_post");
 
     // Log score breakdown for top-10 and bottom-10 posts (sorted copy).
     let mut sorted_for_log: Vec<&ScoredPost> = scored.iter().collect();
@@ -375,6 +159,264 @@ pub(crate) async fn get_recommendations(
         .emit();
 
     Ok(Json(scored))
+}
+
+/// Shared recommendation pipeline.
+///
+/// Fetches e621 posts, hydrates local candidates, scores, thresholds, and
+/// diversifies — returning posts already sorted by adjusted (MMR) score.
+///
+/// The caller is responsible for:
+/// - Score breakdown logging (caller-specific diagnostic)
+/// - Pipeline metrics and audit (caller-specific)
+async fn build_recommendations_shared(
+    account_id: i32,
+    owner_token: &str,
+    page: Option<i32>,
+    affinity_threshold: Option<f32>,
+    exploration: Option<f32>,
+    ctx_label: &str,
+    mut pipe: Option<&mut PipelineMetrics>,
+) -> Result<Vec<ScoredPost>, ApiError> {
+    let cfg = cfg();
+    let runtime = cfg.runtime.clone();
+
+    let owner_clone = owner_token.to_string();
+    let (tags_res, profile_res, account_res, seen_res, owned_res, local_res, bucket_res) =
+        rocket::tokio::join!(
+            rocket::tokio::task::spawn_blocking(move || {
+                get_tag_counts(account_id)
+                    .map_err(|e| format!("Failed to get tag counts: {e}"))
+            }),
+            rocket::tokio::task::spawn_blocking(move || {
+                get_account_preference_profile(account_id)
+                    .map_err(|e| format!("Failed to get account profile: {e}"))
+            }),
+            rocket::tokio::task::spawn_blocking({
+                let owner_token = owner_clone.clone();
+                move || {
+                    get_account_by_id(&owner_token, account_id)
+                        .map_err(|e| format!("Failed to get account: {e}"))
+                }
+            }),
+            rocket::tokio::task::spawn_blocking(move || {
+                get_recently_seen_post_ids(account_id, runtime.dedup_lookback_days)
+                    .map_err(|e| format!("Failed to load seen post ids: {e}"))
+            }),
+            rocket::tokio::task::spawn_blocking(move || {
+                get_owned_post_ids(account_id)
+                    .map_err(|e| format!("Failed to load owned post ids: {e}"))
+            }),
+            rocket::tokio::task::spawn_blocking(move || {
+                collect_local_candidate_ids(account_id, runtime.local_candidate_limit)
+                    .map_err(|e| format!("Failed to collect local candidate ids: {e}"))
+            }),
+            rocket::tokio::task::spawn_blocking(move || {
+                db::get_account_experiment_bucket(account_id)
+                    .map_err(|e| format!("Failed to load experiment bucket: {e}"))
+            }),
+        );
+
+    let tags = tags_res.map_err(|e| format!("Join error: {e}"))??;
+    let profile = profile_res.map_err(|e| format!("Join error: {e}"))??;
+    let account = account_res.map_err(|e| format!("Join error: {e}"))??;
+    let seen_ids = seen_res.map_err(|e| format!("Join error: {e}"))??;
+    let owned_ids = owned_res.map_err(|e| format!("Join error: {e}"))??;
+    let mut local_candidate_ids = local_res.map_err(|e| format!("Join error: {e}"))??;
+    let explicit_bucket = bucket_res.map_err(|e| format!("Join error: {e}"))??;
+
+    // Blacklist filter (applies to local candidates only — live posts already
+    // have the blacklist applied via e621 search syntax). We only extract
+    // simple tag names (no e621 search syntax like `-rating:s` or `young furry`);
+    // complex expressions are best-effort and will be ignored here — they still
+    // apply to live e621 posts.
+    let blacklisted_simple_tags: Vec<String> = account
+        .blacklist
+        .lines()
+        .flat_map(|l| l.split_whitespace().filter(|t| !t.is_empty()))
+        .filter(|t| !t.contains(':') && !t.starts_with('-'))
+        .map(|t| t.to_lowercase())
+        .collect();
+    if !blacklisted_simple_tags.is_empty() && !local_candidate_ids.is_empty() {
+        let ids_for_filter = local_candidate_ids.clone();
+        let tags_for_filter = blacklisted_simple_tags.clone();
+        let blacklisted_ids: HashSet<i64> =
+            db_blocking(move || {
+                db::load_blacklisted_post_ids(&ids_for_filter, &tags_for_filter)
+            })
+            .await?;
+        local_candidate_ids.retain(|id| !blacklisted_ids.contains(id));
+    }
+
+    // Second wave: user_relation depends on tags.
+    let tags_for_relation = tags.clone();
+    let user_relation = rocket::tokio::task::spawn_blocking(move || {
+        db::load_account_tag_relation(account_id, &tags_for_relation)
+            .map_err(|e| format!("Failed to load user tag relation graph: {e}"))
+    })
+    .await
+    .map_err(|e| format!("Join error: {e}"))??;
+
+    let (bucket_name, mut priors) = cfg.pick_bucket(account_id, explicit_bucket.as_deref());
+    priors.now = Utc::now();
+
+    if let Some(explore) = exploration {
+        priors.exploration_epsilon = explore.min(0.5).max(0.0);
+    }
+    if let Some(p) = &mut pipe { p.mark("db_hydrate"); }
+
+    let live_posts: Vec<Post> = api::get_posts(&account, page)
+        .await
+        .map_err(|e| ApiError::Internal(format!("Failed to fetch posts: {e}")))?;
+    if let Some(p) = &mut pipe { p.mark("e621_fetch"); }
+
+    // Catalog persistence is fire-and-forget: SQLite is single-writer and
+    // infinite scroll fires this several times per second. Pull off the
+    // request path so response shape doesn't depend on flush order. IDF is
+    // bumped incrementally inside `save_posts_tags_batch`.
+    {
+        let posts_for_persist = live_posts.clone();
+        let ctx_label_for_audit = ctx_label.to_string();
+        rocket::tokio::spawn(async move {
+            let res =
+                rocket::tokio::task::spawn_blocking(move || -> Result<(), String> {
+                    upsert_catalog_posts(&posts_for_persist)
+                        .map_err(|e| format!("Failed to store catalog posts: {e}"))?;
+                    db::save_posts_tags_batch(&posts_for_persist, &HashSet::new(), false, None) // skip cooccurrence: candidate browse posts aren't user truth
+                        .map_err(|e| format!("Failed to store catalog tags: {e}"))?;
+                    Ok(())
+                })
+                .await;
+            if let Ok(Err(e)) = res {
+                warn!("background recommendation persist failed: {e}");
+                audit::event("feed.persist_failed")
+                    .field("kind", "task_error")
+                    .field("ctx", ctx_label_for_audit)
+                    .field("error", e)
+                    .emit_err();
+            } else if let Err(e) = res {
+                warn!("background recommendation persist task panicked: {e}");
+                audit::event("feed.persist_failed")
+                    .field("kind", "panic")
+                    .field("ctx", ctx_label_for_audit)
+                    .field("error", e)
+                    .emit_err();
+            }
+        });
+    }
+
+    // Hydrate locals (skip owned/seen/already-in-live).
+    let live_ids: HashSet<i64> = live_posts.iter().map(|p| p.id).collect();
+    let local_to_hydrate: Vec<i64> = local_candidate_ids
+        .into_iter()
+        .filter(|id| !live_ids.contains(id) && !owned_ids.contains(id) && !seen_ids.contains(id))
+        .collect();
+    let local_posts = if local_to_hydrate.is_empty() {
+        Vec::new()
+    } else {
+        db_blocking(move || hydrate_posts_by_ids(&local_to_hydrate)).await?
+    };
+
+    // Filter live posts through the same dedup lens.
+    let mut combined: Vec<Post> = Vec::with_capacity(live_posts.len() + local_posts.len());
+    for post in live_posts {
+        if owned_ids.contains(&post.id) || seen_ids.contains(&post.id) {
+            continue;
+        }
+        combined.push(post);
+    }
+    let mut combined_ids: HashSet<i64> = combined.iter().map(|p| p.id).collect();
+    for post in local_posts {
+        if combined_ids.insert(post.id) {
+            combined.push(post);
+        }
+    }
+
+    // Build the blacklist set for the IDF prior (scoring-level soft filter).
+    let idf = current_idf();
+    let global_relation = current_global_relation();
+
+    let blacklist_set: HashSet<String> = blacklisted_simple_tags.into_iter().collect();
+    let ctx = ScoringContext::new_with_blacklist(
+        &tags,
+        &priors,
+        &idf,
+        &profile,
+        &global_relation,
+        &user_relation,
+        blacklist_set,
+    );
+
+    // Pre-resolve per-post features once so the parallel scoring loop
+    // skips HashMap-by-string lookups in IDF and tag-relation graphs.
+    let cached: Vec<CachedPostFeatures> = combined
+        .iter()
+        .map(|post| {
+            CachedPostFeatures::from_post_with_user(
+                post, &idf, &global_relation, Some(&user_relation),
+            )
+        })
+        .collect();
+    if let Some(p) = &mut pipe { p.mark("cache_build"); }
+
+    // Parallel scoring via rayon — the closure captures &ctx, &idf,
+    // &global_relation, &user_relation which are all Send + Sync.
+    let scored_and_timing: Vec<(ScoredPost, ChannelTiming)> = combined
+        .into_par_iter()
+        .zip(cached.into_par_iter())
+        .map(|(post, cf)| {
+            let (s, breakdown, timing) = ctx.score_cached_with_metrics(&cf);
+            let sp = ScoredPost {
+                post,
+                score: s,
+                breakdown: Some(breakdown),
+            };
+            (sp, timing)
+        })
+        .collect();
+
+    // Accumulate performance metrics (trivially cheap when perf_metrics is off).
+    let mut metrics = ScoringMetrics::default();
+    for (_, timing) in &scored_and_timing {
+        metrics.accumulate(timing);
+    }
+    metrics.log_summary();
+
+    let mut scored: Vec<ScoredPost> = scored_and_timing
+        .into_iter()
+        .map(|(sp, _)| sp)
+        .collect();
+    if let Some(p) = &mut pipe { p.mark("scoring"); }
+
+    // Threshold (if requested) before diversification so we don't pay
+    // MMR cost on posts we're going to drop anyway.
+    if let Some(threshold) = affinity_threshold {
+        scored.retain(|sp| sp.score >= threshold);
+    }
+
+    // Diversify via MMR — same helper the main `/recommendations` route
+    // uses. The returned order interleaves diverse picks with high-score
+    // ones; we DON'T sort by score after, because that would undo the
+    // MMR interleaving. Callers can `truncate(N)` to keep the top-N
+    // best-balanced posts.
+    let mut scored = diversify_scored_posts(scored, &global_relation, &priors);
+    if let Some(p) = &mut pipe { p.mark("diversify_post"); }
+
+    // Class F: ε-greedy exploration bonus (applied in the shared pipeline
+    // so both endpoints behave identically).
+    if priors.exploration_epsilon > 1e-4 {
+        let eps = priors.exploration_epsilon.min(0.5);
+        for sp in &mut scored {
+            let tag_novelty = 1.0
+                - sp.breakdown.as_ref().map(|b| b.tag_similarity).unwrap_or(0.0);
+            sp.score = (sp.score + eps * tag_novelty).clamp(0.0, 1.0);
+        }
+    }
+
+    // Drop bucket_name — the caller handles bucket logging.
+    let _ = bucket_name;
+
+    Ok(scored)
 }
 
 #[openapi(tag = "Recommendations")]
@@ -421,10 +463,10 @@ pub(crate) async fn get_recommendations_continue(
     };
 
     // Build, dedup against the session's shown set, then truncate.
-    // `build_recommendations_inner` returns posts already sorted (and
+    // `build_recommendations_shared` returns posts already sorted (and
     // diversified) so `truncate` keeps the top-N, not an arbitrary N.
     let mut posts =
-        build_recommendations_inner(account_id, &owner_token, None, None, None).await?;
+        build_recommendations_shared(account_id, &owner_token, None, None, None, "continue", None).await?;
     if !shown_ids.is_empty() {
         posts.retain(|sp| !shown_ids.contains(&sp.post.id));
     }
@@ -564,200 +606,4 @@ pub(crate) async fn get_similar_posts(
         .emit();
 
     Ok(Json(scored))
-}
-
-/// Build a recommendations page using the standard pipeline.
-///
-/// Returns posts already sorted by score (DESC), thresholded against
-/// `affinity_threshold` if supplied, and diversified via the same MMR
-/// helper as the main `/recommendations` endpoint. The caller may
-/// `truncate` the result to a page size and trust that the kept slice
-/// is the top-N, not an arbitrary N.
-async fn build_recommendations_inner(
-    account_id: i32,
-    owner_token: &str,
-    page: Option<i32>,
-    affinity_threshold: Option<f32>,
-    exploration: Option<f32>,
-) -> Result<Vec<ScoredPost>, ApiError> {
-    use std::collections::HashSet;
-
-    let cfg = cfg();
-    let runtime = cfg.runtime.clone();
-
-    let owner_clone = owner_token.to_string();
-    let (tags_res, profile_res, account_res, seen_res, owned_res, local_res, bucket_res) = rocket::tokio::join!(
-        rocket::tokio::task::spawn_blocking(move || {
-            get_tag_counts(account_id).map_err(|e| format!("Failed to get tag counts: {e}"))
-        }),
-        rocket::tokio::task::spawn_blocking(move || {
-            get_account_preference_profile(account_id).map_err(|e| format!("Failed to get account profile: {e}"))
-        }),
-        rocket::tokio::task::spawn_blocking({
-            let owner_token = owner_clone.clone();
-            move || {
-                get_account_by_id(&owner_token, account_id).map_err(|e| format!("Failed to get account: {e}"))
-            }
-        }),
-        rocket::tokio::task::spawn_blocking(move || {
-            get_recently_seen_post_ids(account_id, runtime.dedup_lookback_days).map_err(|e| format!("Failed to load seen post ids: {e}"))
-        }),
-        rocket::tokio::task::spawn_blocking(move || {
-            get_owned_post_ids(account_id).map_err(|e| format!("Failed to load owned post ids: {e}"))
-        }),
-        rocket::tokio::task::spawn_blocking(move || {
-            collect_local_candidate_ids(account_id, runtime.local_candidate_limit).map_err(|e| format!("Failed to collect local candidate ids: {e}"))
-        }),
-        rocket::tokio::task::spawn_blocking(move || {
-            db::get_account_experiment_bucket(account_id).map_err(|e| format!("Failed to load experiment bucket: {e}"))
-        }),
-    );
-
-    let tags = tags_res.map_err(|e| format!("Join error: {e}"))??;
-    let profile = profile_res.map_err(|e| format!("Join error: {e}"))??;
-    let account = account_res.map_err(|e| format!("Join error: {e}"))??;
-    let seen_ids = seen_res.map_err(|e| format!("Join error: {e}"))??;
-    let owned_ids = owned_res.map_err(|e| format!("Join error: {e}"))??;
-    let mut local_candidate_ids = local_res.map_err(|e| format!("Join error: {e}"))??;
-    let explicit_bucket = bucket_res.map_err(|e| format!("Join error: {e}"))??;
-
-    // Blacklist filter (same as main endpoint).
-    let blacklisted_simple_tags: Vec<String> = account
-        .blacklist
-        .lines()
-        .flat_map(|l| l.split_whitespace().filter(|t| !t.is_empty()))
-        .filter(|t| !t.contains(':') && !t.starts_with('-'))
-        .map(|t| t.to_lowercase())
-        .collect();
-    if !blacklisted_simple_tags.is_empty() && !local_candidate_ids.is_empty() {
-        let ids_for_filter = local_candidate_ids.clone();
-        let tags_for_filter = blacklisted_simple_tags.clone();
-        let blacklisted_ids: HashSet<i64> = db_blocking(move || {
-            db::load_blacklisted_post_ids(&ids_for_filter, &tags_for_filter)
-        })
-        .await?;
-        local_candidate_ids.retain(|id| !blacklisted_ids.contains(id));
-    }
-
-    // Second wave: user_relation depends on tags.
-    let tags_for_relation = tags.clone();
-    let user_relation = rocket::tokio::task::spawn_blocking(move || {
-        db::load_account_tag_relation(account_id, &tags_for_relation)
-            .map_err(|e| format!("Failed to load user tag relation graph: {e}"))
-    })
-    .await
-    .map_err(|e| format!("Join error: {e}"))??;
-
-    let (bucket_name, mut priors) = cfg.pick_bucket(account_id, explicit_bucket.as_deref());
-    priors.now = Utc::now();
-
-    if let Some(explore) = exploration {
-        priors.exploration_epsilon = explore.min(0.5).max(0.0);
-    }
-
-    let live_posts: Vec<Post> = api::get_posts(&account, page)
-        .await
-        .map_err(|e| ApiError::Internal(format!("Failed to fetch posts: {e}")))?;
-
-    // Catalog persistence (fire-and-forget).
-    {
-        let posts_for_persist = live_posts.clone();
-        rocket::tokio::spawn(async move {
-            let res = rocket::tokio::task::spawn_blocking(move || -> Result<(), String> {
-                upsert_catalog_posts(&posts_for_persist)?;
-                db::save_posts_tags_batch(&posts_for_persist, &HashSet::new(), false, None)?;
-                Ok(())
-            })
-            .await;
-            if let Ok(Err(e)) = res {
-                warn!("background recommendation persist failed: {e}");
-                audit::event("feed.persist_failed")
-                    .field("kind", "task_error")
-                    .field("ctx", "continue")
-                    .field("error", e)
-                    .emit_err();
-            } else if let Err(e) = res {
-                warn!("background recommendation persist task panicked: {e}");
-                audit::event("feed.persist_failed")
-                    .field("kind", "panic")
-                    .field("ctx", "continue")
-                    .field("error", e)
-                    .emit_err();
-            }
-        });
-    }
-
-    // Hydrate locals (skip owned/seen/already-in-live).
-    let live_ids: HashSet<i64> = live_posts.iter().map(|p| p.id).collect();
-    let local_to_hydrate: Vec<i64> = local_candidate_ids
-        .into_iter()
-        .filter(|id| !live_ids.contains(id) && !owned_ids.contains(id) && !seen_ids.contains(id))
-        .collect();
-    let local_posts = if local_to_hydrate.is_empty() {
-        Vec::new()
-    } else {
-        db_blocking(move || hydrate_posts_by_ids(&local_to_hydrate)).await?
-    };
-
-    // Combine + dedup.
-    let mut combined: Vec<Post> = Vec::with_capacity(live_posts.len() + local_posts.len());
-    for post in live_posts {
-        if owned_ids.contains(&post.id) || seen_ids.contains(&post.id) {
-            continue;
-        }
-        combined.push(post);
-    }
-    let mut combined_ids: HashSet<i64> = combined.iter().map(|p| p.id).collect();
-    for post in local_posts {
-        if combined_ids.insert(post.id) {
-            combined.push(post);
-        }
-    }
-
-    let idf = current_idf();
-    let global_relation = current_global_relation();
-
-    let blacklist_set: HashSet<String> = blacklisted_simple_tags.into_iter().collect();
-    let ctx = ScoringContext::new_with_blacklist(
-        &tags,
-        &priors,
-        &idf,
-        &profile,
-        &global_relation,
-        &user_relation,
-        blacklist_set,
-    );
-
-    let cached: Vec<CachedPostFeatures> = combined
-        .iter()
-        .map(|post| CachedPostFeatures::from_post_with_user(post, &idf, &global_relation, Some(&user_relation)))
-        .collect();
-
-    let mut scored: Vec<ScoredPost> = combined
-        .into_par_iter()
-        .zip(cached.into_par_iter())
-        .map(|(post, cf)| {
-            let (s, breakdown) = ctx.score_cached(&cf);
-            ScoredPost { post, score: s, breakdown: Some(breakdown) }
-        })
-        .collect();
-
-    // Threshold (if requested) before diversification so we don't pay
-    // MMR cost on posts we're going to drop anyway.
-    if let Some(threshold) = affinity_threshold
-        && threshold > 0.0
-    {
-        scored.retain(|sp| sp.score >= threshold);
-    }
-
-    // Diversify via MMR — same helper the main `/recommendations` route
-    // uses. The returned order interleaves diverse picks with high-score
-    // ones; we DON'T sort by score after, because that would undo the
-    // MMR interleaving. Callers can `truncate(N)` to keep the top-N
-    // best-balanced posts.
-    let scored = diversify_scored_posts(scored, &global_relation, &priors);
-
-    let _ = bucket_name; // bucket logging is the caller's responsibility
-
-    Ok(scored)
 }

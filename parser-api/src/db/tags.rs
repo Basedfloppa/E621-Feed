@@ -163,11 +163,10 @@ pub fn save_posts_tags_batch(
             // every post's tag pairs are fresh; ON CONFLICT handles dedup.
             // Build the reverse map incrementally as we discover new tags.
             for &tid in &post_tag_ids {
-                if !tag_id_to_meta.contains_key(&tid) {
-                    if let Some(((name, group), _)) = tag_id_cache.iter().find(|&(_, &v)| v == tid) {
+                if !tag_id_to_meta.contains_key(&tid)
+                    && let Some(((name, group), _)) = tag_id_cache.iter().find(|&(_, &v)| v == tid) {
                         tag_id_to_meta.insert(tid, (name.clone(), *group));
                     }
-                }
             }
             if account_id.is_some() && track_cooccurrence && has_multi_tags {
                 // Build the per-post meta map from our global reverse map.
@@ -313,13 +312,11 @@ pub fn set_tag_counts(account_id: i32) -> Result<(), String> {
 pub fn get_tag_counts(account_id: i32) -> Result<Vec<TagCount>, String> {
     // Check TTL cache first (dedups repeated lookups for the same account
     // within a 30-second window, e.g. infinite-scroll pagination).
-    if let Ok(cache) = TAG_COUNTS_CACHE.lock() {
-        if let Some(entry) = cache.get(&account_id) {
-            if entry.inserted_at.elapsed() < TAG_COUNTS_CACHE_TTL {
+    if let Ok(cache) = TAG_COUNTS_CACHE.lock()
+        && let Some(entry) = cache.get(&account_id)
+            && entry.inserted_at.elapsed() < TAG_COUNTS_CACHE_TTL {
                 return Ok(entry.counts.clone());
             }
-        }
-    }
 
     let conn = open_db()?;
 

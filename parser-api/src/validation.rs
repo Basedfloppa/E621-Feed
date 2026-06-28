@@ -9,7 +9,10 @@
 //! * `owner_token` — 16..=128 chars from `[A-Za-z0-9_-]`.
 
 use crate::errors::ApiError;
-use crate::models::{BatchInteractionRequest, BlacklistPayload, DeviceScopedAccount, FeedInteractionRequest, PreferredTagPayload};
+use crate::models::{
+    BatchInteractionRequest, BlacklistPayload, DeviceScopedAccount, FeedInteractionRequest,
+    PreferredTagPayload,
+};
 
 const MAX_ACCOUNT_ID: i32 = 100_000_000;
 const MAX_NAME_LEN: usize = 64;
@@ -162,7 +165,9 @@ pub fn validate_blacklist_payload(payload: &BlacklistPayload) -> Result<(), ApiE
 /// a finite f32 clamped to `[0.0, 0.5]`. 0 = deterministic (default),
 /// higher values = more exploratory / "surprise me".
 pub fn validate_exploration(t: Option<f32>) -> Result<Option<f32>, ApiError> {
-    let Some(t) = t else { return Ok(None); };
+    let Some(t) = t else {
+        return Ok(None);
+    };
     if !t.is_finite() {
         return Err(ApiError::BadRequest(
             "exploration must be a finite number".into(),
@@ -172,7 +177,9 @@ pub fn validate_exploration(t: Option<f32>) -> Result<Option<f32>, ApiError> {
 }
 
 pub fn validate_recommendations_page(page: Option<i32>) -> Result<(), ApiError> {
-    let Some(p) = page else { return Ok(()); };
+    let Some(p) = page else {
+        return Ok(());
+    };
     if !(1..=MAX_RECOMMENDATIONS_PAGE).contains(&p) {
         return Err(ApiError::BadRequest(format!(
             "page {p} out of range [1, {MAX_RECOMMENDATIONS_PAGE}]"
@@ -184,7 +191,9 @@ pub fn validate_recommendations_page(page: Option<i32>) -> Result<(), ApiError> 
 /// Reject NaN / ±Infinity (any comparison against them is always false,
 /// silently dropping every post), then clamp into `[0.0, 1.0]`.
 pub fn validate_affinity_threshold(t: Option<f32>) -> Result<Option<f32>, ApiError> {
-    let Some(t) = t else { return Ok(None); };
+    let Some(t) = t else {
+        return Ok(None);
+    };
     if !t.is_finite() {
         return Err(ApiError::BadRequest(
             "affinity_threshold must be a finite number".into(),
@@ -202,7 +211,10 @@ pub fn validate_session_token(token: &str) -> Result<(), ApiError> {
             "session_token length {len} not in 8..=128"
         )));
     }
-    if !token.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+    if !token
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
         return Err(ApiError::BadRequest(
             "session_token must contain only [A-Za-z0-9_-]".into(),
         ));
@@ -234,7 +246,7 @@ pub fn validate_similar_posts_limit(limit: Option<i32>) -> Result<i64, ApiError>
 pub fn validate_similar_posts_min_overlap(overlap: Option<i32>) -> Result<i32, ApiError> {
     match overlap {
         None => Ok(2),
-        Some(o) if o >= 1 && o <= 20 => Ok(o),
+        Some(o) if (1..=20).contains(&o) => Ok(o),
         Some(o) => Err(ApiError::BadRequest(format!(
             "min_overlap {o} out of range [1, 20]"
         ))),
@@ -244,7 +256,7 @@ pub fn validate_similar_posts_min_overlap(overlap: Option<i32>) -> Result<i32, A
 pub fn validate_similar_posts_page(page: Option<i32>) -> Result<i64, ApiError> {
     match page {
         None => Ok(1),
-        Some(p) if p >= 1 && p <= 100 => Ok(p as i64),
+        Some(p) if (1..=100).contains(&p) => Ok(p as i64),
         Some(p) => Err(ApiError::BadRequest(format!(
             "page {p} out of range [1, 100]"
         ))),
@@ -389,7 +401,9 @@ mod tests {
         assert!(is_bad(validate_blacklist_text("<script>alert(1)</script>")));
         assert!(is_bad(validate_blacklist_text("javascript:void")));
         assert!(is_bad(validate_blacklist_text("a<b")));
-        assert!(is_bad(validate_blacklist_text(&"x".repeat(MAX_BLACKLIST_LEN + 1))));
+        assert!(is_bad(validate_blacklist_text(
+            &"x".repeat(MAX_BLACKLIST_LEN + 1)
+        )));
         assert!(is_bad(validate_blacklist_text(
             &"y".repeat(MAX_BLACKLIST_LINE_LEN + 1)
         )));
@@ -438,7 +452,10 @@ mod tests {
         };
         assert!(validate_device_scoped_account(&ok).is_ok());
 
-        let bad_id = DeviceScopedAccount { id: 0, ..ok.clone() };
+        let bad_id = DeviceScopedAccount {
+            id: 0,
+            ..ok.clone()
+        };
         assert!(is_bad(validate_device_scoped_account(&bad_id)));
 
         let bad_name = DeviceScopedAccount {
@@ -496,35 +513,36 @@ mod tests {
             position: 3,
             session_id: "sess-1".to_string(),
         };
-        assert!(is_bad(validate_batch_interaction(&BatchInteractionRequest {
-            interactions: vec![],
-        })));
+        assert!(is_bad(validate_batch_interaction(
+            &BatchInteractionRequest {
+                interactions: vec![],
+            }
+        )));
         assert!(validate_batch_interaction(&BatchInteractionRequest {
             interactions: vec![single.clone()],
         })
         .is_ok());
         let many = vec![single.clone(); 100];
-        assert!(validate_batch_interaction(&BatchInteractionRequest {
-            interactions: many,
-        })
-        .is_ok());
+        assert!(
+            validate_batch_interaction(&BatchInteractionRequest { interactions: many }).is_ok()
+        );
         let too_many = vec![single; 101];
-        assert!(is_bad(validate_batch_interaction(&BatchInteractionRequest {
-            interactions: too_many,
-        })));
+        assert!(is_bad(validate_batch_interaction(
+            &BatchInteractionRequest {
+                interactions: too_many,
+            }
+        )));
     }
 
     #[test]
     fn preferred_tag_payload_validation() {
         use crate::models::PreferredTag;
         let ok = PreferredTagPayload {
-            preferred_tags: vec![
-                PreferredTag {
-                    tag: "fluffy".to_string(),
-                    group: "general".to_string(),
-                    weight: 2.0,
-                },
-            ],
+            preferred_tags: vec![PreferredTag {
+                tag: "fluffy".to_string(),
+                group: "general".to_string(),
+                weight: 2.0,
+            }],
         };
         assert!(validate_preferred_tag_payload(&ok).is_ok());
 
@@ -577,9 +595,11 @@ mod tests {
             };
             MAX_PREFERRED_TAGS + 1
         ];
-        assert!(is_bad(validate_preferred_tag_payload(&PreferredTagPayload {
-            preferred_tags: many,
-        })));
+        assert!(is_bad(validate_preferred_tag_payload(
+            &PreferredTagPayload {
+                preferred_tags: many,
+            }
+        )));
 
         // Unknown group — rejected against the whitelist.
         let bad = PreferredTagPayload {
@@ -592,7 +612,15 @@ mod tests {
         assert!(is_bad(validate_preferred_tag_payload(&bad)));
 
         // Whitelist accepts every documented group.
-        for g in ["artist", "character", "copyright", "general", "lore", "meta", "species"] {
+        for g in [
+            "artist",
+            "character",
+            "copyright",
+            "general",
+            "lore",
+            "meta",
+            "species",
+        ] {
             let payload = PreferredTagPayload {
                 preferred_tags: vec![PreferredTag {
                     tag: "fluffy".to_string(),

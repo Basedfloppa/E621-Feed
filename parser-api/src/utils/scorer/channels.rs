@@ -638,15 +638,13 @@ impl<'a> ScoringContext<'a> {
                 }
 
                 // Check feedback impressions if enabled.
-                if p.novelty_use_feedback {
-                    if let Some(fb) = fb_map.get(tlc.as_ref()) {
-                        if fb.impressions > 0 {
+                if p.novelty_use_feedback
+                    && let Some(fb) = fb_map.get(tlc.as_ref())
+                        && fb.impressions > 0 {
                             let seen = confidence(fb.impressions as f32, n0, 1.0);
                             novel_weight += 1.0 - seen;
                             continue;
                         }
-                    }
-                }
 
                 // Tag is completely novel → full weight.
                 novel_weight += 1.0;

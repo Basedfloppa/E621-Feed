@@ -101,7 +101,7 @@ fn hashed_tag_set(
             Some((h, tid))
         })
         .collect();
-    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out.sort_by_key(|a| a.0);
     out.dedup_by(|a, b| a.0 == b.0);
     out
 }
@@ -148,8 +148,16 @@ fn pmi_group_similarity(
     threshold: f32,
     max_tags: usize,
 ) -> f32 {
-    let a_tids: Vec<TagId> = a.iter().filter_map(|(_, tid)| *tid).take(max_tags).collect();
-    let b_tids: Vec<TagId> = b.iter().filter_map(|(_, tid)| *tid).take(max_tags).collect();
+    let a_tids: Vec<TagId> = a
+        .iter()
+        .filter_map(|(_, tid)| *tid)
+        .take(max_tags)
+        .collect();
+    let b_tids: Vec<TagId> = b
+        .iter()
+        .filter_map(|(_, tid)| *tid)
+        .take(max_tags)
+        .collect();
 
     if a_tids.is_empty() || b_tids.is_empty() {
         return 0.0;
@@ -242,8 +250,14 @@ fn max_redundancy_indexed(
                 + jaccard_hashes(&cand.species, &chosen.species) * priors.diversity_w_species
                 + jaccard_hashes(&cand.general, &chosen.general) * priors.diversity_w_general
         } else {
-            group_similarity(&cand.artist, &chosen.artist, graph, blend, pmi_threshold, max_tags)
-                * priors.diversity_w_artist
+            group_similarity(
+                &cand.artist,
+                &chosen.artist,
+                graph,
+                blend,
+                pmi_threshold,
+                max_tags,
+            ) * priors.diversity_w_artist
                 + group_similarity(
                     &cand.character,
                     &chosen.character,
@@ -324,7 +338,10 @@ pub fn diversify_indices(
 
     let mut available: Vec<usize> = idx_by_score[..head_n].to_vec();
     let mut selected: Vec<usize> = Vec::with_capacity(head_n);
-    let mut top_score = available.iter().map(|&i| entries[i].0).fold(f32::MIN, f32::max);
+    let mut top_score = available
+        .iter()
+        .map(|&i| entries[i].0)
+        .fold(f32::MIN, f32::max);
 
     let damp = priors.diversity_interaction_damp.clamp(0.0, 1.0);
     let max_penalty = priors.diversity_max_penalty.clamp(0.0, 1.0);
@@ -352,7 +369,10 @@ pub fn diversify_indices(
         let removed_was_top = (entries[chosen_idx].0 - top_score).abs() < 1e-6;
         selected.push(chosen_idx);
         if removed_was_top && !available.is_empty() {
-            top_score = available.iter().map(|&i| entries[i].0).fold(f32::MIN, f32::max);
+            top_score = available
+                .iter()
+                .map(|&i| entries[i].0)
+                .fold(f32::MIN, f32::max);
         }
     }
 
@@ -421,7 +441,11 @@ fn enforce_diversity_quota(scored: &mut [ScoredPost]) {
         sp.post.tags.artist.first().map(|a| a.to_ascii_lowercase())
     });
     enforce_group_quota(scored, top_k, MIN_CHARACTERS, |sp| {
-        sp.post.tags.character.first().map(|c| c.to_ascii_lowercase())
+        sp.post
+            .tags
+            .character
+            .first()
+            .map(|c| c.to_ascii_lowercase())
     });
 }
 
@@ -494,7 +518,11 @@ mod tests {
             file: None,
             preview: None,
             sample: None,
-            score: Score { up: 0, down: 0, total: 0 },
+            score: Score {
+                up: 0,
+                down: 0,
+                total: 0,
+            },
             tags: Tags {
                 general: vec![],
                 artist: artists.iter().map(|s| s.to_string()).collect(),
@@ -595,7 +623,11 @@ mod tests {
             scored(3, &["d"], &[]),
         ];
         enforce_group_quota(&mut posts, 4, 2, |sp| sp.post.tags.artist.first().cloned());
-        assert_eq!(ids(&posts), vec![0, 1, 2, 3], "satisfied quota must not re-order");
+        assert_eq!(
+            ids(&posts),
+            vec![0, 1, 2, 3],
+            "satisfied quota must not re-order"
+        );
     }
 
     /// An all-one-artist window pulls a single diverse post up from below,
@@ -665,16 +697,19 @@ mod tests {
     #[test]
     fn group_quota_handles_missing_keys() {
         let mut posts = vec![
-            scored(0, &[], &[]),    // None
+            scored(0, &[], &[]), // None
             scored(1, &["a"], &[]),
-            scored(2, &[], &[]),    // None
+            scored(2, &[], &[]), // None
             scored(3, &["a"], &[]),
             scored(4, &["b"], &[]), // below window
             scored(5, &["c"], &[]), // below window
         ];
         enforce_group_quota(&mut posts, 4, 2, |sp| sp.post.tags.artist.first().cloned());
 
-        assert_eq!(posts[3].post.id, 4, "diverse `b` fills the last redundant slot");
+        assert_eq!(
+            posts[3].post.id, 4,
+            "diverse `b` fills the last redundant slot"
+        );
         assert_eq!(distinct_artists(&posts, 4), 2);
         assert_permutation_of(&posts, &[0, 1, 2, 3, 4, 5]);
     }
@@ -691,7 +726,11 @@ mod tests {
         ];
         // min 5 distinct, but the window has no redundant slot to evict.
         enforce_group_quota(&mut posts, 4, 5, |sp| sp.post.tags.artist.first().cloned());
-        assert_eq!(ids(&posts), vec![0, 1, 2, 3, 4], "no redundant slot — left intact");
+        assert_eq!(
+            ids(&posts),
+            vec![0, 1, 2, 3, 4],
+            "no redundant slot — left intact"
+        );
     }
 
     // ── enforce_diversity_quota — integration (top_k = 20) ──────────────
@@ -740,7 +779,10 @@ mod tests {
             .collect();
         enforce_diversity_quota(&mut posts);
 
-        assert!(distinct_artists(&posts, 20) >= 2, "top-20 must hold ≥2 artists");
+        assert!(
+            distinct_artists(&posts, 20) >= 2,
+            "top-20 must hold ≥2 artists"
+        );
         assert_eq!(posts[19].post.id, 20, "`bob` promoted into the window");
         assert_eq!(posts[19].post.tags.artist, vec!["bob"]);
         assert_permutation_of(&posts, &(0..24).collect::<Vec<_>>());
@@ -764,7 +806,10 @@ mod tests {
             .collect();
         enforce_diversity_quota(&mut posts);
 
-        assert!(distinct_characters(&posts, 20) >= 3, "top-20 must hold ≥3 characters");
+        assert!(
+            distinct_characters(&posts, 20) >= 3,
+            "top-20 must hold ≥3 characters"
+        );
         assert_eq!(posts[19].post.id, 20, "`villain` promoted first");
         assert_eq!(posts[18].post.id, 21, "`rogue` promoted second");
         assert_permutation_of(&posts, &(0..24).collect::<Vec<_>>());
@@ -896,7 +941,10 @@ mod tests {
 
         // dog vs cat: PMI ≈ -1.10 < 0.0 threshold -> no match
         let score = pmi_group_similarity(&a, &c, &graph, 0.0, 10);
-        assert_eq!(score, 0.0, "dog-cat should not match at threshold 0.0, got {score}");
+        assert_eq!(
+            score, 0.0,
+            "dog-cat should not match at threshold 0.0, got {score}"
+        );
     }
 
     // ── group_similarity blend ──────────────────────────────────────────

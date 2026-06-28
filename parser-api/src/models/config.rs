@@ -467,11 +467,10 @@ impl BucketOverride {
             p.mix_tag_relation = v;
         }
         // Apply generic priors overrides via JSON merge.
-        if let Some(json) = &self.priors {
-            if let Ok(overrides) = serde_json::from_value::<Priors>(json.clone()) {
+        if let Some(json) = &self.priors
+            && let Ok(overrides) = serde_json::from_value::<Priors>(json.clone()) {
                 merge_priors(p, &overrides);
             }
-        }
     }
 }
 
@@ -518,7 +517,7 @@ fn merge_priors(base: &mut Priors, overrides: &Priors) {
     if overrides.recency_w_global != 0.4 { base.recency_w_global = overrides.recency_w_global; }
     if overrides.recency_w_personal != 0.6 { base.recency_w_personal = overrides.recency_w_personal; }
     if overrides.recency_personal_floor_frac != 1.0 { base.recency_personal_floor_frac = overrides.recency_personal_floor_frac; }
-    if overrides.recency_log_personal != true { base.recency_log_personal = overrides.recency_log_personal; }
+    if !overrides.recency_log_personal { base.recency_log_personal = overrides.recency_log_personal; }
     if !overrides.recency_tau_hot.is_nan() { base.recency_tau_hot = overrides.recency_tau_hot; }
     if !overrides.recency_tau_recent.is_nan() { base.recency_tau_recent = overrides.recency_tau_recent; }
     if overrides.recency_split_age_hours != 24.0 { base.recency_split_age_hours = overrides.recency_split_age_hours; }
@@ -588,7 +587,7 @@ fn merge_priors(base: &mut Priors, overrides: &Priors) {
 
     // --- novelty channel ---
     if overrides.novelty_n0 != 3.0 { base.novelty_n0 = overrides.novelty_n0; }
-    if overrides.novelty_use_feedback != true { base.novelty_use_feedback = overrides.novelty_use_feedback; }
+    if !overrides.novelty_use_feedback { base.novelty_use_feedback = overrides.novelty_use_feedback; }
 
     // --- algorithmic shape ---
     if overrides.score_temperature != 0.0 { base.score_temperature = overrides.score_temperature; }
