@@ -211,9 +211,11 @@ fn pmi_group_similarity(
 /// Blended group-level similarity: Jaccard (exact tag-match) and PMI
 /// (semantic soft-match). When `blend <= 0`, falls back to pure Jaccard.
 ///
-/// When `user_graph` is provided, PMI queries use the user's co-occurrence
-/// statistics (capturing personalized tag associations) instead of the
-/// global graph. Jaccard exact-match uses the TagIds from `graph`.
+/// Jaccard uses the pre-resolved TagIds from `graph` (global, consistent
+/// ID mapping). PMI uses `user_graph` when provided and `user_pmi_weight`
+/// is positive — capturing personalized tag co-occurrence so MMR diversity
+/// personalises around per-user tag associations (e.g. a `skeb`+`canine`
+/// co-favorite gets less MMR penalty for that specific pair).
 fn group_similarity(
     a: &[(u64, Option<TagId>)],
     b: &[(u64, Option<TagId>)],
@@ -221,15 +223,28 @@ fn group_similarity(
     user_graph: Option<&TagRelationGraph>,
     blend: f32,
     pmi_threshold: f32,
+    user_pmi_weight: f32,
     max_tags: usize,
 ) -> f32 {
     if blend <= 0.0 {
         return jaccard_hashes(a, b);
     }
     let jac = jaccard_hashes(a, b);
-    let graph_for_pmi = user_graph.unwrap_or(graph);
+    let graph_for_pmi = if user_graph.is_some() && user_pmi_weight > 1e-4 {
+        user_graph.unwrap_or(graph)
+    } else {
+        graph
+    };
     let pmi = pmi_group_similarity(a, b, graph_for_pmi, pmi_threshold, max_tags);
-    (1.0 - blend) * jac + blend * pmi
+    // Apply user-PMI amplification: when diversity_user_pmi_weight > 1, the
+    // user-graph PMI gets an extra boost proportional to how strongly those
+    // tags co-occur in the user's favorites.
+    let pmi_boost = if user_graph.is_some() && user_pmi_weight > 1e-4 {
+        user_pmi_weight
+    } else {
+        1.0
+    };
+    (1.0 - blend) * jac + blend * pmi * pmi_boost
 }
 
 fn max_redundancy_indexed(
@@ -243,6 +258,7 @@ fn max_redundancy_indexed(
     let window = priors.diversity_window.max(1);
     let blend = priors.diversity_semantic_blend.clamp(0.0, 1.0);
     let pmi_threshold = priors.diversity_pmi_threshold;
+    let user_pmi_weight = priors.diversity_user_pmi_weight;
     let max_tags = priors.diversity_semantic_max_tags.max(1);
 
     let mut max_sim = 0.0f32;
@@ -264,6 +280,7 @@ fn max_redundancy_indexed(
                 user_graph,
                 blend,
                 pmi_threshold,
+                user_pmi_weight,
                 max_tags,
             ) * priors.diversity_w_artist
                 + group_similarity(
@@ -273,6 +290,7 @@ fn max_redundancy_indexed(
                     user_graph,
                     blend,
                     pmi_threshold,
+                    user_pmi_weight,
                     max_tags,
                 ) * priors.diversity_w_character
                 + group_similarity(
@@ -282,6 +300,7 @@ fn max_redundancy_indexed(
                     user_graph,
                     blend,
                     pmi_threshold,
+                    user_pmi_weight,
                     max_tags,
                 ) * priors.diversity_w_copyright
                 + group_similarity(
@@ -291,6 +310,7 @@ fn max_redundancy_indexed(
                     user_graph,
                     blend,
                     pmi_threshold,
+                    user_pmi_weight,
                     max_tags,
                 ) * priors.diversity_w_species
                 + group_similarity(
@@ -300,6 +320,7 @@ fn max_redundancy_indexed(
                     user_graph,
                     blend,
                     pmi_threshold,
+                    user_pmi_weight,
                     max_tags,
                 ) * priors.diversity_w_general
         };
@@ -984,7 +1005,7 @@ mod tests {
         let b = vec![(2, None), (3, None)];
         // Jaccard = 1/3 ≈ 0.333
         let jac = jaccard_hashes(&a, &b);
-        let blended = group_similarity(&a, &b, &graph, None, 0.0, 0.0, 10);
+        let blended = group_similarity(&a, &b, &graph, None, 0.0, 0.0, 1.0, 10);
         assert!(
             (blended - jac).abs() < 1e-6,
             "blend=0 should equal jaccard: {blended} vs {jac}"
@@ -1016,8 +1037,8 @@ mod tests {
 
         // With blend=1.0 and PMI threshold=0, user_graph should yield
         // high PMI (40 cooc) while global yields low PMI (2 cooc).
-        let with_user = group_similarity(&a, &b, &global, Some(&user), 1.0, 0.0, 10);
-        let without_user = group_similarity(&a, &b, &global, None, 1.0, 0.0, 10);
+        let with_user = group_similarity(&a, &b, &global, Some(&user), 1.0, 0.0, 2.0, 10);
+        let without_user = group_similarity(&a, &b, &global, None, 1.0, 0.0, 1.0, 10);
         assert!(
             with_user > without_user,
             "user_graph PMI ({with_user}) should exceed global PMI ({without_user})"

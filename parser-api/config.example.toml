@@ -202,9 +202,10 @@ diversity_interaction_damp = 0.35
 # mutual information count as a "soft match" even when the tag name differs.
 # The non-zero affordance below gives the calibration grid room to probe
 # in both directions during `grid with-diversify`.
-diversity_semantic_blend = 0.05  # [0-1]; 0 = disabled (pure Jaccard)
+diversity_semantic_blend = 0.05  # [0-1]; 0 = disabled (pure Jaccard), >0 enables PMI soft-matching
 diversity_pmi_threshold = 0.5    # minimum PMI for a soft match; pairs with PMI above this count as semantically related
 diversity_semantic_max_tags = 10 # top-K tags per group for the O(T²) PMI loop
+diversity_user_pmi_weight = 1.0  # amplify user-graph PMI over global in MMR (1.0 = no boost, >1 = personalized diversity)
 
 # --- Runtime / worker tuning ------------------------------------------------
 [runtime]

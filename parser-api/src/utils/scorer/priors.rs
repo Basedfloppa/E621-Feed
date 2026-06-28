@@ -252,6 +252,13 @@ pub struct Priors {
     /// (0 = no limit, though O(T²) cost scales quadratically).
     #[serde(default = "default_diversity_semantic_max_tags")]
     pub diversity_semantic_max_tags: usize,
+    /// When `diversity_semantic_blend > 0`, multiply user-graph PMI by this
+    /// factor over global-graph PMI. Values > 1.0 amplify per-user diversity
+    /// personalization (a user who co-favorites `skeb`+`canine` gets less
+    /// MMR penalty for those tags together). 0 = disable user-graph entirely
+    /// even when `diversity_semantic_blend > 0`.
+    #[serde(default = "default_diversity_user_pmi_weight")]
+    pub diversity_user_pmi_weight: f32,
 }
 
 fn default_quality_log_bias() -> f32 {
@@ -443,4 +450,7 @@ fn default_diversity_pmi_threshold() -> f32 {
 }
 fn default_diversity_semantic_max_tags() -> usize {
     10
+}
+fn default_diversity_user_pmi_weight() -> f32 {
+    1.0
 }
