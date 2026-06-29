@@ -157,13 +157,12 @@ pub struct RuntimeConfig {
     /// before resetting the counter and resuming normal cadence.
     #[serde(default = "default_prefetch_breaker_pause_secs")]
     pub prefetch_breaker_pause_secs: u64,
-    /// Number of top tags to fetch per group (artist, character). Default 1
-    /// (narrow). Higher values (e.g. 5–10) broaden catalog diversity at the
-    /// cost of more API quota per tick.
+    /// Number of top tags to fetch per group (artist, character). Default 10
+    /// (broad catalog). Lower values (e.g. 1) restrict to a narrow catalog.
     #[serde(default = "default_prefetch_tags_per_group")]
     pub prefetch_tags_per_group: usize,
-    /// Whether to also fetch a “recent popular” stream (latest posts above
-    /// the user's avg fav count) as a third prefetch bucket. Default false.
+    /// Whether to also fetch a "recent popular" stream (latest posts above
+    /// the user's avg fav count) as a third prefetch bucket. Default true.
     /// When enabled the worker picks one additional top tag for artist/
     /// character and fetches by popularity.
     #[serde(default = "default_prefetch_include_recent_popular")]
@@ -300,13 +299,13 @@ fn default_prefetch_breaker_pause_secs() -> u64 {
     600
 }
 fn default_prefetch_tags_per_group() -> usize {
-    1
+    10
 }
 fn default_prefetch_include_recent_popular() -> bool {
-    false
+    true
 }
 fn default_prefetch_cooldown_secs() -> u64 {
-    3600
+    86400
 }
 fn default_cache_validate_interval_secs() -> u64 {
     300 // 5 min
@@ -924,6 +923,9 @@ max_retries = 1
         assert_eq!(rt.prefetch_active_window_days, 14);
         assert_eq!(rt.prefetch_breaker_threshold, 3);
         assert_eq!(rt.prefetch_breaker_pause_secs, 600);
+        // Prefetch defaults: broad catalog + recent popular (P1 fix).
+        assert_eq!(rt.prefetch_tags_per_group, 10);
+        assert!(rt.prefetch_include_recent_popular);
         assert_eq!(rt.cache_validate_interval_secs, 300);
         assert_eq!(rt.cache_idle_eviction_secs, 1800);
     }

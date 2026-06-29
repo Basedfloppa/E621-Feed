@@ -272,11 +272,18 @@ pub(crate) fn score_with_cache(
                 }
 
                 let scored: Vec<(i64, f32, bool)> = if diversify {
+                    // Pass the per-account user_relation so PMI soft-matching
+                    // in the diversity pass uses the user's own co-occurrence
+                    // statistics (controlled by diversity_user_pmi_weight).  The
+                    // DiversityFeatures in fx.diversity_features were built with
+                    // the user graph's TagId mapping (see dataset.rs), so
+                    // marginal/cooc lookups resolve correctly inside
+                    // pmi_group_similarity.
                     let order = diversify_indices(
                         &entries,
                         &fx.diversity_features,
                         &dataset.global_relation,
-                        None,
+                        Some(&fx.user_relation),
                         priors,
                         head_limit,
                     );

@@ -411,10 +411,15 @@ pub(crate) fn prepare_eval_dataset(opts: &GridOptions) -> anyhow::Result<EvalDat
             }
             user_relation.freeze_with_query_set(&queryable, 2);
             // MMR features only when actually needed.
+            // Build DiversityFeatures with the user graph so TagIds resolve
+            // against the per-account co-occurrence data.  This is required
+            // for `diversity_user_pmi_weight` to actually amplify user-graph
+            // PMI during MMR — if we built with `global_relation` the TagIds
+            // would be wrong for the user graph's frozen pair storage.
             let diversity_features: Vec<DiversityFeatures> = if opts.diversify {
                 let mut v = Vec::with_capacity(test_posts.len() + neg_posts.len());
-                v.extend(test_posts.iter().map(|p| DiversityFeatures::from_post(p, &global_relation)));
-                v.extend(neg_posts.iter().map(|p| DiversityFeatures::from_post(p, &global_relation)));
+                v.extend(test_posts.iter().map(|p| DiversityFeatures::from_post(p, &user_relation)));
+                v.extend(neg_posts.iter().map(|p| DiversityFeatures::from_post(p, &user_relation)));
                 v
             } else {
                 Vec::new()
