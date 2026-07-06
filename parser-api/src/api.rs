@@ -8,7 +8,7 @@ use tokio::time::{Instant, sleep, timeout};
 use urlencoding::encode;
 
 use crate::models::{
-    Post, PostsApiResponse, TruncatedAccount, UserApiResponse, UserSearchResult, cfg,
+    Post, TruncatedAccount, UserApiResponse, UserSearchResult, cfg,
 };
 
 /// Global rate gate. Outbound sends share one token-bucket budget so
@@ -516,6 +516,7 @@ pub async fn get_favorites(
             ("user_id", account.id.to_string()),
             ("limit", cfg.posts_limit.to_string()),
             ("page", page.to_string()),
+            ("v2", true.to_string()),
         ],
     );
     debug!("GET (auth) /favorites.json?user_id=…&limit=…&page={page}");
@@ -528,8 +529,8 @@ pub async fn get_favorites(
         }
     };
 
-    let posts = match json::from_str::<PostsApiResponse>(&body) {
-        Ok(r) => r.posts,
+    let posts = match json::from_str::<Vec<Post>>(&body) {
+        Ok(r) => r,
         Err(e) => {
             let preview = body_preview(&body);
             warn!("favorites parse failed: {e}; first bytes: {preview}");
@@ -655,15 +656,15 @@ pub async fn get_posts_by_tags(
             ("limit", cfg.posts_limit.to_string()),
             ("page", page.unwrap_or(1).to_string()),
             ("tags", combined),
+            ("v2", true.to_string()),
         ],
     );
     // Bypass cache — prefetch traffic must not pollute user-facing cache.
     let body = fetch_authed_text(url, true, 0)
         .await
         .map_err(|e| format!("posts request {e}"))?;
-    let posts = json::from_str::<PostsApiResponse>(&body)
-        .map_err(|e| format!("posts parse failed: {e}"))?
-        .posts;
+    let posts = json::from_str::<Vec<Post>>(&body)
+        .map_err(|e| format!("posts parse failed: {e}"))?;
     Ok(posts)
 }
 
@@ -682,14 +683,14 @@ pub async fn get_posts_by_ids(ids: &[i64]) -> Result<Vec<Post>, String> {
             ("limit", cfg.posts_limit.to_string()),
             ("tags", tags),
             ("page", "1".to_string()),
+            ("v2", true.to_string()),
         ],
     );
     let body = fetch_authed_text(url, true, 0)
         .await
         .map_err(|e| format!("posts by ids request: {e}"))?;
-    let posts = json::from_str::<PostsApiResponse>(&body)
-        .map_err(|e| format!("posts parse failed: {e}"))?
-        .posts;
+    let posts = json::from_str::<Vec<Post>>(&body)
+        .map_err(|e| format!("posts parse failed: {e}"))?;
     Ok(posts)
 }
 
@@ -728,15 +729,15 @@ pub async fn get_posts(account: &TruncatedAccount, page: Option<i32>) -> Result<
             ("limit", cfg.posts_limit.to_string()),
             ("page", page.unwrap_or(1).to_string()),
             ("tags", blacklist),
+            ("v2", true.to_string()),
         ],
     );
     debug!("GET (auth) {url}");
     let body = fetch_authed_text(url, false, ttl_secs)
         .await
         .map_err(|e| format!("posts request {e}"))?;
-    let posts = json::from_str::<PostsApiResponse>(&body)
-        .map_err(|e| format!("posts parse failed: {e}"))?
-        .posts;
+    let posts = json::from_str::<Vec<Post>>(&body)
+        .map_err(|e| format!("posts parse failed: {e}"))?;
 
     info!("Fetched {} posts", posts.len());
     Ok(posts)

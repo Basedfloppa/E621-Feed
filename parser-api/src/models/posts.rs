@@ -4,11 +4,6 @@ use chrono::{DateTime, Utc};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-#[derive(Deserialize)]
-pub struct PostsApiResponse {
-    pub posts: Vec<Post>,
-}
-
 #[derive(Serialize, Deserialize, JsonSchema, Clone)]
 pub struct Post {
     pub id: i64,
