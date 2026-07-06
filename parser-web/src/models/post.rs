@@ -1,99 +1,136 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-#[derive(Deserialize, Serialize, Clone, PartialEq)]
+#[derive(Deserialize, Serialize, Clone, PartialEq, Default)]
 pub struct Post {
     pub id: i64,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
-    pub file: Option<FileInfo>,
-    pub preview: Option<Preview>,
-    pub sample: Option<Sample>,
-    pub score: Score,
-    pub tags: Tags,
-    pub locked_tags: Option<Vec<String>>,
     pub change_seq: f64,
-    pub flags: Flags,
-    pub rating: Rating,
-    pub fav_count: i64,
-    pub sources: Vec<String>,
-    pub pools: Vec<i64>,
-    pub relationships: Relationships,
-    pub approver_id: Option<i64>,
+    pub files: Files,
     pub uploader_id: i64,
+    #[serde(default)]
+    pub uploader_name: Option<String>,
+    pub approver_id: Option<i64>,
+    pub stats: Stats,
+    pub flags: Flags,
+    pub has: Has,
+    pub relationships: Relationships,
+    pub pools: Vec<i64>,
+    pub rating: Rating,
+    #[serde(default)]
+    pub locked_tags: Vec<String>,
+    #[serde(default)]
+    pub sources: Vec<String>,
+    #[serde(default)]
     pub description: Option<String>,
-    pub comment_count: i64,
-    pub is_favorited: bool,
-    pub has_notes: bool,
-    pub duration: Option<f64>,
+    #[serde(default)]
+    pub tags: Tags,
 }
 
-#[derive(Deserialize, Serialize, Clone, PartialEq)]
-pub struct FileInfo {
-    pub width: i64,
-    pub height: i64,
-    pub ext: Option<String>,
-    pub size: i64,
+#[derive(Deserialize, Serialize, Clone, PartialEq, Default)]
+pub struct Files {
+    #[serde(default)]
+    pub meta: FileMeta,
+    #[serde(default)]
+    pub original: FileOriginal,
+    #[serde(default)]
+    pub preview: FilePreview,
+    #[serde(default)]
+    pub sample: FileSample,
+}
+
+#[derive(Deserialize, Serialize, Clone, PartialEq, Default)]
+pub struct FileMeta {
+    #[serde(default)]
     pub md5: Option<String>,
-    pub url: Option<String>,
-}
-
-#[derive(Deserialize, Serialize, Clone, PartialEq)]
-pub struct Preview {
-    pub width: i64,
-    pub height: i64,
-    pub url: Option<String>,
-}
-
-#[derive(Deserialize, Serialize, Clone, PartialEq)]
-pub struct Sample {
-    pub has: Option<bool>,
-    pub height: Option<i64>,
-    pub width: Option<i64>,
-    pub url: Option<String>,
-    pub alternates: Option<Alternates>,
-    pub variants: Option<Variants>,
-    pub samples: Option<Samples>,
-}
-
-#[derive(Deserialize, Serialize, Clone, PartialEq)]
-pub struct PostSampleAlternate {
-    pub fps: f32,
-    pub codec: Option<String>,
+    #[serde(default)]
+    pub ext: Option<String>,
+    #[serde(default)]
     pub size: i64,
+    #[serde(default)]
+    pub duration: Option<f64>,
+    #[serde(default)]
+    pub has_sample: bool,
+}
+
+#[derive(Deserialize, Serialize, Clone, PartialEq, Default)]
+pub struct FileOriginal {
+    #[serde(default)]
     pub width: i64,
+    #[serde(default)]
     pub height: i64,
+    #[serde(default)]
     pub url: Option<String>,
 }
 
-#[derive(Deserialize, Serialize, Clone, PartialEq)]
-pub struct Alternates {
-    pub has: Option<bool>,
-    pub original: Option<PostSampleAlternate>,
+#[derive(Deserialize, Serialize, Clone, PartialEq, Default)]
+pub struct FilePreview {
+    #[serde(default)]
+    pub width: i64,
+    #[serde(default)]
+    pub height: i64,
+    #[serde(default)]
+    pub jpg: Option<String>,
+    #[serde(default)]
+    pub webp: Option<String>,
 }
 
-#[derive(Deserialize, Serialize, Clone, PartialEq)]
-pub struct Variants {
-    pub webm: PostSampleAlternate,
-    pub mp4: PostSampleAlternate,
+#[derive(Deserialize, Serialize, Clone, PartialEq, Default)]
+pub struct FileSample {
+    #[serde(default)]
+    pub width: i64,
+    #[serde(default)]
+    pub height: i64,
+    #[serde(default)]
+    pub jpg: Option<String>,
+    #[serde(default)]
+    pub webp: Option<String>,
 }
 
-#[derive(Deserialize, Serialize, Clone, PartialEq)]
-pub struct Samples {
-    #[serde(rename = "480p")]
-    pub p480: PostSampleAlternate,
-    #[serde(rename = "720p")]
-    pub p720: PostSampleAlternate,
+#[derive(Deserialize, Serialize, Clone, PartialEq, Default)]
+pub struct Stats {
+    #[serde(default)]
+    pub score: Score,
+    #[serde(default)]
+    pub fav_count: i64,
+    #[serde(default)]
+    pub is_favorited: bool,
+    #[serde(default)]
+    pub vote: i64,
+    #[serde(default)]
+    pub comment_count: i64,
 }
 
-#[derive(Deserialize, Serialize, Clone, PartialEq)]
+#[derive(Deserialize, Serialize, Clone, PartialEq, Default)]
+pub struct Has {
+    #[serde(default)]
+    pub parent: bool,
+    #[serde(default)]
+    pub children: bool,
+    #[serde(default)]
+    pub active_children: bool,
+    #[serde(default)]
+    pub notes: bool,
+    #[serde(default)]
+    pub sample: bool,
+}
+
+#[derive(Deserialize, Serialize, Clone, PartialEq, Default)]
+pub struct Relationships {
+    pub parent_id: Option<i64>,
+    #[serde(default)]
+    pub children: Vec<i64>,
+}
+
+#[derive(Deserialize, Serialize, Clone, PartialEq, Default)]
 pub struct Score {
     pub up: i64,
     pub down: i64,
     pub total: i64,
 }
 
-#[derive(Deserialize, Serialize, Clone, PartialEq)]
+#[derive(Deserialize, Serialize, Clone, PartialEq, Default)]
 pub struct Tags {
     pub general: Vec<String>,
     pub artist: Vec<String>,
@@ -106,7 +143,7 @@ pub struct Tags {
     pub contributor: Vec<String>,
 }
 
-#[derive(Deserialize, Serialize, Clone, PartialEq)]
+#[derive(Deserialize, Serialize, Clone, PartialEq, Default)]
 pub struct Flags {
     pub pending: bool,
     pub flagged: bool,
@@ -116,9 +153,10 @@ pub struct Flags {
     pub deleted: bool,
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum Rating {
+    #[default]
     S,
     Q,
     E,
@@ -130,14 +168,6 @@ pub enum FeedInteractionType {
     QualifiedImpression,
     Open,
     Hide,
-}
-
-#[derive(Deserialize, Serialize, Clone, PartialEq)]
-pub struct Relationships {
-    pub parent_id: Option<i64>,
-    pub has_children: bool,
-    pub has_active_children: bool,
-    pub children: Vec<i64>,
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq)]

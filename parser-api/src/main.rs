@@ -13,6 +13,8 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 use rocket::futures::lock::Mutex;
 use rocket::http::CookieJar;
+#[cfg(debug_assertions)]
+use rocket::http::Method;
 use rocket::request::Request;
 use rocket::serde::json::{serde_json, Json};
 use rocket::shield::Shield;
@@ -232,6 +234,11 @@ fn attach_cors(rocket: rocket::Rocket<rocket::Build>) -> rocket::Rocket<rocket::
     let cors = rocket_cors::CorsOptions {
         allowed_origins: exact,
         allow_credentials: true,
+        allowed_methods: vec![Method::Get, Method::Post, Method::Put, Method::Patch, Method::Delete, Method::Options]
+            .into_iter()
+            .map(From::from)
+            .collect(),
+        allowed_headers: rocket_cors::AllowedHeaders::all(),
         ..Default::default()
     }
     .to_cors()

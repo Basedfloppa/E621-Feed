@@ -616,8 +616,8 @@ mod tests {
     use super::*;
     use crate::models::{
         AccountMediaStat, AccountPreferenceProfile, AccountQualityProfile,
-        AccountRatingStat, AccountRecencyProfile, AccountTagFeedback, Flags, Post,
-        Rating, Relationships, Score, TagCount, Tags,
+        AccountRatingStat, AccountRecencyProfile, AccountTagFeedback, Files, Flags, Has, Post,
+        Rating, Relationships, Score, Stats, TagCount, Tags,
     };
     use crate::utils::idf::IdfIndex;
     use crate::utils::scorer::cached::CachedPostFeatures;
@@ -867,38 +867,14 @@ mod tests {
 
     fn make_post(tags: Tags) -> Post {
         Post {
-            id: 1,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-            file: None,
-            preview: None,
-            sample: None,
-            score: Score {
-                up: 100,
-                down: 0,
-                total: 100,
-            },
-            tags,
-            locked_tags: None,
-            change_seq: 0.0,
-            flags: Flags::default(),
-            rating: Rating::S,
-            fav_count: 50,
-            sources: vec![],
-            pools: vec![],
-            relationships: Relationships {
-                parent_id: None,
-                has_children: false,
-                has_active_children: false,
-                children: vec![],
-            },
-            approver_id: None,
-            uploader_id: 0,
+            id: 1, created_at: Utc::now(), updated_at: Utc::now(), change_seq: 0.0,
+            files: Files::default(),
+            uploader_id: 0, uploader_name: None, approver_id: None,
+            stats: Stats { score: Score { up: 100, down: 0, total: 100 }, fav_count: 50, comment_count: 5, ..Default::default() },
+            flags: Flags::default(), has: Has::default(), relationships: Relationships::default(),
+            pools: vec![], rating: Rating::S, locked_tags: vec![], sources: vec![],
             description: None,
-            comment_count: 5,
-            is_favorited: false,
-            has_notes: false,
-            duration: None,
+            tags,
         }
     }
 
@@ -1120,8 +1096,7 @@ mod tests {
         let ctx = ScoringContext::new(&counts, &priors, &idf, &profile, &global, &user_graph);
 
         let post = Post {
-            score: Score { up: 40, down: 10, total: 50 },
-            fav_count: 0,
+            stats: Stats { score: Score { up: 40, down: 10, total: 50 }, fav_count: 0, ..Default::default() },
             ..make_post(make_empty_tags())
         };
         let cached = cache_post(&post, &idf, &global);

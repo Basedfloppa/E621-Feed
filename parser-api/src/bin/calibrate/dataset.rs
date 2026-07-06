@@ -511,10 +511,10 @@ fn build_profile(train_posts: &[Post]) -> AccountPreferenceProfile {
     for p in train_posts {
         *rating_counts.entry(p.rating.to_string()).or_insert(0) += 1;
         *media_counts.entry(p.media_type()).or_insert(0) += 1;
-        score_total_sum += p.score.total.max(0) as f32;
-        fav_sum += p.fav_count.max(0) as f32;
-        comment_sum += p.comment_count.max(0) as f32;
-        duration_sum += p.duration.unwrap_or(0.0) as f32;
+        score_total_sum += p.stats.score.total.max(0) as f32;
+        fav_sum += p.stats.fav_count.max(0) as f32;
+        comment_sum += p.stats.comment_count.max(0) as f32;
+        duration_sum += p.files.meta.duration.unwrap_or(0.0) as f32;
         let age = (now - p.created_at).num_seconds() as f32 / 86_400.0;
         ages.push(age.max(0.0));
     }

@@ -517,6 +517,7 @@ pub async fn get_favorites(
             ("limit", cfg.posts_limit.to_string()),
             ("page", page.to_string()),
             ("v2", true.to_string()),
+            ("mode", "extended".to_string()),
         ],
     );
     debug!("GET (auth) /favorites.json?user_id=…&limit=…&page={page}");
@@ -657,6 +658,7 @@ pub async fn get_posts_by_tags(
             ("page", page.unwrap_or(1).to_string()),
             ("tags", combined),
             ("v2", true.to_string()),
+            ("mode", "extended".to_string()),
         ],
     );
     // Bypass cache — prefetch traffic must not pollute user-facing cache.
@@ -684,6 +686,7 @@ pub async fn get_posts_by_ids(ids: &[i64]) -> Result<Vec<Post>, String> {
             ("tags", tags),
             ("page", "1".to_string()),
             ("v2", true.to_string()),
+            ("mode", "extended".to_string()),
         ],
     );
     let body = fetch_authed_text(url, true, 0)
@@ -730,6 +733,7 @@ pub async fn get_posts(account: &TruncatedAccount, page: Option<i32>) -> Result<
             ("page", page.unwrap_or(1).to_string()),
             ("tags", blacklist),
             ("v2", true.to_string()),
+            ("mode", "extended".to_string()),
         ],
     );
     debug!("GET (auth) {url}");

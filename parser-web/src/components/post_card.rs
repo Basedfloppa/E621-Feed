@@ -261,8 +261,8 @@ pub fn post_card(props: &PostCardProps) -> Html {
 
     let (rating_label, rating_classes) = rating_badge_classes(&post.rating);
 
-    let score_summary = post.score.total;
-    let score_detail = AttrValue::from(format!("↑ {}   ↓ {}", post.score.up, post.score.down));
+    let score_summary = post.stats.score.total;
+    let score_detail = AttrValue::from(format!("↑ {}   ↓ {}", post.stats.score.up, post.stats.score.down));
 
     let on_hide = {
         let backend_url = props.backend_url.to_string();
@@ -369,7 +369,7 @@ pub fn post_card(props: &PostCardProps) -> Html {
                     onclick={on_link_click}
                     aria-label={format!(
                         "Open post {} on e621 (rating {}, score {}, affinity {:.2})",
-                        post.id, rating_label, post.score.total, &props.affinity
+                        post.id, rating_label, post.stats.score.total, &props.affinity
                     )}
                 />
 
@@ -537,16 +537,30 @@ fn is_supported_image(url: &str) -> bool {
     ALLOWED.iter().any(|ext| lower.ends_with(ext))
 }
 
+fn preview_url(post: &Post) -> Option<&str> {
+    post.files.preview.jpg.as_deref()
+        .or(post.files.preview.webp.as_deref())
+}
+
+fn sample_url(post: &Post) -> Option<&str> {
+    if post.has.sample {
+        post.files.sample.jpg.as_deref()
+            .or(post.files.sample.webp.as_deref())
+    } else {
+        None
+    }
+}
+
 fn fallback_image_url(post: &Post) -> String {
-    if let Some(url) = post.preview.as_ref().and_then(|p| p.url.as_deref())
+    if let Some(url) = preview_url(post)
         && is_supported_image(url) {
             return url.to_owned();
         }
-    if let Some(url) = post.sample.as_ref().and_then(|s| s.url.as_deref())
+    if let Some(url) = sample_url(post)
         && is_supported_image(url) {
             return url.to_owned();
         }
-    if let Some(url) = post.file.as_ref().and_then(|f| f.url.as_deref())
+    if let Some(url) = post.files.original.url.as_deref()
         && is_supported_image(url) {
             return url.to_owned();
         }
@@ -556,21 +570,18 @@ fn fallback_image_url(post: &Post) -> String {
 fn preferred_image_url(post: &Post, required_width: i64) -> Option<AttrValue> {
     let mut candidates: Vec<(AttrValue, i64)> = Vec::new();
 
-    if let Some(p) = post.preview.as_ref()
-        && let Some(url) = p.url.as_deref()
-            && is_supported_image(url) {
-                candidates.push((AttrValue::from(url.to_owned()), p.width));
-            }
-    if let Some(s) = post.sample.as_ref()
-        && let (Some(url), Some(w)) = (s.url.as_deref(), s.width)
-            && is_supported_image(url) {
-                candidates.push((AttrValue::from(url.to_owned()), w));
-            }
-    if let Some(f) = post.file.as_ref()
-        && let Some(url) = f.url.as_deref()
-            && is_supported_image(url) {
-                candidates.push((AttrValue::from(url.to_owned()), f.width));
-            }
+    if let Some(url) = preview_url(post)
+        && is_supported_image(url) {
+            candidates.push((AttrValue::from(url.to_owned()), post.files.preview.width));
+        }
+    if let Some(url) = sample_url(post)
+        && is_supported_image(url) {
+            candidates.push((AttrValue::from(url.to_owned()), post.files.sample.width));
+        }
+    if let Some(url) = post.files.original.url.as_deref()
+        && is_supported_image(url) {
+            candidates.push((AttrValue::from(url.to_owned()), post.files.original.width));
+        }
 
     candidates.sort_by_key(|&(_, w)| w);
     if let Some((u, _)) = candidates.iter().find(|&&(_, w)| w >= required_width) {

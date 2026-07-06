@@ -490,11 +490,7 @@ fn enforce_diversity_quota(scored: &mut [ScoredPost]) {
         sp.post.tags.artist.first().map(|a| a.to_ascii_lowercase())
     });
     enforce_group_quota(scored, top_k, MIN_CHARACTERS, |sp| {
-        sp.post
-            .tags
-            .character
-            .first()
-            .map(|c| c.to_ascii_lowercase())
+        sp.post.tags.character.first().map(|c| c.to_ascii_lowercase())
     });
 }
 
@@ -552,7 +548,7 @@ fn enforce_group_quota(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::{Flags, Post, Rating, Relationships, Score, ScoredPost, Tags};
+    use crate::models::{Files, Flags, Has, Post, Rating, Relationships, ScoredPost, Stats, Tags};
     use crate::utils::tag_relation::TagRelationGraph;
     use chrono::Utc;
 
@@ -561,55 +557,18 @@ mod tests {
     /// placeholder.
     fn post(id: i64, artists: &[&str], characters: &[&str]) -> Post {
         Post {
-            id,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-            file: None,
-            preview: None,
-            sample: None,
-            score: Score {
-                up: 0,
-                down: 0,
-                total: 0,
-            },
-            tags: Tags {
-                general: vec![],
-                artist: artists.iter().map(|s| s.to_string()).collect(),
-                copyright: vec![],
-                character: characters.iter().map(|s| s.to_string()).collect(),
-                species: vec![],
-                invalid: vec![],
-                meta: vec![],
-                lore: vec![],
-                contributor: vec![],
-            },
-            locked_tags: None,
-            change_seq: 0.0,
-            flags: Flags {
-                pending: false,
-                flagged: false,
-                note_locked: false,
-                status_locked: false,
-                rating_locked: false,
-                deleted: false,
-            },
-            rating: Rating::S,
-            fav_count: 0,
-            sources: vec![],
-            pools: vec![],
-            relationships: Relationships {
-                parent_id: None,
-                has_children: false,
-                has_active_children: false,
-                children: vec![],
-            },
-            approver_id: None,
-            uploader_id: 0,
+            id, created_at: Utc::now(), updated_at: Utc::now(), change_seq: 0.0,
+            files: Files::default(),
+            uploader_id: 0, uploader_name: None, approver_id: None,
+            stats: Stats::default(), flags: Flags::default(),
+            has: Has::default(), relationships: Relationships::default(),
+            pools: vec![], rating: Rating::S, locked_tags: vec![], sources: vec![],
             description: None,
-            comment_count: 0,
-            is_favorited: false,
-            has_notes: false,
-            duration: None,
+            tags: Tags {
+                artist: artists.iter().map(|s| s.to_string()).collect(),
+                character: characters.iter().map(|s| s.to_string()).collect(),
+                ..Tags::default()
+            },
         }
     }
 
@@ -639,9 +598,7 @@ mod tests {
         for sp in posts.iter().take(window) {
             if let Some(a) = sp.post.tags.artist.first() {
                 let a = a.to_ascii_lowercase();
-                if !set.contains(&a) {
-                    set.push(a);
-                }
+                if !set.contains(&a) { set.push(a); }
             }
         }
         set.len()
@@ -652,9 +609,7 @@ mod tests {
         for sp in posts.iter().take(window) {
             if let Some(c) = sp.post.tags.character.first() {
                 let c = c.to_ascii_lowercase();
-                if !set.contains(&c) {
-                    set.push(c);
-                }
+                if !set.contains(&c) { set.push(c); }
             }
         }
         set.len()
@@ -697,7 +652,7 @@ mod tests {
         // `b` (id 4) is swapped into slot 3 — the lowest-ranked redundant
         // slot — and the displaced `a` (id 3) drops to slot 4.
         assert_eq!(posts[3].post.id, 4);
-        assert_eq!(posts[3].post.tags.artist, vec!["b"]);
+        assert_eq!(posts[3].post.tags.artist, vec!["b".to_string()]);
         assert_eq!(posts[4].post.id, 3);
         assert_eq!(distinct_artists(&posts, 4), 2);
         assert_permutation_of(&posts, &[0, 1, 2, 3, 4, 5, 6]);
@@ -833,7 +788,7 @@ mod tests {
             "top-20 must hold ≥2 artists"
         );
         assert_eq!(posts[19].post.id, 20, "`bob` promoted into the window");
-        assert_eq!(posts[19].post.tags.artist, vec!["bob"]);
+        assert_eq!(posts[19].post.tags.artist, vec!["bob".to_string()]);
         assert_permutation_of(&posts, &(0..24).collect::<Vec<_>>());
     }
 

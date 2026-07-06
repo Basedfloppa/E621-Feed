@@ -10,44 +10,23 @@
 use std::collections::HashSet;
 
 use e621_account_parser_api::db;
-use e621_account_parser_api::models::FileInfo;
-use e621_account_parser_api::models::{Flags, Post, Rating, Relationships, Score, Tags};
+use e621_account_parser_api::models::{
+    Files, FileMeta, FileOriginal,
+    Flags, Has, Post, Rating, Relationships, Score, Stats, Tags,
+};
 
 /// Helper: build a minimal Post for testing.
 fn make_post(id: i64, tags: Tags, uploader_id: i64) -> Post {
     Post {
-        id,
-        created_at: chrono::Utc::now(),
-        updated_at: chrono::Utc::now(),
-        file: None,
-        preview: None,
-        sample: None,
-        score: Score {
-            up: 10,
-            down: 0,
-            total: 10,
-        },
-        tags,
-        locked_tags: None,
+        id, created_at: chrono::Utc::now(), updated_at: chrono::Utc::now(),
         change_seq: 0.0,
-        flags: Flags::default(),
-        rating: Rating::S,
-        fav_count: 5,
-        sources: vec![],
-        pools: vec![],
-        relationships: Relationships {
-            parent_id: None,
-            has_children: false,
-            has_active_children: false,
-            children: vec![],
-        },
-        approver_id: None,
-        uploader_id,
+        files: Files::default(),
+        uploader_id, uploader_name: None, approver_id: None,
+        stats: Stats { score: Score { up: 10, down: 0, total: 10 }, fav_count: 5, ..Default::default() },
+        flags: Flags::default(), has: Has::default(), relationships: Relationships::default(),
+        pools: vec![], rating: Rating::S, locked_tags: vec![], sources: vec![],
         description: None,
-        comment_count: 0,
-        is_favorited: false,
-        has_notes: false,
-        duration: None,
+        tags,
     }
 }
 
@@ -988,55 +967,21 @@ fn profile_post(
         _ => Rating::S,
     };
     Post {
-        id,
-        created_at: chrono::Utc::now(),
-        updated_at: chrono::Utc::now(),
-        file: Some(FileInfo {
-            width: 100,
-            height: 100,
-            ext: Some(ext.into()),
-            size: 1234,
-            md5: Some("dummy".into()),
-            url: Some("https://example.com/img".into()),
-        }),
-        preview: None,
-        sample: None,
-        score: Score {
-            up: score_total.max(0),
-            down: 0,
-            total: score_total,
-        },
-        tags: Tags {
-            general: vec!["tag".into()],
-            artist: vec!["art".into()],
-            copyright: vec![],
-            character: vec![],
-            species: vec![],
-            lore: vec![],
-            meta: vec![],
-            invalid: vec![],
-            contributor: vec![],
-        },
-        locked_tags: None,
+        id, created_at: chrono::Utc::now(), updated_at: chrono::Utc::now(),
         change_seq: 0.0,
-        flags: Flags::default(),
-        rating: r,
-        fav_count,
-        sources: vec![],
-        pools: vec![],
-        relationships: Relationships {
-            parent_id: None,
-            has_children: false,
-            has_active_children: false,
-            children: vec![],
+        files: Files {
+            meta: FileMeta { ext: Some(ext.into()), size: 1234, md5: Some("dummy".into()), duration, ..Default::default() },
+            original: FileOriginal { width: 100, height: 100, url: Some("https://example.com/img".into()) },
+            ..Default::default()
         },
-        approver_id: None,
-        uploader_id,
+        uploader_id, uploader_name: None, approver_id: None,
+        stats: Stats { score: Score { up: score_total.max(0), down: 0, total: score_total }, fav_count, comment_count, ..Default::default() },
+        flags: Flags::default(),
+        has: Has::default(),
+        relationships: Relationships::default(),
+        pools: vec![], rating: r, locked_tags: vec![], sources: vec![],
         description: None,
-        comment_count,
-        is_favorited: false,
-        has_notes: false,
-        duration,
+        tags: Tags { general: vec!["tag".into()], artist: vec!["art".into()], ..Tags::default() },
     }
 }
 
@@ -1084,48 +1029,18 @@ fn profile_media_profile() {
         profile_post(200015, "s", "mp4", None, 1, 0, 0, 1), // video
         // Post with duration > 0 but no file_ext (should be video)
         e621_account_parser_api::models::Post {
-            id: 200016,
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
-            file: None,
-            preview: None,
-            sample: None,
-            score: e621_account_parser_api::models::Score {
-                up: 1,
-                down: 0,
-                total: 1,
-            },
-            tags: e621_account_parser_api::models::Tags {
-                general: vec!["tag".into()],
-                artist: vec!["art".into()],
-                copyright: vec![],
-                character: vec![],
-                species: vec![],
-                lore: vec![],
-                meta: vec![],
-                invalid: vec![],
-                contributor: vec![],
-            },
-            locked_tags: None,
+            id: 200016, created_at: chrono::Utc::now(), updated_at: chrono::Utc::now(),
             change_seq: 0.0,
+            files: Files { meta: FileMeta { duration: Some(10.0), ..Default::default() }, ..Default::default() },
+            uploader_id: 1, uploader_name: None, approver_id: None,
+            stats: Stats { score: Score { up: 1, down: 0, total: 1 }, ..Default::default() },
             flags: e621_account_parser_api::models::Flags::default(),
-            rating: e621_account_parser_api::models::Rating::S,
-            fav_count: 0,
-            sources: vec![],
-            pools: vec![],
-            relationships: Relationships {
-                parent_id: None,
-                has_children: false,
-                has_active_children: false,
-                children: vec![],
-            },
-            approver_id: None,
-            uploader_id: 1,
+            has: Has::default(),
+            relationships: Relationships::default(),
+            pools: vec![], rating: e621_account_parser_api::models::Rating::S,
+            locked_tags: vec![], sources: vec![],
             description: None,
-            comment_count: 0,
-            is_favorited: false,
-            has_notes: false,
-            duration: Some(10.0),
+            tags: Tags { general: vec!["tag".into()], artist: vec!["art".into()], ..Tags::default() },
         },
     ];
     db::save_posts(&posts, acc.id).unwrap();
@@ -1198,48 +1113,18 @@ fn profile_recency_profile() {
     let now = Utc::now();
     let make_post = |id: i64, days_ago: f64| -> e621_account_parser_api::models::Post {
         e621_account_parser_api::models::Post {
-            id,
-            created_at: now - Duration::seconds((days_ago * 86_400.0) as i64),
-            updated_at: now,
-            file: None,
-            preview: None,
-            sample: None,
-            score: e621_account_parser_api::models::Score {
-                up: 1,
-                down: 0,
-                total: 1,
-            },
-            tags: e621_account_parser_api::models::Tags {
-                general: vec!["tag".into()],
-                artist: vec!["art".into()],
-                copyright: vec![],
-                character: vec![],
-                species: vec![],
-                lore: vec![],
-                meta: vec![],
-                invalid: vec![],
-                contributor: vec![],
-            },
-            locked_tags: None,
-            change_seq: 0.0,
+            id, created_at: now - Duration::seconds((days_ago * 86_400.0) as i64),
+            updated_at: now, change_seq: 0.0,
+            files: Files::default(),
+            uploader_id: 1, uploader_name: None, approver_id: None,
+            stats: Stats { score: Score { up: 1, down: 0, total: 1 }, ..Default::default() },
             flags: e621_account_parser_api::models::Flags::default(),
-            rating: e621_account_parser_api::models::Rating::S,
-            fav_count: 0,
-            sources: vec![],
-            pools: vec![],
-            relationships: Relationships {
-                parent_id: None,
-                has_children: false,
-                has_active_children: false,
-                children: vec![],
-            },
-            approver_id: None,
-            uploader_id: 1,
+            has: Has::default(),
+            relationships: Relationships::default(),
+            pools: vec![], rating: e621_account_parser_api::models::Rating::S,
+            locked_tags: vec![], sources: vec![],
             description: None,
-            comment_count: 0,
-            is_favorited: false,
-            has_notes: false,
-            duration: None,
+            tags: Tags { general: vec!["tag".into()], artist: vec!["art".into()], ..Tags::default() },
         }
     };
 

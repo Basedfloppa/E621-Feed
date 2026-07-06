@@ -93,17 +93,17 @@ impl<'a> ScoringContext<'a> {
         let p = self.priors;
         let exp = p.one_sided_ratio_exp;
         let absolute = sigmoid(
-            p.quality_a * (post.score.total.max(0) as f32).ln_1p()
-                + p.quality_b * (post.fav_count.max(0) as f32).ln_1p()
+            p.quality_a * (post.stats.score.total.max(0) as f32).ln_1p()
+                + p.quality_b * (post.stats.fav_count.max(0) as f32).ln_1p()
                 + p.quality_log_bias,
         );
         let rel_score = one_sided_ratio(
-            post.score.total.max(0) as f32,
+            post.stats.score.total.max(0) as f32,
             self.profile.quality.avg_score_total,
             exp,
         );
         let rel_comments = one_sided_ratio(
-            post.comment_count.max(0) as f32,
+            post.stats.comment_count.max(0) as f32,
             self.profile.quality.avg_comment_count,
             exp,
         );
@@ -117,8 +117,8 @@ impl<'a> ScoringContext<'a> {
         );
         // Class F: blend in upvote ratio if quality_c > 0.
         if p.quality_c > 1e-3 {
-            let up = post.score.up.max(0) as f32;
-            let down = post.score.down.max(0) as f32;
+            let up = post.stats.score.up.max(0) as f32;
+            let down = post.stats.score.down.max(0) as f32;
             let upvote_ratio = if up + down > 0.0 {
                 up / (up + down)
             } else {
@@ -140,11 +140,11 @@ impl<'a> ScoringContext<'a> {
         let p = self.priors;
         let exp = p.one_sided_ratio_exp;
         let fav_fit = one_sided_ratio(
-            post.fav_count.max(0) as f32,
+            post.stats.fav_count.max(0) as f32,
             self.profile.quality.avg_fav_count,
             exp,
         );
-        let dur_val = post.duration.unwrap_or(0.0) as f32;
+        let dur_val = post.files.meta.duration.unwrap_or(0.0) as f32;
         let dur_base = self.profile.quality.avg_duration;
         let duration_fit = if dur_val > 0.0 || dur_base > 0.0 {
             one_sided_ratio(dur_val, dur_base, exp)
@@ -885,7 +885,8 @@ mod tests {
     use crate::models::{
         AccountMediaStat, AccountPreferenceProfile, AccountQualityProfile,
         AccountRatingStat, AccountRecencyProfile, AccountTagFeedback,
-        AccountUploaderStat, Flags, Post, Rating, Relationships, Score, TagCount, Tags,
+        AccountUploaderStat, Files, FileMeta, FileOriginal, FilePreview, FileSample,
+        Flags, Has, Post, Rating, Relationships, Score, Stats, TagCount, Tags,
     };
     use crate::utils::idf::IdfIndex;
     use crate::utils::scorer::context::ScoringContext;
@@ -1126,38 +1127,14 @@ mod tests {
 
     fn make_post(tags: Tags, score_total: i64, fav_count: i64, rating: Rating) -> Post {
         Post {
-            id: 1,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-            file: None,
-            preview: None,
-            sample: None,
-            score: Score {
-                up: score_total.max(0),
-                down: 0,
-                total: score_total,
-            },
-            tags,
-            locked_tags: None,
-            change_seq: 0.0,
-            flags: Flags::default(),
-            rating,
-            fav_count,
-            sources: vec![],
-            pools: vec![],
-            relationships: Relationships {
-                parent_id: None,
-                has_children: false,
-                has_active_children: false,
-                children: vec![],
-            },
-            approver_id: None,
-            uploader_id: 0,
+            id: 1, created_at: Utc::now(), updated_at: Utc::now(), change_seq: 0.0,
+            files: Files::default(),
+            uploader_id: 0, uploader_name: None, approver_id: None,
+            stats: Stats { score: Score { up: score_total.max(0), down: 0, total: score_total }, fav_count, ..Default::default() },
+            flags: Flags::default(), has: Has::default(), relationships: Relationships::default(),
+            pools: vec![], rating, locked_tags: vec![], sources: vec![],
             description: None,
-            comment_count: 0,
-            is_favorited: false,
-            has_notes: false,
-            duration: None,
+            tags,
         }
     }
 
@@ -1335,8 +1312,7 @@ mod tests {
         let ctx = ScoringContext::new(&counts, &priors, &idf, &profile, &global_graph, &user_graph);
 
         let post = Post {
-            score: Score { up: 40, down: 10, total: 50 },
-            // Note: struct update overwrites fav_count to 0 from make_post defaults.
+            stats: Stats { score: Score { up: 40, down: 10, total: 50 }, ..Default::default() },
             ..make_post(make_empty_tags(), 0, 0, Rating::S)
         };
         let q = ctx.quality_fit(&post);
@@ -1393,7 +1369,7 @@ mod tests {
         let ctx = ScoringContext::new(&counts, &priors, &idf, &profile, &global_graph, &user_graph);
 
         let post = Post {
-            duration: Some(60.0),
+            files: Files { meta: FileMeta { duration: Some(60.0), ..Default::default() }, ..Default::default() },
             ..make_post(make_empty_tags(), 0, 25, Rating::S)
         };
         let pop = ctx.popularity_fit(&post);
@@ -1456,10 +1432,7 @@ mod tests {
         let ctx = ScoringContext::new(&counts, &priors, &idf, &profile, &global_graph, &user_graph);
 
         let post = Post {
-            file: Some(crate::models::FileInfo {
-                ext: Some("swf".to_string()),
-                width: 0, height: 0, size: 0, md5: None, url: None,
-            }),
+            files: Files { meta: FileMeta { ext: Some("swf".to_string()), ..Default::default() }, ..Default::default() },
             ..make_post(make_empty_tags(), 0, 0, Rating::S)
         };
         let m = ctx.media_fit(&post);
@@ -1793,6 +1766,7 @@ mod tests {
         // Post has uploader_id = 99 (not in map)
         let post = Post {
             uploader_id: 99,
+            uploader_name: None,
             ..make_post(make_empty_tags(), 0, 0, Rating::S)
         };
         let u = ctx.uploader_fit(&post);
@@ -1823,6 +1797,7 @@ mod tests {
 
         let post = Post {
             uploader_id: 42,
+            uploader_name: None,
             ..make_post(make_empty_tags(), 0, 0, Rating::S)
         };
         let u = ctx.uploader_fit(&post);
@@ -1859,6 +1834,7 @@ mod tests {
 
         let post = Post {
             uploader_id: 7,
+            uploader_name: None,
             ..make_post(make_empty_tags(), 0, 0, Rating::S)
         };
         let u = ctx.uploader_fit(&post);
@@ -1890,6 +1866,7 @@ mod tests {
 
         let post = Post {
             uploader_id: 7,
+            uploader_name: None,
             ..make_post(make_empty_tags(), 0, 0, Rating::S)
         };
         let u = ctx.uploader_fit(&post);

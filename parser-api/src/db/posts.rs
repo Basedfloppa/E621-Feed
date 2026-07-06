@@ -320,17 +320,26 @@ const POST_UPSERT_SQL: &str = "
 fn post_upsert_params(post: &Post) -> Vec<rusqlite::types::Value> {
     use rusqlite::types::Value;
 
-    let file_ext = post.file.as_ref().and_then(|f| f.ext.clone());
-    let file_width = post.file.as_ref().map(|f| f.width);
-    let file_height = post.file.as_ref().map(|f| f.height);
-    let file_size = post.file.as_ref().map(|f| f.size);
-    let preview_url = post.preview.as_ref().and_then(|p| p.url.clone());
-    let preview_width = post.preview.as_ref().map(|p| p.width);
-    let preview_height = post.preview.as_ref().map(|p| p.height);
-    let sample_url = post.sample.as_ref().and_then(|s| s.url.clone());
-    let sample_width = post.sample.as_ref().and_then(|s| s.width);
-    let sample_height = post.sample.as_ref().and_then(|s| s.height);
-    let file_url = post.file.as_ref().and_then(|f| f.url.clone());
+    let file_ext = post.files.meta.ext.clone();
+    let file_width = Some(post.files.original.width);
+    let file_height = Some(post.files.original.height);
+    let file_size = Some(post.files.meta.size);
+    let preview_url = post
+        .files
+        .preview
+        .jpg
+        .clone()
+        .or_else(|| post.files.preview.webp.clone());
+    let preview_width = Some(post.files.preview.width);
+    let preview_height = Some(post.files.preview.height);
+    let sample_url = if post.has.sample {
+        post.files.sample.jpg.clone().or_else(|| post.files.sample.webp.clone())
+    } else {
+        None
+    };
+    let sample_width = if post.has.sample { Some(post.files.sample.width) } else { None };
+    let sample_height = if post.has.sample { Some(post.files.sample.height) } else { None };
+    let file_url = post.files.original.url.clone();
 
     fn opt_int(v: Option<i64>) -> Value {
         v.map(Value::Integer).unwrap_or(Value::Null)
@@ -346,8 +355,8 @@ fn post_upsert_params(post: &Post) -> Vec<rusqlite::types::Value> {
         Value::Integer(post.id),
         Value::Text(post.created_at.to_rfc3339()),
         Value::Text(post.updated_at.to_rfc3339()),
-        Value::Integer(post.score.total),
-        Value::Integer(post.fav_count),
+        Value::Integer(post.stats.score.total),
+        Value::Integer(post.stats.fav_count),
         Value::Text(post.rating.to_string()),
         Value::Text(Utc::now().to_rfc3339()),
         opt_text(file_ext),
@@ -355,20 +364,16 @@ fn post_upsert_params(post: &Post) -> Vec<rusqlite::types::Value> {
         opt_int(file_height),
         opt_int(file_size),
         Value::Integer(if post.is_animated() { 1 } else { 0 }),
-        opt_real(post.duration),
-        Value::Integer(post.comment_count),
-        Value::Integer(if post.has_notes { 1 } else { 0 }),
+        opt_real(post.files.meta.duration),
+        Value::Integer(post.stats.comment_count),
+        Value::Integer(if post.has.notes { 1 } else { 0 }),
         Value::Integer(if post.flags.deleted { 1 } else { 0 }),
-        Value::Integer(if post.relationships.has_children {
-            1
-        } else {
-            0
-        }),
+        Value::Integer(if post.has.children { 1 } else { 0 }),
         opt_text(preview_url),
         opt_text(sample_url),
         opt_text(file_url),
-        Value::Integer(post.score.up),
-        Value::Integer(post.score.down),
+        Value::Integer(post.stats.score.up),
+        Value::Integer(post.stats.score.down),
         opt_int(sample_width),
         opt_int(sample_height),
         opt_int(preview_width),
@@ -402,7 +407,8 @@ pub fn post_count() -> i64 {
 /// locally (sources, pools, alternates) get default values; the scorer and
 /// feed UI don't read them.
 pub fn hydrate_posts_by_ids(ids: &[i64]) -> Result<Vec<Post>, String> {
-    use crate::models::{FileInfo, Flags, Preview, Rating, Relationships, Sample, Score, Tags};
+    use crate::models::{FileMeta, FileOriginal, FilePreview, FileSample, Files, Flags,
+        Has, Rating, Relationships, Score, Stats, Tags};
 
     if ids.is_empty() {
         return Ok(Vec::new());
@@ -526,60 +532,53 @@ pub fn hydrate_posts_by_ids(ids: &[i64]) -> Result<Vec<Post>, String> {
                 other => return Err(format!("hydrate post {id}: bad rating {other}")),
             };
 
-            let file = if file_url.is_some() || file_ext.is_some() {
-                Some(FileInfo {
-                    width: file_w.unwrap_or(0),
-                    height: file_h.unwrap_or(0),
-                    ext: file_ext,
-                    size: file_size.unwrap_or(0),
-                    md5: None,
-                    url: file_url,
-                })
-            } else {
-                None
-            };
-            let preview = preview_url.as_ref().map(|url| Preview {
-                width: prev_w.unwrap_or(0),
-                height: prev_h.unwrap_or(0),
-                url: Some(url.clone()),
-            });
-            let sample = sample_url.as_ref().map(|url| Sample {
-                has: Some(true),
-                width: sample_w,
-                height: sample_h,
-                url: Some(url.clone()),
-                alternates: None,
-                variants: None,
-                samples: None,
-            });
-
             posts.insert(
                 id,
                 Post {
                     id,
                     created_at,
                     updated_at,
-                    file,
-                    preview,
-                    sample,
-                    score: Score {
-                        up: score_up,
-                        down: score_down,
-                        total: score_total,
-                    },
-                    tags: Tags {
-                        general: Vec::new(),
-                        artist: Vec::new(),
-                        copyright: Vec::new(),
-                        character: Vec::new(),
-                        species: Vec::new(),
-                        invalid: Vec::new(),
-                        meta: Vec::new(),
-                        lore: Vec::new(),
-                        contributor: Vec::new(),
-                    },
-                    locked_tags: None,
                     change_seq: 0.0,
+                    files: Files {
+                        meta: FileMeta {
+                            md5: None,
+                            ext: file_ext,
+                            size: file_size.unwrap_or(0),
+                            duration,
+                            has_sample: sample_url.is_some(),
+                        },
+                        original: FileOriginal {
+                            width: file_w.unwrap_or(0),
+                            height: file_h.unwrap_or(0),
+                            url: file_url,
+                        },
+                        preview: FilePreview {
+                            width: prev_w.unwrap_or(0),
+                            height: prev_h.unwrap_or(0),
+                            jpg: preview_url.clone(),
+                            webp: None,
+                        },
+                        sample: FileSample {
+                            width: sample_w.unwrap_or(0),
+                            height: sample_h.unwrap_or(0),
+                            jpg: sample_url.clone(),
+                            webp: None,
+                        },
+                    },
+                    uploader_id: 0,
+                    uploader_name: None,
+                    approver_id: None,
+                    stats: Stats {
+                        score: Score {
+                            up: score_up,
+                            down: score_down,
+                            total: score_total,
+                        },
+                        fav_count,
+                        is_favorited: false,
+                        vote: 0,
+                        comment_count,
+                    },
                     flags: Flags {
                         pending: false,
                         flagged: false,
@@ -588,23 +587,23 @@ pub fn hydrate_posts_by_ids(ids: &[i64]) -> Result<Vec<Post>, String> {
                         rating_locked: false,
                         deleted: is_deleted != 0,
                     },
-                    rating,
-                    fav_count,
-                    sources: Vec::new(),
-                    pools: Vec::new(),
+                    has: Has {
+                        parent: false,
+                        children: has_children != 0,
+                        active_children: false,
+                        notes: has_notes != 0,
+                        sample: sample_url.is_some(),
+                    },
                     relationships: Relationships {
                         parent_id: None,
-                        has_children: has_children != 0,
-                        has_active_children: false,
                         children: Vec::new(),
                     },
-                    approver_id: None,
-                    uploader_id: 0,
+                    pools: Vec::new(),
+                    rating,
+                    locked_tags: Vec::new(),
+                    sources: Vec::new(),
                     description: None,
-                    comment_count,
-                    is_favorited: false,
-                    has_notes: has_notes != 0,
-                    duration,
+                    tags: Tags::default(),
                 },
             );
         }

@@ -791,29 +791,22 @@ mod tests {
 
     #[test]
     fn from_train_posts_builds_graph() {
-        use crate::models::{Post, Score, Tags, Flags, Rating, Relationships};
+        use crate::models::{Files, Stats, Has, Post, Score, Flags, Rating, Relationships, Tags};
         let post = Post {
-            id: 1,
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
-            file: None, preview: None, sample: None,
-            score: Score { up: 1, down: 0, total: 1 },
+            id: 1, created_at: chrono::Utc::now(), updated_at: chrono::Utc::now(),
+            change_seq: 0.0,
+            files: Files::default(),
+            uploader_id: 0, uploader_name: None, approver_id: None,
+            stats: Stats { score: Score { up: 1, down: 0, total: 1 }, ..Default::default() },
+            flags: Flags::default(), has: Has::default(),
+            relationships: Relationships::default(),
+            pools: vec![], rating: Rating::S, locked_tags: vec![], sources: vec![],
+            description: None,
             tags: Tags {
                 artist: vec!["artist_a".into()],
                 general: vec!["fluffy".into(), "outdoor".into()],
-                copyright: vec![], character: vec![], species: vec![],
-                lore: vec![], meta: vec![], invalid: vec![], contributor: vec![],
+                ..Tags::default()
             },
-            locked_tags: None, change_seq: 0.0,
-            flags: Flags::default(), rating: Rating::S,
-            fav_count: 0, sources: vec![], pools: vec![],
-            relationships: Relationships {
-                parent_id: None, has_children: false,
-                has_active_children: false, children: vec![],
-            },
-            approver_id: None, uploader_id: 0, description: None,
-            comment_count: 0, is_favorited: false, has_notes: false,
-            duration: None,
         };
 
         let g = TagRelationGraph::from_train_posts(&[post]);
@@ -843,28 +836,18 @@ mod tests {
 
     #[test]
     fn from_train_posts_lowercases_tags() {
-        use crate::models::{Post, Score, Tags, Flags, Rating, Relationships};
+        use crate::models::{Files, Stats, Has, Post, Score, Flags, Rating, Relationships, Tags};
         let post = Post {
-            id: 1,
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
-            file: None, preview: None, sample: None,
-            score: Score { up: 1, down: 0, total: 1 },
-            tags: Tags {
-                general: vec!["Fluffy".into()],
-                artist: vec![], copyright: vec![], character: vec![],
-                species: vec![], lore: vec![], meta: vec![], invalid: vec![], contributor: vec![],
-            },
-            locked_tags: None, change_seq: 0.0,
-            flags: Flags::default(), rating: Rating::S,
-            fav_count: 0, sources: vec![], pools: vec![],
-            relationships: Relationships {
-                parent_id: None, has_children: false,
-                has_active_children: false, children: vec![],
-            },
-            approver_id: None, uploader_id: 0, description: None,
-            comment_count: 0, is_favorited: false, has_notes: false,
-            duration: None,
+            id: 1, created_at: chrono::Utc::now(), updated_at: chrono::Utc::now(),
+            change_seq: 0.0,
+            files: Files::default(),
+            uploader_id: 0, uploader_name: None, approver_id: None,
+            stats: Stats { score: Score { up: 1, down: 0, total: 1 }, ..Default::default() },
+            flags: Flags::default(), has: Has::default(),
+            relationships: Relationships::default(),
+            pools: vec![], rating: Rating::S, locked_tags: vec![], sources: vec![],
+            description: None,
+            tags: Tags { general: vec!["Fluffy".into()], ..Tags::default() },
         };
         let g = TagRelationGraph::from_train_posts(&[post]);
         // Tag should be lowercased to "fluffy"

@@ -168,7 +168,7 @@ pub(crate) fn sample_negatives_mixed(
         let max_tries = target_pop.saturating_mul(5).max(100);
         while out.len() < target_total && tries < max_tries {
             let pivot: i32 =
-                test_posts[next(&mut rng) % test_posts.len()].fav_count.max(0) as i32;
+                test_posts[next(&mut rng) % test_posts.len()].stats.fav_count.max(0) as i32;
             // 70%-150% of pivot fav_count (asymmetric: matched-or-slightly-higher).
             let lo = ((pivot as f32) * 0.7) as i32;
             let hi = ((pivot as f32) * 1.5).max((pivot + 50) as f32) as i32;

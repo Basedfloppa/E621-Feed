@@ -365,29 +365,18 @@ async fn analyze_account_e621_user_error_returns_err() {
 
     // Seed cooc so we can assert teardown DID NOT run.
     let p = e621_account_parser_api::models::Post {
-        id: 30001,
-        created_at: chrono::Utc::now(),
-        updated_at: chrono::Utc::now(),
-        file: None,
-        preview: None,
-        sample: None,
-        score: e621_account_parser_api::models::Score { up: 1, down: 0, total: 1 },
-        tags: e621_account_parser_api::models::Tags {
-            general: vec!["a".into(), "b".into()],
-            artist: vec![], copyright: vec![], character: vec![], species: vec![],
-            invalid: vec![], meta: vec![], lore: vec![], contributor: vec![],
-        },
-        locked_tags: None, change_seq: 0.0,
+        id: 30001, created_at: chrono::Utc::now(), updated_at: chrono::Utc::now(),
+        change_seq: 0.0,
+        files: e621_account_parser_api::models::Files::default(),
+        uploader_id: 42, uploader_name: None, approver_id: None,
+        stats: e621_account_parser_api::models::Stats { score: e621_account_parser_api::models::Score { up: 1, down: 0, total: 1 }, ..Default::default() },
         flags: e621_account_parser_api::models::Flags::default(),
-        rating: e621_account_parser_api::models::Rating::S,
-        fav_count: 0, sources: vec![], pools: vec![],
-        relationships: e621_account_parser_api::models::Relationships {
-            parent_id: None, has_children: false,
-            has_active_children: false, children: vec![],
-        },
-        approver_id: None, uploader_id: 42, description: None,
-        comment_count: 0, is_favorited: false, has_notes: false,
-        duration: None,
+        has: e621_account_parser_api::models::Has::default(),
+        relationships: e621_account_parser_api::models::Relationships::default(),
+        pools: vec![], rating: e621_account_parser_api::models::Rating::S,
+        locked_tags: vec![], sources: vec![],
+        description: None,
+        tags: e621_account_parser_api::models::Tags { general: vec!["a".into(), "b".into()], ..Default::default() },
     };
     db::save_posts(std::slice::from_ref(&p), account_id).unwrap();
     db::save_posts_tags_batch(
@@ -545,27 +534,18 @@ async fn analyze_account_re_analyze_replaces_state() {
 
     // Seed prior state: two posts with tag "old".
     let make_p = |id: i64, general_tag: &str| e621_account_parser_api::models::Post {
-        id,
-        created_at: chrono::Utc::now(),
-        updated_at: chrono::Utc::now(),
-        file: None, preview: None, sample: None,
-        score: e621_account_parser_api::models::Score { up: 1, down: 0, total: 1 },
-        tags: e621_account_parser_api::models::Tags {
-            general: vec![general_tag.into()],
-            artist: vec![], copyright: vec![], character: vec![], species: vec![],
-            invalid: vec![], meta: vec![], lore: vec![], contributor: vec![],
-        },
-        locked_tags: None, change_seq: 0.0,
+        id, created_at: chrono::Utc::now(), updated_at: chrono::Utc::now(),
+        change_seq: 0.0,
+        files: e621_account_parser_api::models::Files::default(),
+        uploader_id: 42, uploader_name: None, approver_id: None,
+        stats: e621_account_parser_api::models::Stats { score: e621_account_parser_api::models::Score { up: 1, down: 0, total: 1 }, ..Default::default() },
         flags: e621_account_parser_api::models::Flags::default(),
-        rating: e621_account_parser_api::models::Rating::S,
-        fav_count: 0, sources: vec![], pools: vec![],
-        relationships: e621_account_parser_api::models::Relationships {
-            parent_id: None, has_children: false,
-            has_active_children: false, children: vec![],
-        },
-        approver_id: None, uploader_id: 42, description: None,
-        comment_count: 0, is_favorited: false, has_notes: false,
-        duration: None,
+        has: e621_account_parser_api::models::Has::default(),
+        relationships: e621_account_parser_api::models::Relationships::default(),
+        pools: vec![], rating: e621_account_parser_api::models::Rating::S,
+        locked_tags: vec![], sources: vec![],
+        description: None,
+        tags: e621_account_parser_api::models::Tags { general: vec![general_tag.into()], ..Default::default() },
     };
     db::set_account("pipeline_owner", account_id, "test_user", "").unwrap();
     let old_posts = vec![make_p(40001, "old_tag"), make_p(40002, "old_tag")];
@@ -737,13 +717,17 @@ fn strip_blacklisted_tags_is_case_insensitive_and_per_group() {
         .collect();
 
     let post = e621_account_parser_api::models::Post {
-        id: 1,
-        created_at: chrono::Utc::now(),
-        updated_at: chrono::Utc::now(),
-        file: None,
-        preview: None,
-        sample: None,
-        score: e621_account_parser_api::models::Score { up: 1, down: 0, total: 1 },
+        id: 1, created_at: chrono::Utc::now(), updated_at: chrono::Utc::now(),
+        change_seq: 0.0,
+        files: e621_account_parser_api::models::Files::default(),
+        uploader_id: 0, uploader_name: None, approver_id: None,
+        stats: e621_account_parser_api::models::Stats { score: e621_account_parser_api::models::Score { up: 1, down: 0, total: 1 }, ..Default::default() },
+        flags: e621_account_parser_api::models::Flags::default(),
+        has: e621_account_parser_api::models::Has::default(),
+        relationships: e621_account_parser_api::models::Relationships::default(),
+        pools: vec![], rating: e621_account_parser_api::models::Rating::S,
+        locked_tags: vec![], sources: vec![],
+        description: None,
         tags: e621_account_parser_api::models::Tags {
             general: vec!["keep".into(), "BAD".into(), "alsobad".into(), "  trim_me  ".into()],
             artist: vec!["keep_artist".into(), "bad".into()],
@@ -752,17 +736,6 @@ fn strip_blacklisted_tags_is_case_insensitive_and_per_group() {
             invalid: vec![], meta: vec!["bad".into()],
             lore: vec!["bad".into()], contributor: vec![],
         },
-        locked_tags: None, change_seq: 0.0,
-        flags: e621_account_parser_api::models::Flags::default(),
-        rating: e621_account_parser_api::models::Rating::S,
-        fav_count: 0, sources: vec![], pools: vec![],
-        relationships: e621_account_parser_api::models::Relationships {
-            parent_id: None, has_children: false,
-            has_active_children: false, children: vec![],
-        },
-        approver_id: None, uploader_id: 0, description: None,
-        comment_count: 0, is_favorited: false, has_notes: false,
-        duration: None,
     };
 
     let p = pipeline::strip_blacklisted_tags(post, &blacklist);
@@ -797,31 +770,24 @@ fn find_similar_post_ids_ranks_by_overlap_and_filters() {
     let blacklist = std::collections::HashSet::new();
     let make_post = |id: i64, general: Vec<&str>| {
         e621_account_parser_api::models::Post {
-            id,
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
-            file: None,
-            preview: Some(e621_account_parser_api::models::Preview {
-                width: 1, height: 1, url: Some("p".into()),
-            }),
-            sample: None,
-            score: e621_account_parser_api::models::Score { up: 1, down: 0, total: 1 },
-            tags: e621_account_parser_api::models::Tags {
-                general: general.iter().map(|s| s.to_string()).collect(),
-                artist: vec![], copyright: vec![], character: vec![], species: vec![],
-                invalid: vec![], meta: vec![], lore: vec![], contributor: vec![],
+            id, created_at: chrono::Utc::now(), updated_at: chrono::Utc::now(),
+            change_seq: 0.0,
+            files: e621_account_parser_api::models::Files {
+                preview: e621_account_parser_api::models::FilePreview {
+                    width: 1, height: 1, jpg: Some("p".into()),
+                    ..Default::default()
+                },
+                ..Default::default()
             },
-            locked_tags: None, change_seq: 0.0,
+            uploader_id: 0, uploader_name: None, approver_id: None,
+            stats: e621_account_parser_api::models::Stats { score: e621_account_parser_api::models::Score { up: 1, down: 0, total: 1 }, ..Default::default() },
             flags: e621_account_parser_api::models::Flags::default(),
-            rating: e621_account_parser_api::models::Rating::S,
-            fav_count: 0, sources: vec![], pools: vec![],
-            relationships: e621_account_parser_api::models::Relationships {
-                parent_id: None, has_children: false,
-                has_active_children: false, children: vec![],
-            },
-            approver_id: None, uploader_id: 0, description: None,
-            comment_count: 0, is_favorited: false, has_notes: false,
-            duration: None,
+            has: e621_account_parser_api::models::Has::default(),
+            relationships: e621_account_parser_api::models::Relationships::default(),
+            pools: vec![], rating: e621_account_parser_api::models::Rating::S,
+            locked_tags: vec![], sources: vec![],
+            description: None,
+            tags: e621_account_parser_api::models::Tags { general: general.iter().map(|s| s.to_string()).collect(), ..Default::default() },
         }
     };
 
@@ -892,33 +858,24 @@ async fn digest_generic_returns_mixed_posts() {
     let blacklist = std::collections::HashSet::new();
     let posts: Vec<_> = (0..10)
         .map(|i| e621_account_parser_api::models::Post {
-            id: 70000 + i,
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
-            file: None,
-            preview: Some(e621_account_parser_api::models::Preview {
-                width: 1, height: 1, url: Some("p".into()),
-            }),
-            sample: None,
-            score: e621_account_parser_api::models::Score {
-                up: 10 + i, down: 0, total: 10 + i,
+            id: 70000 + i, created_at: chrono::Utc::now(), updated_at: chrono::Utc::now(),
+            change_seq: 0.0,
+            files: e621_account_parser_api::models::Files {
+                preview: e621_account_parser_api::models::FilePreview {
+                    width: 1, height: 1, jpg: Some("p".into()),
+                    ..Default::default()
+                },
+                ..Default::default()
             },
-            tags: e621_account_parser_api::models::Tags {
-                general: vec!["tag".into()],
-                artist: vec![], copyright: vec![], character: vec![], species: vec![],
-                invalid: vec![], meta: vec![], lore: vec![], contributor: vec![],
-            },
-            locked_tags: None, change_seq: 0.0,
+            uploader_id: 42, uploader_name: None, approver_id: None,
+            stats: e621_account_parser_api::models::Stats { score: e621_account_parser_api::models::Score { up: 10 + i, down: 0, total: 10 + i }, fav_count: 5, ..Default::default() },
             flags: e621_account_parser_api::models::Flags::default(),
-            rating: e621_account_parser_api::models::Rating::S,
-            fav_count: 5, sources: vec![], pools: vec![],
-            relationships: e621_account_parser_api::models::Relationships {
-                parent_id: None, has_children: false,
-                has_active_children: false, children: vec![],
-            },
-            approver_id: None, uploader_id: 42, description: None,
-            comment_count: 0, is_favorited: false, has_notes: false,
-            duration: None,
+            has: e621_account_parser_api::models::Has::default(),
+            relationships: e621_account_parser_api::models::Relationships::default(),
+            pools: vec![], rating: e621_account_parser_api::models::Rating::S,
+            locked_tags: vec![], sources: vec![],
+            description: None,
+            tags: e621_account_parser_api::models::Tags { general: vec!["tag".into()], ..Default::default() },
         })
         .collect();
     db::upsert_catalog_posts(&posts).unwrap();
@@ -947,27 +904,18 @@ fn feed_interaction_round_trip_writes_both_tables() {
 
     // Seed a post with tags so the feedback fan-out has something to count.
     let p = e621_account_parser_api::models::Post {
-        id: 80001,
-        created_at: chrono::Utc::now(),
-        updated_at: chrono::Utc::now(),
-        file: None, preview: None, sample: None,
-        score: e621_account_parser_api::models::Score { up: 1, down: 0, total: 1 },
-        tags: e621_account_parser_api::models::Tags {
-            general: vec!["g1".into(), "g2".into()],
-            artist: vec![], copyright: vec![], character: vec![], species: vec![],
-            invalid: vec![], meta: vec![], lore: vec![], contributor: vec![],
-        },
-        locked_tags: None, change_seq: 0.0,
+        id: 80001, created_at: chrono::Utc::now(), updated_at: chrono::Utc::now(),
+        change_seq: 0.0,
+        files: e621_account_parser_api::models::Files::default(),
+        uploader_id: 0, uploader_name: None, approver_id: None,
+        stats: e621_account_parser_api::models::Stats { score: e621_account_parser_api::models::Score { up: 1, down: 0, total: 1 }, ..Default::default() },
         flags: e621_account_parser_api::models::Flags::default(),
-        rating: e621_account_parser_api::models::Rating::S,
-        fav_count: 0, sources: vec![], pools: vec![],
-        relationships: e621_account_parser_api::models::Relationships {
-            parent_id: None, has_children: false,
-            has_active_children: false, children: vec![],
-        },
-        approver_id: None, uploader_id: 0, description: None,
-        comment_count: 0, is_favorited: false, has_notes: false,
-        duration: None,
+        has: e621_account_parser_api::models::Has::default(),
+        relationships: e621_account_parser_api::models::Relationships::default(),
+        pools: vec![], rating: e621_account_parser_api::models::Rating::S,
+        locked_tags: vec![], sources: vec![],
+        description: None,
+        tags: e621_account_parser_api::models::Tags { general: vec!["g1".into(), "g2".into()], ..Default::default() },
     };
     db::save_posts(std::slice::from_ref(&p), account_id).unwrap();
     db::save_posts_tags_batch(
@@ -1039,27 +987,22 @@ fn feed_interactions_batch_dedups_duplicates() {
     db::set_account("batch_owner", account_id, "test_user", "").unwrap();
 
     let p = e621_account_parser_api::models::Post {
-        id: 80003,
-        created_at: chrono::Utc::now(),
-        updated_at: chrono::Utc::now(),
-        file: None, preview: None, sample: None,
-        score: e621_account_parser_api::models::Score { up: 1, down: 0, total: 1 },
+        id: 80003, created_at: chrono::Utc::now(), updated_at: chrono::Utc::now(),
+        change_seq: 0.0,
+        files: e621_account_parser_api::models::Files::default(),
+        uploader_id: 0, uploader_name: None, approver_id: None,
+        stats: e621_account_parser_api::models::Stats { score: e621_account_parser_api::models::Score { up: 1, down: 0, total: 1 }, ..Default::default() },
+        flags: e621_account_parser_api::models::Flags::default(),
+        has: e621_account_parser_api::models::Has::default(),
+        relationships: e621_account_parser_api::models::Relationships::default(),
+        pools: vec![], rating: e621_account_parser_api::models::Rating::S,
+        locked_tags: vec![], sources: vec![],
+        description: None,
         tags: e621_account_parser_api::models::Tags {
             general: vec!["g".into()],
             artist: vec![], copyright: vec![], character: vec![], species: vec![],
             invalid: vec![], meta: vec![], lore: vec![], contributor: vec![],
         },
-        locked_tags: None, change_seq: 0.0,
-        flags: e621_account_parser_api::models::Flags::default(),
-        rating: e621_account_parser_api::models::Rating::S,
-        fav_count: 0, sources: vec![], pools: vec![],
-        relationships: e621_account_parser_api::models::Relationships {
-            parent_id: None, has_children: false,
-            has_active_children: false, children: vec![],
-        },
-        approver_id: None, uploader_id: 0, description: None,
-        comment_count: 0, is_favorited: false, has_notes: false,
-        duration: None,
     };
     db::save_posts(std::slice::from_ref(&p), account_id).unwrap();
     db::save_posts_tags_batch(
@@ -1163,31 +1106,24 @@ fn recommendations_owned_dedup_invariant() {
     db::set_account("dedup_owner", account_id, "test_user", "").unwrap();
 
     let make = |id: i64| e621_account_parser_api::models::Post {
-        id,
-        created_at: chrono::Utc::now(),
-        updated_at: chrono::Utc::now(),
-        file: None,
-        preview: Some(e621_account_parser_api::models::Preview {
-            width: 1, height: 1, url: Some("p".into()),
-        }),
-        sample: None,
-        score: e621_account_parser_api::models::Score { up: 1, down: 0, total: 1 },
-        tags: e621_account_parser_api::models::Tags {
-            general: vec!["shared_tag".into()],
-            artist: vec![], copyright: vec![], character: vec![], species: vec![],
-            invalid: vec![], meta: vec![], lore: vec![], contributor: vec![],
+        id, created_at: chrono::Utc::now(), updated_at: chrono::Utc::now(),
+        change_seq: 0.0,
+        files: e621_account_parser_api::models::Files {
+            preview: e621_account_parser_api::models::FilePreview {
+                width: 1, height: 1, jpg: Some("p".into()),
+                ..Default::default()
+            },
+            ..Default::default()
         },
-        locked_tags: None, change_seq: 0.0,
+        uploader_id: 0, uploader_name: None, approver_id: None,
+        stats: e621_account_parser_api::models::Stats { score: e621_account_parser_api::models::Score { up: 1, down: 0, total: 1 }, ..Default::default() },
         flags: e621_account_parser_api::models::Flags::default(),
-        rating: e621_account_parser_api::models::Rating::S,
-        fav_count: 0, sources: vec![], pools: vec![],
-        relationships: e621_account_parser_api::models::Relationships {
-            parent_id: None, has_children: false,
-            has_active_children: false, children: vec![],
-        },
-        approver_id: None, uploader_id: 0, description: None,
-        comment_count: 0, is_favorited: false, has_notes: false,
-        duration: None,
+        has: e621_account_parser_api::models::Has::default(),
+        relationships: e621_account_parser_api::models::Relationships::default(),
+        pools: vec![], rating: e621_account_parser_api::models::Rating::S,
+        locked_tags: vec![], sources: vec![],
+        description: None,
+        tags: e621_account_parser_api::models::Tags { general: vec!["shared_tag".into()], ..Default::default() },
     };
 
     let owned_post = make(90001);
@@ -1435,27 +1371,18 @@ async fn prefetch_target_selection_respects_cooldown() {
 
     // Seed a post so tag_counts will be populated.
     let p = e621_account_parser_api::models::Post {
-        id: 50001,
-        created_at: chrono::Utc::now(),
-        updated_at: chrono::Utc::now(),
-        file: None, preview: None, sample: None,
-        score: e621_account_parser_api::models::Score { up: 10, down: 0, total: 10 },
-        tags: e621_account_parser_api::models::Tags {
-            general: vec!["artist_a".into()], artist: vec!["artist_a".into()],
-            copyright: vec![], character: vec![], species: vec![],
-            invalid: vec![], meta: vec![], lore: vec![], contributor: vec![],
-        },
-        locked_tags: None, change_seq: 0.0,
+        id: 50001, created_at: chrono::Utc::now(), updated_at: chrono::Utc::now(),
+        change_seq: 0.0,
+        files: e621_account_parser_api::models::Files::default(),
+        uploader_id: 42, uploader_name: None, approver_id: None,
+        stats: e621_account_parser_api::models::Stats { score: e621_account_parser_api::models::Score { up: 10, down: 0, total: 10 }, fav_count: 5, ..Default::default() },
         flags: e621_account_parser_api::models::Flags::default(),
-        rating: e621_account_parser_api::models::Rating::S,
-        fav_count: 5, sources: vec![], pools: vec![],
-        relationships: e621_account_parser_api::models::Relationships {
-            parent_id: None, has_children: false,
-            has_active_children: false, children: vec![],
-        },
-        approver_id: None, uploader_id: 42, description: None,
-        comment_count: 0, is_favorited: false, has_notes: false,
-        duration: None,
+        has: e621_account_parser_api::models::Has::default(),
+        relationships: e621_account_parser_api::models::Relationships::default(),
+        pools: vec![], rating: e621_account_parser_api::models::Rating::S,
+        locked_tags: vec![], sources: vec![],
+        description: None,
+        tags: e621_account_parser_api::models::Tags { general: vec!["artist_a".into()], artist: vec!["artist_a".into()], ..Default::default() },
     };
     db::save_posts(std::slice::from_ref(&p), account_id).unwrap();
 
