@@ -1,0 +1,123 @@
+domain.com {
+    root * /var/www/E621-Account-Parser/parser-web/dist
+
+    # ====== Security headers — applied to ALL responses, no duplication ======
+    header {
+        Strict-Transport-Security     "max-age=31536000; includeSubDomains; preload"
+        Content-Security-Policy       "default-src 'self'; script-src 'self' 'wasm-unsafe-eval' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data: https://*.e621.net; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+        Referrer-Policy               "no-referrer"
+        X-Content-Type-Options        "nosniff"
+        X-Frame-Options               "DENY"
+        Cross-Origin-Opener-Policy    "same-origin"
+        Cross-Origin-Resource-Policy  "same-origin"
+        Permissions-Policy            "geolocation=(), microphone=(), camera=(), payment=(), usb=(), interest-cohort=()"
+    }
+
+    # ====== Compression: on-the-fly + pre-compressed (zstd/gzip) ======
+    encode zstd gzip
+
+    # ====== OPTIONS preflight (for SPA routes, NOT /api) ======
+    @options_site {
+        method OPTIONS
+        not path /api/*
+    }
+    respond @options_site 204
+
+    # ====== robots.txt ======
+    @robots {
+        path /robots.txt
+    }
+    respond @robots `User-agent: *
+Disallow: /api/
+Disallow: /static/snippets/
+Disallow: /admin
+Disallow: /login
+Disallow: /openapi.json
+Disallow: /swagger-ui
+` 200 {
+        header Content-Type "text/plain; charset=utf-8"
+    }
+
+    # ====== Block Swagger in production ======
+    @blocked {
+        path /api/swagger-ui* /api/openapi.json
+    }
+    respond @blocked 404
+
+    # ====== API — proxy to Go backend :8080 (WebSocket handled automatically) ======
+    reverse_proxy /api/* http://127.0.0.1:8080 {
+        header_up Host {host}
+        header_up X-Real-IP {remote_host}
+        header_up X-Forwarded-For {remote_host}
+        header_up X-Forwarded-Proto {scheme}
+
+        transport http {
+            read_timeout  300s
+            write_timeout 300s
+        }
+    }
+
+    # ====== Caching rules ======
+
+    # static/config.js — do not cache
+    @no_cache {
+        path /static/config.js
+    }
+    header @no_cache {
+        Cache-Control "no-store, no-cache, must-revalidate, max-age=0"
+        Pragma        "no-cache"
+        Expires       "0"
+    }
+
+    # index.html — no-cache (always revalidate)
+    @index {
+        path /index.html
+    }
+    header @index Cache-Control "no-cache, must-revalidate"
+
+    # WASM — MIME auto-detected + long-term cache
+    @wasm {
+        path *.wasm
+    }
+    header @wasm Cache-Control "public, max-age=31536000, immutable"
+
+    # .mjs — MIME auto-detected + long-term cache
+    @mjs {
+        path *.mjs
+    }
+    header @mjs Cache-Control "public, max-age=31536000, immutable"
+
+    # Hashed assets — long-term cache
+    @assets {
+        path *.js *.css *.png *.jpg *.jpeg *.gif *.svg *.ico *.woff *.woff2
+    }
+    header @assets Cache-Control "public, max-age=31536000, immutable"
+
+    # manifest.json / service-worker.js — light cache
+    @sw {
+        path /manifest.json /manifest.webmanifest /service-worker.js
+    }
+    header @sw Cache-Control "public, max-age=3600, must-revalidate"
+
+    # ====== SPA fallback (for routes like /account, /feed, /digest, etc.) ======
+    try_files {path} /index.html
+
+    file_server {
+        precompress zstd gzip
+    }
+
+    # ====== Request body limit (for /api) ======
+    request_body {
+        max_size 50MB
+    }
+
+    # ====== Logs ======
+    log {
+        output file /var/log/nginx/parser.access.log
+    }
+}
+
+# ====== www → apex redirect ======
+www.domain.com {
+    redir https://domain.com{uri}
+}
