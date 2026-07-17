@@ -10,8 +10,8 @@ A tiny web app for storing personal favorites and generating a personalized post
 [![Last Commit](https://img.shields.io/github/last-commit/Basedfloppa/e621-Account-Parser?style=flat-square)](https://github.com/Basedfloppa/e621-Account-Parser/commits)
 [![Commit Activity](https://img.shields.io/github/commit-activity/m/Basedfloppa/e621-Account-Parser?style=flat-square)](https://github.com/Basedfloppa/e621-Account-Parser/pulse)
 
-## Live at a temporary domain
-https://e621scraper.duckdns.org
+## Live at a FINAL DOMAIN (YIPPIE)
+https://e621feed.zorolin.rs/feed
 
 ---
 
