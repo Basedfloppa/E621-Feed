@@ -5,9 +5,17 @@
 //! accounts persist as long as the user comes back inside the browser's
 //! 400-day cap.
 //!
-//! `SameSite=Lax` is sufficient CSRF protection here because every
+//! `SameSite=Lax` is sufficient CSRF protection because every
 //! mutating route is `POST/PATCH/DELETE` (Lax does not attach cookies to
 //! cross-origin requests of those methods) and GET routes are read-only.
+//!
+//! ## Local dev
+//!
+//! `trunk serve` + Rocket on different ports IS cross-origin, so Lax
+//! would block the cookie. The fix is **Trunk's proxy** (`Trunk.toml`
+//! already configures `[[proxy]]` for `/api/` → `http://127.0.0.1:8080`).
+//! With `backend_domain = ""` in `static/config.js`, all API calls use
+//! relative paths — same origin, no cross-site context, cookie works.
 
 use std::collections::HashSet;
 use std::sync::{OnceLock, RwLock};
