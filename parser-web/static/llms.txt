@@ -1,0 +1,41 @@
+# E621 Feed
+
+> Self-hosted personalised feed engine for e621. Import favourites, build
+> per-account preference profiles, serve scored + diversified recommendations
+> via an 11-channel ensemble model.
+
+## Project
+
+- Source: https://github.com/Basedfloppa/e621-Account-Parser
+- Live: https://e621feed.zorolin.rs
+- License: MIT-0 (No Attribution)
+
+## Docs
+
+- Main README: https://github.com/Basedfloppa/e621-Account-Parser/blob/master/Readme.md
+- Scoring knobs reference: https://github.com/Basedfloppa/e621-Account-Parser/blob/master/docs/scoring.md
+- Calibration & backtesting guide: https://github.com/Basedfloppa/e621-Account-Parser/blob/master/docs/calibration.md
+- Production deployment: https://github.com/Basedfloppa/e621-Account-Parser/blob/master/docs/deployment.md
+
+## API
+
+The backend serves a JSON API under `/api`. All mutating endpoints require a
+cookie-based session token (bootstrapped via `POST /api/session/bootstrap`).
+The full OpenAPI spec is available at `/api/openapi.json` in dev mode only —
+in production it is blocked by nginx.
+
+The API surface covers: session management, account CRUD, favourites import
+with background progress polling, scored + diversified feed recommendations
+with session-based cross-page dedup, feed interaction logging (single +
+batch), similar-post lookup by tag overlap, and a daily digest with
+stratified sampling + 24 h TTL cache.
+
+## Architecture
+
+- **Backend:** Rust (Rocket 0.5), SQLite (WAL mode), rayon for parallel scoring
+- **Frontend:** Yew 0.21 (WASM), Bootstrap 5, Chart.js, d3-force for tag graph
+- **Scoring:** 11-channel ensemble (similarity, quality, recency, rating, media,
+  popularity, interaction, tag-relation PMI, uploader, exclusivity, novelty)
+  with MMR diversification and ε-greedy exploration
+- **Calibration:** Offline grid search over ~80 knobs with NDCG@20 / Recall@50 /
+  MRR + bootstrap 95% CI

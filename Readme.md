@@ -1,4 +1,4 @@
-# E621 Account Parser
+# E621 Feed
 
 A self-hosted personalised feed engine for e621: import favourites, build
 per-account preference profiles, and serve scored + diversified
@@ -15,6 +15,7 @@ WASM/Yew frontend with an interactive tag-relation graph.
 [![Commit Activity](https://img.shields.io/github/commit-activity/m/Basedfloppa/e621-Account-Parser?style=flat-square)](https://github.com/Basedfloppa/e621-Account-Parser/pulse)
 
 ## Live at a FINAL DOMAIN (YIPPIE)
+
 <https://e621feed.zorolin.rs/feed>
 
 ---

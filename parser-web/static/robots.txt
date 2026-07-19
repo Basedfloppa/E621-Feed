@@ -1,0 +1,12 @@
+User-agent: *
+Allow: /
+Sitemap: https://e621feed.zorolin.rs/sitemap.xml
+
+User-agent: GPTBot
+Allow: /
+
+User-agent: Claude-Web
+Allow: /
+
+User-agent: anthropic-ai
+Allow: /

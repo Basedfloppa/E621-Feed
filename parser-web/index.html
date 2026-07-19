@@ -1,20 +1,30 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
-
-<head>
+  <head>
     <meta charset="utf-8" />
-    <title>E621 account parser</title>
-    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>E621 Feed - personalised feed &amp; recommendations for e621</title>
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, viewport-fit=cover"
+    />
+    <meta
+      name="description"
+      content="Self-hosted recommendation engine for e621. Import favourites, build per-account preference profiles, get scored and diversified feeds with 11-channel scoring, daily digest, interactive tag-relation graph."
+    />
+    <meta name="application-name" content="E621 Feed" />
+    <meta name="robots" content="index,follow" />
+    <meta name="referrer" content="no-referrer" />
+    <link rel="canonical" href="https://e621feed.zorolin.rs/" />
 
     <link data-trunk rel="css" href="style.css" />
-    <link rel="stylesheet" href="./static/vendor/bootstrap.min.css">
-    <link rel="stylesheet" href="./static/vendor/bootstrap-icons.min.css">
-    <link rel="stylesheet" href="./static/vendor/shepherd.css"/>
+    <link rel="stylesheet" href="./static/vendor/bootstrap.min.css" />
+    <link rel="stylesheet" href="./static/vendor/bootstrap-icons.min.css" />
+    <link rel="stylesheet" href="./static/vendor/shepherd.css" />
 
-    <link data-trunk rel="copy-dir" href="./static/">
-    <link data-trunk rel="copy-dir" href="./.well-known/">
-    <link rel="icon" href="./static/favicon.ico" sizes="any">
-    <link rel="icon" href="./static/favicon.svg" type="image/svg+xml">
+    <link data-trunk rel="copy-dir" href="./static/" />
+    <link data-trunk rel="copy-dir" href="./.well-known/" />
+    <link rel="icon" href="./static/favicon.ico" sizes="any" />
+    <link rel="icon" href="./static/favicon.svg" type="image/svg+xml" />
 
     <script src="./static/theme_script.js"></script>
     <script src="./static/config.js"></script>
@@ -22,36 +32,75 @@
     <script src="./static/vendor/bootstrap.bundle.min.js"></script>
     <script src="./static/tour.js" type="module"></script>
 
-    <meta name="title" content="E621 account parser" />
-    <meta name="description" content="A tiny web app for storing personal favorites and generating a personalized post feed." />
-    <meta name="application-name" content="E621 account parser" />
-    <meta name="robots" content="index,follow" />
-    <meta name="referrer" content="no-referrer" />
     <meta name="color-scheme" content="light dark" />
-    <meta name="theme-color" content="#0d6efd" media="(prefers-color-scheme: light)" />
-    <meta name="theme-color" content="#111827" media="(prefers-color-scheme: dark)" />
+    <meta
+      name="theme-color"
+      content="#0d6efd"
+      media="(prefers-color-scheme: light)"
+    />
+    <meta
+      name="theme-color"
+      content="#111827"
+      media="(prefers-color-scheme: dark)"
+    />
 
-    <meta property="og:site_name" content="E621 account parser" />
-    <meta property="og:title" content="E621 account parser" />
-    <meta property="og:description" content="A tiny web app for storing personal favorites and generating a personalized post feed." />
+    <meta property="og:site_name" content="E621 Feed" />
+    <meta
+      property="og:title"
+      content="E621 Feed - personalised feed &amp; recommendations"
+    />
+    <meta
+      property="og:description"
+      content="Self-hosted recommendation engine for e621. Import favourites, get scored and diversified feeds with 11-channel scoring, daily digest, interactive tag-relation graph."
+    />
     <meta property="og:type" content="website" />
     <meta property="og:locale" content="en_US" />
     <meta property="og:image" content="/static/images/og.png" />
     <meta property="og:image:type" content="image/png" />
     <meta property="og:image:width" content="1200" />
     <meta property="og:image:height" content="630" />
-    <meta property="og:image:alt" content="E621 Account Parser — personalised feed from your favourites" />
+    <meta
+      property="og:image:alt"
+      content="E621 Feed - personalised feed from your favourites"
+    />
 
     <meta name="twitter:card" content="summary_large_image" />
-    <meta name="twitter:title" content="E621 account parser" />
-    <meta name="twitter:description" content="A tiny web app for storing personal favorites and generating a personalized post feed." />
+    <meta
+      name="twitter:title"
+      content="E621 Feed - personalised feed &amp; recommendations"
+    />
+    <meta
+      name="twitter:description"
+      content="Self-hosted recommendation engine for e621. Import favourites, get scored and diversified feeds with 11-channel scoring, daily digest, interactive tag-relation graph."
+    />
     <meta name="twitter:image" content="/static/images/og.png" />
-    <meta name="twitter:image:alt" content="E621 Account Parser — personalised feed from your favourites" />
+    <meta
+      name="twitter:image:alt"
+      content="E621 Feed - personalised feed from your favourites"
+    />
 
-    <meta name="format-detection" content="telephone=no, date=no, address=no, email=no" />
-</head>
+    <meta
+      name="format-detection"
+      content="telephone=no, date=no, address=no, email=no"
+    />
 
-<body>
-</body>
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "WebApplication",
+        "name": "E621 Feed",
+        "url": "https://e621feed.zorolin.rs",
+        "description": "Self-hosted personalised feed engine for e621. Import favourites, build per-account preference profiles, get scored and diversified recommendations.",
+        "applicationCategory": "Entertainment",
+        "operatingSystem": "Any",
+        "browserRequirements": "Requires JavaScript",
+        "offers": {
+          "@type": "Offer",
+          "price": "0"
+        }
+      }
+    </script>
+  </head>
 
+  <body></body>
 </html>
