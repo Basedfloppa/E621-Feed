@@ -149,7 +149,6 @@ pub async fn run_process_with_mode(
     };
     let pages =
         (favcount / cfg.posts_limit) + (if favcount % cfg.posts_limit > 0 { 1 } else { 0 });
-    jobs::set_pages_total(account_id, pages);
 
     macro_rules! record_phase {
         ($name:expr) => {{
@@ -246,7 +245,7 @@ pub async fn run_process_with_mode(
     let new_count = if resolved_mode == ProcessMode::Full {
         run_full_fetch(account_id, &account, &blacklist, pages, cfg.runtime.process_fetch_concurrency.max(1)).await?
     } else {
-        run_incremental_fetch(account_id, &account, &blacklist).await?
+        run_incremental_fetch(account_id, &account, &blacklist, pages).await?
     };
     mark_idf_dirty();
     record_phase!("fetch_and_save");
@@ -285,6 +284,7 @@ async fn run_full_fetch(
     let acc_id = account.id;
     let mut consecutive_failures = 0u32;
     let mut total_persisted = 0usize;
+    jobs::set_pages_total(account_id, pages);
     for page in 1..=pages {
         let raw = api::get_favorites(account, page).await;
         let posts_res: Result<Vec<Post>, String> = raw.map(|opt| {
@@ -347,6 +347,11 @@ async fn run_full_fetch(
 /// not already in `accounts_post`, stop as soon as a page contains a
 /// post we already own. Returns the number of net-new posts saved.
 ///
+/// `known_pages` is the total page count based on `favorite_count` —
+/// only used for the frontend progress bar's `pages_total`. The actual
+/// loop stops early on overlap; when that happens `pages_total` is
+/// trimmed to `pages_done` so the bar snaps to 100%.
+///
 /// Correctness relies on e621 returning favourites in stable
 /// reverse-chronological order. Edge cases the loop handles:
 ///   * page is entirely new           — save all, continue to next page
@@ -364,12 +369,22 @@ async fn run_incremental_fetch(
     account_id: i32,
     account: &TruncatedAccount,
     blacklist: &HashSet<String>,
+    known_pages: i32,
 ) -> Result<usize, String> {
     let local_owned: HashSet<i64> = db_blocking(move || {
         db::get_owned_post_ids(account_id)
             .map_err(|e| format!("Failed to load owned post ids: {e}"))
     })
     .await?;
+
+    info!(
+        "[process {account_id}] (incremental) local_owned has {} posts, known_pages={known_pages}",
+        local_owned.len()
+    );
+    // Frontend progress: show a page counter. Use the larger of known_pages
+    // (total from favcount) and a generous upper bound so the bar makes sense.
+    let display_pages = known_pages.max(1);
+    jobs::set_pages_total(account_id, display_pages);
 
     let acc_id = account.id;
     let mut consecutive_failures = 0u32;
@@ -379,6 +394,11 @@ async fn run_incremental_fetch(
     // 32k new favs in one incremental pass; far beyond realistic.
     let max_pages = 200i32;
     for page in 1..=max_pages {
+        // If we went past the original estimate, bump pages_total so the
+        // frontend bar doesn't get stuck at 100%.
+        if page > display_pages {
+            jobs::set_pages_total(account_id, page);
+        }
         let raw = api::get_favorites(account, page).await;
         let posts_res: Result<Vec<Post>, String> = raw.map(|opt| {
             opt.unwrap_or_default()
@@ -454,7 +474,9 @@ async fn run_incremental_fetch(
 
         if had_overlap {
             // Reached the boundary between new and already-known favs.
-            // Everything older is already in our DB.
+            // Everything older is already in our DB. Trim pages_total
+            // to pages_done so the frontend progress bar snaps to 100%.
+            jobs::set_pages_total(account_id, page);
             break;
         }
     }

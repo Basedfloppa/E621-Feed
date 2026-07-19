@@ -6,7 +6,7 @@ use crate::models::{
 use crate::pages::UserInfo;
 use gloo_timers::callback::Timeout;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use web_sys::{HtmlInputElement, HtmlTextAreaElement};
 use yew::prelude::*;
 use yew_router::prelude::use_location;
@@ -50,6 +50,9 @@ pub fn account_creator() -> Html {
     let experiment_buckets: UseStateHandle<HashMap<i64, String>> = use_state(HashMap::new);
     let pending_remove: UseStateHandle<Option<UserInfo>> = use_state(|| None);
     let default_blacklist: UseStateHandle<Vec<String>> = use_state(Vec::new);
+    // Accounts with a running /process job (full or incremental).
+    // Keys are account_id; presence means "block the other button".
+    let process_running: UseStateHandle<HashSet<i64>> = use_state(HashSet::new);
 
     // Look-up support: the create-account form embeds `UserSearchForm`,
     // which writes its hit into `searched_user`. The effect below
@@ -696,6 +699,32 @@ pub fn account_creator() -> Html {
                                                                 account_id={acc_id}
                                                                 api_base={backend_domain.clone()}
                                                                 on_complete={on_reanalyze_complete.clone()}
+                                                                blocked={process_running.contains(&acc.id)}
+                                                                on_running={{
+                                                                    let process_running = process_running.clone();
+                                                                    Callback::from(move |running: bool| {
+                                                                        let mut set = (*process_running).clone();
+                                                                        if running { set.insert(acc_id); }
+                                                                        else { set.remove(&acc_id); }
+                                                                        process_running.set(set);
+                                                                    })
+                                                                }}
+                                                            />
+                                                            <ReanalyzeButton
+                                                                mode="incremental"
+                                                                account_id={acc_id}
+                                                                api_base={backend_domain.clone()}
+                                                                on_complete={on_reanalyze_complete.clone()}
+                                                                blocked={process_running.contains(&acc.id)}
+                                                                on_running={{
+                                                                    let process_running = process_running.clone();
+                                                                    Callback::from(move |running: bool| {
+                                                                        let mut set = (*process_running).clone();
+                                                                        if running { set.insert(acc_id); }
+                                                                        else { set.remove(&acc_id); }
+                                                                        process_running.set(set);
+                                                                    })
+                                                                }}
                                                             />
                                                             <button
                                                                 class="btn btn-outline-danger"

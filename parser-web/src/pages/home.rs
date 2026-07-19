@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
 use yew::prelude::*;
@@ -55,6 +56,8 @@ pub fn home_page() -> Html {
     let canvas_ref = use_node_ref();
     let active_view: UseStateHandle<TagView> = use_state(|| TagView::Chart);
     let navigator = use_navigator();
+    // Accounts with a running /process job (full or incremental).
+    let process_running: UseStateHandle<HashSet<i64>> = use_state(HashSet::new);
 
     // Saved-accounts mirror for the "found in e621 but not saved on this
     // device" prompt below. `SavedAccountsSelect` maintains its own copy
@@ -194,17 +197,46 @@ pub fn home_page() -> Html {
                                                     let acc_id = acc.id;
                                                     let name = acc.name.clone();
                                                     let on_msg = on_reanalyze_msg.clone();
+                                                    let process_running = process_running.clone();
                                                     html! {
                                                         <li class="list-group-item d-flex justify-content-between align-items-center py-1 px-2">
                                                             <span class="small">
                                                                 <strong>{ &name }</strong>
                                                                 { format!(" (ID {})", acc.id) }
                                                             </span>
-                                                            <ReanalyzeButton
-                                                                account_id={acc_id}
-                                                                api_base={cfg.backend_domain.clone()}
-                                                                on_complete={on_msg}
-                                                            />
+                                                            <div class="btn-group btn-group-sm" role="group">
+                                                                <ReanalyzeButton
+                                                                    account_id={acc_id}
+                                                                    api_base={cfg.backend_domain.clone()}
+                                                                    on_complete={on_msg.clone()}
+                                                                    blocked={process_running.contains(&acc.id)}
+                                                                    on_running={{
+                                                                        let process_running = process_running.clone();
+                                                                        Callback::from(move |running: bool| {
+                                                                            let mut set = (*process_running).clone();
+                                                                            if running { set.insert(acc_id); }
+                                                                            else { set.remove(&acc_id); }
+                                                                            process_running.set(set);
+                                                                        })
+                                                                    }}
+                                                                />
+                                                                <ReanalyzeButton
+                                                                    mode="incremental"
+                                                                    account_id={acc_id}
+                                                                    api_base={cfg.backend_domain.clone()}
+                                                                    on_complete={on_msg}
+                                                                    blocked={process_running.contains(&acc.id)}
+                                                                    on_running={{
+                                                                        let process_running = process_running.clone();
+                                                                        Callback::from(move |running: bool| {
+                                                                            let mut set = (*process_running).clone();
+                                                                            if running { set.insert(acc_id); }
+                                                                            else { set.remove(&acc_id); }
+                                                                            process_running.set(set);
+                                                                        })
+                                                                    }}
+                                                                />
+                                                            </div>
                                                         </li>
                                                     }
                                                 })}
