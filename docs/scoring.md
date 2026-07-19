@@ -31,8 +31,12 @@ The final score is a weighted blend of **11 scoring channels**:
 |`df_floor`|rarer tags hit harder (risk: spiky)|rarer tags toned down (stable)|
 |`idf_max`|compress extremes|allow rarities to dominate more|
 |`idf_lambda`|blend IDF toward 1 (flatter)|keep raw IDF contrast (sharper)|
+|`idf_lambda_meta`|meta-tag IDF contrast reduced separately (NaN = track `idf_lambda`)|meta tags keep raw IDF contrast even when `idf_lambda` is flat|
 |`idf_alpha`|stronger compression (flatter)|less compression (sharper)|
 |`freq_alpha`|downplay frequency (treat counts similarly; more diversity)|amplify frequent tags (favorites dominate; less diversity)|
+|`bm25_k`|TF saturates faster (rare and frequent tags treated similarly)|TF saturates slower (frequent tags dominate more)|
+|`one_sided_ratio_exp`|sqrt-shaped ratio curve (muted difference)|linear ratio curve (amplified difference between profile and post)|
+|`idf_rsj_smoothing`|less Laplace smoothing in RSJ IDF|more smoothing — extreme IDF values compressed|
 
 ## Mix weights (channel blend)
 
@@ -98,8 +102,9 @@ Three-piece exponential kernel: hot → recent → days.
 
 ## Diversity / MMR
 
-MMR is applied first (Jaccard-based redundancy penalty across 5 tag groups),
-then a diversity-quota pass guarantees minimum variety in the top 20:
+MMR is applied first (Jaccard-based redundancy penalty across 5 scored tag
+groups — artist, character, copyright, species, general), then a
+diversity-quota pass guarantees minimum variety in the top 20:
 
 - **Artist quota** — at least 2 different artists
 - **Character quota** — at least 3 different characters
@@ -120,6 +125,13 @@ Where `PMI_match_ratio` is the fraction of (tag_a, tag_b) pairs whose pointwise
 mutual information exceeds `diversity_pmi_threshold`, capped at
 `diversity_semantic_max_tags` tags per group per post to bound O(T²) cost.
 
+When `diversity_semantic_blend > 0`, the personal tag-relation graph contributes
+PMI alongside the global graph. `diversity_user_pmi_weight` controls the balance:
+user-graph PMI is multiplied by this factor before blending with global PMI.
+Values > 1.0 amplify per-user diversity personalisation (a user who co-favourites
+`skeb`+`canine` gets less MMR penalty for those tags together); 0 disables the
+user graph entirely for diversity even when `diversity_semantic_blend > 0`.
+
 |Variable|Lower →|Higher →|
 |---|---|---|
 |`diversity_window`|shorter memory; repeats can resurface|longer memory; more variety per page|
@@ -133,6 +145,7 @@ mutual information exceeds `diversity_pmi_threshold`, capped at
 |`diversity_semantic_blend`|pure Jaccard (legacy)|PMI-soft-match blended into MMR similarity (0 = disabled, default)|
 |`diversity_pmi_threshold`|more pairs count as semantic matches|only strongly-associated pairs (PMI above this) count|
 |`diversity_semantic_max_tags`|fewer tags in O(T²) loop (faster)|more tags per group considered (slower, more signal)|
+|`diversity_user_pmi_weight`|global PMI dominates diversity signal|per-user tag co-occurrence patterns drive diversity personalisation; 0 = disable user graph|
 
 ## Discrete-preference smoothing + strong-negative veto
 
@@ -194,6 +207,12 @@ pair is mapped to a score via:
 
 `exclusivity = 1.0 − sigmoid(avg_cooc / exclusivity_scale − min_exclusivity_cooc)`
 
+Pairs that span different tag groups (e.g. artist × species) are weighted
+by `exclusivity_cross_group_weight` relative to within-group pairs. The
+effective cross-group contribution is `cross_group_weight / (cross_group_weight + 1.0)`.
+Default 0.5 → cross-group pairs contribute ~⅓ of total exclusivity weight.
+Higher values give more credit to rare multi-group tag combos.
+
 Default mix weight is 0 (disabled). Exclusivity signal is most useful for
 surfacing niche or cross-over content that doesn't naturally cluster into
 the user's established tag groups.
@@ -204,6 +223,7 @@ the user's established tag groups.
 |`exclusivity_scale`|exclusivity curve sharper — small cooc differences matter|curve flatter — only very rare pairs get full credit (default 0.5)|
 |`min_exclusivity_cooc`|more pairs labelled "rare"|fewer pairs labelled rare — requires truly unusual combos (default 2)|
 |`exclusivity_max_tags`|more tags enter the O(K²) loop (slower, more signal)|fewer tags — faster, but may miss rare pairs at the tail (default 15)|
+|`exclusivity_cross_group_weight`|within-group pairs dominate (cross-group nearly ignored)|cross-group rare combos contribute equally with within-group (default 0.5)|
 
 ## Tag novelty channel (v5.11)
 
@@ -240,11 +260,19 @@ between every pair of tags on a post. To keep this O(T²) loop tractable
 on posts with many tags, **Cluster-PMI** keeps only the top-K tags by
 group weight (default 20, controlled by `tag_relation_max_tags`).
 
+Per-pair PMI values are aggregated into a single channel score via
+`tag_relation_pair_aggregator`:
+
+- `mean` (default) — arithmetic mean of all pair scores
+- `max` — strongest pair dominates
+- `geomean` — geometric mean, dampens outlier pairs
+
 |Variable|Lower →|Higher →|
 |---|---|---|
 |`tag_relation_w_global`|ignore whole-catalog tag pairing|global PMI-style lift dominates the tag-relation component|
 |`tag_relation_w_personal`|ignore user-specific tag pairings|pair co-occurrence inside the user's own favourites dominates the tag-relation component (auto-shrunk on small profiles)|
 |`tag_relation_pmi_scale`|low-lift pairs already saturate the global signal|only strongly-associated pairs contribute meaningfully|
+|`tag_relation_pmi_scale_user`|separate PMI scale for user graph (NaN = track `tag_relation_pmi_scale`)|personal PMI amplified independently of global|
 |`tag_relation_min_cooc`|thin pairs contribute global signal (and load into memory)|require more joint occurrences before a pair is trusted; raising this also prunes more rows out of the in-memory graph at load time|
 |`tag_relation_user_min_cooc`|let cooc=1 user pairs contribute|require multiple user-side co-occurrences before a pair contributes (default 1 — user pair samples are an order of magnitude sparser than catalog samples)|
 |`tag_relation_cooc_ref`|even rare global pairs trusted at full weight|global pairs need more cooc before earning full PMI weight (rare pairs get linearly shrunk toward zero)|

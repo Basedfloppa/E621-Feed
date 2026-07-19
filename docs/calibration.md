@@ -36,43 +36,45 @@
    clamp-saturation warning if any knob landed at its search boundary.
 
    As of v5.11 the grid covers ~80 numeric knobs + 1 categorical:
-   * 11 `mix_*` weights (added `mix_uploader`, `mix_exclusivity`, `mix_novelty`)
-   * IDF / frequency shaping (7): `df_floor`, `idf_max`, `idf_lambda`,
+   - 11 `mix_*` weights (added `mix_uploader`, `mix_exclusivity`, `mix_novelty`)
+   - IDF / frequency shaping (8): `df_floor`, `idf_max`, `idf_lambda`,
      `idf_alpha`, `freq_alpha`, `bm25_k`, `one_sided_ratio_exp`,
      `idf_rsj_smoothing`
-   * Quality channel (4): `quality_a/b/log_bias`, `quality_c`,
+   - Quality channel (4): `quality_a/b/log_bias`, `quality_c`,
      `quality_w_absolute/relative_score/relative_comments`
-   * Popularity channel (2): `popularity_w_fav/duration`
-   * Recency channel (6): `recency_tau_days`, `recency_tau_recent`,
+   - Popularity channel (2): `popularity_w_fav/duration`
+   - Recency channel (6): `recency_tau_days`, `recency_tau_recent`,
      `recency_tau_hot`, `recency_split_age_days`, `recency_split_age_hours`,
      `recency_w_global/personal`, `recency_personal_floor_frac`
-   * Discrete-pref + cold-start (3): `discrete_smoothing_alpha`,
+   - Discrete-pref + cold-start (3): `discrete_smoothing_alpha`,
      `discrete_pref_floor`, `coldstart_n0`
-   * Tag-relation (6): `tag_relation_pmi_scale`, `tag_relation_w_global/personal`,
+   - Tag-relation (6): `tag_relation_pmi_scale`, `tag_relation_w_global/personal`,
      `tag_relation_cooc_ref/user_cooc_ref`, `tag_relation_max_tags`
-   * Cold-start internals (2): `coldstart_smoothing_boost`,
+   - Cold-start internals (2): `coldstart_smoothing_boost`,
      `interaction_ctr_prior_alpha`
-   * Per-group multipliers (6): `group_w_artist/character/copyright/species/general/lore`
-   * Algorithmic shape (5): `score_temperature`, `confidence_steepness`,
+   - Per-group multipliers (6): `group_w_artist/character/copyright/species/general/lore`
+   - Algorithmic shape (5): `score_temperature`, `confidence_steepness`,
      `mmr_redundancy_exp`, `tag_sim_jaccard_blend`, `exploration_epsilon`
-   * Point splits (5, NaN-sentinel disabled): `idf_lambda_meta`,
+   - Point splits (5, NaN-sentinel disabled): `idf_lambda_meta`,
      `recency_tau_recent`, `recency_tau_hot`, `tag_relation_pmi_scale_user`,
      `recency_split_age_hours`
-   * Uploader channel (3): `uploader_n0`, `uploader_w_avg_score`, `uploader_w_avg_fav`
-   * Exclusivity channel (3): `min_exclusivity_cooc`, `exclusivity_scale`, `exclusivity_max_tags`
-   * Novelty channel (1): `novelty_n0` (`novelty_use_feedback` is bool — not grid-swept)
-   * Diversity weights (5): `diversity_w_artist/character/copyright/species/general`
-   * **Class J — diversity semantic (3):** `diversity_semantic_blend`,
-     `diversity_pmi_threshold`, `diversity_semantic_max_tags`
-   * Categorical (1): `tag_relation_pair_aggregator` ∈ {mean, max, geomean}
+   - Uploader channel (3): `uploader_n0`, `uploader_w_avg_score`, `uploader_w_avg_fav`
+   - Exclusivity channel (4): `min_exclusivity_cooc`, `exclusivity_scale`,
+     `exclusivity_max_tags`, `exclusivity_cross_group_weight`
+   - Novelty channel (1): `novelty_n0` (`novelty_use_feedback` is bool — not grid-swept)
+   - Diversity weights (5): `diversity_w_artist/character/copyright/species/general`
+   - **Class J — diversity semantic (4):** `diversity_semantic_blend`,
+     `diversity_pmi_threshold`, `diversity_semantic_max_tags`,
+     `diversity_user_pmi_weight`
+   - Categorical (1): `tag_relation_pair_aggregator` ∈ {mean, max, geomean}
 
    Subsets / flags:
-   * `grid mix-only` — only the 11 mix weights (fastest)
-   * `grid pairs-only` — skip the single-knob sweep, only the paired moves
-   * `grid no-pairs` — skip the paired sweep
-   * `grid with-diversify` — run `diversify_scored_posts` before NDCG so
+   - `grid mix-only` — only the 11 mix weights (fastest)
+   - `grid pairs-only` — skip the single-knob sweep, only the paired moves
+   - `grid no-pairs` — skip the paired sweep
+   - `grid with-diversify` — run `diversify_scored_posts` before NDCG so
      `diversity_*` knobs become measurable
-   * `verbose` — log every probe (including rejected ones) plus
+   - `verbose` — log every probe (including rejected ones) plus
      per-knob early-exit notices
 
    Per-knob early exit: after 2 consecutive non-improving probes inside
@@ -273,16 +275,16 @@ artifacts from `write_grid_log` continue to land in
   discovery, probing, import. Single-threaded by design.
 - [`parser-api/src/bin/calibrate/`](../parser-api/src/bin/calibrate/) —
   the calibrate harness, split into:
-  * `main.rs` — CLI parsing, mode chaining, dataset hand-off.
-  * `dataset.rs` — eligible-account selection, train/test split,
+  - `main.rs` — CLI parsing, mode chaining, dataset hand-off.
+  - `dataset.rs` — eligible-account selection, train/test split,
     post hydration, per-post `CachedPostFeatures` build.
-  * `sampling.rs` — train/test split + uniform/mixed-hard negatives.
-  * `metrics.rs` — NDCG / Recall / MRR + uncached `score_with_progress`.
-  * `cache.rs` — `ChannelMask`, `ScoreCache`, `score_with_cache` (the
+  - `sampling.rs` — train/test split + uniform/mixed-hard negatives.
+  - `metrics.rs` — NDCG / Recall / MRR + uncached `score_with_progress`.
+  - `cache.rs` — `ChannelMask`, `ScoreCache`, `score_with_cache` (the
     grid hot path).
-  * `knobs.rs` — `KnobSpec` registry + per-knob invalidation masks.
-  * `grid.rs` — line search + paired sweep + categorical sweep.
-  * `log.rs`, `options.rs`, `probe.rs` — printing, CLI options, DB probe.
+  - `knobs.rs` — `KnobSpec` registry + per-knob invalidation masks.
+  - `grid.rs` — line search + paired sweep + categorical sweep.
+  - `log.rs`, `options.rs`, `probe.rs` — printing, CLI options, DB probe.
 - [`parser-api/src/utils/scorer/`](../parser-api/src/utils/scorer/) —
   the scoring math being calibrated; same code paths in production. The
   cached entry points (`tag_similarity_cached`, `tag_relation_fit_cached`,

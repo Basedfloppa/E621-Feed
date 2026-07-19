@@ -1,6 +1,10 @@
 # E621 Account Parser
 
-A tiny web app for storing personal favorites and generating a personalized post feed.
+A self-hosted personalised feed engine for e621: import favourites, build
+per-account preference profiles, and serve scored + diversified
+recommendations via an 11-channel ensemble model. Includes offline
+calibration tooling (grid search over ~80 scoring knobs) and a
+WASM/Yew frontend with an interactive tag-relation graph.
 
 [![Stars](https://img.shields.io/github/stars/Basedfloppa/e621-Account-Parser?style=flat-square)](https://github.com/Basedfloppa/e621-Account-Parser/stargazers)
 [![Forks](https://img.shields.io/github/forks/Basedfloppa/e621-Account-Parser?style=flat-square)](https://github.com/Basedfloppa/e621-Account-Parser/network/members)
@@ -11,7 +15,7 @@ A tiny web app for storing personal favorites and generating a personalized post
 [![Commit Activity](https://img.shields.io/github/commit-activity/m/Basedfloppa/e621-Account-Parser?style=flat-square)](https://github.com/Basedfloppa/e621-Account-Parser/pulse)
 
 ## Live at a FINAL DOMAIN (YIPPIE)
-https://e621feed.zorolin.rs/feed
+<https://e621feed.zorolin.rs/feed>
 
 ---
 
@@ -22,16 +26,27 @@ A self-hosted alternative to e621's built-in feed: imports your favourites, buil
 ---
 
 ## Features
-- Save and manage personal favorites
-- Generate a customized feed based on your preferences
-- Learn lightweight preference signals from feed usage
-- Show recommendation score breakdowns in the feed UI
-- Interactive tag-relation graph: force-directed visualisation of tag co-occurrence with community detection, panning, and zoom
-- Simple local dev setup (Rust backend + Trunk-served frontend)
+
+- Save and manage personal favourites (full + incremental `/process` modes)
+- Personalised feed with 11-channel scoring (tag similarity, quality, recency,
+  rating, media, popularity, interaction, tag-relation, uploader, exclusivity,
+  novelty) and MMR diversification
+- Recommendation score breakdowns in the feed UI
+- Daily digest with stratified sampling (top picks, trending, exploration,
+  wildcard, recent)
+- Session-based cross-page dedup for infinite scroll
+- Similar-posts lookup by tag overlap
+- Interactive tag-relation graph: force-directed visualisation of tag
+  co-occurrence with community detection, panning, zoom, and ETag caching
+- Per-account preferred tags with group-level weights
+- Offline calibration harness: `seed` (import public favs) + `calibrate eval` /
+  `calibrate grid` (NDCG/Recall/MRR with bootstrap CIs, greedy line search)
+- Simple local dev setup (Rust backend + Trunk-served Yew/WASM frontend)
 
 ---
 
 ## Tooling Installation
+
 Make sure you have [Rust](https://www.rust-lang.org/tools/install) and `cargo` installed. Then:
 
 ```bash
@@ -43,6 +58,7 @@ cargo install --locked cargo-audit
 `cargo-watch` enables hot-reload for the backend, `trunk` serves/builds the frontend, and `cargo-audit` is required by the pre-commit hook.
 
 ### Pre-commit hook
+
 There is no CI on this repo. The pre-commit hook in [`.githooks/`](.githooks/) runs `cargo audit --deny warnings` against `parser-api/` before any commit that touches it. Activate once per clone:
 
 ```bash
@@ -91,7 +107,7 @@ MALLOC_CONF=dirty_decay_ms:0,muzzy_decay_ms:0 ./target/release/e621-account-pars
 Without jemalloc, the `MALLOC_ARENA_MAX=2` / `MALLOC_TRIM_THRESHOLD_=65536`
 env vars cut glibc waste by ~30–50% without a rebuild.
 
-http://localhost:8080
+<http://localhost:8080>
 
 ```bash
 cd ./parser-api/
@@ -135,7 +151,8 @@ buckets.
 
 ## Frontend
 
-./static/config.js
+`parser-web/static/config.js`
+
 ```js
 window.APP_CONFIG = Object.freeze({
     posts_domain: "https://uri.com",
@@ -143,7 +160,7 @@ window.APP_CONFIG = Object.freeze({
 });
 ```
 
-http://localhost:8000
+<http://localhost:8000>
 
 ```bash
 cd ./parser-web/
@@ -154,8 +171,9 @@ trunk serve
 
 ## Production deployment
 
-Hosting the app behind nginx with release-mode pre-compression is
-covered separately in [docs/deployment.md](docs/deployment.md).
+Hosting the app behind nginx (or Caddy — see [`Caddyfile`](Caddyfile))
+with release-mode pre-compression is covered separately in
+[docs/deployment.md](docs/deployment.md).
 
 ---
 
