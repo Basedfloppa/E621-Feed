@@ -651,7 +651,7 @@ pub fn feed_page() -> Html {
                             format!("Loaded {} posts", posts.len())
                         };
                         html! { <span class="small m-3 bg-body-tertiary bg-opacity-75 text-body-emphasis rounded-pill badge shadow-sm" aria-live="polite">{ label }</span> }
-                    } else { html!{ <span class="small m-3 bg-body-tertiary bg-opacity-75 text-body-emphasis rounded-pill badge shadow-sm" aria-live="polite">{"Loading..."}</span>} }
+                    } else { html!{ <span class="small m-3 bg-body-tertiary bg-opacity-75 text-body-emphasis rounded-pill badge shadow-sm" aria-live="polite"><span class="spinner-border spinner-border-sm me-1" role="status"></span>{"Loading..."}</span>} }
                 }
             </div>
 
