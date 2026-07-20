@@ -217,7 +217,7 @@ pub fn header() -> Html {
     });
 
     html! {
-        <nav class="navbar navbar-expand-lg bg-body-tertiary border" id="header">
+        <nav class="navbar navbar-expand-lg bg-body-tertiary border sticky-top" id="header">
             <div class="container-fluid d-flex align-items-center gap-2">
                 <a class="navbar-brand text-nowrap me-auto" href="/">
                     {"E621 Feed"}
