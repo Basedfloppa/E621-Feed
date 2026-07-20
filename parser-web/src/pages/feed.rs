@@ -179,6 +179,7 @@ pub fn feed_page() -> Html {
         let error = error.clone();
         let selected_user = selected_user.clone();
         let cutoff_pct = cutoff_pct.clone();
+        let session_id = session_id.clone();
         let inflight = inflight.clone();
         let exhausted = exhausted.clone();
         let consecutive_empty = consecutive_empty.clone();
@@ -204,8 +205,11 @@ pub fn feed_page() -> Html {
                 return;
             };
             let url = format!(
-                "{}/recommendations/{}?page={}",
-                cfg.backend_domain, user.id, *page
+                "{}/recommendations/{}?page={}&session={}",
+                cfg.backend_domain,
+                user.id,
+                *page,
+                urlencoding::encode(session_id.as_str())
             );
 
             // Captured for the per-page cutoff filter that runs after fetch.
