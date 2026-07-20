@@ -383,7 +383,6 @@ pub fn digest_page() -> Html {
                     let Some(cfg) = read_config_from_head() else {
                         return html! {};
                     };
-                    let breakdown = if *show_breakdown { sp.breakdown.clone() } else { None };
                     html! {
                         <div class={col_class}>
                             <PostCard
@@ -393,9 +392,10 @@ pub fn digest_page() -> Html {
                                 account_id={selected_user.as_ref().map(|u| u.id as i32).unwrap_or(0)}
                                 session_id={String::new()}
                                 position={i as i32}
-                                breakdown={breakdown}
+                                breakdown={sp.breakdown.clone()}
                                 show_desc={*show_desc}
                                 show_metadata={*show_metadata}
+                                show_breakdown={*show_breakdown}
                             />
                         </div>
                     }

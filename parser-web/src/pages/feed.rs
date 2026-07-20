@@ -96,6 +96,13 @@ pub fn feed_page() -> Html {
             .and_then(|v| v.parse::<bool>().ok())
             .unwrap_or(false)
     });
+    let show_breakdown = use_state(|| {
+        window()
+            .and_then(|w| w.local_storage().ok().flatten())
+            .and_then(|s| s.get_item("show_score_breakdown").ok().flatten())
+            .and_then(|v| v.parse::<bool>().ok())
+            .unwrap_or(false)
+    });
     // Per-page bottom-cutoff in percent (0..=95). 0 = show everything,
     // 30 = drop the bottom 30% of each fetched page by raw score, 95 =
     // keep only the top 5%. Decoupled from the model's raw `score` so
@@ -130,6 +137,16 @@ pub fn feed_page() -> Html {
         use_effect_with(*show_metadata, move |a: &bool| {
             if let Some(store) = window().and_then(|w| w.local_storage().ok().flatten()) {
                 let _ = store.set_item("show_file_metadata", &a.to_string());
+            }
+            || ()
+        });
+    }
+
+    {
+        let show_breakdown = show_breakdown.clone();
+        use_effect_with(*show_breakdown, move |a: &bool| {
+            if let Some(store) = window().and_then(|w| w.local_storage().ok().flatten()) {
+                let _ = store.set_item("show_score_breakdown", &a.to_string());
             }
             || ()
         });
@@ -466,6 +483,7 @@ pub fn feed_page() -> Html {
                         breakdown={sp.breakdown.clone()}
                         show_desc={*show_desc.clone()}
                         show_metadata={*show_metadata.clone()}
+                        show_breakdown={*show_breakdown.clone()}
                     />
                 </div>
             }
@@ -629,6 +647,23 @@ pub fn feed_page() -> Html {
                                     Callback::from(move |e: InputEvent| {
                                         let input: HtmlInputElement = e.target_unchecked_into();
                                         show_metadata.set(input.checked());
+                                    })
+                                }}
+                    />
+                </div>
+
+                <div class="col-auto feed-post-text-col" id="feed-score-breakdown">
+                    <span class="d-block">{"Score breakdown"}</span>
+                    <input
+                        id="show-score-breakdown"
+                        type="checkbox"
+                        class="form-check-input"
+                        checked={*show_breakdown}
+                        oninput={{
+                                    let show_breakdown = show_breakdown.clone();
+                                    Callback::from(move |e: InputEvent| {
+                                        let input: HtmlInputElement = e.target_unchecked_into();
+                                        show_breakdown.set(input.checked());
                                     })
                                 }}
                     />

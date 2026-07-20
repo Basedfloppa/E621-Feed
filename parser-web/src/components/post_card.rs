@@ -24,6 +24,8 @@ pub struct PostCardProps {
     pub show_desc: bool,
     #[prop_or_default]
     pub show_metadata: bool,
+    #[prop_or_default]
+    pub show_breakdown: bool,
 }
 
 #[function_component(PostCard)]
@@ -499,43 +501,51 @@ pub fn post_card(props: &PostCardProps) -> Html {
             </div>
 
             {
+                if props.show_breakdown {
+                    if let Some(breakdown) = &props.breakdown {
+                        html! {
+                            <div class="p-2 d-flex flex-wrap justify-content-center gap-1" aria-label="Score breakdown">
+                                <span class="badge text-muted text-truncate mw-100" title="Cosine similarity between this post's tags and your favourites (TF-IDF weighted).">
+                                    { format!("Tag {:.2}", breakdown.tag_similarity) }
+                                </span>
+                                <span class="badge text-muted text-truncate mw-100" title="How this post's score, favourites and comments compare to the typical post you like.">
+                                    { format!("Quality {:.2}", breakdown.quality_fit) }
+                                </span>
+                                <span class="badge text-muted text-truncate mw-100" title="How close this post's age is to the ages you usually engage with.">
+                                    { format!("Recent {:.2}", breakdown.recency_fit) }
+                                </span>
+                                <span class="badge text-muted text-truncate mw-100" title="Match between this post's rating (S/Q/E) and the rating mix of your favourites.">
+                                    { format!("Rating {:.2}", breakdown.rating_fit) }
+                                </span>
+                                <span class="badge text-muted text-truncate mw-100" title="Match between this post's media type (image / gif / video) and your usual preference.">
+                                    { format!("Media {:.2}", breakdown.media_fit) }
+                                </span>
+                                <span class="badge text-muted text-truncate mw-100" title="How this post's favourite count and duration compare to the norm in your profile.">
+                                    { format!("Popular {:.2}", breakdown.popularity_fit) }
+                                </span>
+                                <span class="badge text-muted text-truncate mw-100" title="Signal from your recent feed behaviour on this post's tags — impressions, opens, and hides.">
+                                    { format!("Interact {:.2}", breakdown.interaction_fit) }
+                                </span>
+                                <span class="badge text-muted text-truncate mw-100" title="How coherently this post's tags relate to each other — globally (PMI lift) and inside your own favourites (pair co-occurrence).">
+                                    { format!("Relation {:.2}", breakdown.tag_relation_fit) }
+                                </span>
+                            </div>
+                        }
+                    } else {
+                        html!{}
+                    }
+                } else {
+                    html!{}
+                }
+            }
+
+            {
                 if show_desc == &true {
                     html! {
                     <div class="card-body p-2 text-center align-items-end">
                         <h6 class="card-title mt-1">{ format!("#{}", post.id) }</h6>
                         {
-                            if let Some(breakdown) = &props.breakdown {
-                                html! {
-                                    <div class="mb-1 d-flex flex-wrap justify-content-center gap-1" aria-label="Score breakdown">
-                                        <span class="badge text-muted text-truncate mw-100" title="Cosine similarity between this post's tags and your favourites (TF-IDF weighted).">
-                                            { format!("Tag {:.2}", breakdown.tag_similarity) }
-                                        </span>
-                                        <span class="badge text-muted text-truncate mw-100" title="How this post's score, favourites and comments compare to the typical post you like.">
-                                            { format!("Quality {:.2}", breakdown.quality_fit) }
-                                        </span>
-                                        <span class="badge text-muted text-truncate mw-100" title="How close this post's age is to the ages you usually engage with.">
-                                            { format!("Recent {:.2}", breakdown.recency_fit) }
-                                        </span>
-                                        <span class="badge text-muted text-truncate mw-100" title="Match between this post's rating (S/Q/E) and the rating mix of your favourites.">
-                                            { format!("Rating {:.2}", breakdown.rating_fit) }
-                                        </span>
-                                        <span class="badge text-muted text-truncate mw-100" title="Match between this post's media type (image / gif / video) and your usual preference.">
-                                            { format!("Media {:.2}", breakdown.media_fit) }
-                                        </span>
-                                        <span class="badge text-muted text-truncate mw-100" title="How this post's favourite count and duration compare to the norm in your profile.">
-                                            { format!("Popular {:.2}", breakdown.popularity_fit) }
-                                        </span>
-                                        <span class="badge text-muted text-truncate mw-100" title="Signal from your recent feed behaviour on this post's tags — impressions, opens, and hides.">
-                                            { format!("Interact {:.2}", breakdown.interaction_fit) }
-                                        </span>
-                                        <span class="badge text-muted text-truncate mw-100" title="How coherently this post's tags relate to each other — globally (PMI lift) and inside your own favourites (pair co-occurrence).">
-                                            { format!("Relation {:.2}", breakdown.tag_relation_fit) }
-                                        </span>
-                                    </div>
-                                }
-                            } else {
-                                html! {}
-                            }
+                            html!{}
                         }
 
                         {
