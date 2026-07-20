@@ -422,7 +422,7 @@ pub fn post_card(props: &PostCardProps) -> Html {
                         };
                         let ext = post.files.meta.ext.as_deref().unwrap_or("").to_uppercase();
                         html! {
-                            <span class="position-absolute bottom-0 start-0 m-2 badge bg-dark bg-opacity-60 text-light small lh-1" style="font-size:0.6rem;">
+                            <span class="position-absolute bottom-0 start-0 m-2 badge bg-dark bg-opacity-60 text-light small lh-1" style="font-size:0.7rem;">
                                 { format!("{}  {}", ext, size_str) }
                             </span>
                         }

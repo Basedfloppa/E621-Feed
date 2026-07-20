@@ -232,3 +232,11 @@ main#main-content {
   color: var(--bs-body-color);
   background-color: var(--bs-tertiary-bg);
 }
+
+/* Hover state for saved accounts list items */
+.list-group-item {
+  transition: background-color 0.15s ease-in-out;
+}
+.list-group-item:hover {
+  background-color: var(--bs-tertiary-bg);
+}
