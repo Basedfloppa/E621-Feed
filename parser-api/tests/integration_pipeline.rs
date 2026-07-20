@@ -102,19 +102,44 @@ fn fake_post_json(id: i64, artist: &[&str], general: &[&str]) -> serde_json::Val
         "id": id,
         "created_at": "2024-01-01T00:00:00.000-08:00",
         "updated_at": "2024-01-01T00:00:00.000-08:00",
-        "file": {
-            "width": 800, "height": 600, "ext": "jpg", "size": 12345,
-            "md5": "0".repeat(32), "url": format!("https://e6.example/data/{id}.jpg"),
+        "files": {
+            "meta": {
+                "md5": "0".repeat(32), "ext": "jpg", "size": 12345,
+                "duration": null, "has_sample": false,
+            },
+            "original": {
+                "width": 800, "height": 600,
+                "url": format!("https://e6.example/data/{id}.jpg"),
+            },
+            "preview": {
+                "width": 150, "height": 100,
+                "jpg": format!("https://e6.example/data/preview/{id}.jpg"),
+                "webp": null,
+            },
+            "sample": {"width": 0, "height": 0, "jpg": null, "webp": null},
         },
-        "preview": {
-            "width": 150, "height": 100,
-            "url": format!("https://e6.example/data/preview/{id}.jpg"),
+        "change_seq": 0.0,
+        "uploader_id": 42,
+        "uploader_name": null,
+        "approver_id": null,
+        "stats": {
+            "score": {"up": 10, "down": 0, "total": 10},
+            "fav_count": 5, "is_favorited": false, "vote": 0, "comment_count": 0,
         },
-        "sample": {
-            "has": false, "height": null, "width": null, "url": null,
-            "alternates": null, "variants": null, "samples": null,
+        "flags": {
+            "pending": false, "flagged": false, "note_locked": false,
+            "status_locked": false, "rating_locked": false, "deleted": false,
         },
-        "score": {"up": 10, "down": 0, "total": 10},
+        "has": {
+            "parent": false, "children": false, "active_children": false,
+            "notes": false, "sample": false,
+        },
+        "relationships": {"parent_id": null, "children": []},
+        "pools": [],
+        "rating": "s",
+        "locked_tags": [],
+        "sources": [],
+        "description": null,
         "tags": {
             "general": general,
             "artist": artist,
@@ -126,27 +151,6 @@ fn fake_post_json(id: i64, artist: &[&str], general: &[&str]) -> serde_json::Val
             "lore": [],
             "contributor": [],
         },
-        "locked_tags": null,
-        "change_seq": 0.0,
-        "flags": {
-            "pending": false, "flagged": false, "note_locked": false,
-            "status_locked": false, "rating_locked": false, "deleted": false,
-        },
-        "rating": "s",
-        "fav_count": 5,
-        "sources": [],
-        "pools": [],
-        "relationships": {
-            "parent_id": null, "has_children": false,
-            "has_active_children": false, "children": [],
-        },
-        "approver_id": null,
-        "uploader_id": 42,
-        "description": null,
-        "comment_count": 0,
-        "is_favorited": false,
-        "has_notes": false,
-        "duration": null,
     })
 }
 
@@ -267,26 +271,22 @@ async fn analyze_account_happy_path() {
     Mock::given(method("GET"))
         .and(path("/favorites.json"))
         .and(query_param("page", "1"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "posts": [
-                fake_post_json(20001, &["artist_a"], &["fluffy", "outdoor"]),
-                fake_post_json(20002, &["artist_a"], &["fluffy", "indoor"]),
-                fake_post_json(20003, &["artist_b"], &["scaly", "outdoor"]),
-                fake_post_json(20004, &["artist_b"], &["scaly", "indoor"]),
-            ]
-        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+            fake_post_json(20001, &["artist_a"], &["fluffy", "outdoor"]),
+            fake_post_json(20002, &["artist_a"], &["fluffy", "indoor"]),
+            fake_post_json(20003, &["artist_b"], &["scaly", "outdoor"]),
+            fake_post_json(20004, &["artist_b"], &["scaly", "indoor"]),
+        ])))
         .mount(&server)
         .await;
 
     Mock::given(method("GET"))
         .and(path("/favorites.json"))
         .and(query_param("page", "2"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "posts": [
-                fake_post_json(20005, &["artist_c"], &["fluffy", "night"]),
-                fake_post_json(20006, &["artist_c"], &["scaly", "night"]),
-            ]
-        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+            fake_post_json(20005, &["artist_c"], &["fluffy", "night"]),
+            fake_post_json(20006, &["artist_c"], &["scaly", "night"]),
+        ])))
         .mount(&server)
         .await;
 
@@ -434,9 +434,9 @@ async fn analyze_account_aborts_on_consecutive_page_failures() {
     Mock::given(method("GET"))
         .and(path("/favorites.json"))
         .and(query_param("page", "1"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "posts": [fake_post_json(60010, &["a"], &["x"])]
-        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+            fake_post_json(60010, &["a"], &["x"])
+        ])))
         .mount(&server)
         .await;
     // Pages 2 and 3 both 500 — `send_with_retry` will exhaust the retry
@@ -566,12 +566,10 @@ async fn analyze_account_re_analyze_replaces_state() {
         .await;
     Mock::given(method("GET"))
         .and(path("/favorites.json"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "posts": [
-                fake_post_json(40003, &[], &["new_tag"]),
-                fake_post_json(40004, &[], &["new_tag"]),
-            ]
-        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+            fake_post_json(40003, &[], &["new_tag"]),
+            fake_post_json(40004, &[], &["new_tag"]),
+        ])))
         .mount(&server)
         .await;
 
@@ -662,9 +660,9 @@ async fn analyze_account_global_blacklist_strips_tags() {
         .await;
     Mock::given(method("GET"))
         .and(path("/favorites.json"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "posts": [fake_post_json(50001, &["artist_x"], &["fluffy", "kept_tag"])]
-        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+            fake_post_json(50001, &["artist_x"], &["fluffy", "kept_tag"])
+        ])))
         .mount(&server)
         .await;
 
@@ -1184,13 +1182,11 @@ async fn process_then_owned_dedup_excludes_imported_favs() {
         .await;
     Mock::given(method("GET"))
         .and(path("/favorites.json"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "posts": [
-                fake_post_json(95001, &["a"], &["t"]),
-                fake_post_json(95002, &["a"], &["t"]),
-                fake_post_json(95003, &["a"], &["t"]),
-            ]
-        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+            fake_post_json(95001, &["a"], &["t"]),
+            fake_post_json(95002, &["a"], &["t"]),
+            fake_post_json(95003, &["a"], &["t"]),
+        ])))
         .mount(&server)
         .await;
 
@@ -1256,16 +1252,14 @@ async fn recommendations_cross_page_dedup_filters_shown_posts() {
     Mock::given(method("GET"))
         .and(path("/favorites.json"))
         .and(query_param("page", "1"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "posts": [
-                fake_post_json(101, &["artist_a"], &["t1"]),
-                fake_post_json(102, &["artist_a"], &["t1"]),
-                fake_post_json(103, &["artist_b"], &["t2"]),
-                fake_post_json(104, &["artist_b"], &["t2"]),
-                fake_post_json(105, &["artist_c"], &["t3"]),
-                fake_post_json(106, &["artist_c"], &["t3"]),
-            ]
-        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+            fake_post_json(101, &["artist_a"], &["t1"]),
+            fake_post_json(102, &["artist_a"], &["t1"]),
+            fake_post_json(103, &["artist_b"], &["t2"]),
+            fake_post_json(104, &["artist_b"], &["t2"]),
+            fake_post_json(105, &["artist_c"], &["t3"]),
+            fake_post_json(106, &["artist_c"], &["t3"]),
+        ])))
         .mount(&server)
         .await;
 
