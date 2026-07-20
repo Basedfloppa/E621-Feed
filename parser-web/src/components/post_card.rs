@@ -21,7 +21,9 @@ pub struct PostCardProps {
     #[prop_or_default]
     pub alt: Option<AttrValue>,
     #[prop_or_default]
-    pub show_desc: bool
+    pub show_desc: bool,
+    #[prop_or_default]
+    pub show_metadata: bool,
 }
 
 #[function_component(PostCard)]
@@ -325,6 +327,7 @@ pub fn post_card(props: &PostCardProps) -> Html {
 
     let mut root_classes = classes!(
         "card",
+        "post-card",
         "h-100",
         "overflow-hidden",
         "w-100",
@@ -408,6 +411,25 @@ pub fn post_card(props: &PostCardProps) -> Html {
                 >
                     { score_summary }
                 </span>
+
+                {
+                    if props.show_metadata {
+                        let size_kb = post.files.meta.size / 1024;
+                        let size_str = if size_kb > 1024 {
+                            format!("{:.1}MB", size_kb as f64 / 1024.0)
+                        } else {
+                            format!("{}KB", size_kb)
+                        };
+                        let ext = post.files.meta.ext.as_deref().unwrap_or("").to_uppercase();
+                        html! {
+                            <span class="position-absolute bottom-0 start-0 m-2 badge bg-dark bg-opacity-60 text-light small lh-1" style="font-size:0.6rem;">
+                                { format!("{}  {}", ext, size_str) }
+                            </span>
+                        }
+                    } else {
+                        html!{}
+                    }
+                }
             </div>
 
             {

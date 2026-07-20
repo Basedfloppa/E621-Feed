@@ -10,7 +10,18 @@ pub fn theme_toggle() -> Html {
             .flatten()
             .and_then(|s| s.get_item("theme").ok())
             .flatten()
-            .unwrap_or_else(|| "light".to_string());
+            .unwrap_or_else(|| {
+                if window()
+                    .and_then(|w| w.match_media("(prefers-color-scheme: dark)").ok())
+                    .flatten()
+                    .map(|m| m.matches())
+                    .unwrap_or(false)
+                {
+                    "dark".to_string()
+                } else {
+                    "light".to_string()
+                }
+            });
 
         if let Some(doc_elem) = window()
             .and_then(|w| w.document())
@@ -44,10 +55,7 @@ pub fn theme_toggle() -> Html {
 
             window()
                 .unwrap()
-                .add_event_listener_with_callback(
-                    "storage",
-                    handler.as_ref().unchecked_ref()
-                )
+                .add_event_listener_with_callback("storage", handler.as_ref().unchecked_ref())
                 .expect("Failed to add storage event listener");
 
             move || {
@@ -55,7 +63,7 @@ pub fn theme_toggle() -> Html {
                     .unwrap()
                     .remove_event_listener_with_callback(
                         "storage",
-                        handler.as_ref().unchecked_ref()
+                        handler.as_ref().unchecked_ref(),
                     )
                     .expect("Failed to remove storage event listener");
             }
@@ -78,10 +86,7 @@ pub fn theme_toggle() -> Html {
                 let _ = doc_elem.set_attribute("data-bs-theme", theme_str);
             }
 
-            if let Some(storage) = window()
-                .and_then(|w| w.local_storage().ok())
-                .flatten()
-            {
+            if let Some(storage) = window().and_then(|w| w.local_storage().ok()).flatten() {
                 let _ = storage.set_item("theme", theme_str);
             }
         })

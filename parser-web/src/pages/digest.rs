@@ -79,6 +79,7 @@ pub fn digest_page() -> Html {
     let hide_saved = use_state(|| read_bool_local("digest_hide_saved", false));
     let show_breakdown = use_state(|| read_bool_local("digest_show_breakdown", true));
     let show_desc = use_state(|| read_bool_local("digest_show_desc", true));
+    let show_metadata = use_state(|| read_bool_local("digest_show_metadata", false));
     let grid = use_state(|| GridType::from_storage(read_local("digest_grid_type")));
 
     // Bumped by the Refresh button to force a re-fetch even when no input
@@ -106,6 +107,13 @@ pub fn digest_page() -> Html {
         let v = *show_desc;
         use_effect_with(v, move |a: &bool| {
             write_local("digest_show_desc", &a.to_string());
+            || ()
+        });
+    }
+    {
+        let v = *show_metadata;
+        use_effect_with(v, move |a: &bool| {
+            write_local("digest_show_metadata", &a.to_string());
             || ()
         });
     }
@@ -301,6 +309,23 @@ pub fn digest_page() -> Html {
                                 </label>
                             </div>
                         </li>
+                        <li class="mb-2">
+                            <div class="form-check form-switch">
+                                <input
+                                    class="form-check-input"
+                                    type="checkbox"
+                                    id="digest-show-metadata"
+                                    checked={*show_metadata}
+                                    onchange={{
+                                        let show_metadata = show_metadata.clone();
+                                        Callback::from(move |_: Event| show_metadata.set(!*show_metadata))
+                                    }}
+                                />
+                                <label class="form-check-label" for="digest-show-metadata">
+                                    { "Show file metadata" }
+                                </label>
+                            </div>
+                        </li>
                         <li><hr class="dropdown-divider" /></li>
                         <li>
                             <small class="text-muted d-block mb-1">{ "Grid density" }</small>
@@ -370,6 +395,7 @@ pub fn digest_page() -> Html {
                                 position={i as i32}
                                 breakdown={breakdown}
                                 show_desc={*show_desc}
+                                show_metadata={*show_metadata}
                             />
                         </div>
                     }

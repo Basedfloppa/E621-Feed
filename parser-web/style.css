@@ -185,6 +185,24 @@ main#main-content {
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
 }
 
+/* Rounded card corners and shadows */
+.post-card {
+  border-radius: 8px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+  transition:
+    box-shadow 0.15s ease-in-out,
+    transform 0.15s ease-in-out;
+}
+.post-card:hover {
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12);
+}
+[data-bs-theme="dark"] .post-card {
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+}
+[data-bs-theme="dark"] .post-card:hover {
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
+}
+
 @media (max-width: 575.98px) {
   #header .nav-link {
     padding-inline: 0.5rem;

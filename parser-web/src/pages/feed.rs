@@ -89,6 +89,13 @@ pub fn feed_page() -> Html {
             .and_then(|v| v.parse::<bool>().ok())
             .unwrap_or(false)
     });
+    let show_metadata = use_state(|| {
+        window()
+            .and_then(|w| w.local_storage().ok().flatten())
+            .and_then(|s| s.get_item("show_file_metadata").ok().flatten())
+            .and_then(|v| v.parse::<bool>().ok())
+            .unwrap_or(false)
+    });
     // Per-page bottom-cutoff in percent (0..=95). 0 = show everything,
     // 30 = drop the bottom 30% of each fetched page by raw score, 95 =
     // keep only the top 5%. Decoupled from the model's raw `score` so
@@ -113,6 +120,16 @@ pub fn feed_page() -> Html {
         use_effect_with(*show_desc, move |a: &bool| {
             if let Some(store) = window().and_then(|w| w.local_storage().ok().flatten()) {
                 let _ = store.set_item("hide_post_desc", &a.to_string());
+            }
+            || ()
+        });
+    }
+
+    {
+        let show_metadata = show_metadata.clone();
+        use_effect_with(*show_metadata, move |a: &bool| {
+            if let Some(store) = window().and_then(|w| w.local_storage().ok().flatten()) {
+                let _ = store.set_item("show_file_metadata", &a.to_string());
             }
             || ()
         });
@@ -448,6 +465,7 @@ pub fn feed_page() -> Html {
                         position={position}
                         breakdown={sp.breakdown.clone()}
                         show_desc={*show_desc.clone()}
+                        show_metadata={*show_metadata.clone()}
                     />
                 </div>
             }
@@ -596,6 +614,23 @@ pub fn feed_page() -> Html {
                                         show_desc.set(input.checked());
                                     })
                                 }} 
+                    />
+                </div>
+
+                <div class="col-auto feed-post-text-col" id="feed-file-metadata">
+                    <span class="d-block">{"Show file metadata"}</span>
+                    <input
+                        id="show-file-metadata"
+                        type="checkbox"
+                        class="form-check-input"
+                        checked={*show_metadata}
+                        oninput={{
+                                    let show_metadata = show_metadata.clone();
+                                    Callback::from(move |e: InputEvent| {
+                                        let input: HtmlInputElement = e.target_unchecked_into();
+                                        show_metadata.set(input.checked());
+                                    })
+                                }}
                     />
                 </div>
             </div>
