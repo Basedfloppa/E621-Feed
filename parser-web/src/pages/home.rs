@@ -285,6 +285,9 @@ pub fn home_page() -> Html {
                                         />
                                     </div>
                                 }
+                            <div class="text-center text-body-tertiary small mt-4">
+                                {"Your data stays on this server. Your e621 favourites and profile are never shared with third parties."}
+                            </div>
                             </div>
                         </div>
                     </div>
