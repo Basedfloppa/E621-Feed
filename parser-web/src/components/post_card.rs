@@ -366,6 +366,22 @@ pub fn post_card(props: &PostCardProps) -> Html {
         root_classes.push("post-card-hidden");
     }
 
+    // Post number badge with optional file metadata
+    let badge_text = {
+        let size_kb = post.files.meta.size / 1024;
+        let size_str = if size_kb > 1024 {
+            format!("{:.1}MB", size_kb as f64 / 1024.0)
+        } else {
+            format!("{}KB", size_kb)
+        };
+        let ext = post.files.meta.ext.as_deref().unwrap_or("").to_uppercase();
+        if props.show_metadata {
+            format!("#{} — {} {}", post.id, ext, size_str)
+        } else {
+            format!("#{}", post.id)
+        }
+    };
+
     let inner: Html = html! {
         <>
             <div class="position-relative card-body p-0">
@@ -474,21 +490,10 @@ pub fn post_card(props: &PostCardProps) -> Html {
                 </span>
 
                 {
-                    if props.show_metadata {
-                        let size_kb = post.files.meta.size / 1024;
-                        let size_str = if size_kb > 1024 {
-                            format!("{:.1}MB", size_kb as f64 / 1024.0)
-                        } else {
-                            format!("{}KB", size_kb)
-                        };
-                        let ext = post.files.meta.ext.as_deref().unwrap_or("").to_uppercase();
-                        html! {
-                            <span class="position-absolute bottom-0 start-0 m-2 badge bg-dark bg-opacity-60 text-light small lh-1" style="font-size:0.7rem;">
-                                { format!("{}  {}", ext, size_str) }
-                            </span>
-                        }
-                    } else {
-                        html!{}
+                    html! {
+                        <span class="position-absolute bottom-0 start-0 m-2 badge bg-dark bg-opacity-60 text-light small lh-1" style="font-size:0.65rem;">
+                            { badge_text.clone() }
+                        </span>
                     }
                 }
             </div>
