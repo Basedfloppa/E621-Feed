@@ -322,3 +322,39 @@ async fn rocket() -> _ {
 
     attach_cors(r)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::attach_cors;
+    use rocket::http::Header;
+    use rocket::local::asynchronous::Client;
+
+    #[get("/cors-test")]
+    fn cors_test() -> &'static str {
+        "ok"
+    }
+
+    #[rocket::async_test]
+    async fn dev_cors_allows_trunk_origin_with_credentials() {
+        let rocket = attach_cors(rocket::build().mount("/", routes![cors_test]));
+        let client = Client::tracked(rocket).await.expect("valid test Rocket");
+
+        let response = client
+            .get("/cors-test")
+            .header(Header::new("Origin", "http://localhost:8000"))
+            .dispatch()
+            .await;
+
+        assert_eq!(response.status(), rocket::http::Status::Ok);
+        assert_eq!(
+            response.headers().get_one("Access-Control-Allow-Origin"),
+            Some("http://localhost:8000")
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get_one("Access-Control-Allow-Credentials"),
+            Some("true")
+        );
+    }
+}
