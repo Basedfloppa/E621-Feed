@@ -29,17 +29,37 @@ pub fn saved_accounts_select(props: &SavedAccountsProps) -> Html {
         // `ACCOUNT_LIST_CHANGED_EVENT` window event (account created, removed,
         // or blacklist edited)
         let saved_accounts = saved_accounts.clone();
+        let found_user = props.selected_user.clone();
+        let user_query = user_query.clone();
         use_effect_with((), move |_| {
             let saved_accounts_for_fetch = saved_accounts.clone();
             let fetch = move || {
                 let saved_accounts = saved_accounts_for_fetch.clone();
+                let found_user = found_user.clone();
+                let user_query = user_query.clone();
                 if let Some(cfg) = read_config_from_head() {
                     wasm_bindgen_futures::spawn_local(async move {
                         let url = format!("{}/accounts", cfg.backend_domain);
                         match api_get(&url).send().await {
                             Ok(response) if response.ok() => {
                                 match response.json::<Vec<UserInfo>>().await {
-                                    Ok(accounts) => saved_accounts.set(accounts),
+                                    Ok(accounts) => {
+                                        saved_accounts.set(accounts.clone());
+                                        // Restore persisted selection
+                                        if found_user.is_none()
+                                            && let Some(win) = web_sys::window()
+                                                && let Ok(Some(storage)) = win.local_storage()
+                                                && let Ok(Some(saved_id)) = storage.get_item("selected_account_id")
+                                                && let Ok(id) = saved_id.parse::<i64>()
+                                                && let Some(acc) = accounts.iter().find(|a| a.id == id) {
+                                                    found_user.set(Some(UserInfo {
+                                                        id: acc.id,
+                                                        name: acc.name.clone(),
+                                                        blacklist: acc.blacklist.clone(),
+                                                    }));
+                                                    user_query.set(acc.name.clone());
+                                                }
+                                    }
                                     Err(_) => saved_accounts.set(Vec::new()),
                                 }
                             }
@@ -100,6 +120,12 @@ pub fn saved_accounts_select(props: &SavedAccountsProps) -> Html {
                     blacklist: account.blacklist.clone(),
                 }));
                 user_query.set(account.name.clone());
+                // Persist selection so SPA navigation doesn't lose it
+                if let Some(win) = web_sys::window()
+                    && let Ok(Some(storage)) = win.local_storage()
+                {
+                    let _ = storage.set_item("selected_account_id", &account.id.to_string());
+                }
             }
         })
     };
@@ -111,6 +137,11 @@ pub fn saved_accounts_select(props: &SavedAccountsProps) -> Html {
         Callback::from(move |_| {
             found_user.set(None);
             user_query.set(String::new());
+            if let Some(win) = web_sys::window()
+                && let Ok(Some(storage)) = win.local_storage()
+            {
+                let _ = storage.remove_item("selected_account_id");
+            }
         })
     };
 
