@@ -526,7 +526,7 @@ pub fn feed_page() -> Html {
                     <div class="btn-group" role="group" aria-label="Grid type">
                         <button
                             type="button"
-                            class={classes!("btn","btn-dark", if *grid == GridType::Auto { "active" } else { "" })}
+                            class={classes!("btn","btn-outline-secondary", if *grid == GridType::Auto { "active" } else { "" })}
                             aria-pressed={(*grid == GridType::Auto).to_string()}
                             aria-label="Auto grid (responsive)"
                             title="Auto grid (responsive)"
@@ -540,7 +540,7 @@ pub fn feed_page() -> Html {
 
                         <button
                             type="button"
-                            class={classes!("btn","btn-dark", if *grid == GridType::Three { "active" } else { "" })}
+                            class={classes!("btn","btn-outline-secondary", if *grid == GridType::Three { "active" } else { "" })}
                             aria-pressed={(*grid == GridType::Three).to_string()}
                             aria-label="Three-column grid"
                             title="Three-column grid"
@@ -554,7 +554,7 @@ pub fn feed_page() -> Html {
 
                         <button
                             type="button"
-                            class={classes!("btn","btn-dark", if *grid == GridType::Two { "active" } else { "" })}
+                            class={classes!("btn","btn-outline-secondary", if *grid == GridType::Two { "active" } else { "" })}
                             aria-pressed={(*grid == GridType::Two).to_string()}
                             aria-label="Two-column grid"
                             title="Two-column grid"
@@ -568,7 +568,7 @@ pub fn feed_page() -> Html {
 
                         <button
                             type="button"
-                            class={classes!("btn","btn-dark", if *grid == GridType::One { "active" } else { "" })}
+                            class={classes!("btn","btn-outline-secondary", if *grid == GridType::One { "active" } else { "" })}
                             aria-pressed={(*grid == GridType::One).to_string()}
                             aria-label="Single-column list"
                             title="Single-column list"
@@ -603,9 +603,9 @@ pub fn feed_page() -> Html {
             <div class="position-fixed bottom-0 start-50 translate-middle-x w-100 d-flex justify-content-between z-1 feed-statusbar">
                 {
                     if let Some(u) = &*selected_user {
-                        html! { <span class="text-muted small m-3 bg-dark bg-opacity-50 rounded-pill badge">{ format!("User: {} (ID: {})", u.name, u.id) }</span> }
+                        html! { <span class="small m-3 bg-body-tertiary bg-opacity-75 text-body-emphasis rounded-pill badge shadow-sm">{ format!("User: {} (ID: {})", u.name, u.id) }</span> }
                     } else {
-                        html! { <span class="text-muted small m-3 bg-dark bg-opacity-50 rounded-pill badge">{ "No user selected" }</span> }
+                        html! { <span class="small m-3 bg-body-tertiary bg-opacity-75 text-body-emphasis rounded-pill badge shadow-sm">{ "No user selected" }</span> }
                     }
                 }
                 {
@@ -615,8 +615,8 @@ pub fn feed_page() -> Html {
                         } else {
                             format!("Loaded {} posts", posts.len())
                         };
-                        html! { <span class="text-muted small m-3 bg-dark bg-opacity-50 rounded-pill badge" aria-live="polite">{ label }</span> }
-                    } else { html!{ <span class="text-muted small m-3 bg-dark bg-opacity-50 rounded-pill badge" aria-live="polite">{"Loading..."}</span>} }
+                        html! { <span class="small m-3 bg-body-tertiary bg-opacity-75 text-body-emphasis rounded-pill badge shadow-sm" aria-live="polite">{ label }</span> }
+                    } else { html!{ <span class="small m-3 bg-body-tertiary bg-opacity-75 text-body-emphasis rounded-pill badge shadow-sm" aria-live="polite">{"Loading..."}</span>} }
                 }
             </div>
 

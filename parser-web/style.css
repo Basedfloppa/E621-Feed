@@ -1,186 +1,216 @@
 html {
-    background-color: var(--bs-body-bg);
-    color: var(--bs-body-color);
-    transition: background-color 0.3s, color 0.3s;
+  background-color: var(--bs-body-bg);
+  color: var(--bs-body-color);
+  transition:
+    background-color 0.3s,
+    color 0.3s;
 }
 
 body {
-    min-width: 320px;
-    overflow-x: hidden;
-    background-color: var(--bs-body-bg);
-    color: var(--bs-body-color);
+  min-width: 320px;
+  overflow-x: hidden;
+  background-color: var(--bs-body-bg);
+  color: var(--bs-body-color);
 }
 
 main#main-content {
-    background-color: var(--bs-body-bg);
-    color: var(--bs-body-color);
+  background-color: var(--bs-body-bg);
+  color: var(--bs-body-color);
 }
 
 #header .container-fluid {
-    row-gap: 0.75rem;
+  row-gap: 0.75rem;
 }
 
 #header .navbar-brand {
-    font-size: 1rem;
+  font-size: 1rem;
 }
 
 #header .navbar-nav {
-    row-gap: 0.25rem;
+  row-gap: 0.25rem;
 }
 
 .feed-toolbar > .col-auto {
-    min-width: 0;
+  min-width: 0;
 }
 
 .feed-toolbar input.form-control {
-    min-width: 7rem;
+  min-width: 7rem;
 }
 
 .feed-statusbar {
-    pointer-events: none;
+  pointer-events: none;
 }
 
 .feed-statusbar .badge {
-    max-width: min(48vw, 24rem);
-    white-space: normal;
-    pointer-events: auto;
+  max-width: min(48vw, 24rem);
+  white-space: normal;
+  pointer-events: auto;
 }
 
 .post-tags-preview {
-    overflow-wrap: anywhere;
+  overflow-wrap: anywhere;
 }
 
 .list-group-item {
-    overflow-wrap: anywhere;
-    word-break: break-word;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .list-group-item > .d-flex {
-    min-width: 0;
+  min-width: 0;
 }
 
 .list-group-item > .d-flex > span {
-    min-width: 0;
-    flex: 1 1 auto;
+  min-width: 0;
+  flex: 1 1 auto;
 }
 
 .btn:disabled,
 .btn.disabled {
-    opacity: 0.45;
-    cursor: not-allowed;
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 
 .btn-outline-secondary {
-    --bs-btn-color: #565e64;
-    --bs-btn-border-color: #565e64;
+  --bs-btn-color: #565e64;
+  --bs-btn-border-color: #565e64;
 }
 [data-bs-theme="dark"] .btn-outline-secondary {
-    --bs-btn-color: var(--bs-secondary-color);
-    --bs-btn-border-color: var(--bs-secondary-color);
+  --bs-btn-color: var(--bs-secondary-color);
+  --bs-btn-border-color: var(--bs-secondary-color);
 }
 
 .btn:focus-visible,
 .btn-group > .btn:focus-visible {
-    outline: 2px solid var(--bs-primary);
-    outline-offset: 2px;
-    z-index: 2;
+  outline: 2px solid var(--bs-primary);
+  outline-offset: 2px;
+  z-index: 2;
 }
 
 .post-card-hide-btn {
-    opacity: 0;
-    transition: opacity 0.15s ease-in-out;
-    line-height: 1;
-    padding: 0.15rem 0.4rem;
-    border: none;
-    cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s ease-in-out;
+  line-height: 1;
+  padding: 0.15rem 0.4rem;
+  border: none;
+  cursor: pointer;
 }
 
 .card:hover .post-card-hide-btn,
 .post-card-hide-btn:focus,
 .post-card-hide-btn:focus-visible {
-    opacity: 1;
+  opacity: 1;
 }
 
 .post-card-hidden {
-    border-style: dashed !important;
-    opacity: 0.55;
+  border-style: dashed !important;
+  opacity: 0.55;
+}
+[data-bs-theme="dark"] .post-card-hidden {
+  border-color: var(--bs-border-color) !important;
 }
 
 @media (max-width: 991.98px) {
-    #header {
-        padding-inline: 0.25rem;
-    }
+  #header {
+    padding-inline: 0.25rem;
+  }
 }
 
 @media (max-width: 767.98px) {
-    .feed-page {
-        padding-bottom: 1rem;
-    }
+  .feed-page {
+    padding-bottom: 1rem;
+  }
 
-    .feed-toolbar {
-        row-gap: 0.75rem;
-        align-items: stretch !important;
-    }
+  .feed-toolbar {
+    row-gap: 0.75rem;
+    align-items: stretch !important;
+  }
 
-    .feed-toolbar > .col-auto {
-        width: 100%;
-    }
+  .feed-toolbar > .col-auto {
+    width: 100%;
+  }
 
-    .feed-toolbar label,
-    .feed-toolbar .btn-group {
-        width: 100%;
-    }
+  .feed-toolbar label,
+  .feed-toolbar .btn-group {
+    width: 100%;
+  }
 
-    .feed-toolbar .btn-group > .btn {
-        flex: 1 1 0;
-    }
+  .feed-toolbar .btn-group > .btn {
+    flex: 1 1 0;
+  }
 
-    .feed-grid-col,
-    .feed-affinity-col {
-        width: 100%;
-    }
+  .feed-grid-col,
+  .feed-affinity-col {
+    width: 100%;
+  }
 
-    .feed-statusbar {
-        position: static !important;
-        transform: none !important;
-        width: 100% !important;
-        display: flex;
-        flex-direction: column;
-        align-items: stretch;
-        gap: 0.5rem;
-        margin-top: 1rem;
-        pointer-events: auto;
-    }
+  .feed-statusbar {
+    position: static !important;
+    transform: none !important;
+    width: 100% !important;
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0.5rem;
+    margin-top: 1rem;
+    pointer-events: auto;
+  }
 
-    .feed-statusbar .badge {
-        max-width: none;
-        width: 100%;
-        margin: 0 !important;
-        border-radius: 0.75rem !important;
-        text-align: center;
-        padding: 0.65rem 0.8rem;
-    }
+  .feed-statusbar .badge {
+    max-width: none;
+    width: 100%;
+    margin: 0 !important;
+    border-radius: 0.75rem !important;
+    text-align: center;
+    padding: 0.65rem 0.8rem;
+  }
 
-    .feed-grid {
-        margin-inline: 0 !important;
-    }
+  .feed-grid {
+    margin-inline: 0 !important;
+  }
 
-    .feed-grid > [class*="col-"] {
-        min-width: 0 !important;
-        padding-inline: 0.35rem;
-    }
+  .feed-grid > [class*="col-"] {
+    min-width: 0 !important;
+    padding-inline: 0.35rem;
+  }
 
-    .feed-grid .card {
-        border-radius: 0.9rem;
-    }
+  .feed-grid .card {
+    border-radius: 0.9rem;
+  }
+}
+
+[data-bs-theme="dark"] .feed-grid .card {
+  border-color: var(--bs-border-color);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
 }
 
 @media (max-width: 575.98px) {
-    #header .nav-link {
-        padding-inline: 0.5rem;
-    }
+  #header .nav-link {
+    padding-inline: 0.5rem;
+  }
 
-    .feed-page h2 {
-        font-size: 1.35rem;
-    }
+  .feed-page h2 {
+    font-size: 1.35rem;
+  }
+}
+
+[data-bs-theme="dark"] .feed-toolbar input.form-control {
+  border-color: var(--bs-border-color);
+}
+
+/* Spinbutton arrows use the input's color property;
+   ensure it's always visible against its background */
+.feed-toolbar input[type="number"] {
+  color: var(--bs-body-color);
+}
+
+[data-bs-theme="dark"] .feed-toolbar .btn-group > .btn.label,
+[data-bs-theme="dark"] .list-group-item {
+  color: var(--bs-body-color);
+}
+
+[data-bs-theme="dark"] .feed-statusbar .badge {
+  color: var(--bs-body-color);
+  background-color: var(--bs-tertiary-bg);
 }
