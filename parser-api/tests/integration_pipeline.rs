@@ -15,7 +15,7 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
-use e621_account_parser_api::db;
+use e621_account_parser_api::{api, db};
 use e621_account_parser_api::jobs::{self, ProcessJobPhase};
 use e621_account_parser_api::pipeline;
 use tokio::sync::Mutex;
@@ -405,6 +405,57 @@ async fn analyze_account_e621_user_error_returns_err() {
         "cooc must NOT be wiped when /process aborts before drop_old"
     );
 
+    wipe_account(account_id);
+}
+
+/// A successful HTTP status with an unexpected response shape must not be
+/// interpreted as an empty favourites page. Otherwise a schema change or an
+/// upstream JSON error envelope can silently truncate a full/incremental import.
+#[tokio::test(flavor = "multi_thread")]
+async fn get_favorites_malformed_200_returns_err() {
+    let _guard = pipeline_lock().lock().await;
+    ensure_migrations();
+    let server = MockServer::start().await;
+    let _cfg = install_mock_config(&server.uri());
+
+    let account_id = 91007;
+    wipe_account(account_id);
+
+    Mock::given(method("GET"))
+        .and(path(format!("/users/{account_id}.json")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(fake_user_json(account_id, 1)))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/favorites.json"))
+        .and(query_param("page", "1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "posts": []
+        })))
+        .mount(&server)
+        .await;
+
+    let account = db::set_account("pipeline_owner", account_id, "test_user", "").unwrap();
+    let error = match api::get_favorites(&account, 1).await {
+        Ok(_) => panic!("malformed 200 response must be surfaced as an error"),
+        Err(error) => error.to_string(),
+    };
+
+    assert!(error.contains("favorites page 1"), "missing page context: {error}");
+    assert!(error.contains("malformed 200 response"), "wrong error: {error}");
+
+    jobs::try_begin(account_id);
+    let pipeline_error = pipeline::run_process(account_id, "pipeline_owner".to_string())
+        .await
+        .expect_err("one malformed page must abort the pipeline immediately");
+    assert!(
+        pipeline_error.contains("aborted on malformed favourites response"),
+        "wrong pipeline error: {pipeline_error}"
+    );
+    let state = jobs::get_state(account_id).expect("job state recorded");
+    assert_eq!(state.pages_done, 0, "malformed page must not be marked done");
+
+    jobs::finish(account_id, Err(pipeline_error));
     wipe_account(account_id);
 }
 

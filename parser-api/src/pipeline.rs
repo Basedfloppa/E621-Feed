@@ -286,12 +286,11 @@ async fn run_full_fetch(
     let mut total_persisted = 0usize;
     jobs::set_pages_total(account_id, pages);
     for page in 1..=pages {
-        let raw = api::get_favorites(account, page).await;
-        let posts_res: Result<Vec<Post>, String> = raw.map(|opt| {
-            opt.unwrap_or_default()
+        let posts_res = api::get_favorites(account, page).await.map(|posts| {
+            posts
                 .into_iter()
                 .map(|p| strip_blacklisted_tags(p, blacklist))
-                .collect()
+                .collect::<Vec<Post>>()
         });
         let posts = match posts_res {
             Ok(p) => {
@@ -310,6 +309,11 @@ async fn run_full_fetch(
                     .field("consecutive", consecutive_failures)
                     .field("error", &e)
                     .emit_err();
+                if e.is_malformed() {
+                    return Err(format!(
+                        "aborted on malformed favourites response at page {page}: {e}"
+                    ));
+                }
                 if consecutive_failures >= MAX_CONSECUTIVE_PAGE_FAILURES {
                     return Err(format!(
                         "aborted after {consecutive_failures} consecutive page fetch failures; \
@@ -399,12 +403,11 @@ async fn run_incremental_fetch(
         if page > display_pages {
             jobs::set_pages_total(account_id, page);
         }
-        let raw = api::get_favorites(account, page).await;
-        let posts_res: Result<Vec<Post>, String> = raw.map(|opt| {
-            opt.unwrap_or_default()
+        let posts_res = api::get_favorites(account, page).await.map(|posts| {
+            posts
                 .into_iter()
                 .map(|p| strip_blacklisted_tags(p, blacklist))
-                .collect()
+                .collect::<Vec<Post>>()
         });
         let posts = match posts_res {
             Ok(p) => {
@@ -424,6 +427,11 @@ async fn run_incremental_fetch(
                     .field("mode", "incremental")
                     .field("error", &e)
                     .emit_err();
+                if e.is_malformed() {
+                    return Err(format!(
+                        "aborted on malformed favourites response at page {page}: {e}"
+                    ));
+                }
                 if consecutive_failures >= MAX_CONSECUTIVE_PAGE_FAILURES {
                     return Err(format!(
                         "aborted after {consecutive_failures} consecutive page fetch failures; \

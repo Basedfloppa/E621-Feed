@@ -85,6 +85,11 @@ pub fn clear_api_cache() {
     map.clear();
 }
 
+fn remove_api_cache_entry(url: &str) {
+    let mut map = API_CACHE.lock().expect("api cache poisoned");
+    map.remove(url);
+}
+
 /// Drop every cache entry past TTL. Called by the periodic worker since
 /// `api_cache_put` only evicts on insert.
 pub fn prune_api_cache() -> (usize, usize) {
@@ -489,24 +494,39 @@ async fn send_with_retry(builder: reqwest::RequestBuilder) -> Result<Response, S
     Err("unreachable".into())
 }
 
+#[derive(Debug)]
+pub enum FavoritesPageError {
+    Request(String),
+    Malformed(String),
+}
+
+impl FavoritesPageError {
+    pub fn is_malformed(&self) -> bool {
+        matches!(self, Self::Malformed(_))
+    }
+}
+
+impl std::fmt::Display for FavoritesPageError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Request(message) | Self::Malformed(message) => f.write_str(message),
+        }
+    }
+}
+
+impl std::error::Error for FavoritesPageError {}
+
 /// Fetch one page of favourites for `account`.
 ///
-/// Returns:
-///   * `Ok(Some(posts))` — request succeeded. `posts` may be empty if the
-///     page is genuinely past the end of the user's favourites.
-///   * `Ok(None)` — the body parsed but didn't match the expected
-///     `PostsApiResponse` shape (e621 returned an error envelope or
-///     something the deserialiser can't handle). Treated as an empty
-///     page upstream.
-///   * `Err(_)` — the HTTP call itself failed after all retries
-///     (timeout, DNS, 5xx that exhausted backoff). Caller decides
-///     whether to bail; the previous "return Vec::new()" silently
-///     fabricated empty pages, leaving `/process` with dropped
-///     favourites the user never sees.
+/// Returns the posts from one favourites page.
+///
+/// An empty vector is reserved for a valid empty API page. HTTP failures and
+/// malformed 2xx bodies are returned as errors so callers cannot mistake a
+/// schema change or error envelope for the end of pagination.
 pub async fn get_favorites(
     account: &TruncatedAccount,
     page: i32,
-) -> Result<Option<Vec<Post>>, String> {
+) -> Result<Vec<Post>, FavoritesPageError> {
     info!("Fetching favorites: user_id={} page={}", account.id, page);
 
     let cfg = cfg();
@@ -522,25 +542,27 @@ pub async fn get_favorites(
     );
     debug!("GET (auth) /favorites.json?user_id=…&limit=…&page={page}");
 
-    let body = match fetch_authed_text(url, false, 0).await {
+    let body = match fetch_authed_text(url.clone(), false, 0).await {
         Ok(b) => b,
         Err(e) => {
             warn!("favorites request failed: {e}");
-            return Err(format!("favorites page {page}: {e}"));
+            return Err(FavoritesPageError::Request(format!(
+                "favorites page {page}: {e}"
+            )));
         }
     };
 
-    let posts = match json::from_str::<Vec<Post>>(&body) {
-        Ok(r) => r,
-        Err(e) => {
-            let preview = body_preview(&body);
-            warn!("favorites parse failed: {e}; first bytes: {preview}");
-            return Ok(None);
-        }
-    };
+    let posts = json::from_str::<Vec<Post>>(&body).map_err(|e| {
+        let preview = body_preview(&body);
+        remove_api_cache_entry(&url);
+        warn!("favorites page {page} parse failed: {e}; first bytes: {preview}");
+        FavoritesPageError::Malformed(format!(
+            "favorites page {page}: malformed 200 response: {e}; first bytes: {preview}"
+        ))
+    })?;
 
     info!("Fetched {} favorite posts", posts.len());
-    Ok(Some(posts))
+    Ok(posts)
 }
 
 pub async fn get_account(account: &TruncatedAccount) -> Result<UserApiResponse, String> {
