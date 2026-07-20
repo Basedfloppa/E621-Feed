@@ -220,7 +220,7 @@ pub fn header() -> Html {
         <nav class="navbar navbar-expand-lg bg-body-tertiary border" id="header">
             <div class="container-fluid d-flex align-items-center gap-2">
                 <a class="navbar-brand text-nowrap me-auto" href="/">
-                    {"e621 Account parser"}
+                    {"E621 Feed"}
                 </a>
                 <button
                     type="button"
