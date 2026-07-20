@@ -32,6 +32,7 @@ pub fn post_card(props: &PostCardProps) -> Html {
     let show_desc = &props.show_desc;
 
     let root_ref = use_node_ref();
+    let video_ref = use_node_ref();
     let impression_logged = use_state(|| false);
     let hidden = use_state(|| false);
     let card_width = use_state(|| 0.0f64);
@@ -52,6 +53,23 @@ pub fn post_card(props: &PostCardProps) -> Html {
         )>,
         _,
     >(|| None);
+
+    // Force muted on video elements after mount — Yew's HTML attribute
+    // may not set the DOM property early enough to prevent audio on autoplay.
+    {
+        let video_ref = video_ref.clone();
+        let is_video = matches!(
+            post.files.meta.ext.as_deref(),
+            Some("webm") | Some("mp4") | Some("WEBM") | Some("MP4")
+        ) || post.files.meta.duration.unwrap_or(0.0) > 0.0;
+        use_effect_with(post.id, move |_| {
+            if is_video
+                && let Some(el) = video_ref.cast::<web_sys::HtmlVideoElement>() {
+                    el.set_muted(true);
+                }
+            || ()
+        });
+    }
 
     {
         let card_width = card_width.clone();
@@ -238,6 +256,17 @@ pub fn post_card(props: &PostCardProps) -> Html {
         });
     }
 
+    // Ensure video element is muted via DOM property (Yew's attribute may
+    // not set the underlying HTMLMediaElement.muted correctly for autoplay).
+    {
+        let vr = video_ref.clone();
+        use_effect_with(vr, move |vr| {
+            if let Some(video) = vr.cast::<web_sys::HtmlVideoElement>() {
+                video.set_muted(true);
+            }
+        });
+    }
+
     let img_url = (*current_img_url).clone();
     let preview_count = preview_tag_count(*card_width);
 
@@ -342,14 +371,46 @@ pub fn post_card(props: &PostCardProps) -> Html {
             <div class="position-relative card-body p-0">
                 {
                     if let Some(url) = img_url {
-                        html! {
-                            <img
-                                class="card-img-top img-fluid"
-                                src={url}
-                                alt={(*alt_text).clone()}
-                                loading="lazy"
-                                decoding="async"
-                            />
+                        let is_video = matches!(
+                            post.files.meta.ext.as_deref(),
+                            Some("webm") | Some("mp4") | Some("WEBM") | Some("MP4")
+                        ) || post.files.meta.duration.unwrap_or(0.0) > 0.0;
+
+                        if is_video {
+                            if let Some(video_url) = &post.files.original.url {
+                                html! {
+                                    <video
+                                        ref={video_ref.clone()}
+                                        class="card-img-top img-fluid"
+                                        src={video_url.clone()}
+                                        poster={url.clone()}
+                                        autoplay={true}
+                                        loop={true}
+                                        playsinline={true}
+                                        preload="none"
+                                    />
+                                }
+                            } else {
+                                html! {
+                                    <img
+                                        class="card-img-top img-fluid"
+                                        src={url}
+                                        alt={(*alt_text).clone()}
+                                        loading="lazy"
+                                        decoding="async"
+                                    />
+                                }
+                            }
+                        } else {
+                            html! {
+                                <img
+                                    class="card-img-top img-fluid"
+                                    src={url}
+                                    alt={(*alt_text).clone()}
+                                    loading="lazy"
+                                    decoding="async"
+                                />
+                            }
                         }
                     } else {
                         html! {
