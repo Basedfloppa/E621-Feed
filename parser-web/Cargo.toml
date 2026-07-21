@@ -46,8 +46,8 @@ web-sys = { version = "0.3", features = [
     "MediaQueryList",
 ] }
 urlencoding = "2"
-yew = { version = "0.21", features = ["csr"] }
-yew-router = "0.18"
+yew = { version = "0.23", features = ["csr"] }
+yew-router = "0.20"
 reqwasm = "0.5"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
