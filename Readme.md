@@ -28,7 +28,10 @@ A self-hosted alternative to e621's built-in feed: imports your favourites, buil
 
 ## Features
 
-- Save and manage personal favourites (full + incremental `/process` modes)
+- Save and manage personal favourites with full reconciliation and fast
+  incremental updates
+- Power-user feed controls: relative per-page cutoff presets plus persistent
+  Auto/3/2/1-column layouts
 - Personalised feed with 11-channel scoring (tag similarity, quality, recency,
   rating, media, popularity, interaction, tag-relation, uploader, exclusivity,
   novelty) and MMR diversification
@@ -43,6 +46,31 @@ A self-hosted alternative to e621's built-in feed: imports your favourites, buil
 - Offline calibration harness: `seed` (import public favs) + `calibrate eval` /
   `calibrate grid` (NDCG/Recall/MRR with bootstrap CIs, greedy line search)
 - Simple local dev setup (Rust backend + Trunk-served Yew/WASM frontend)
+
+### Full analysis vs incremental update
+
+Use **Full re-analysis** for the first import or whenever removed e621
+favourites must be reconciled. It requests every expected favourites page,
+replaces the stored account links with the pages fetched successfully, and
+rebuilds the profile. Individual page failures are emitted to audit logs; two
+consecutive failures abort and surface a failed status. Operators should retry
+any failed or known-incomplete run.
+
+Use **Update favourites** for routine refreshes. Incremental mode reads newest
+pages until it reaches a post already stored locally, persists only new
+favourites, and skips the destructive teardown. On very large accounts this
+can avoid roughly 20 minutes of full-rebuild work. Because it stops at the
+first known post, it cannot discover favourites removed on e621; run a full
+re-analysis periodically when deletions matter.
+
+### Power-user feed controls
+
+The **Per-page cutoff** is relative to each scored page, not an absolute score
+threshold: Wide keeps every result, Balanced drops the bottom 30%, and Strict
+drops the bottom 60%. The **Grid type** control chooses responsive Auto or a
+fixed three-, two-, or one-column layout. Both settings are stored in browser
+`localStorage`; they change filtering/layout only and do not retrain or alter
+the scoring model.
 
 ---
 
