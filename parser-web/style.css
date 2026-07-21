@@ -240,3 +240,137 @@ main#main-content {
 .list-group-item:hover {
   background-color: var(--bs-tertiary-bg);
 }
+
+/* Shepherd onboarding — inherit the active Bootstrap light/dark palette. */
+[data-bs-theme] .shepherd-element {
+  color: var(--bs-body-color);
+  background: var(--bs-body-bg);
+  border: 1px solid var(--bs-border-color);
+  border-radius: 0.75rem;
+  box-shadow: 0 0.75rem 2rem rgba(var(--bs-body-color-rgb), 0.18);
+  max-width: min(26rem, calc(100vw - 2rem));
+  overflow: hidden;
+}
+
+[data-bs-theme] .shepherd-content {
+  background: var(--bs-body-bg);
+  border-radius: inherit;
+}
+
+[data-bs-theme] .shepherd-has-title .shepherd-content .shepherd-header {
+  color: var(--bs-body-color);
+  background: var(--bs-tertiary-bg);
+  border-bottom: 1px solid var(--bs-border-color);
+  padding: 0.85rem 1rem;
+}
+
+[data-bs-theme] .shepherd-title,
+[data-bs-theme] .shepherd-text {
+  color: var(--bs-body-color);
+}
+
+[data-bs-theme] .shepherd-title {
+  font-weight: 600;
+  line-height: 1.35;
+}
+
+[data-bs-theme] .shepherd-text {
+  line-height: 1.5;
+  padding: 1rem;
+}
+
+[data-bs-theme] .shepherd-footer {
+  gap: 0.5rem;
+  padding: 0 1rem 1rem;
+}
+
+[data-bs-theme] .shepherd-button {
+  color: #fff;
+  background: var(--bs-primary);
+  border: 1px solid var(--bs-primary);
+  border-radius: var(--bs-border-radius);
+  font-weight: 500;
+  margin: 0;
+  padding: 0.5rem 1rem;
+  transition:
+    background-color 0.15s ease-in-out,
+    border-color 0.15s ease-in-out,
+    box-shadow 0.15s ease-in-out;
+}
+
+[data-bs-theme] .shepherd-button:not(:disabled):hover {
+  color: #fff;
+  background: color-mix(in srgb, var(--bs-primary) 82%, #000);
+  border-color: color-mix(in srgb, var(--bs-primary) 78%, #000);
+}
+
+[data-bs-theme] .shepherd-footer .shepherd-button:last-child:not(:first-child) {
+  color: var(--bs-secondary-color);
+  background: transparent;
+  border-color: var(--bs-border-color);
+}
+
+[data-bs-theme]
+  .shepherd-footer
+  .shepherd-button:last-child:not(:first-child):hover {
+  color: var(--bs-body-color);
+  background: var(--bs-tertiary-bg);
+}
+
+[data-bs-theme] .shepherd-button:focus-visible,
+[data-bs-theme] .shepherd-cancel-icon:focus-visible {
+  outline: 0;
+  box-shadow: 0 0 0 0.25rem rgba(var(--bs-primary-rgb), 0.25);
+}
+
+[data-bs-theme] .shepherd-has-title .shepherd-content .shepherd-cancel-icon {
+  color: var(--bs-secondary-color);
+  border-radius: 50%;
+  line-height: 1;
+}
+
+[data-bs-theme]
+  .shepherd-has-title
+  .shepherd-content
+  .shepherd-cancel-icon:hover {
+  color: var(--bs-body-color);
+}
+
+[data-bs-theme] .shepherd-arrow::before {
+  background: var(--bs-body-bg);
+  border: 1px solid var(--bs-border-color);
+}
+
+[data-bs-theme]
+  .shepherd-element.shepherd-has-title[data-popper-placement^="bottom"]
+  > .shepherd-arrow::before {
+  background: var(--bs-tertiary-bg);
+}
+
+[data-bs-theme]
+  .shepherd-modal-overlay-container.shepherd-modal-is-visible
+  path {
+  fill: rgba(0, 0, 0, 0.62);
+}
+
+@media (max-width: 575.98px) {
+  [data-bs-theme] .shepherd-element {
+    max-width: calc(100vw - 1rem);
+  }
+
+  [data-bs-theme] .shepherd-footer {
+    flex-wrap: wrap;
+  }
+
+  [data-bs-theme] .shepherd-button {
+    flex: 1 1 auto;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  [data-bs-theme] .shepherd-element,
+  [data-bs-theme] .shepherd-button,
+  [data-bs-theme] .shepherd-modal-overlay-container {
+    transition: none;
+  }
+}

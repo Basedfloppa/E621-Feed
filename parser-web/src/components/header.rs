@@ -139,10 +139,23 @@ pub fn header() -> Html {
                 },
                 Step {
                     id: "home-analyzer".into(),
-                    title: Some("Tag analyzer.".into()),
-                    text: "Once you've picked your account, you can start the tag analyzer — it scans your favourite posts for tags and builds the statistics that drive recommendations.".into(),
+                    title: Some("Build your taste profile.".into()),
+                    text: "Run a full analysis the first time. It requests every expected favourites page, replaces the stored favourite links, and rebuilds the tag profile, including reconciliation of favourites you removed on e621.".into(),
                     route: Some("/".into()),
-                    attach_to: Some(AttachTo { element: "#home-analyzer".into(), on: "bottom".into() }),
+                    attach_to: Some(AttachTo { element: "#home-account".into(), on: "bottom".into() }),
+                    buttons: Some(vec![
+                        Button { text: "Next".into(), action: "next".into(), classes: None },
+                        Button { text: "Back".into(), action: "back".into(), classes: None },
+                    ]),
+                    wait_timeout: Some(8000),
+                    must_be_visible: Some(true),
+                },
+                Step {
+                    id: "home-updates".into(),
+                    title: Some("Keep it fresh without a full rebuild.".into()),
+                    text: "For routine refreshes, use Update favourites: it fetches only newer favourites and skips the expensive teardown, saving substantial time on large accounts. Incremental updates cannot detect favourites you removed on e621, so run Full re-analysis when you need deletions reconciled.".into(),
+                    route: Some("/".into()),
+                    attach_to: None,
                     buttons: Some(vec![
                         Button { text: "Next".into(), action: "next".into(), classes: None },
                         Button { text: "Back".into(), action: "back".into(), classes: None },
@@ -165,8 +178,8 @@ pub fn header() -> Html {
                 },
                 Step {
                     id: "feed-affinity".into(),
-                    title: Some("Post affinity.".into()),
-                    text: "Before scrolling, set a post affinity threshold so you don't see things you may not like — 0.2 is a good starting value.".into(),
+                    title: Some("Control each page's cutoff.".into()),
+                    text: "This power-user control drops the weakest percentage from each scored page: Wide keeps everything, Balanced drops the bottom 30%, and Strict drops the bottom 60%. It is a relative display filter, not an absolute affinity threshold, and your choice is saved in this browser.".into(),
                     route: Some("/feed".into()),
                     attach_to: Some(AttachTo { element: "#feed-affinity".into(), on: "bottom".into() }),
                     buttons: Some(vec![
@@ -178,8 +191,8 @@ pub fn header() -> Html {
                 },
                 Step {
                     id: "feed-grid".into(),
-                    title: Some("Feed grid.".into()),
-                    text: "Pick the grid layout that's most comfortable for your screen width.".into(),
+                    title: Some("Choose your feed density.".into()),
+                    text: "Use Auto for a responsive grid, or lock the feed to three, two, or one column. This changes layout only — not recommendation scores — and is saved in this browser.".into(),
                     route: Some("/feed".into()),
                     attach_to: Some(AttachTo { element: "#feed-grid".into(), on: "bottom".into() }),
                     buttons: Some(vec![
