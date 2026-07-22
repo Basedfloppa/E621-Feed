@@ -122,6 +122,38 @@ pub fn feed_page() -> Html {
         GridType::from_storage(stored)
     });
 
+    // Badge visibility toggles — each defaults to enabled (true) and
+    // persists to localStorage under `feed_show_*` keys so the user's
+    // preference survives reloads.
+    let show_rating = use_state(|| {
+        window()
+            .and_then(|w| w.local_storage().ok().flatten())
+            .and_then(|s| s.get_item("feed_show_rating").ok().flatten())
+            .and_then(|v| v.parse::<bool>().ok())
+            .unwrap_or(true)
+    });
+    let show_affinity = use_state(|| {
+        window()
+            .and_then(|w| w.local_storage().ok().flatten())
+            .and_then(|s| s.get_item("feed_show_affinity").ok().flatten())
+            .and_then(|v| v.parse::<bool>().ok())
+            .unwrap_or(true)
+    });
+    let show_score = use_state(|| {
+        window()
+            .and_then(|w| w.local_storage().ok().flatten())
+            .and_then(|s| s.get_item("feed_show_score").ok().flatten())
+            .and_then(|v| v.parse::<bool>().ok())
+            .unwrap_or(true)
+    });
+    let show_post_number = use_state(|| {
+        window()
+            .and_then(|w| w.local_storage().ok().flatten())
+            .and_then(|s| s.get_item("feed_show_post_number").ok().flatten())
+            .and_then(|v| v.parse::<bool>().ok())
+            .unwrap_or(true)
+    });
+
     // Exploration epsilon — ε-greedy exploration bonus.
     // 0.0 = pure exploitation (Focused), 0.5 = max exploration (Discovery).
     // Initialised from localStorage; falls back to 0.1 (Balanced).
@@ -183,6 +215,26 @@ pub fn feed_page() -> Html {
             || ()
         });
     }
+
+    // Persist badge visibility toggles.
+    macro_rules! persist_bool {
+        ($s:expr, $key:expr) => {
+            {
+                let s = $s.clone();
+                let key = $key;
+                use_effect_with(*s, move |a: &bool| {
+                    if let Some(store) = window().and_then(|w| w.local_storage().ok().flatten()) {
+                        let _ = store.set_item(key, &a.to_string());
+                    }
+                    || ()
+                });
+            }
+        };
+    }
+    persist_bool!(show_rating, "feed_show_rating");
+    persist_bool!(show_affinity, "feed_show_affinity");
+    persist_bool!(show_score, "feed_show_score");
+    persist_bool!(show_post_number, "feed_show_post_number");
 
     {
         let exploration_epsilon = exploration_epsilon.clone();
@@ -528,6 +580,10 @@ pub fn feed_page() -> Html {
                         show_desc={*show_desc.clone()}
                         show_metadata={*show_metadata.clone()}
                         show_breakdown={*show_breakdown.clone()}
+                        show_rating={*show_rating.clone()}
+                        show_affinity={*show_affinity.clone()}
+                        show_score={*show_score.clone()}
+                        show_post_number={*show_post_number.clone()}
                     />
                 </div>
             }
@@ -717,57 +773,147 @@ pub fn feed_page() -> Html {
                     </div>
                 </div>
 
-                <div class="col-auto feed-post-text-col" id="feed-post-text">
-                    <span class="d-block">{"Show post text"}</span>
-                    <input 
-                        id="show-post-text"
-                        type="checkbox" 
-                        class="form-check-input"
-                        checked={*show_desc}
-                        oninput={{
-                                    let show_desc = show_desc.clone();
-                                    Callback::from(move |e: InputEvent| {
-                                        let input: HtmlInputElement = e.target_unchecked_into();
-                                        show_desc.set(input.checked());
-                                    })
-                                }} 
-                    />
-                </div>
+                <div class="col-auto">
+                    <div class="dropdown">
+                        <button
+                            class="btn btn-outline-secondary dropdown-toggle"
+                            type="button"
+                            data-bs-toggle="dropdown"
+                            data-bs-auto-close="outside"
+                            aria-expanded="false"
+                            aria-label="Card display settings"
+                        >
+                            <i class="bi bi-sliders" aria-hidden="true"></i>
+                            {" Display"}
+                        </button>
+                        <ul class="dropdown-menu dropdown-menu-end p-3" style="min-width: 260px;">
+                            <li><small class="text-muted d-block mb-1">{ "Badges" }</small></li>
+                            <li class="mb-2">
+                                <div class="form-check form-switch">
+                                    <input
+                                        class="form-check-input"
+                                        type="checkbox"
+                                        id="show-rating"
+                                        checked={*show_rating}
+                                        onchange={{
+                                            let show_rating = show_rating.clone();
+                                            Callback::from(move |_: Event| show_rating.set(!*show_rating))
+                                        }}
+                                    />
+                                    <label class="form-check-label" for="show-rating">
+                                        {"Rating badge"}
+                                    </label>
+                                </div>
+                            </li>
+                            <li class="mb-2">
+                                <div class="form-check form-switch">
+                                    <input
+                                        class="form-check-input"
+                                        type="checkbox"
+                                        id="show-affinity"
+                                        checked={*show_affinity}
+                                        onchange={{
+                                            let show_affinity = show_affinity.clone();
+                                            Callback::from(move |_: Event| show_affinity.set(!*show_affinity))
+                                        }}
+                                    />
+                                    <label class="form-check-label" for="show-affinity">
+                                        {"Affinity score"}
+                                    </label>
+                                </div>
+                            </li>
+                            <li class="mb-2">
+                                <div class="form-check form-switch">
+                                    <input
+                                        class="form-check-input"
+                                        type="checkbox"
+                                        id="show-score"
+                                        checked={*show_score}
+                                        onchange={{
+                                            let show_score = show_score.clone();
+                                            Callback::from(move |_: Event| show_score.set(!*show_score))
+                                        }}
+                                    />
+                                    <label class="form-check-label" for="show-score">
+                                        {"Post score"}
+                                    </label>
+                                </div>
+                            </li>
+                            <li class="mb-2">
+                                <div class="form-check form-switch">
+                                    <input
+                                        class="form-check-input"
+                                        type="checkbox"
+                                        id="show-post-number"
+                                        checked={*show_post_number}
+                                        onchange={{
+                                            let show_post_number = show_post_number.clone();
+                                            Callback::from(move |_: Event| show_post_number.set(!*show_post_number))
+                                        }}
+                                    />
+                                    <label class="form-check-label" for="show-post-number">
+                                        {"Post number"}
+                                    </label>
+                                </div>
+                            </li>
+                            <li><hr class="dropdown-divider" /></li>
+                            <li><small class="text-muted d-block mb-1">{ "Cards" }</small></li>
+                            <li class="mb-2">
+                                <div class="form-check form-switch">
+                                    <input
+                                        class="form-check-input"
+                                        type="checkbox"
+                                        id="show-post-text"
+                                        checked={*show_desc}
+                                        onchange={{
+                                            let show_desc = show_desc.clone();
+                                            Callback::from(move |_: Event| show_desc.set(!*show_desc))
+                                        }}
+                                    />
+                                    <label class="form-check-label" for="show-post-text">
+                                        {"Post text / tags"}
+                                    </label>
+                                </div>
+                            </li>
+                            <li class="mb-2">
+                                <div class="form-check form-switch">
+                                    <input
+                                        class="form-check-input"
+                                        type="checkbox"
+                                        id="show-file-metadata"
+                                        checked={*show_metadata}
+                                        onchange={{
+                                            let show_metadata = show_metadata.clone();
+                                            Callback::from(move |_: Event| show_metadata.set(!*show_metadata))
+                                        }}
+                                    />
+                                    <label class="form-check-label" for="show-file-metadata">
+                                        {"File metadata"}
+                                    </label>
+                                </div>
+                            </li>
+                            <li>
+                                <div class="form-check form-switch">
+                                    <input
+                                        class="form-check-input"
+                                        type="checkbox"
+                                        id="show-score-breakdown"
+                                        checked={*show_breakdown}
+                                        onchange={{
+                                            let show_breakdown = show_breakdown.clone();
+                                            Callback::from(move |_: Event| show_breakdown.set(!*show_breakdown))
+                                        }}
+                                    />
+                                    <label class="form-check-label" for="show-score-breakdown">
+                                        {"Score breakdown"}
+                                    </label>
+                                </div>
+                            </li>
+                        </ul>
+                    </div>
 
-                <div class="col-auto feed-post-text-col" id="feed-file-metadata">
-                    <span class="d-block">{"Show file metadata"}</span>
-                    <input
-                        id="show-file-metadata"
-                        type="checkbox"
-                        class="form-check-input"
-                        checked={*show_metadata}
-                        oninput={{
-                                    let show_metadata = show_metadata.clone();
-                                    Callback::from(move |e: InputEvent| {
-                                        let input: HtmlInputElement = e.target_unchecked_into();
-                                        show_metadata.set(input.checked());
-                                    })
-                                }}
-                    />
-                </div>
-
-                <div class="col-auto feed-post-text-col" id="feed-score-breakdown">
-                    <span class="d-block">{"Score breakdown"}</span>
-                    <input
-                        id="show-score-breakdown"
-                        type="checkbox"
-                        class="form-check-input"
-                        checked={*show_breakdown}
-                        oninput={{
-                                    let show_breakdown = show_breakdown.clone();
-                                    Callback::from(move |e: InputEvent| {
-                                        let input: HtmlInputElement = e.target_unchecked_into();
-                                        show_breakdown.set(input.checked());
-                                    })
-                                }}
-                    />
-                </div>
             </div>
+        </div>
 
             <div class="position-fixed bottom-0 start-50 translate-middle-x w-100 d-flex justify-content-between z-1 feed-statusbar">
                 {

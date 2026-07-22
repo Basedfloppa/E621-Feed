@@ -26,6 +26,18 @@ pub struct PostCardProps {
     pub show_metadata: bool,
     #[prop_or_default]
     pub show_breakdown: bool,
+    /// Show the rating badge (S/Q/E with colour) on the post card.
+    #[prop_or(true)]
+    pub show_rating: bool,
+    /// Show the affinity score badge on the post card.
+    #[prop_or(true)]
+    pub show_affinity: bool,
+    /// Show the post score (upvote/downvote total) badge on the post card.
+    #[prop_or(true)]
+    pub show_score: bool,
+    /// Show the post number / file-metadata badge on the post card.
+    #[prop_or(true)]
+    pub show_post_number: bool,
 }
 
 #[function_component(PostCard)]
@@ -455,13 +467,15 @@ pub fn post_card(props: &PostCardProps) -> Html {
                     )}
                 />
 
-                <span
-                    class={classes!(rating_classes, "position-absolute", "top-0", "start-0", "m-2")}
-                    title="Rating"
-                    aria-label={format!("Rating {rating_label}")}
-                >
-                    { rating_label }
-                </span>
+                if props.show_rating {
+                    <span
+                        class={classes!(rating_classes, "position-absolute", "top-0", "start-0", "m-2")}
+                        title="Rating"
+                        aria-label={format!("Rating {rating_label}")}
+                    >
+                        { rating_label }
+                    </span>
+                }
 
                 <button
                     type="button"
@@ -479,26 +493,28 @@ pub fn post_card(props: &PostCardProps) -> Html {
                     { "×" }
                 </button>
 
-                <span
-                    class={classes!("badge", "rounded","bg-secondary","position-absolute", "top-0", "end-0", "m-2")}
-                    title={"Overall recommendation score — blends tag similarity, quality, recency, rating, media, popularity, interaction, and tag-relation signals into a single affinity measure. Higher values indicate a stronger match with your personal preferences, but absolute scores shift with model tuning."}
-                    aria-label={format!("Affinity {:.2}", props.affinity)}>
-                    { format!("{:.2}",&props.affinity) }
-                </span>
+                if props.show_affinity {
+                    <span
+                        class={classes!("badge", "rounded","bg-secondary","position-absolute", "top-0", "end-0", "m-2")}
+                        title={"Overall recommendation score — blends tag similarity, quality, recency, rating, media, popularity, interaction, and tag-relation signals into a single affinity measure. Higher values indicate a stronger match with your personal preferences, but absolute scores shift with model tuning."}
+                        aria-label={format!("Affinity {:.2}", props.affinity)}>
+                        { format!("{:.2}",&props.affinity) }
+                    </span>
+                }
 
-                <span
-                    class={classes!("badge", "position-absolute", "bottom-0", "end-0", "m-2", if score_summary > 0 {"bg-success"} else {"bg-danger"})}
-                    title={score_detail}
-                >
-                    { score_summary }
-                </span>
+                if props.show_score {
+                    <span
+                        class={classes!("badge", "position-absolute", "bottom-0", "end-0", "m-2", if score_summary > 0 {"bg-success"} else {"bg-danger"})}
+                        title={score_detail}
+                    >
+                        { score_summary }
+                    </span>
+                }
 
-                {
-                    html! {
-                        <span class="position-absolute bottom-0 start-0 m-2 badge bg-dark bg-opacity-60 text-light small lh-1" style="font-size:0.65rem;">
-                            { badge_text.clone() }
-                        </span>
-                    }
+                if props.show_post_number {
+                    <span class="position-absolute bottom-0 start-0 m-2 badge bg-dark bg-opacity-60 text-light small lh-1" style="font-size:0.65rem;">
+                        { badge_text.clone() }
+                    </span>
                 }
             </div>
 
