@@ -480,7 +480,9 @@ pub fn post_card(props: &PostCardProps) -> Html {
                 </button>
 
                 <span
-                    class={classes!("badge", "rounded","bg-secondary","position-absolute", "top-0", "end-0", "m-2")} >
+                    class={classes!("badge", "rounded","bg-secondary","position-absolute", "top-0", "end-0", "m-2")}
+                    title={"Overall recommendation score — blends tag similarity, quality, recency, rating, media, popularity, interaction, and tag-relation signals into a single affinity measure. Higher values indicate a stronger match with your personal preferences, but absolute scores shift with model tuning."}
+                    aria-label={format!("Affinity {:.2}", props.affinity)}>
                     { format!("{:.2}",&props.affinity) }
                 </span>
 
