@@ -547,6 +547,15 @@ pub fn post_card(props: &PostCardProps) -> Html {
                                 <span class="badge text-muted text-truncate mw-100" title="How coherently this post's tags relate to each other — globally (PMI lift) and inside your own favourites (pair co-occurrence).">
                                     { format!("Relation {:.2}", breakdown.tag_relation_fit) }
                                 </span>
+                                <span class="badge text-muted text-truncate mw-100" title="How this post's uploader compares to the uploaders you tend to favourite.">
+                                    { format!("Uploader {:.2}", breakdown.uploader_fit) }
+                                </span>
+                                <span class="badge text-muted text-truncate mw-100" title="How rare or unusual this post's tag combination is within your profile — favours distinctive picks.">
+                                    { format!("Exclusive {:.2}", breakdown.exclusivity_fit) }
+                                </span>
+                                <span class="badge text-muted text-truncate mw-100" title="How fresh or unfamiliar this post's tags are compared to what you've seen recently.">
+                                    { format!("Novel {:.2}", breakdown.novelty_fit) }
+                                </span>
                             </div>
                         }
                     } else {

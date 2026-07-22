@@ -181,6 +181,12 @@ pub struct ScoreBreakdown {
     pub interaction_fit: f32,
     #[serde(default)]
     pub tag_relation_fit: f32,
+    #[serde(default)]
+    pub uploader_fit: f32,
+    #[serde(default)]
+    pub exclusivity_fit: f32,
+    #[serde(default)]
+    pub novelty_fit: f32,
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq)]
