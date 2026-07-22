@@ -122,6 +122,18 @@ pub fn feed_page() -> Html {
         GridType::from_storage(stored)
     });
 
+    // Exploration epsilon — ε-greedy exploration bonus.
+    // 0.0 = pure exploitation (Focused), 0.5 = max exploration (Discovery).
+    // Initialised from localStorage; falls back to 0.1 (Balanced).
+    let exploration_epsilon = use_state(|| {
+        window()
+            .and_then(|w| w.local_storage().ok().flatten())
+            .and_then(|s| s.get_item("feed_exploration_epsilon").ok().flatten())
+            .and_then(|v| v.parse::<f32>().ok())
+            .unwrap_or(0.1)
+            .clamp(0.0, 0.5)
+    });
+
     {
         let show_desc = show_desc.clone();
         use_effect_with(*show_desc, move |a: &bool| {
@@ -172,6 +184,16 @@ pub fn feed_page() -> Html {
         });
     }
 
+    {
+        let exploration_epsilon = exploration_epsilon.clone();
+        use_effect_with(*exploration_epsilon, move |a: &f32| {
+            if let Some(store) = window().and_then(|w| w.local_storage().ok().flatten()) {
+                let _ = store.set_item("feed_exploration_epsilon", &a.to_string());
+            }
+            || ()
+        });
+    }
+
     let fetch_page = {
         let posts = posts.clone();
         let page = page.clone();
@@ -179,6 +201,7 @@ pub fn feed_page() -> Html {
         let error = error.clone();
         let selected_user = selected_user.clone();
         let cutoff_pct = cutoff_pct.clone();
+        let exploration_epsilon = exploration_epsilon.clone();
         let session_id = session_id.clone();
         let inflight = inflight.clone();
         let exhausted = exhausted.clone();
@@ -205,11 +228,12 @@ pub fn feed_page() -> Html {
                 return;
             };
             let url = format!(
-                "{}/recommendations/{}?page={}&session={}",
+                "{}/recommendations/{}?page={}&session={}&exploration={:.2}",
                 cfg.backend_domain,
                 user.id,
                 *page,
-                urlencoding::encode(session_id.as_str())
+                urlencoding::encode(session_id.as_str()),
+                *exploration_epsilon,
             );
 
             // Captured for the per-page cutoff filter that runs after fetch.
@@ -340,6 +364,22 @@ pub fn feed_page() -> Html {
         let consecutive_errors = consecutive_errors.clone();
         let error = error.clone();
         use_effect_with(*cutoff_pct, move |_| {
+            exhausted.set(false);
+            consecutive_empty.borrow().set(0);
+            consecutive_errors.borrow().set(0);
+            error.set(None);
+            || ()
+        });
+    }
+
+    // Changing the exploration preset resets scroll state so the next
+    // scroll event fetches a fresh page with the new epsilon value.
+    {
+        let exhausted = exhausted.clone();
+        let consecutive_empty = consecutive_empty.clone();
+        let consecutive_errors = consecutive_errors.clone();
+        let error = error.clone();
+        use_effect_with(*exploration_epsilon, move |_| {
             exhausted.set(false);
             consecutive_empty.borrow().set(0);
             consecutive_errors.borrow().set(0);
@@ -551,6 +591,61 @@ pub fn feed_page() -> Html {
                                             title={ *tip }
                                             aria-pressed={active.to_string()}
                                             onclick={Callback::from(move |_| cutoff_pct.set(val))}
+                                        >
+                                            { *label }
+                                        </button>
+                                    }
+                                }).collect::<Html>()
+                            }
+                        </div>
+                    </div>
+                </div>
+
+                <div class="col-auto feed-exploration-col" id="feed-exploration">
+                    <label for="feed-exploration-input" class="form-label mb-1 d-block">
+                        {"Exploration"}
+                        <small class="text-muted ms-1">
+                            { "(ε-greedy novelty boost)" }
+                        </small>
+                    </label>
+                    <div class="d-flex align-items-center gap-2">
+                        <input
+                            id="feed-exploration-input"
+                            type="number"
+                            class="form-control"
+                            style="max-width: 8rem"
+                            value={exploration_epsilon.to_string()}
+                            step="0.05"
+                            min="0"
+                            max="0.5"
+                            oninput={{
+                                let exploration_epsilon = exploration_epsilon.clone();
+                                Callback::from(move |e: InputEvent| {
+                                    if let Some(target) = e.target()
+                                        && let Ok(input) = target.dyn_into::<HtmlInputElement>()
+                                            && let Ok(v) = input.value().parse::<f32>() {
+                                                exploration_epsilon.set(v.clamp(0.0, 0.5));
+                                            }
+                                })
+                            }}
+                        />
+                        <div class="btn-group btn-group-sm" role="group" aria-label="Exploration preset">
+                            {
+                                [
+                                    ("Focused", 0.0f32, "Pure exploitation — show only the model's top picks. Same as default behaviour."),
+                                    ("Balanced", 0.1f32, "Mild exploration — occasionally surface novel content alongside confident picks."),
+                                    ("Discovery", 0.4f32, "Heavy exploration — prioritise novel and less-similar content for broader discovery."),
+                                ].iter().map(|(label, value, tip)| {
+                                    let val = *value;
+                                    let active = (*exploration_epsilon - val).abs() < 0.025;
+                                    let exploration_epsilon = exploration_epsilon.clone();
+                                    html! {
+                                        <button
+                                            type="button"
+                                            class={classes!("btn", "btn-outline-secondary", active.then_some("active"))}
+                                            title={ *tip }
+                                            aria-pressed={active.to_string()}
+                                            onclick={Callback::from(move |_| exploration_epsilon.set(val))}
                                         >
                                             { *label }
                                         </button>
