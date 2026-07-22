@@ -389,10 +389,11 @@ pub fn post_card(props: &PostCardProps) -> Html {
             format!("{}KB", size_kb)
         };
         let ext = post.files.meta.ext.as_deref().unwrap_or("").to_uppercase();
+        let fav_part = format!("♥ {}", post.stats.fav_count);
         if props.show_metadata {
-            format!("#{} — {} {}", post.id, ext, size_str)
+            format!("#{} — {} {} — {}", post.id, ext, size_str, fav_part)
         } else {
-            format!("#{}", post.id)
+            format!("#{} — {}", post.id, fav_part)
         }
     };
 
