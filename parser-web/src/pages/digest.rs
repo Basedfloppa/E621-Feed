@@ -1,5 +1,6 @@
 use serde::de::DeserializeOwned;
 use wasm_bindgen::JsCast;
+use wasm_bindgen::closure::Closure;
 use wasm_bindgen_futures::spawn_local;
 use web_sys::RequestInit;
 use web_sys::{Request, RequestMode, Response, window};
@@ -87,6 +88,11 @@ pub fn digest_page() -> Html {
     // server-side regeneration to retry).
     let refresh_tick = use_state(|| 0u32);
 
+    // Tracks whether a /process job is running for the selected account.
+    // When set, the digest page shows a progress indicator and disables
+    // controls (Refresh, mode toggle) until the job completes.
+    let process_status = use_state(|| Option::<ProcessJobState>::None);
+
     // Persist each setting on change. Effects only fire when the dep value
     // differs from the previous render, so this is cheap.
     {
@@ -122,6 +128,47 @@ pub fn digest_page() -> Html {
         use_effect_with(g, move |g: &GridType| {
             write_local("digest_grid_type", g.to_storage());
             || ()
+        });
+    }
+
+    // Bootstrap the process status when the selected account changes.
+    // The digest requires a processed profile, so we show a progress
+    // indicator when /process is still running.
+    {
+        let api_base = (*selected_user).clone().map(|u| (u.id, u));
+        let api_base_for_effect = api_base.clone();
+        let process_status = process_status.clone();
+        use_effect_with(api_base_for_effect, move |val| {
+            let Some((account_id, _)) = val else {
+                process_status.set(None);
+                return;
+            };
+            let Some(cfg) = read_config_from_head() else {
+                return;
+            };
+            let url = format!("{}/process/{}/status", cfg.backend_domain, account_id);
+            let process_status = process_status.clone();
+            spawn_local(async move {
+                match api_get(&url).send().await {
+                    Ok(resp) if resp.ok() => {
+                        match resp.json::<Option<ProcessJobState>>().await {
+                            Ok(s) => process_status.set(s),
+                            Err(e) => {
+                                web_sys::console::warn_1(
+                                    &format!("digest process status parse: {e}").into(),
+                                );
+                                process_status.set(None);
+                            }
+                        }
+                    }
+                    Ok(_) => process_status.set(None),
+                    Err(e) => {
+                        web_sys::console::warn_1(
+                            &format!("digest process status network: {e}").into(),
+                        );
+                    }
+                }
+            });
         });
     }
 
@@ -162,6 +209,10 @@ pub fn digest_page() -> Html {
                 };
                 let url = format!("{}/digest/{}{}", cfg.backend_domain, user.id, qs);
 
+                // Clear any stale process-running message now that we're
+                // fetching fresh data (the user may have waited for the job
+                // to finish). Keep the process_status so the next poll can
+                // still detect a new run triggered by another tab.
                 is_loading.set(true);
                 error.set(None);
 
@@ -184,12 +235,124 @@ pub fn digest_page() -> Html {
         );
     }
 
+    // Poll while a /process job is Running. When it transitions to Done,
+    // bump the refresh tick so the digest fetch reruns automatically.
+    {
+        let _api_base = (*selected_user).clone().map(|u| (u.id, u));
+        let refresh_tick = refresh_tick.clone();
+        let process_status = process_status.clone();
+        let phase = process_status
+            .as_ref()
+            .map(|s| s.phase.clone())
+            .unwrap_or(ProcessJobPhase::Done);
+        let account_id = process_status
+            .as_ref()
+            .map(|s| s.account_id)
+            .unwrap_or(0);
+        let started_at = process_status
+            .as_ref()
+            .map(|s| s.started_at.clone())
+            .unwrap_or_default();
+
+        use_effect_with(
+            (phase.clone(), account_id, started_at),
+            move |(phase, account_id, _started_at)| {
+                let mut handle: Option<i32> = None;
+                let mut _closure: Option<Closure<dyn FnMut()>> = None;
+
+                if matches!(phase, ProcessJobPhase::Running) && *account_id > 0 {
+                    if let Some(cfg) = read_config_from_head() {
+                    let url = format!("{}/process/{}/status", cfg.backend_domain, account_id);
+                    let process_status = process_status.clone();
+                    let refresh_tick = refresh_tick.clone();
+
+                    let cb = Closure::<dyn FnMut()>::new(move || {
+                        let url = url.clone();
+                        let process_status = process_status.clone();
+                        let refresh_tick = refresh_tick.clone();
+                        spawn_local(async move {
+                            match api_get(&url).send().await {
+                                Ok(resp) if resp.ok() => {
+                                    match resp.json::<Option<ProcessJobState>>().await {
+                                        Ok(Some(s)) => {
+                                            let was_done = matches!(
+                                                s.phase,
+                                                ProcessJobPhase::Done | ProcessJobPhase::Failed,
+                                            );
+                                            let was_previously_running =
+                                                process_status
+                                                    .as_ref()
+                                                    .map(|old| old.phase == ProcessJobPhase::Running)
+                                                    .unwrap_or(false);
+                                            process_status.set(Some(s));
+                                            // Auto-refresh digest when a
+                                            // running job finishes.
+                                            if was_done && was_previously_running {
+                                                refresh_tick.set(*refresh_tick + 1);
+                                            }
+                                        }
+                                        Ok(None) => {
+                                            process_status.set(None);
+                                        }
+                                        Err(e) => {
+                                            web_sys::console::warn_1(
+                                                &format!("digest status parse: {e}").into(),
+                                            );
+                                        }
+                                    }
+                                }
+                                Ok(resp) => {
+                                    web_sys::console::warn_1(
+                                        &format!("digest status HTTP {}", resp.status()).into(),
+                                    );
+                                }
+                                Err(e) => {
+                                    web_sys::console::warn_1(
+                                        &format!("digest status network: {e}").into(),
+                                    );
+                                }
+                            }
+                        });
+                    });
+
+                        if let Some(window) = web_sys::window()
+                            && let Ok(h) = window
+                                .set_interval_with_callback_and_timeout_and_arguments_0(
+                                    cb.as_ref().unchecked_ref(),
+                                    5000,
+                                )
+                        {
+                            handle = Some(h);
+                            _closure = Some(cb);
+                        }
+                    } else {
+                        web_sys::console::warn_1(&"digest poll: no config".into());
+                    }
+                }
+
+                move || {
+                    if let Some(h) = handle
+                        && let Some(w) = web_sys::window()
+                    {
+                        w.clear_interval_with_handle(h);
+                    }
+                    drop(_closure);
+                }
+            },
+        );
+    }
+
     let on_refresh = {
         let refresh_tick = refresh_tick.clone();
         Callback::from(move |_: MouseEvent| {
             refresh_tick.set(*refresh_tick + 1);
         })
     };
+
+    let process_is_running = matches!(
+        process_status.as_ref().map(|s| s.phase.clone()),
+        Some(ProcessJobPhase::Running)
+    );
 
     let on_toggle_full = {
         let is_full = is_full.clone();
@@ -224,6 +387,49 @@ pub fn digest_page() -> Html {
 
     let col_class = grid.col_class();
 
+    // Compute the process-running banner outside the html! macro so we
+    // can use let bindings without tripping the macro's element parser.
+    let process_banner = if process_is_running {
+        let (label, progress_pct, elapsed) = match process_status.as_ref() {
+            Some(ps) => {
+                let label = if ps.pages_total > 0 {
+                    format!("Processing favourites {}/{}", ps.pages_done, ps.pages_total)
+                } else {
+                    "Starting analysis…".to_string()
+                };
+                let pct = if ps.pages_total > 0 {
+                    (ps.pages_done as f32 / ps.pages_total as f32 * 100.0).clamp(0.0, 100.0)
+                } else {
+                    0.0
+                };
+                let elapsed = ps.elapsed_secs;
+                (label, pct, elapsed)
+            }
+            None => ("Processing…".to_string(), 0.0, 0.0),
+        };
+        html! {
+            <div class="alert alert-info d-flex align-items-center gap-2 flex-wrap mb-3" role="status">
+                <span class="spinner-border spinner-border-sm" aria-hidden="true"></span>
+                <span>{ &label }</span>
+                if progress_pct > 0.0 {
+                    <div class="flex-grow-1" style="min-width: 120px;">
+                        <div class="progress" role="progressbar" style="height: 6px;"
+                            aria-valuenow={format!("{:.0}", progress_pct)}
+                            aria-valuemin="0" aria-valuemax="100">
+                            <div class="progress-bar progress-bar-striped progress-bar-animated bg-info"
+                                style={format!("width: {:.1}%", progress_pct)} />
+                        </div>
+                    </div>
+                }
+                if elapsed > 0.0 {
+                    <small class="text-muted">{ format!("{:.0}s elapsed", elapsed) }</small>
+                }
+            </div>
+        }
+    } else {
+        html! {}
+    };
+
     html! {
         <div class="container-fluid mt-3">
             <div class="d-flex align-items-center gap-2 mb-3 flex-wrap">
@@ -235,7 +441,7 @@ pub fn digest_page() -> Html {
                 <button
                     class="btn btn-outline-primary"
                     onclick={on_refresh}
-                    disabled={*is_loading}
+                    disabled={*is_loading || process_is_running}
                 >
                     <i class="bi bi-arrow-clockwise" aria-hidden="true"></i>
                     { " Refresh" }
@@ -246,7 +452,7 @@ pub fn digest_page() -> Html {
                         if *is_full { "btn-primary" } else { "btn-outline-secondary" },
                     )}
                     onclick={on_toggle_full}
-                    disabled={*is_loading}
+                    disabled={*is_loading || process_is_running}
                 >
                     { if *is_full { "Full digest" } else { "Quick digest" } }
                 </button>
@@ -364,6 +570,8 @@ pub fn digest_page() -> Html {
                 <div class="alert alert-danger" role="alert">{ e }</div>
             }
 
+            { process_banner }
+
             if *is_loading {
                 <div class="d-flex justify-content-center my-5">
                     <div class="spinner-border" role="status">
@@ -372,7 +580,7 @@ pub fn digest_page() -> Html {
                 </div>
             }
 
-            if !*is_loading && posts.is_empty() && error.is_none() {
+            if !*is_loading && !process_is_running && posts.is_empty() && error.is_none() {
                 <div class="alert alert-info" role="alert">
                     { "No posts yet. Select an account above and wait for the digest to load." }
                 </div>
