@@ -713,7 +713,9 @@ pub fn feed_page() -> Html {
                                     // resets the fetch_page guard would
                                     // short-circuit on `*exhausted`.
                                     Callback::from(move |_| {
-                                        consecutive_errors.borrow().set(0);
+                                        if *exhausted {
+                                            consecutive_errors.borrow().set(0);
+                                        }
                                         exhausted.set(false);
                                         error.set(None);
                                         fetch_page.emit(());
