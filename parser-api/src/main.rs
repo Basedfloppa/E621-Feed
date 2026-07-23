@@ -288,6 +288,8 @@ async fn rocket() -> _ {
         routes::feed::get_recommendations_continue,
         routes::feed::get_similar_posts,
         routes::digest::get_daily_digest,
+        routes::browse::get_trending,
+        routes::browse::get_favorites,
         get_default_blacklist,
         session_bootstrap,
         session_clear

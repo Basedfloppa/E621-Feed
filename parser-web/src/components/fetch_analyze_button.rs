@@ -295,7 +295,7 @@ pub fn fetch_analyze_button(props: &AnalyzeButtonProps) -> Html {
     };
 
     html! {
-        <div class="d-grid gap-2 mb-4">
+        <div class="flex flex-col gap-2 mb-4">
             <button
                 class="btn btn-warning"
                 onclick={analyze_tags}
@@ -307,7 +307,7 @@ pub fn fetch_analyze_button(props: &AnalyzeButtonProps) -> Html {
                 { if busy {
                     html! {
                         <span>
-                            <span class="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></span>
+                            <span class="loading loading-spinner loading-sm me-2" role="status" aria-hidden="true"></span>
                             { label.clone() }
                         </span>
                     }
@@ -316,13 +316,11 @@ pub fn fetch_analyze_button(props: &AnalyzeButtonProps) -> Html {
                 }}
             </button>
             if let Some(pct) = progress_pct {
-                <div class="progress" role="progressbar" aria-valuenow={format!("{pct:.0}")} aria-valuemin="0" aria-valuemax="100" style="height: 6px;">
-                    <div class="progress-bar progress-bar-striped progress-bar-animated bg-warning" style={format!("width: {pct:.1}%")} />
-                </div>
+                <progress class="progress progress-warning" style="height: 6px;" value={format!("{pct:.0}")} max="100" />
             }
-            <small class="text-muted">
+            <span class="text-xs text-base-content/70">
                 { "Scans your favourites on e621 and builds a tag profile used for recommendations. Long-running accounts continue in the background even if you close this tab." }
-            </small>
+            </span>
         </div>
     }
 }

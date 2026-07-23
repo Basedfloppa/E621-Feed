@@ -11,7 +11,7 @@ use std::rc::Rc;
 use gloo_timers::callback::Interval;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::Closure;
-use web_sys::{MouseEvent as WebMouseEvent, WheelEvent as WebWheelEvent};
+use web_sys::{js_sys, MouseEvent as WebMouseEvent, MutationObserver, MutationObserverInit, WheelEvent as WebWheelEvent};
 use yew::prelude::*;
 
 use crate::models::{
@@ -279,6 +279,51 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
     *view_ref.borrow_mut() = *view;
     let pan: Rc<RefCell<PanState>> = use_mut_ref(PanState::default);
     let is_dragging = use_state(|| false);
+    let theme_trigger = use_state(|| 0u32);
+
+    // Watch for theme changes — re-render SVG with new colours.
+    {
+        let theme_trigger = theme_trigger.clone();
+        use_effect_with((), move |_| {
+            let trigger = theme_trigger.clone();
+            let cb = Closure::<dyn FnMut(js_sys::Array, _)>::new(
+                move |mutations: js_sys::Array, _obs: MutationObserver| {
+                    for i in 0..mutations.length() {
+                        let m = mutations.get(i).dyn_into::<web_sys::MutationRecord>().ok();
+                        if let Some(m) = m
+                            && m.attribute_name().as_deref() == Some("data-theme")
+                        {
+                            trigger.set(*trigger + 1);
+                            break;
+                        }
+                    }
+                },
+            );
+            if let Some(body) = web_sys::window()
+                .and_then(|w| w.document())
+                .and_then(|d| d.body())
+            {
+                let observer = MutationObserver::new(cb.as_ref().unchecked_ref());
+                if let Ok(o) = observer {
+                    let opts = MutationObserverInit::new();
+                    opts.set_attributes(true);
+                    let _ = o.observe_with_options(&body, &opts);
+                    cb.forget();
+                    std::mem::forget(o);
+                }
+            }
+            || ()
+        });
+    }
+
+    // Also include theme_trigger in the data-fetch deps so graph
+    // colours refresh on theme switch without a full re-fetch.
+    // The community_color closure reads the theme via `is_dark` which
+    // is evaluated on every render, so bumping theme_trigger forces
+    // new HTML output with updated HSL values.
+    {
+        let _ = *theme_trigger;
+    }
 
     // -------- Fetch tag-relation graph ------------------------------------
     {
@@ -729,12 +774,21 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
     }
     // Singleton communities fall back to a muted grey so isolated nodes
     // don't add saturated noise to the palette.
+    let is_dark = web_sys::window()
+        .and_then(|w| w.document())
+        .and_then(|d| d.document_element())
+        .and_then(|el| el.get_attribute("data-theme"))
+        .map(|t| t == "dark" || t == "dim")
+        .unwrap_or(false);
+
     let community_color = |c: u32| -> String {
         if (c as usize) < community_size.len() && community_size[c as usize] <= 1 {
-            return "#6b7280".to_string();
+            return format!("hsl(0, 0%, {}%)", if is_dark { 55 } else { 60 });
         }
         let hue = ((c as f64) * 137.508_f64) % 360.0;
-        format!("hsl({:.0}, 60%, 55%)", hue)
+        let sat = if is_dark { 50 } else { 60 };
+        let light = if is_dark { 60 } else { 50 };
+        format!("hsl({:.0}, {}%, {}%)", hue, sat, light)
     };
 
     // -------- Build SVG layers (edges → circles → labels) -----------------
@@ -768,9 +822,9 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
                 }
             };
             let stroke = if in_hover {
-                "var(--bs-body-color)"
+                "var(--color-base-content)"
             } else {
-                "var(--bs-secondary)"
+                "var(--color-secondary)"
             };
             let na = &l.nodes[a];
             let nb = &l.nodes[b];
@@ -865,7 +919,7 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
                     cx={format!("{:.2}", n.x)} cy={format!("{:.2}", n.y)}
                     r={format!("{:.2}", n.radius + 6.0)}
                     fill="none"
-                    stroke="var(--bs-body-color)"
+                    stroke="var(--color-base-content)"
                     stroke-width="1.4"
                     stroke-opacity="0.55"
                 />
@@ -887,7 +941,7 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
                     r={format!("{:.2}", n.radius)}
                     fill={color.clone()}
                     fill-opacity={format!("{:.3}", opacity)}
-                    stroke="var(--bs-body-color)"
+                    stroke="var(--color-base-content)"
                     stroke-width={format!("{:.2}", stroke_width)}
                     stroke-opacity={format!("{:.3}", opacity)}
                     style="cursor: pointer;"
@@ -930,11 +984,11 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
                 y={format!("{:.2}", n.y + 4.0)}
                 text-anchor={label_anchor}
                 paint-order="stroke fill"
-                stroke="var(--bs-body-bg)"
+                stroke="var(--color-base-100)"
                 stroke-width="3.2"
                 stroke-linejoin="round"
                 stroke-opacity={format!("{:.3}", label_opacity)}
-                fill="var(--bs-body-color)"
+                fill="var(--color-base-content)"
                 fill-opacity={format!("{:.3}", label_opacity)}
                 font-size="11"
                 font-weight={weight}
@@ -1053,7 +1107,7 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
                 let cls = classes!(
                     "btn",
                     "btn-sm",
-                    if active { "btn-secondary" } else { "btn-outline-secondary" }
+                    if active { "btn-ghost" } else { "btn-outline" }
                 );
                 let title = format!("{count} tags in this community");
                 let label = format!("{top_name} · {count}");
@@ -1066,7 +1120,7 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
             .collect();
         let show_all = if cur_iso.is_some() {
             html! {
-                <button type="button" class="btn btn-sm btn-outline-secondary" onclick={on_show_all}>
+                <button type="button" class="btn btn-sm btn-outline" onclick={on_show_all}>
                     {"Show all"}
                 </button>
             }
@@ -1074,8 +1128,8 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
             html! {}
         };
         html! {
-            <div class="d-flex flex-wrap gap-2 mt-2 align-items-center">
-                <small class="text-muted me-1">{"Communities:"}</small>
+            <div class="flex flex-wrap gap-2 mt-2 items-center">
+                <span class="text-sm text-base-content/70 me-1">{"Communities:"}</span>
                 { show_all }
                 { buttons }
             </div>
@@ -1095,7 +1149,7 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
     }
 
     let body = if let Some(err) = (*error).clone() {
-        html! { <p class="text-danger mb-0">{err}</p> }
+        html! { <p class="text-error mb-0">{err}</p> }
     } else {
         let cursor = if *is_dragging { "grabbing" } else { "grab" };
         let transform = format!(
@@ -1111,62 +1165,48 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
         );
         html! {
             <>
-                <div class="row gx-2 align-items-center mb-3">
-                    <div class="col-auto">
-                        <label class="form-label small mb-0">{"Top tags"}</label>
-                    </div>
-                    <div class="col-12 col-sm-3">
-                        <input
-                            type="number"
-                            class="form-control form-control-sm"
-                            min="5"
-                            max="250"
-                            step="5"
-                            value={top_n.to_string()}
-                            onchange={on_top_change}
-                        />
-                    </div>
-                    <div class="col-auto">
-                        <label class="form-label small mb-0">{"Min co-occurrence"}</label>
-                    </div>
-                    <div class="col-12 col-sm-2">
-                        <input
-                            type="number"
-                            class="form-control form-control-sm"
-                            min="1"
-                            step="1"
-                            value={min_cooc.to_string()}
-                            onchange={on_min_cooc_change}
-                        />
-                    </div>
-                    <div class="col-auto">
-                        <label class="form-label small mb-0" title="Each tag keeps only its strongest links to other tags. Lower = clearer backbone, higher = denser graph.">{"Edges per tag"}</label>
-                    </div>
-                    <div class="col-12 col-sm-2">
-                        <input
-                            type="number"
-                            class="form-control form-control-sm"
-                            min="2"
-                            max="20"
-                            step="1"
-                            value={edges_per_tag.to_string()}
-                            onchange={on_edges_per_tag_change}
-                        />
-                    </div>
-                    <div class="col-auto ms-auto">
-                        <div class="btn-group btn-group-sm" role="group" aria-label="Zoom controls">
-                            <button type="button" class="btn btn-outline-secondary" title="Zoom out" onclick={on_zoom_out}>{"−"}</button>
-                            <button type="button" class="btn btn-outline-secondary" title="Reset view (or double-click the graph)" onclick={on_zoom_reset.clone()}>{ format!("{:.0}%", view_now.scale * 100.0) }</button>
-                            <button type="button" class="btn btn-outline-secondary" title="Zoom in" onclick={on_zoom_in}>{"+"}</button>
+                <div class="flex flex-wrap items-center gap-2 mb-3">
+                    <span class="text-base-content text-sm mb-0">{"Top tags"}</span>
+                    <input
+                        type="number"
+                        class="input input-bordered input-sm w-24"
+                        min="5"
+                        max="250"
+                        step="5"
+                        value={top_n.to_string()}
+                        onchange={on_top_change}
+                    />
+                    <span class="text-base-content text-sm mb-0">{"Min co-occurrence"}</span>
+                    <input
+                        type="number"
+                        class="input input-bordered input-sm w-20"
+                        min="1"
+                        step="1"
+                        value={min_cooc.to_string()}
+                        onchange={on_min_cooc_change}
+                    />
+                    <span class="text-base-content text-sm mb-0" title="Each tag keeps only its strongest links to other tags. Lower = clearer backbone, higher = denser graph.">{"Edges per tag"}</span>
+                    <input
+                        type="number"
+                        class="input input-bordered input-sm w-20"
+                        min="2"
+                        max="20"
+                        step="1"
+                        value={edges_per_tag.to_string()}
+                        onchange={on_edges_per_tag_change}
+                    />
+                    <div class="ms-auto">
+                        <div class="join join-sm" role="group" aria-label="Zoom controls">
+                            <button type="button" class="btn btn-outline join-item" title="Zoom out" onclick={on_zoom_out}>{"−"}</button>
+                            <button type="button" class="btn btn-outline join-item" title="Reset view (or double-click the graph)" onclick={on_zoom_reset.clone()}>{ format!("{:.0}%", view_now.scale * 100.0) }</button>
+                            <button type="button" class="btn btn-outline join-item" title="Zoom in" onclick={on_zoom_in}>{"+"}</button>
                         </div>
                     </div>
                     if *loading {
-                        <div class="col-auto">
-                            <span class="spinner-border spinner-border-sm text-primary" role="status"/>
-                        </div>
+                        <span class="loading loading-spinner loading-sm text-primary" role="status"/>
                     }
                 </div>
-                <div class="position-relative" style="aspect-ratio: 16 / 9; min-height: 460px; max-height: 75vh; user-select: none;">
+                <div class="relative" style="aspect-ratio: 16 / 9; min-height: 460px; max-height: 75vh; user-select: none;">
                     <svg
                         ref={svg_ref.clone()}
                         viewBox={format!("0 0 {VIEWBOX_W} {VIEWBOX_H}")}
@@ -1183,25 +1223,25 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
                         </g>
                     </svg>
                     if let Some((_, node)) = hover_summary.clone() {
-                        <div class="position-absolute top-0 end-0 m-2 px-2 py-1 small rounded shadow-sm bg-body border" style="pointer-events: none;">
+                        <div class="absolute top-0 right-0 m-2 px-2 py-1 text-sm rounded shadow-sm bg-base-100 border" style="pointer-events: none;">
                             <strong>{ node.name.clone() }</strong>
                             { format!(" · {} · {}×", node.group_type, node.count) }
                         </div>
                     }
                     if view_dirty {
-                        <button type="button" class="btn btn-sm btn-outline-secondary position-absolute bottom-0 start-0 m-2" onclick={on_zoom_reset} title={format!("zoom {:.2}× — click to reset", view_now.scale)}>
+                        <button type="button" class="btn btn-sm btn-outline absolute bottom-0 left-0 m-2" onclick={on_zoom_reset} title={format!("zoom {:.2}× — click to reset", view_now.scale)}>
                             { format!("⟲ reset ({:.1}×)", view_now.scale) }
                         </button>
                     }
                     if matches!(payload.as_ref(), Some(g) if !g.nodes.is_empty() && g.edges.is_empty()) {
-                        <div class="position-absolute top-50 start-50 translate-middle text-center text-muted small px-3 py-2 rounded bg-body-tertiary" style="pointer-events: none; max-width: 280px;">
+                        <div class="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 text-center text-base-content/70 text-sm px-3 py-2 rounded bg-base-200" style="pointer-events: none; max-width: 280px;">
                             {"No tag pairs co-occur often enough yet. Add more favourites or lower the "}
                             <em>{"min co-occurrence"}</em>
                             {" threshold above to see relationships."}
                         </div>
                     }
                 </div>
-                <p class="small text-muted mt-2 mb-0">
+                <p class="text-sm text-base-content/70 mt-2 mb-0">
                     {
                         match payload.as_ref() {
                             Some(g) => format!(
@@ -1212,19 +1252,19 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
                         }
                     }
                 </p>
-                <p class="small text-muted mt-1 mb-0">{"Drag a node to reshape its neighbourhood · click a node to open its e621 search · drag empty space to pan · scroll to zoom · click a community below to isolate it."}</p>
+                <p class="text-sm text-base-content/70 mt-1 mb-0">{"Drag a node to reshape its neighbourhood · click a node to open its e621 search · drag empty space to pan · scroll to zoom · click a community below to isolate it."}</p>
                 { legend_html }
             </>
         }
     };
 
     html! {
-        <div class="card mt-4">
-            <div class="card-header bg-primary text-white d-flex justify-content-between align-items-center">
-                <h5 class="mb-0">{"Tag Relation Graph"}</h5>
-                <small class="opacity-75">{"hover a node for details · drag to rearrange · colour = community"}</small>
+        <div class="card bg-base-100 shadow mt-4">
+            <div class="bg-primary text-primary-content flex justify-between items-center p-4">
+                <h5 class="card-title text-lg text-primary-content">{"Tag Relation Graph"}</h5>
+                <span class="text-xs opacity-75">{"hover a node for details · drag to rearrange · colour = community"}</span>
             </div>
-            <div class="card-body">
+            <div class="card-body text-base-content">
                 { body }
             </div>
         </div>

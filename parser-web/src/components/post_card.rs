@@ -371,10 +371,14 @@ pub fn post_card(props: &PostCardProps) -> Html {
     let mut root_classes = classes!(
         "card",
         "post-card",
-        "h-100",
+        "card-compact",
+        "h-full",
         "overflow-hidden",
-        "w-100",
-        "position-relative"
+        "w-full",
+        "relative",
+        "border",
+        "border-base-300",
+        "shadow-sm"
     );
     if *hidden {
         root_classes.push("post-card-hidden");
@@ -397,9 +401,50 @@ pub fn post_card(props: &PostCardProps) -> Html {
         }
     };
 
+    // Pre-compute footer content so we don't need let-bindings inside html!.
+    let footer_content: Option<Html> = {
+        let mut parts: Vec<Html> = Vec::new();
+        if let Some(bd) = props.breakdown.as_ref().filter(|_| props.show_breakdown) {
+            let chs: [(&str, &str, f32); 11] = [
+                ("Tag",      "Cosine similarity between this post's tags and your favourites (TF-IDF weighted).", bd.tag_similarity),
+                ("Quality",  "How this post's score, favourites and comments compare to the typical post you like.", bd.quality_fit),
+                ("Recent",   "How close this post's age is to the ages you usually engage with.", bd.recency_fit),
+                ("Rating",   "Match between this post's rating (S/Q/E) and the rating mix of your favourites.", bd.rating_fit),
+                ("Media",    "Match between this post's media type (image / gif / video) and your usual preference.", bd.media_fit),
+                ("Popular",  "How this post's favourite count and duration compare to the norm in your profile.", bd.popularity_fit),
+                ("Interact", "Signal from your recent feed behaviour on this post's tags — impressions, opens, and hides.", bd.interaction_fit),
+                ("Relation", "How coherently this post's tags relate to each other — globally (PMI lift) and inside your own favourites (pair co-occurrence).", bd.tag_relation_fit),
+                ("Uploader", "How this post's uploader compares to the uploaders you tend to favourite.", bd.uploader_fit),
+                ("Exclusive", "How rare or unusual this post's tag combination is within your profile — favours distinctive picks.", bd.exclusivity_fit),
+                ("Novel",    "How fresh or unfamiliar this post's tags are compared to what you've seen recently.", bd.novelty_fit),
+            ];
+            parts.push(html! {
+                <div class="p-2 flex flex-wrap justify-center gap-1" aria-label="Score breakdown">
+                    { for chs.iter().map(|&(label, title, val)| html! {
+                        <span class="badge badge-ghost truncate max-w-full" title={title}>
+                            { format!("{} {:.2}", label, val) }
+                        </span>
+                    }) }
+                </div>
+            });
+        }
+        if *show_desc {
+            parts.push(html! {
+                <div class="p-2 text-center border-t border-base-300">
+                    { if !post.tags.general.is_empty() {
+                        html! { <p class="text-base-content/70 text-sm mb-0 break-words">{ tag_preview(&post.tags.general, preview_count) }</p> }
+                    } else {
+                        html! { <p class="text-base-content/70 text-sm mb-0">{ "—" }</p> }
+                    }}
+                </div>
+            });
+        }
+        if parts.is_empty() { None } else { Some(parts.into_iter().collect()) }
+    };
+
     let inner: Html = html! {
         <>
-            <div class="position-relative card-body p-0">
+            <div class="relative p-0">
                 {
                     if let Some(url) = img_url {
                         let is_video = matches!(
@@ -412,10 +457,11 @@ pub fn post_card(props: &PostCardProps) -> Html {
                                 html! {
                                     <video
                                         ref={video_ref.clone()}
-                                        class="card-img-top img-fluid"
+                                        class="w-full object-cover"
                                         src={video_url.clone()}
                                         poster={url.clone()}
                                         autoplay={true}
+                                        muted={true}
                                         loop={true}
                                         playsinline={true}
                                         preload="none"
@@ -424,7 +470,7 @@ pub fn post_card(props: &PostCardProps) -> Html {
                             } else {
                                 html! {
                                     <img
-                                        class="card-img-top img-fluid"
+                                        class="w-full object-cover"
                                         src={url}
                                         alt={(*alt_text).clone()}
                                         loading="lazy"
@@ -435,7 +481,7 @@ pub fn post_card(props: &PostCardProps) -> Html {
                         } else {
                             html! {
                                 <img
-                                    class="card-img-top img-fluid"
+                                    class="w-full object-cover"
                                     src={url}
                                     alt={(*alt_text).clone()}
                                     loading="lazy"
@@ -446,7 +492,7 @@ pub fn post_card(props: &PostCardProps) -> Html {
                     } else {
                         html! {
                             <div
-                                class="bg-secondary text-white d-flex align-items-center justify-content-center"
+                                class="bg-base-300 text-base-content flex items-center justify-center"
                                 style="aspect-ratio: 4 / 3;"
                                 aria-label="No preview available"
                             >
@@ -460,7 +506,7 @@ pub fn post_card(props: &PostCardProps) -> Html {
                     href={post_url.clone()}
                     target="_blank"
                     rel="noopener noreferrer"
-                    class="stretched-link"
+                    class="absolute inset-0 z-1"
                     onclick={on_link_click}
                     aria-label={format!(
                         "Open post {} on e621 (rating {}, score {}, affinity {:.2})",
@@ -470,7 +516,7 @@ pub fn post_card(props: &PostCardProps) -> Html {
 
                 if props.show_rating {
                     <span
-                        class={classes!(rating_classes, "position-absolute", "top-0", "start-0", "m-2")}
+                        class={classes!(rating_classes, "absolute", "top-0", "start-0", "m-2")}
                         title="Rating"
                         aria-label={format!("Rating {rating_label}")}
                     >
@@ -481,9 +527,9 @@ pub fn post_card(props: &PostCardProps) -> Html {
                 <button
                     type="button"
                     class={classes!(
-                        "post-card-hide-btn", "btn", "btn-sm", "btn-dark",
-                        "rounded-circle", "position-absolute", "top-0", "start-50",
-                        "translate-middle-x", "mt-2"
+                        "post-card-hide-btn", "btn", "btn-sm", "btn-neutral", "btn-circle",
+                        "absolute", "top-0", "left-1/2",
+                        "-translate-x-1/2", "mt-2"
                     )}
                     style="z-index: 2;"
                     onmousedown={Callback::from(|e: MouseEvent| e.stop_propagation())}
@@ -496,7 +542,7 @@ pub fn post_card(props: &PostCardProps) -> Html {
 
                 if props.show_affinity {
                     <span
-                        class={classes!("badge", "rounded","bg-secondary","position-absolute", "top-0", "end-0", "m-2")}
+                        class={classes!("badge", "badge-ghost", "absolute", "top-0", "right-0", "m-2")}
                         title={"Overall recommendation score — blends tag similarity, quality, recency, rating, media, popularity, interaction, and tag-relation signals into a single affinity measure. Higher values indicate a stronger match with your personal preferences, but absolute scores shift with model tuning."}
                         aria-label={format!("Affinity {:.2}", props.affinity)}>
                         { format!("{:.2}",&props.affinity) }
@@ -505,7 +551,7 @@ pub fn post_card(props: &PostCardProps) -> Html {
 
                 if props.show_score {
                     <span
-                        class={classes!("badge", "position-absolute", "bottom-0", "end-0", "m-2", if score_summary > 0 {"bg-success"} else {"bg-danger"})}
+                        class={classes!("badge", "absolute", "bottom-0", "right-0", "m-2", if score_summary > 0 {"badge-success"} else {"badge-error"})}
                         title={score_detail}
                     >
                         { score_summary }
@@ -513,86 +559,18 @@ pub fn post_card(props: &PostCardProps) -> Html {
                 }
 
                 if props.show_post_number {
-                    <span class="position-absolute bottom-0 start-0 m-2 badge bg-dark bg-opacity-60 text-light small lh-1" style="font-size:0.65rem;">
+                    <span class="absolute bottom-0 left-0 m-2 badge badge-neutral text-neutral-content text-sm leading-none" style="font-size:0.65rem;">
                         { badge_text.clone() }
                     </span>
                 }
             </div>
 
+            // Card footer: score breakdown + tags, pushed to bottom so all
+            // cards in a grid row have their footer starting at the same Y.
             {
-                if props.show_breakdown {
-                    if let Some(breakdown) = &props.breakdown {
-                        html! {
-                            <div class="p-2 d-flex flex-wrap justify-content-center gap-1" aria-label="Score breakdown">
-                                <span class="badge text-muted text-truncate mw-100" title="Cosine similarity between this post's tags and your favourites (TF-IDF weighted).">
-                                    { format!("Tag {:.2}", breakdown.tag_similarity) }
-                                </span>
-                                <span class="badge text-muted text-truncate mw-100" title="How this post's score, favourites and comments compare to the typical post you like.">
-                                    { format!("Quality {:.2}", breakdown.quality_fit) }
-                                </span>
-                                <span class="badge text-muted text-truncate mw-100" title="How close this post's age is to the ages you usually engage with.">
-                                    { format!("Recent {:.2}", breakdown.recency_fit) }
-                                </span>
-                                <span class="badge text-muted text-truncate mw-100" title="Match between this post's rating (S/Q/E) and the rating mix of your favourites.">
-                                    { format!("Rating {:.2}", breakdown.rating_fit) }
-                                </span>
-                                <span class="badge text-muted text-truncate mw-100" title="Match between this post's media type (image / gif / video) and your usual preference.">
-                                    { format!("Media {:.2}", breakdown.media_fit) }
-                                </span>
-                                <span class="badge text-muted text-truncate mw-100" title="How this post's favourite count and duration compare to the norm in your profile.">
-                                    { format!("Popular {:.2}", breakdown.popularity_fit) }
-                                </span>
-                                <span class="badge text-muted text-truncate mw-100" title="Signal from your recent feed behaviour on this post's tags — impressions, opens, and hides.">
-                                    { format!("Interact {:.2}", breakdown.interaction_fit) }
-                                </span>
-                                <span class="badge text-muted text-truncate mw-100" title="How coherently this post's tags relate to each other — globally (PMI lift) and inside your own favourites (pair co-occurrence).">
-                                    { format!("Relation {:.2}", breakdown.tag_relation_fit) }
-                                </span>
-                                <span class="badge text-muted text-truncate mw-100" title="How this post's uploader compares to the uploaders you tend to favourite.">
-                                    { format!("Uploader {:.2}", breakdown.uploader_fit) }
-                                </span>
-                                <span class="badge text-muted text-truncate mw-100" title="How rare or unusual this post's tag combination is within your profile — favours distinctive picks.">
-                                    { format!("Exclusive {:.2}", breakdown.exclusivity_fit) }
-                                </span>
-                                <span class="badge text-muted text-truncate mw-100" title="How fresh or unfamiliar this post's tags are compared to what you've seen recently.">
-                                    { format!("Novel {:.2}", breakdown.novelty_fit) }
-                                </span>
-                            </div>
-                        }
-                    } else {
-                        html!{}
-                    }
-                } else {
-                    html!{}
-                }
-            }
-
-            {
-                if show_desc == &true {
-                    html! {
-                    <div class="card-body p-2 text-center align-items-end">
-                        <h6 class="card-title mt-1">{ format!("#{}", post.id) }</h6>
-                        {
-                            html!{}
-                        }
-
-                        {
-                            if !post.tags.general.is_empty() {
-                                html! {
-                                    <p class="card-text text-muted small mb-0 post-tags-preview">
-                                        { tag_preview(&post.tags.general, preview_count) }
-                                    </p>
-                                }
-                            } else {
-                                html! { <p class="card-text text-muted small mb-0">{ "—" }</p> }
-                            }
-                        }
-                    </div>
-                    }
-                }
-                else {
-                    html! {}
-                }
+                if let Some(footer) = footer_content {
+                    html! { <div class="mt-auto">{ footer }</div> }
+                } else { html!{} }
             }
         </>
     };
@@ -600,14 +578,14 @@ pub fn post_card(props: &PostCardProps) -> Html {
     if *hidden {
         return html! {
             <div
-                class={classes!("card", "h-100", "post-card-hidden", "w-100", "p-3", "d-flex", "flex-column", "align-items-center", "justify-content-center", "text-center")}
+                class={classes!("card", "h-full", "post-card-hidden", "w-full", "p-3", "flex", "flex-col", "items-center", "justify-center", "text-center")}
                 ref={root_ref}
                 aria-label={format!("Post {} hidden", post.id)}
             >
-                <span class="text-muted small mb-2">{ format!("Hidden #{}", post.id) }</span>
+                <span class="text-base-content/70 text-sm mb-2">{ format!("Hidden #{}", post.id) }</span>
                 <button
                     type="button"
-                    class="btn btn-sm btn-outline-secondary"
+                    class="btn btn-sm btn-outline"
                     onclick={on_unhide}
                     aria-label="Undo hide"
                 >
@@ -718,9 +696,9 @@ fn preferred_image_url(post: &Post, required_width: i64) -> Option<AttrValue> {
 
 fn rating_badge_classes(r: &Rating) -> (&'static str, Classes) {
     match r {
-        Rating::S => ("S", classes!("badge", "bg-success")),
-        Rating::Q => ("Q", classes!("badge", "bg-warning", "text-dark")),
-        Rating::E => ("E", classes!("badge", "bg-danger")),
+        Rating::S => ("S", classes!("badge", "badge-success")),
+        Rating::Q => ("Q", classes!("badge", "badge-warning")),
+        Rating::E => ("E", classes!("badge", "badge-error")),
     }
 }
 

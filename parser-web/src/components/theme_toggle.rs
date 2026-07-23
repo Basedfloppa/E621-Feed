@@ -1,56 +1,72 @@
 use wasm_bindgen::prelude::*;
 use web_sys::{wasm_bindgen::prelude::Closure, window, StorageEvent};
-use yew::{function_component, html, use_effect_with, use_state, Callback, Html};
+use yew::{classes, function_component, html, use_effect_with, use_state, Callback, Html};
+
+/// Available themes and their human-readable labels.
+const THEMES: &[(&str, &str)] = &[
+    ("light", "Light"),
+    ("dark", "Dark"),
+    ("dim", "Dim"),
+    ("nord", "Nord"),
+    ("sunset", "Sunset"),
+    ("autumn", "Autumn"),
+    ("night", "Night"),
+    ("coffee", "Coffee"),
+    ("winter", "Winter"),
+    ("business", "Business"),
+    ("lemonade", "Lemon"),
+];
+
+fn read_theme() -> String {
+    window()
+        .and_then(|w| w.local_storage().ok())
+        .flatten()
+        .and_then(|s| s.get_item("theme").ok())
+        .flatten()
+        .unwrap_or_else(|| {
+            if window()
+                .and_then(|w| w.match_media("(prefers-color-scheme: dark)").ok())
+                .flatten()
+                .map(|m| m.matches())
+                .unwrap_or(false)
+            {
+                "dark".to_string()
+            } else {
+                "light".to_string()
+            }
+        })
+}
+
+fn apply_theme(theme: &str) {
+    if let Some(doc_elem) = window()
+        .and_then(|w| w.document())
+        .and_then(|d| d.document_element())
+    {
+        let _ = doc_elem.set_attribute("data-theme", theme);
+    }
+    if let Some(storage) = window().and_then(|w| w.local_storage().ok()).flatten() {
+        let _ = storage.set_item("theme", theme);
+    }
+}
 
 #[function_component(ThemeToggle)]
 pub fn theme_toggle() -> Html {
-    let is_light_theme = use_state(|| {
-        let theme = window()
-            .and_then(|w| w.local_storage().ok())
-            .flatten()
-            .and_then(|s| s.get_item("theme").ok())
-            .flatten()
-            .unwrap_or_else(|| {
-                if window()
-                    .and_then(|w| w.match_media("(prefers-color-scheme: dark)").ok())
-                    .flatten()
-                    .map(|m| m.matches())
-                    .unwrap_or(false)
-                {
-                    "dark".to_string()
-                } else {
-                    "light".to_string()
-                }
-            });
-
-        if let Some(doc_elem) = window()
-            .and_then(|w| w.document())
-            .and_then(|d| d.document_element())
-        {
-            let _ = doc_elem.set_attribute("data-bs-theme", &theme);
-        }
-
-        theme == "light"
+    let current = use_state(|| {
+        let t = read_theme();
+        apply_theme(&t);
+        t
     });
 
     use_effect_with((), {
-        let is_light_theme = is_light_theme.clone();
+        let current = current.clone();
         move |_| {
             let handler = Closure::<dyn FnMut(StorageEvent)>::new(move |e: StorageEvent| {
                 if e.key().as_deref() != Some("theme") {
                     return;
                 }
-                
                 let theme = e.new_value().unwrap_or_else(|| "light".into());
-                let is_light = theme == "light";
-                is_light_theme.set(is_light);
-
-                if let Some(doc_elem) = window()
-                    .and_then(|w| w.document())
-                    .and_then(|d| d.document_element())
-                {
-                    let _ = doc_elem.set_attribute("data-bs-theme", &theme);
-                }
+                current.set(theme.clone());
+                apply_theme(&theme);
             });
 
             window()
@@ -70,43 +86,37 @@ pub fn theme_toggle() -> Html {
         }
     });
 
-    let on_click = {
-        let light_theme = is_light_theme.clone();
-
-        Callback::from(move |_| {
-            let new_theme = !*light_theme;
-            light_theme.set(new_theme);
-
-            let theme_str = if new_theme { "light" } else { "dark" };
-
-            if let Some(doc_elem) = window()
-                .and_then(|w| w.document())
-                .and_then(|d| d.document_element())
-            {
-                let _ = doc_elem.set_attribute("data-bs-theme", theme_str);
-            }
-
-            if let Some(storage) = window().and_then(|w| w.local_storage().ok()).flatten() {
-                let _ = storage.set_item("theme", theme_str);
-            }
+    let on_select = {
+        let current = current.clone();
+        Callback::from(move |new_theme: String| {
+            current.set(new_theme.clone());
+            apply_theme(&new_theme);
         })
     };
 
-    let label = if *is_light_theme {
-        "Switch to dark theme"
-    } else {
-        "Switch to light theme"
-    };
     html!(
-        <button
-            type="button"
-            class="btn"
-            onclick={on_click}
-            aria-label={label}
-            title={label}
-            aria-pressed={(!*is_light_theme).to_string()}
-        >
-            <i class={ if *is_light_theme {"bi bi-brightness-high"} else {"bi bi-moon"}} aria-hidden="true"></i>
-        </button>
+        <details class="dropdown dropdown-end">
+            <summary class="btn btn-ghost btn-sm" aria-label="Select theme">
+                // Show current theme label or a generic icon
+                { "🎨" }
+            </summary>
+            <ul class="dropdown-content menu p-2 shadow bg-base-100 rounded-box w-32 z-50">
+                { for THEMES.iter().map(|(key, label)| {
+                    let is_active = *current == *key;
+                    let key = key.to_string();
+                    let onclick = on_select.reform(move |_: yew::MouseEvent| key.clone());
+                    html! {
+                        <li>
+                            <a
+                                class={classes!(if is_active { "menu-active" } else { "" })}
+                                onclick={onclick}
+                            >
+                                { *label }
+                            </a>
+                        </li>
+                    }
+                }) }
+            </ul>
+        </details>
     )
 }

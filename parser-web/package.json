@@ -1,0 +1,16 @@
+{
+  "name": "parser-web",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "type": "commonjs",
+  "dependencies": {
+    "@tailwindcss/cli": "4.3.3",
+    "daisyui": "5.7.0",
+    "tailwindcss": "4.3.3"
+  }
+}

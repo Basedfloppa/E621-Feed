@@ -99,19 +99,21 @@ pub fn user_search_form(props: &UserSearchProps) -> Html {
 
     html! {
         <div class="mb-3">
-            <label for="user-search-input" class="form-label">{"Search by Username or ID"}</label>
-            <div class="input-group">
+            <label for="user-search-input">
+                <span class="text-base-content">{"Search by Username or ID"}</span>
+            </label>
+            <div class="join w-full">
                 <input
                     id="user-search-input"
                     type="text"
-                    class="form-control"
+                    class="input input-bordered join-item flex-1"
                     value={(*user_query).clone()}
                     oninput={on_input}
                     placeholder="Enter username or ID"
                     disabled={*props.is_loading}
                 />
                 <button
-                    class="btn btn-primary"
+                    class="btn btn-primary join-item"
                     type="button"
                     onclick={fetch_user}
                     disabled={*props.is_loading}

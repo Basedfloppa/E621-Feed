@@ -601,9 +601,9 @@ pub fn account_creator() -> Html {
     };
 
     let message_class = if message.is_empty() {
-        "d-none"
+        "hidden"
     } else if *error {
-        "alert alert-danger mt-3"
+        "alert alert-error mt-3"
     } else {
         "alert alert-success mt-3"
     };
@@ -617,8 +617,8 @@ pub fn account_creator() -> Html {
         .unwrap_or_default();
 
     html! {
-        <div class="container mt-5" id="account-page">
-            <h1 class="visually-hidden">{"Account"}</h1>
+        <div id="account-page">
+            <h1 class="text-2xl font-semibold text-base-content text-center mb-3 break-words">{ "Account" }</h1>
             <ConfirmModal
                 open={pending_remove.is_some()}
                 title={"Remove account from this device?".to_string()}
@@ -631,28 +631,28 @@ pub fn account_creator() -> Html {
                 <p class="mb-2">
                     { format!("This will unlink {} from this device.", pending_label) }
                 </p>
-                <p class="text-body-secondary mb-0 small">
+                <p class="text-base-content/70 mb-0 text-sm">
                     { "If no other devices are linked, the account's stored favourites, \
                        blacklist and preference profile are also deleted from the server. \
                        The e621 account itself is unaffected." }
                 </p>
             </ConfirmModal>
-            <div class="row justify-content-center">
-                <div class="col-md-6">
+            <div class="flex justify-center">
+                <div class="w-full max-w-xl">
                     if !accounts_list.is_empty() {
-                        <div class="card shadow mb-4">
-                            <div class="card-body">
-                                <h2 class="card-title text-center mb-4">{"Saved Accounts"}</h2>
+                        <div class="card bg-base-100 shadow mb-4">
+                            <div class="card-body text-base-content">
+                                <h2 class="card-title text-xl text-center">{"Saved Accounts"}</h2>
                                 {
                                     if let Some(err) = &*remove_error {
                                         html! {
-                                            <div class="alert alert-danger py-2 px-3 mb-3" role="alert">
+                                            <div class="alert alert-error py-2 px-3 mb-3" role="alert">
                                                 { err }
                                             </div>
                                         }
                                     } else { html!{} }
                                 }
-                                <ul class="list-group">
+                                <ul class="flex flex-col divide-y divide-base-300">
                                     {for accounts_list.iter().map(|acc| {
                                         let is_editing = current_edit == Some(acc.id);
                                         let acc_id = acc.id;
@@ -665,87 +665,99 @@ pub fn account_creator() -> Html {
                                         let is_saving = *edit_saving;
                                         let bucket = experiment_buckets.get(&acc.id).cloned();
                                         html! {
-                                            <li class="list-group-item">
-                                                <div class="d-flex justify-content-between align-items-center gap-2">
-                                                    <span>
+                                            <li class="p-3">
+                                                <div class="flex justify-between items-center gap-2">
+                                                    <span class="min-w-0 break-words">
                                                         <strong>{&acc.name}</strong>
                                                         {format!(" (ID: {})", acc.id)}
                                                         if let Some(bucket_name) = bucket {
                                                             <span
-                                                                class="badge text-bg-info ms-2"
+                                                                class="badge badge-info ms-2"
                                                                 title="A/B experiment variant currently used for recommendations on this account"
                                                             >
                                                                 { format!("variant: {bucket_name}") }
                                                             </span>
                                                         }
                                                     </span>
-                                                    <div class="btn-group btn-group-sm" role="group">
-                                                        if is_editing {
-                                                            <button
-                                                                class="btn btn-outline-secondary"
-                                                                onclick={Callback::from(move |_| cancel_edit.emit(()))}
-                                                                disabled={is_saving}
-                                                            >
-                                                                {"Cancel"}
-                                                            </button>
-                                                        } else {
-                                                            <button
-                                                                class="btn btn-outline-primary"
-                                                                onclick={Callback::from(move |_| start_edit.emit(acc_id))}
-                                                            >
-                                                                {"Edit blacklist"}
-                                                            </button>
-                                                            <ReanalyzeButton
-                                                                account_id={acc_id}
-                                                                api_base={backend_domain.clone()}
-                                                                on_complete={on_reanalyze_complete.clone()}
-                                                                blocked={process_running.contains(&acc.id)}
-                                                                on_running={{
-                                                                    let process_running = process_running.clone();
-                                                                    Callback::from(move |running: bool| {
-                                                                        let mut set = (*process_running).clone();
-                                                                        if running { set.insert(acc_id); }
-                                                                        else { set.remove(&acc_id); }
-                                                                        process_running.set(set);
-                                                                    })
-                                                                }}
-                                                            />
-                                                            <ReanalyzeButton
-                                                                mode="incremental"
-                                                                account_id={acc_id}
-                                                                api_base={backend_domain.clone()}
-                                                                on_complete={on_reanalyze_complete.clone()}
-                                                                blocked={process_running.contains(&acc.id)}
-                                                                on_running={{
-                                                                    let process_running = process_running.clone();
-                                                                    Callback::from(move |running: bool| {
-                                                                        let mut set = (*process_running).clone();
-                                                                        if running { set.insert(acc_id); }
-                                                                        else { set.remove(&acc_id); }
-                                                                        process_running.set(set);
-                                                                    })
-                                                                }}
-                                                            />
-                                                            <button
-                                                                class="btn btn-outline-danger"
-                                                                title="Unlink this account from the device"
-                                                                onclick={Callback::from(move |_| on_remove.emit(acc_id))}
-                                                            >
-                                                                {"Remove"}
-                                                            </button>
+                                                    <div class="flex flex-col gap-1 shrink-0 min-w-0">
+                                                        <div class="flex gap-2 w-full">
+                                                            if is_editing {
+                                                                <button
+                                                                    class="btn btn-outline btn-sm flex-1"
+                                                                    onclick={Callback::from(move |_| cancel_edit.emit(()))}
+                                                                    disabled={is_saving}
+                                                                >
+                                                                    {"Cancel"}
+                                                                </button>
+                                                            } else {
+                                                                <button
+                                                                    class="btn btn-outline btn-sm flex-1"
+                                                                    onclick={Callback::from(move |_| start_edit.emit(acc_id))}
+                                                                >
+                                                                    {"Edit blacklist"}
+                                                                </button>
+                                                                <button
+                                                                    class="btn btn-outline btn-error btn-sm flex-1"
+                                                                    title="Unlink this account from the device"
+                                                                    onclick={Callback::from(move |_| on_remove.emit(acc_id))}
+                                                                >
+                                                                    {"Remove"}
+                                                                </button>
+                                                            }
+                                                        </div>
+                                                        if !is_editing {
+                                                            <div class="flex gap-2 w-full">
+                                                                <div class="flex-1">
+                                                                    <ReanalyzeButton
+                                                                        account_id={acc_id}
+                                                                        api_base={backend_domain.clone()}
+                                                                        on_complete={on_reanalyze_complete.clone()}
+                                                                        blocked={process_running.contains(&acc.id)}
+                                                                        class="w-full"
+                                                                        on_running={{
+                                                                            let process_running = process_running.clone();
+                                                                            Callback::from(move |running: bool| {
+                                                                                let mut set = (*process_running).clone();
+                                                                                if running { set.insert(acc_id); }
+                                                                                else { set.remove(&acc_id); }
+                                                                                process_running.set(set);
+                                                                            })
+                                                                        }}
+                                                                    />
+                                                                </div>
+                                                                <div class="flex-1">
+                                                                    <ReanalyzeButton
+                                                                        mode="incremental"
+                                                                        account_id={acc_id}
+                                                                        api_base={backend_domain.clone()}
+                                                                        on_complete={on_reanalyze_complete.clone()}
+                                                                        blocked={process_running.contains(&acc.id)}
+                                                                        class="w-full"
+                                                                        on_running={{
+                                                                            let process_running = process_running.clone();
+                                                                            Callback::from(move |running: bool| {
+                                                                                let mut set = (*process_running).clone();
+                                                                                if running { set.insert(acc_id); }
+                                                                                else { set.remove(&acc_id); }
+                                                                                process_running.set(set);
+                                                                            })
+                                                                        }}
+                                                                    />
+                                                                </div>
+                                                            </div>
                                                         }
                                                     </div>
                                                 </div>
                                                 if is_editing {
                                                     <div class="mt-3">
                                                         <textarea
-                                                            class="form-control"
+                                                            class="textarea textarea-bordered w-full box-border"
                                                             rows="5"
                                                             value={draft_value}
                                                             onchange={on_draft_change}
                                                             disabled={is_saving}
                                                         />
-                                                        <div class="form-text mb-2">
+                                                        <div class="text-xs text-base-content/70 mb-2">
                                                             {"One tag per line. Leave empty to fall back to the default blacklist."}
                                                         </div>
                                                         <button
@@ -765,9 +777,9 @@ pub fn account_creator() -> Html {
                         </div>
                     }
 
-                    <div class="card shadow">
-                        <div class="card-body">
-                            <h2 class="card-title text-center mb-4">{"Create New Account"}</h2>
+                    <div class="card bg-base-100 shadow">
+                        <div class="card-body text-base-content">
+                            <h2 class="card-title text-xl text-center">{"Create New Account"}</h2>
 
                             // e621 look-up: paste a username or ID, hit
                             // search, the response auto-populates the ID
@@ -787,39 +799,39 @@ pub fn account_creator() -> Html {
                             }
 
                             <form onsubmit={onsubmit}>
-                                <div class="mb-3">
-                                    <label for="account-id" class="form-label">{"Account ID"}</label>
+                                <fieldset class="fieldset w-full mb-3">
+                                    <legend class="fieldset-legend">{"Account ID"}</legend>
                                     <input
                                         type="text"
                                         inputmode="numeric"
                                         pattern="[0-9]+"
                                         maxlength="9"
-                                        class="form-control"
+                                        class="input w-full box-border"
                                         id="account-id"
                                         value={(*id).clone()}
                                         onchange={on_id_change}
                                         placeholder="Enter numeric account ID"
                                         disabled={*loading}
                                     />
-                                </div>
+                                </fieldset>
 
-                                <div class="mb-3">
-                                    <label for="account-name" class="form-label">{"Username"}</label>
+                                <fieldset class="fieldset w-full mb-3">
+                                    <legend class="fieldset-legend">{"Username"}</legend>
                                     <input
                                         type="text"
-                                        class="form-control"
+                                        class="input w-full box-border"
                                         id="account-name"
                                         value={(*name).clone()}
                                         onchange={on_name_change}
                                         placeholder="Enter your username"
                                         disabled={*loading}
                                     />
-                                </div>
+                                </fieldset>
 
-                                 <div class="mb-3">
-                                    <label for="account-blacklist" class="form-label">{"Blacklist"}</label>
+                                <div class="mb-3">
+                                    <label class="font-semibold text-base-content text-sm mb-1 block">{"Blacklist"}</label>
                                     <textarea
-                                        class="form-control"
+                                        class="textarea w-full"
                                         id="account-blacklist"
                                         rows="5"
                                         value={(*blacklist).clone()}
@@ -827,26 +839,26 @@ pub fn account_creator() -> Html {
                                         placeholder={"One tag per line, for example:\ngore\nyoung -rating:s\n-fav:yourname"}
                                         disabled={*loading}
                                     />
-                                    <div class="form-text">
+                                    <p class="text-base-content/80 text-sm mt-1 break-words">
                                         { "Optional. Paste the blacklist from your e621 account settings, or leave empty to use the default." }
                                         if !default_blacklist.is_empty() {
-                                            <div class="mt-1">
-                                                { "Default applied if empty: " }
+                                            <span>
+                                                { " Default applied if empty: " }
                                                 <code>{ default_blacklist.join(", ") }</code>
-                                            </div>
+                                            </span>
                                         }
-                                    </div>
+                                    </p>
                                 </div>
 
                                 <button
                                     type="submit"
-                                    class="btn btn-primary w-100"
+                                    class="btn btn-primary w-full"
                                     disabled={*loading}
                                 >
                                     { if *loading {
                                         html! {
                                             <span>
-                                                <span class="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></span>
+                                                <span class="loading loading-spinner loading-sm me-2" role="status" aria-hidden="true"></span>
                                                 {"Creating..."}
                                             </span>
                                         }

@@ -1,3 +1,5 @@
+pub mod icons;
+pub mod post_grid;
 pub mod confirm_modal;
 pub mod header;
 pub mod theme_toggle;
@@ -12,6 +14,8 @@ pub mod user_info_alert;
 pub mod user_search_form;
 pub mod reanalyze_button;
 
+pub use icons::*;
+pub use post_grid::*;
 pub use confirm_modal::*;
 pub use header::*;
 pub use theme_toggle::*;

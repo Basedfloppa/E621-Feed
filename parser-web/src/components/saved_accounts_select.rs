@@ -147,11 +147,13 @@ pub fn saved_accounts_select(props: &SavedAccountsProps) -> Html {
 
     html! {
         <div class="mb-4">
-            <label class="form-label" for="saved-accounts-select">{"Select Saved Account"}</label>
-            <div class="input-group">
+            <label for="saved-accounts-select" class="mb-1 block text-sm font-medium">
+                <span class="text-base-content">{"Select Saved Account"}</span>
+            </label>
+            <div class="join w-full">
                 <select
                     id="saved-accounts-select"
-                    class="form-select"
+                    class="select join-item flex-1"
                     onchange={on_select.clone()}
                     disabled={*props.is_loading}
                 >
@@ -170,7 +172,7 @@ pub fn saved_accounts_select(props: &SavedAccountsProps) -> Html {
                     </option>
                 </select>
                 <button
-                    class="btn btn-outline-secondary"
+                    class="btn btn-outline join-item"
                     type="button"
                     onclick={on_clear.clone()}
                     disabled={*props.is_loading}

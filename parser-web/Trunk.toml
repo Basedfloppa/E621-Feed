@@ -7,6 +7,19 @@ port = 8000
 backend = "http://127.0.0.1:8080/api/"
 rewrite = "/api/"
 
+# Process Tailwind CSS input through the CLI before the build.
+# Generates src/tailwind-output.css which is referenced from index.html.
+[[hooks]]
+stage = "pre_build"
+command = "npx"
+command_arguments = [
+  "@tailwindcss/cli",
+  "-i",
+  "src/tailwind.css",
+  "-o",
+  "src/tailwind-output.css",
+]
+
 # Pre-compress static assets (.br + .gz next to each file) so nginx with
 # brotli_static / gzip_static can serve them without on-the-fly cost.
 # Hook is no-op outside `--release` so dev rebuilds stay fast — see the

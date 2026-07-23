@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use serde::de::DeserializeOwned;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
@@ -37,14 +38,14 @@ impl GridType {
             GridType::One => "1",
         }
     }
-    fn col_class(self) -> &'static str {
+    fn grid_class(self) -> &'static str {
         match self {
             GridType::Auto => {
-                "col-xs-6 col-sm-5 col-md-4 col-lg-3 col-xl-2 col-xxl-1 d-flex justify-content-center"
+                "grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-2"
             }
-            GridType::Three => "col-4 d-flex justify-content-center",
-            GridType::Two => "col-6 d-flex justify-content-center",
-            GridType::One => "col-12 d-flex justify-content-center",
+            GridType::Three => "grid grid-cols-3 gap-2",
+            GridType::Two => "grid grid-cols-2 gap-2",
+            GridType::One => "grid grid-cols-1 gap-2",
         }
     }
 }
@@ -81,6 +82,10 @@ pub fn digest_page() -> Html {
     let show_breakdown = use_state(|| read_bool_local("digest_show_breakdown", true));
     let show_desc = use_state(|| read_bool_local("digest_show_desc", true));
     let show_metadata = use_state(|| read_bool_local("digest_show_metadata", false));
+    let show_rating = use_state(|| read_bool_local("digest_show_rating", true));
+    let show_affinity = use_state(|| read_bool_local("digest_show_affinity", true));
+    let show_score = use_state(|| read_bool_local("digest_show_score", true));
+    let show_post_number = use_state(|| read_bool_local("digest_show_post_number", true));
     let grid = use_state(|| GridType::from_storage(read_local("digest_grid_type")));
 
     // Bumped by the Refresh button to force a re-fetch even when no input
@@ -120,6 +125,34 @@ pub fn digest_page() -> Html {
         let v = *show_metadata;
         use_effect_with(v, move |a: &bool| {
             write_local("digest_show_metadata", &a.to_string());
+            || ()
+        });
+    }
+    {
+        let v = *show_rating;
+        use_effect_with(v, move |a: &bool| {
+            write_local("digest_show_rating", &a.to_string());
+            || ()
+        });
+    }
+    {
+        let v = *show_affinity;
+        use_effect_with(v, move |a: &bool| {
+            write_local("digest_show_affinity", &a.to_string());
+            || ()
+        });
+    }
+    {
+        let v = *show_score;
+        use_effect_with(v, move |a: &bool| {
+            write_local("digest_show_score", &a.to_string());
+            || ()
+        });
+    }
+    {
+        let v = *show_post_number;
+        use_effect_with(v, move |a: &bool| {
+            write_local("digest_show_post_number", &a.to_string());
             || ()
         });
     }
@@ -222,7 +255,16 @@ pub fn digest_page() -> Html {
                 spawn_local(async move {
                     match fetch_json::<Vec<ScoredPost>>(&url).await {
                         Ok(result) => {
-                            posts.set(result);
+                            // Deduplicate by post ID — the backend
+                            // stratified_sample can still yield duplicates
+                            // between the top/mid/trending/exploration
+                            // strata.
+                            let mut seen = HashSet::new();
+                            let deduped: Vec<ScoredPost> = result
+                                .into_iter()
+                                .filter(|sp| seen.insert(sp.post.id))
+                                .collect();
+                            posts.set(deduped);
                             is_loading.set(false);
                         }
                         Err(e) => {
@@ -367,7 +409,7 @@ pub fn digest_page() -> Html {
             hide_saved.set(!*hide_saved);
         })
     };
-    let on_toggle_show_breakdown = {
+    let _on_toggle_show_breakdown = {
         let show_breakdown = show_breakdown.clone();
         Callback::from(move |_: Event| {
             show_breakdown.set(!*show_breakdown);
@@ -385,7 +427,7 @@ pub fn digest_page() -> Html {
         Callback::from(move |_: MouseEvent| grid.set(g))
     };
 
-    let col_class = grid.col_class();
+
 
     // Compute the process-running banner outside the html! macro so we
     // can use let bindings without tripping the macro's element parser.
@@ -408,21 +450,18 @@ pub fn digest_page() -> Html {
             None => ("Processing…".to_string(), 0.0, 0.0),
         };
         html! {
-            <div class="alert alert-info d-flex align-items-center gap-2 flex-wrap mb-3" role="status">
-                <span class="spinner-border spinner-border-sm" aria-hidden="true"></span>
+            <div class="alert alert-info flex flex-wrap items-center gap-2 mb-3" role="status">
+                <span class="loading loading-spinner loading-sm" aria-hidden="true"></span>
                 <span>{ &label }</span>
                 if progress_pct > 0.0 {
-                    <div class="flex-grow-1" style="min-width: 120px;">
-                        <div class="progress" role="progressbar" style="height: 6px;"
-                            aria-valuenow={format!("{:.0}", progress_pct)}
-                            aria-valuemin="0" aria-valuemax="100">
-                            <div class="progress-bar progress-bar-striped progress-bar-animated bg-info"
-                                style={format!("width: {:.1}%", progress_pct)} />
-                        </div>
+                    <div class="flex-1" style="min-width: 120px;">
+                        <progress class="progress progress-info" style="height: 6px;"
+                            value={format!("{:.0}", progress_pct)}
+                            max="100" />
                     </div>
                 }
                 if elapsed > 0.0 {
-                    <small class="text-muted">{ format!("{:.0}s elapsed", elapsed) }</small>
+                    <span class="text-xs text-base-content/70">{ format!("{:.0}s elapsed", elapsed) }</span>
                 }
             </div>
         }
@@ -431,25 +470,25 @@ pub fn digest_page() -> Html {
     };
 
     html! {
-        <div class="container-fluid mt-3">
-            <div class="d-flex align-items-center gap-2 mb-3 flex-wrap">
-                <h2 class="mb-0 me-auto">{ "Daily Digest" }</h2>
+        <div class="container-fluid">
+            <div class="flex flex-wrap items-center gap-2 mb-3">
+                <h2 class="text-2xl font-semibold text-base-content mb-0 me-auto">{ "Daily Digest" }</h2>
                 <SavedAccountsSelect
                     selected_user={selected_user.clone()}
                     is_loading={is_loading.clone()}
                 />
                 <button
-                    class="btn btn-outline-primary"
+                    class="btn btn-outline"
                     onclick={on_refresh}
                     disabled={*is_loading || process_is_running}
                 >
-                    <i class="bi bi-arrow-clockwise" aria-hidden="true"></i>
+                    <IconArrowClockwise />
                     { " Refresh" }
                 </button>
                 <button
                     class={classes!(
                         "btn",
-                        if *is_full { "btn-primary" } else { "btn-outline-secondary" },
+                        if *is_full { "btn-primary" } else { "btn-outline" },
                     )}
                     onclick={on_toggle_full}
                     disabled={*is_loading || process_is_running}
@@ -457,125 +496,151 @@ pub fn digest_page() -> Html {
                     { if *is_full { "Full digest" } else { "Quick digest" } }
                 </button>
 
-                <div class="dropdown">
-                    <button
-                        class="btn btn-outline-secondary dropdown-toggle"
-                        type="button"
-                        data-bs-toggle="dropdown"
-                        data-bs-auto-close="outside"
-                        aria-expanded="false"
-                        aria-label="Display settings"
-                    >
-                        <i class="bi bi-sliders" aria-hidden="true"></i>
+                <details class="dropdown dropdown-end">
+                    <summary class="btn btn-outline">
+                        <IconSliders />
                         { " Display" }
-                    </button>
-                    <ul class="dropdown-menu dropdown-menu-end p-3" style="min-width: 260px;">
-                        <li class="mb-2">
-                            <div class="form-check form-switch">
-                                <input
-                                    class="form-check-input"
-                                    type="checkbox"
-                                    id="digest-hide-saved"
-                                    checked={*hide_saved}
-                                    onchange={on_toggle_hide_saved}
-                                />
-                                <label class="form-check-label" for="digest-hide-saved">
-                                    { "Hide already-saved posts" }
-                                </label>
-                            </div>
-                            <small class="text-muted d-block">
-                                { "Filter out posts already in your favourites." }
-                            </small>
-                        </li>
-                        <li class="mb-2">
-                            <div class="form-check form-switch">
-                                <input
-                                    class="form-check-input"
-                                    type="checkbox"
-                                    id="digest-show-breakdown"
-                                    checked={*show_breakdown}
-                                    onchange={on_toggle_show_breakdown}
-                                />
-                                <label class="form-check-label" for="digest-show-breakdown">
-                                    { "Show score breakdown" }
-                                </label>
-                            </div>
-                        </li>
-                        <li class="mb-2">
-                            <div class="form-check form-switch">
-                                <input
-                                    class="form-check-input"
-                                    type="checkbox"
-                                    id="digest-show-desc"
-                                    checked={*show_desc}
-                                    onchange={on_toggle_show_desc}
-                                />
-                                <label class="form-check-label" for="digest-show-desc">
-                                    { "Show post descriptions" }
-                                </label>
-                            </div>
-                        </li>
-                        <li class="mb-2">
-                            <div class="form-check form-switch">
-                                <input
-                                    class="form-check-input"
-                                    type="checkbox"
-                                    id="digest-show-metadata"
-                                    checked={*show_metadata}
-                                    onchange={{
-                                        let show_metadata = show_metadata.clone();
-                                        Callback::from(move |_: Event| show_metadata.set(!*show_metadata))
-                                    }}
-                                />
-                                <label class="form-check-label" for="digest-show-metadata">
-                                    { "Show file metadata" }
-                                </label>
-                            </div>
-                        </li>
-                        <li><hr class="dropdown-divider" /></li>
-                        <li>
-                            <small class="text-muted d-block mb-1">{ "Grid density" }</small>
-                            <div class="btn-group btn-group-sm w-100" role="group" aria-label="Grid type">
-                                <button
-                                    type="button"
-                                    class={classes!("btn","btn-outline-secondary", if *grid == GridType::Auto { "active" } else { "" })}
-                                    aria-pressed={(*grid == GridType::Auto).to_string()}
-                                    onclick={set_grid(GridType::Auto)}
-                                >{ "Auto" }</button>
-                                <button
-                                    type="button"
-                                    class={classes!("btn","btn-outline-secondary", if *grid == GridType::Three { "active" } else { "" })}
-                                    aria-pressed={(*grid == GridType::Three).to_string()}
-                                    onclick={set_grid(GridType::Three)}
-                                >{ "3" }</button>
-                                <button
-                                    type="button"
-                                    class={classes!("btn","btn-outline-secondary", if *grid == GridType::Two { "active" } else { "" })}
-                                    aria-pressed={(*grid == GridType::Two).to_string()}
-                                    onclick={set_grid(GridType::Two)}
-                                >{ "2" }</button>
-                                <button
-                                    type="button"
-                                    class={classes!("btn","btn-outline-secondary", if *grid == GridType::One { "active" } else { "" })}
-                                    aria-pressed={(*grid == GridType::One).to_string()}
-                                    onclick={set_grid(GridType::One)}
-                                >{ "1" }</button>
-                            </div>
-                        </li>
-                    </ul>
-                </div>
+                    </summary>
+                    <div class="menu dropdown-content p-3 shadow bg-base-100 rounded-box w-72 z-50" style="min-width: 260px;">
+                        <label class="label cursor-pointer py-1">
+                            <span class="text-base-content">{"Hide already-saved posts"}</span>
+                            <input
+                                type="checkbox"
+                                class="toggle toggle-sm"
+                                checked={*hide_saved}
+                                onchange={on_toggle_hide_saved}
+                            />
+                        </label>
+                        <span class="text-xs text-base-content/70 block mb-1 ms-1">
+                            { "Filter out posts already in your favourites." }
+                        </span>
+                        <div class="divider my-1"></div>
+                        <span class="text-xs text-base-content/70 block mb-1">{ "Badges" }</span>
+                        <label class="label cursor-pointer py-1">
+                            <span class="text-base-content">{"Rating badge"}</span>
+                            <input
+                                type="checkbox"
+                                class="toggle toggle-sm"
+                                checked={*show_rating}
+                                onchange={{
+                                    let s = show_rating.clone();
+                                    Callback::from(move |_: Event| s.set(!*s))
+                                }}
+                            />
+                        </label>
+                        <label class="label cursor-pointer py-1">
+                            <span class="text-base-content">{"Affinity score"}</span>
+                            <input
+                                type="checkbox"
+                                class="toggle toggle-sm"
+                                checked={*show_affinity}
+                                onchange={{
+                                    let s = show_affinity.clone();
+                                    Callback::from(move |_: Event| s.set(!*s))
+                                }}
+                            />
+                        </label>
+                        <label class="label cursor-pointer py-1">
+                            <span class="text-base-content">{"Post score"}</span>
+                            <input
+                                type="checkbox"
+                                class="toggle toggle-sm"
+                                checked={*show_score}
+                                onchange={{
+                                    let s = show_score.clone();
+                                    Callback::from(move |_: Event| s.set(!*s))
+                                }}
+                            />
+                        </label>
+                        <label class="label cursor-pointer py-1">
+                            <span class="text-base-content">{"Post number"}</span>
+                            <input
+                                type="checkbox"
+                                class="toggle toggle-sm"
+                                checked={*show_post_number}
+                                onchange={{
+                                    let s = show_post_number.clone();
+                                    Callback::from(move |_: Event| s.set(!*s))
+                                }}
+                            />
+                        </label>
+                        <div class="divider my-1"></div>
+                        <span class="text-xs text-base-content/70 block mb-1">{ "Cards" }</span>
+                        <label class="label cursor-pointer py-1">
+                            <span class="text-base-content">{"Post text / tags"}</span>
+                            <input
+                                type="checkbox"
+                                class="toggle toggle-sm"
+                                checked={*show_desc}
+                                onchange={on_toggle_show_desc}
+                            />
+                        </label>
+                        <label class="label cursor-pointer py-1">
+                            <span class="text-base-content">{"File metadata"}</span>
+                            <input
+                                type="checkbox"
+                                class="toggle toggle-sm"
+                                checked={*show_metadata}
+                                onchange={{
+                                    let show_metadata = show_metadata.clone();
+                                    Callback::from(move |_: Event| show_metadata.set(!*show_metadata))
+                                }}
+                            />
+                        </label>
+                        <label class="label cursor-pointer py-1">
+                            <span class="text-base-content">{"Score breakdown"}</span>
+                            <input
+                                type="checkbox"
+                                class="toggle toggle-sm"
+                                checked={*show_breakdown}
+                                onchange={{
+                                    let s = show_breakdown.clone();
+                                    Callback::from(move |_: Event| s.set(!*s))
+                                }}
+                            />
+                        </label>
+                        <div class="divider my-1"></div>
+                        <span class="text-xs text-base-content/70 block mb-1">{ "Grid density" }</span>
+                        <div class="join join-sm w-full" role="group" aria-label="Grid type">
+                            <button
+                                type="button"
+                                class={classes!("btn","btn-outline", if *grid == GridType::Auto { "btn-active" } else { "" })}
+                                aria-pressed={(*grid == GridType::Auto).to_string()}
+                                onclick={set_grid(GridType::Auto)}
+                            >{ "Auto" }</button>
+                            <button
+                                type="button"
+                                class={classes!("btn","btn-outline", if *grid == GridType::Three { "btn-active" } else { "" })}
+                                aria-pressed={(*grid == GridType::Three).to_string()}
+                                onclick={set_grid(GridType::Three)}
+                            >{ "3" }</button>
+                            <button
+                                type="button"
+                                class={classes!("btn","btn-outline", if *grid == GridType::Two { "btn-active" } else { "" })}
+                                aria-pressed={(*grid == GridType::Two).to_string()}
+                                onclick={set_grid(GridType::Two)}
+                            >{ "2" }</button>
+                            <button
+                                type="button"
+                                class={classes!("btn","btn-outline", if *grid == GridType::One { "btn-active" } else { "" })}
+                                aria-pressed={(*grid == GridType::One).to_string()}
+                                onclick={set_grid(GridType::One)}
+                            >{ "1" }</button>
+                        </div>
+                    </div>
+                </details>
             </div>
 
             if let Some(ref e) = *error {
-                <div class="alert alert-danger" role="alert">{ e }</div>
+                <div class="alert alert-error" role="alert">{ e }</div>
             }
 
             { process_banner }
 
             if *is_loading {
-                <div class="d-flex justify-content-center my-5">
-                    <div class="spinner-border" role="status">
-                        <span class="visually-hidden">{ "Loading..." }</span>
+                <div class="flex justify-center my-5">
+                    <div class="loading loading-spinner loading-lg" role="status">
+                        <span class="sr-only">{ "Loading..." }</span>
                     </div>
                 </div>
             }
@@ -586,13 +651,13 @@ pub fn digest_page() -> Html {
                 </div>
             }
 
-            <div class="row g-2">
+            <div class={grid.grid_class()}>
                 { for posts.iter().enumerate().map(|(i, sp)| {
                     let Some(cfg) = read_config_from_head() else {
                         return html! {};
                     };
                     html! {
-                        <div class={col_class}>
+                        <div class="flex justify-center">
                             <PostCard
                                 post={std::rc::Rc::new(sp.post.clone())}
                                 affinity={sp.score}
@@ -601,6 +666,10 @@ pub fn digest_page() -> Html {
                                 session_id={String::new()}
                                 position={i as i32}
                                 breakdown={sp.breakdown.clone()}
+                                show_rating={*show_rating}
+                                show_affinity={*show_affinity}
+                                show_score={*show_score}
+                                show_post_number={*show_post_number}
                                 show_desc={*show_desc}
                                 show_metadata={*show_metadata}
                                 show_breakdown={*show_breakdown}

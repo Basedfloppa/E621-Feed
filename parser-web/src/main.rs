@@ -16,6 +16,10 @@ pub enum Route {
     Account,
     #[at("/feed")]
     Feed,
+    #[at("/trending")]
+    Trending,
+    #[at("/favorites")]
+    Favorites,
     #[at("/digest")]
     Digest,
     #[not_found]
@@ -28,6 +32,8 @@ fn switch(routes: Route) -> Html {
         Route::Home => html! { <HomePage /> },
         Route::Account => html! { <Account /> },
         Route::Feed => html! { <FeedPage />},
+        Route::Trending => html! { <TrendingPage />},
+        Route::Favorites => html! { <FavoritesPage />},
         Route::Digest => html! { <DigestPage />},
         Route::NotFound => html! { <h1>{ "404" }</h1> },
     }
@@ -38,7 +44,7 @@ fn app() -> Html {
     html! {
         <BrowserRouter>
             <Header />
-            <main id="main-content">
+            <main id="main-content" class="bg-base-200 min-h-screen pt-4">
                 <Switch<Route> render={switch} />
             </main>
         </BrowserRouter>

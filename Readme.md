@@ -189,12 +189,24 @@ window.APP_CONFIG = Object.freeze({
 });
 ```
 
+Requires Node.js (for Tailwind CSS + DaisyUI via npm):
+
+```bash
+cd ./parser-web/
+npm install
+```
+
 <http://localhost:8000>
 
 ```bash
 cd ./parser-web/
 trunk serve
 ```
+
+`npm install` is a one-time setup step. After that, `trunk serve` / `trunk build`
+automatically runs the Tailwind CLI (`npx @tailwindcss/cli`) via its
+pre-build hook before every compilation. The generated CSS in
+`src/tailwind-output.css` is gitignored.
 
 ---
 

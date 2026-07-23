@@ -52,14 +52,24 @@ impl GridType {
             GridType::One => "1",
         }
     }
-    fn col_class(self) -> &'static str {
+    fn grid_class(self) -> &'static str {
         match self {
             GridType::Auto => {
-                "col-xs-6 col-sm-5 col-md-4 col-lg-3 col-xl-2 col-xxl-1 d-flex justify-content-center"
+                "grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-3"
             }
-            GridType::Three => "col-4 d-flex justify-content-center",
-            GridType::Two => "col-6 d-flex justify-content-center",
-            GridType::One => "col-12 d-flex justify-content-center",
+            GridType::Three => "grid grid-cols-3 gap-3",
+            GridType::Two => "grid grid-cols-2 gap-3",
+            GridType::One => "grid grid-cols-1 gap-3",
+        }
+    }
+
+    /// How many skeleton cards to show for this grid type.
+    pub fn skeleton_count(&self) -> usize {
+        match self {
+            GridType::Auto => 10,
+            GridType::Three => 9,
+            GridType::Two => 8,
+            GridType::One => 4,
         }
     }
 }
@@ -560,7 +570,7 @@ pub fn feed_page() -> Html {
         .map(|cfg| cfg.backend_domain)
         .unwrap_or_default();
     let card_account_id = selected_user.as_ref().map(|u| u.id as i32).unwrap_or_default();
-    let card_col_class = (*grid).col_class();
+    let card_grid_class = (*grid).grid_class();
     let card_session_id = (*session_id).clone();
     let feed_cards: Html = posts
         .iter()
@@ -568,7 +578,7 @@ pub fn feed_page() -> Html {
         .map(|(idx, sp)| {
             let position = (idx + 1) as i32;
             html! {
-                <div key={sp.post.id} class={ card_col_class } style="min-width: 200px">
+                <div key={sp.post.id} class="flex justify-center" style="min-width: 200px">
                     <PostCard
                         affinity={sp.score}
                         post={Rc::new(sp.post.clone())}
@@ -591,8 +601,8 @@ pub fn feed_page() -> Html {
         .collect();
 
     html! {
-        <div class="container my-4 gap-2 feed-page">
-            <h1 class="h2 mb-3">{ "Latest Posts" }</h1>
+        <div class="m-4 gap-2 feed-page">
+            <h1 class="text-2xl font-semibold text-base-content mb-3">{ "Latest Posts" }</h1>
 
             <div id="feed-account">
                 <SavedAccountsSelect
@@ -601,19 +611,19 @@ pub fn feed_page() -> Html {
                 />
             </div>
 
-            <div class="row g-3 align-items-center feed-toolbar">
-                <div class="col-auto feed-affinity-col" id="feed-affinity">
-                    <label for="feed-affinity-input" class="form-label mb-1 d-block">
-                        {"Per-page cutoff"}
-                        <small class="text-muted ms-1">
+            <div class="flex flex-wrap gap-3 items-center feed-toolbar">
+                <div class="feed-affinity-col" id="feed-affinity">
+                    <label for="feed-affinity-input" class="mb-1 block">
+                        <span class="text-base-content">{"Per-page cutoff"}
+                        <span class="text-xs text-base-content/70 ms-1">
                             { "(% of worst posts to drop)" }
-                        </small>
+                        </span></span>
                     </label>
-                    <div class="d-flex align-items-center gap-2">
+                    <div class="flex items-center gap-2">
                         <input
                             id="feed-affinity-input"
                             type="number"
-                            class="form-control"
+                            class="input input-bordered"
                             style="max-width: 8rem"
                             value={cutoff_pct.to_string()}
                             step="5"
@@ -630,7 +640,7 @@ pub fn feed_page() -> Html {
                                 })
                             }}
                         />
-                        <div class="btn-group btn-group-sm" role="group" aria-label="Cutoff preset">
+                        <div class="join join-sm" role="group" aria-label="Cutoff preset">
                             {
                                 [
                                     ("Wide", 0.0f32, "Show every post on the page — good for discovery."),
@@ -643,7 +653,7 @@ pub fn feed_page() -> Html {
                                     html! {
                                         <button
                                             type="button"
-                                            class={classes!("btn", "btn-outline-secondary", active.then_some("active"))}
+                                            class={classes!("btn", "btn-outline", if active { Some("btn-active") } else { None })}
                                             title={ *tip }
                                             aria-pressed={active.to_string()}
                                             onclick={Callback::from(move |_| cutoff_pct.set(val))}
@@ -657,18 +667,18 @@ pub fn feed_page() -> Html {
                     </div>
                 </div>
 
-                <div class="col-auto feed-exploration-col" id="feed-exploration">
-                    <label for="feed-exploration-input" class="form-label mb-1 d-block">
-                        {"Exploration"}
-                        <small class="text-muted ms-1">
+                <div class="feed-exploration-col" id="feed-exploration">
+                    <label for="feed-exploration-input" class="mb-1 block">
+                        <span class="text-base-content">{"Exploration"}
+                        <span class="text-xs text-base-content/70 ms-1">
                             { "(ε-greedy novelty boost)" }
-                        </small>
+                        </span></span>
                     </label>
-                    <div class="d-flex align-items-center gap-2">
+                    <div class="flex items-center gap-2">
                         <input
                             id="feed-exploration-input"
                             type="number"
-                            class="form-control"
+                            class="input input-bordered"
                             style="max-width: 8rem"
                             value={exploration_epsilon.to_string()}
                             step="0.05"
@@ -685,7 +695,7 @@ pub fn feed_page() -> Html {
                                 })
                             }}
                         />
-                        <div class="btn-group btn-group-sm" role="group" aria-label="Exploration preset">
+                        <div class="join join-sm" role="group" aria-label="Exploration preset">
                             {
                                 [
                                     ("Focused", 0.0f32, "Pure exploitation — show only the model's top picks. Same as default behaviour."),
@@ -698,7 +708,7 @@ pub fn feed_page() -> Html {
                                     html! {
                                         <button
                                             type="button"
-                                            class={classes!("btn", "btn-outline-secondary", active.then_some("active"))}
+                                            class={classes!("btn", "btn-outline", if active { Some("btn-active") } else { None })}
                                             title={ *tip }
                                             aria-pressed={active.to_string()}
                                             onclick={Callback::from(move |_| exploration_epsilon.set(val))}
@@ -712,12 +722,12 @@ pub fn feed_page() -> Html {
                     </div>
                 </div>
 
-                <div class="col-auto feed-grid-col" id="feed-grid">
-                    <span class="d-block">{"Grid type"}</span>
-                    <div class="btn-group" role="group" aria-label="Grid type">
+                <div class="feed-grid-col" id="feed-grid">
+                    <span class="block">{"Grid type"}</span>
+                    <div class="join" role="group" aria-label="Grid type">
                         <button
                             type="button"
-                            class={classes!("btn","btn-outline-secondary", if *grid == GridType::Auto { "active" } else { "" })}
+                            class={classes!("btn", "btn-outline", if *grid == GridType::Auto { "btn-active" } else { "" })}
                             aria-pressed={(*grid == GridType::Auto).to_string()}
                             aria-label="Auto grid (responsive)"
                             title="Auto grid (responsive)"
@@ -726,12 +736,12 @@ pub fn feed_page() -> Html {
                                 Callback::from(move |_| grid.set(GridType::Auto))
                             }}
                         >
-                            <i class="bi bi-water" aria-hidden="true"></i>
+                            <IconWater />
                         </button>
 
                         <button
                             type="button"
-                            class={classes!("btn","btn-outline-secondary", if *grid == GridType::Three { "active" } else { "" })}
+                            class={classes!("btn", "btn-outline", if *grid == GridType::Three { "btn-active" } else { "" })}
                             aria-pressed={(*grid == GridType::Three).to_string()}
                             aria-label="Three-column grid"
                             title="Three-column grid"
@@ -740,12 +750,12 @@ pub fn feed_page() -> Html {
                                 Callback::from(move |_| grid.set(GridType::Three))
                             }}
                         >
-                            <i class="bi bi-grid-3x3-gap-fill" aria-hidden="true"></i>
+                            <IconGrid3x3 />
                         </button>
 
                         <button
                             type="button"
-                            class={classes!("btn","btn-outline-secondary", if *grid == GridType::Two { "active" } else { "" })}
+                            class={classes!("btn", "btn-outline", if *grid == GridType::Two { "btn-active" } else { "" })}
                             aria-pressed={(*grid == GridType::Two).to_string()}
                             aria-label="Two-column grid"
                             title="Two-column grid"
@@ -754,12 +764,12 @@ pub fn feed_page() -> Html {
                                 Callback::from(move |_| grid.set(GridType::Two))
                             }}
                         >
-                            <i class="bi bi-grid-fill" aria-hidden="true"></i>
+                            <IconGridFill />
                         </button>
 
                         <button
                             type="button"
-                            class={classes!("btn","btn-outline-secondary", if *grid == GridType::One { "active" } else { "" })}
+                            class={classes!("btn", "btn-outline", if *grid == GridType::One { "btn-active" } else { "" })}
                             aria-pressed={(*grid == GridType::One).to_string()}
                             aria-label="Single-column list"
                             title="Single-column list"
@@ -768,159 +778,117 @@ pub fn feed_page() -> Html {
                                 Callback::from(move |_| grid.set(GridType::One))
                             }}
                         >
-                            <i class="bi bi-square-fill" aria-hidden="true"></i>
+                            <IconSquareFill />
                         </button>
                     </div>
                 </div>
 
-                <div class="col-auto">
-                    <div class="dropdown">
-                        <button
-                            class="btn btn-outline-secondary dropdown-toggle"
-                            type="button"
-                            data-bs-toggle="dropdown"
-                            data-bs-auto-close="outside"
-                            aria-expanded="false"
-                            aria-label="Card display settings"
-                        >
-                            <i class="bi bi-sliders" aria-hidden="true"></i>
+                <div class="self-end">
+                    <details class="dropdown dropdown-end">
+                        <summary class="btn btn-outline">
+                            <IconSliders />
                             {" Display"}
-                        </button>
-                        <ul class="dropdown-menu dropdown-menu-end p-3" style="min-width: 260px;">
-                            <li><small class="text-muted d-block mb-1">{ "Badges" }</small></li>
-                            <li class="mb-2">
-                                <div class="form-check form-switch">
-                                    <input
-                                        class="form-check-input"
-                                        type="checkbox"
-                                        id="show-rating"
-                                        checked={*show_rating}
-                                        onchange={{
-                                            let show_rating = show_rating.clone();
-                                            Callback::from(move |_: Event| show_rating.set(!*show_rating))
-                                        }}
-                                    />
-                                    <label class="form-check-label" for="show-rating">
-                                        {"Rating badge"}
-                                    </label>
-                                </div>
-                            </li>
-                            <li class="mb-2">
-                                <div class="form-check form-switch">
-                                    <input
-                                        class="form-check-input"
-                                        type="checkbox"
-                                        id="show-affinity"
-                                        checked={*show_affinity}
-                                        onchange={{
-                                            let show_affinity = show_affinity.clone();
-                                            Callback::from(move |_: Event| show_affinity.set(!*show_affinity))
-                                        }}
-                                    />
-                                    <label class="form-check-label" for="show-affinity">
-                                        {"Affinity score"}
-                                    </label>
-                                </div>
-                            </li>
-                            <li class="mb-2">
-                                <div class="form-check form-switch">
-                                    <input
-                                        class="form-check-input"
-                                        type="checkbox"
-                                        id="show-score"
-                                        checked={*show_score}
-                                        onchange={{
-                                            let show_score = show_score.clone();
-                                            Callback::from(move |_: Event| show_score.set(!*show_score))
-                                        }}
-                                    />
-                                    <label class="form-check-label" for="show-score">
-                                        {"Post score"}
-                                    </label>
-                                </div>
-                            </li>
-                            <li class="mb-2">
-                                <div class="form-check form-switch">
-                                    <input
-                                        class="form-check-input"
-                                        type="checkbox"
-                                        id="show-post-number"
-                                        checked={*show_post_number}
-                                        onchange={{
-                                            let show_post_number = show_post_number.clone();
-                                            Callback::from(move |_: Event| show_post_number.set(!*show_post_number))
-                                        }}
-                                    />
-                                    <label class="form-check-label" for="show-post-number">
-                                        {"Post number"}
-                                    </label>
-                                </div>
-                            </li>
-                            <li><hr class="dropdown-divider" /></li>
-                            <li><small class="text-muted d-block mb-1">{ "Cards" }</small></li>
-                            <li class="mb-2">
-                                <div class="form-check form-switch">
-                                    <input
-                                        class="form-check-input"
-                                        type="checkbox"
-                                        id="show-post-text"
-                                        checked={*show_desc}
-                                        onchange={{
-                                            let show_desc = show_desc.clone();
-                                            Callback::from(move |_: Event| show_desc.set(!*show_desc))
-                                        }}
-                                    />
-                                    <label class="form-check-label" for="show-post-text">
-                                        {"Post text / tags"}
-                                    </label>
-                                </div>
-                            </li>
-                            <li class="mb-2">
-                                <div class="form-check form-switch">
-                                    <input
-                                        class="form-check-input"
-                                        type="checkbox"
-                                        id="show-file-metadata"
-                                        checked={*show_metadata}
-                                        onchange={{
-                                            let show_metadata = show_metadata.clone();
-                                            Callback::from(move |_: Event| show_metadata.set(!*show_metadata))
-                                        }}
-                                    />
-                                    <label class="form-check-label" for="show-file-metadata">
-                                        {"File metadata"}
-                                    </label>
-                                </div>
-                            </li>
-                            <li>
-                                <div class="form-check form-switch">
-                                    <input
-                                        class="form-check-input"
-                                        type="checkbox"
-                                        id="show-score-breakdown"
-                                        checked={*show_breakdown}
-                                        onchange={{
-                                            let show_breakdown = show_breakdown.clone();
-                                            Callback::from(move |_: Event| show_breakdown.set(!*show_breakdown))
-                                        }}
-                                    />
-                                    <label class="form-check-label" for="show-score-breakdown">
-                                        {"Score breakdown"}
-                                    </label>
-                                </div>
-                            </li>
-                        </ul>
-                    </div>
+                        </summary>
+                        <div class="menu dropdown-content p-3 shadow bg-base-100 rounded-box w-72 z-50" style="min-width: 260px;">
+                            <span class="text-xs text-base-content/70 block mb-1">{ "Badges" }</span>
+                            <label class="label cursor-pointer py-1">
+                                <span class="text-base-content">{"Rating badge"}</span>
+                                <input
+                                    type="checkbox"
+                                    class="toggle toggle-sm"
+                                    checked={*show_rating}
+                                    onchange={{
+                                        let show_rating = show_rating.clone();
+                                        Callback::from(move |_: Event| show_rating.set(!*show_rating))
+                                    }}
+                                />
+                            </label>
+                            <label class="label cursor-pointer py-1">
+                                <span class="text-base-content">{"Affinity score"}</span>
+                                <input
+                                    type="checkbox"
+                                    class="toggle toggle-sm"
+                                    checked={*show_affinity}
+                                    onchange={{
+                                        let show_affinity = show_affinity.clone();
+                                        Callback::from(move |_: Event| show_affinity.set(!*show_affinity))
+                                    }}
+                                />
+                            </label>
+                            <label class="label cursor-pointer py-1">
+                                <span class="text-base-content">{"Post score"}</span>
+                                <input
+                                    type="checkbox"
+                                    class="toggle toggle-sm"
+                                    checked={*show_score}
+                                    onchange={{
+                                        let show_score = show_score.clone();
+                                        Callback::from(move |_: Event| show_score.set(!*show_score))
+                                    }}
+                                />
+                            </label>
+                            <label class="label cursor-pointer py-1">
+                                <span class="text-base-content">{"Post number"}</span>
+                                <input
+                                    type="checkbox"
+                                    class="toggle toggle-sm"
+                                    checked={*show_post_number}
+                                    onchange={{
+                                        let show_post_number = show_post_number.clone();
+                                        Callback::from(move |_: Event| show_post_number.set(!*show_post_number))
+                                    }}
+                                />
+                            </label>
+                            <div class="divider my-1"></div>
+                            <span class="text-xs text-base-content/70 block mb-1">{ "Cards" }</span>
+                            <label class="label cursor-pointer py-1">
+                                <span class="text-base-content">{"Post text / tags"}</span>
+                                <input
+                                    type="checkbox"
+                                    class="toggle toggle-sm"
+                                    checked={*show_desc}
+                                    onchange={{
+                                        let show_desc = show_desc.clone();
+                                        Callback::from(move |_: Event| show_desc.set(!*show_desc))
+                                    }}
+                                />
+                            </label>
+                            <label class="label cursor-pointer py-1">
+                                <span class="text-base-content">{"File metadata"}</span>
+                                <input
+                                    type="checkbox"
+                                    class="toggle toggle-sm"
+                                    checked={*show_metadata}
+                                    onchange={{
+                                        let show_metadata = show_metadata.clone();
+                                        Callback::from(move |_: Event| show_metadata.set(!*show_metadata))
+                                    }}
+                                />
+                            </label>
+                            <label class="label cursor-pointer py-1">
+                                <span class="text-base-content">{"Score breakdown"}</span>
+                                <input
+                                    type="checkbox"
+                                    class="toggle toggle-sm"
+                                    checked={*show_breakdown}
+                                    onchange={{
+                                        let show_breakdown = show_breakdown.clone();
+                                        Callback::from(move |_: Event| show_breakdown.set(!*show_breakdown))
+                                    }}
+                                />
+                            </label>
+                        </div>
+                    </details>
 
             </div>
         </div>
 
-            <div class="position-fixed bottom-0 start-50 translate-middle-x w-100 d-flex justify-content-between z-1 feed-statusbar">
+            <div class="fixed bottom-0 left-1/2 -translate-x-1/2 w-full flex justify-between z-1 feed-statusbar">
                 {
                     if let Some(u) = &*selected_user {
-                        html! { <span class="small m-3 bg-body-tertiary bg-opacity-75 text-body-emphasis rounded-pill badge shadow-sm">{ format!("User: {} (ID: {})", u.name, u.id) }</span> }
+                        html! { <span class="text-sm m-3 bg-base-200 bg-opacity-75 text-base-content rounded-full badge shadow-sm">{ format!("User: {} (ID: {})", u.name, u.id) }</span> }
                     } else {
-                        html! { <span class="small m-3 bg-body-tertiary bg-opacity-75 text-body-emphasis rounded-pill badge shadow-sm">{ "No user selected" }</span> }
+                        html! { <span class="text-sm m-3 bg-base-200 bg-opacity-75 text-base-content rounded-full badge shadow-sm">{ "No user selected" }</span> }
                     }
                 }
                 {
@@ -930,18 +898,21 @@ pub fn feed_page() -> Html {
                         } else {
                             format!("Loaded {} posts", posts.len())
                         };
-                        html! { <span class="small m-3 bg-body-tertiary bg-opacity-75 text-body-emphasis rounded-pill badge shadow-sm" aria-live="polite">{ label }</span> }
-                    } else { html!{ <span class="small m-3 bg-body-tertiary bg-opacity-75 text-body-emphasis rounded-pill badge shadow-sm" aria-live="polite"><span class="spinner-border spinner-border-sm me-1" role="status"></span>{"Loading..."}</span>} }
+                        html! { <span class="text-sm m-3 bg-base-200 bg-opacity-75 text-base-content rounded-full badge shadow-sm" aria-live="polite">{ label }</span> }
+                    } else {
+                        let loading_msg = format!("Loading... ({} posts loaded)", posts.len());
+                        html!{ <span class="text-sm m-3 bg-base-200 bg-opacity-75 text-base-content rounded-full badge shadow-sm" aria-live="polite"><span class="loading loading-spinner loading-sm me-1" role="status"></span>{ loading_msg }</span>}
+                    }
                 }
             </div>
 
             {
                 if let Some(err) = &*error {
                     html! {
-                        <div class="alert alert-danger d-flex justify-content-between align-items-center" role="alert" aria-live="polite">
+                        <div class="alert alert-error flex justify-between items-center" role="alert" aria-live="polite">
                             <span>{ err }</span>
                             <button
-                                class="btn btn-sm btn-outline-light"
+                                class="btn btn-sm btn-outline"
                                 type="button"
                                 onclick={{
                                     let fetch_page = fetch_page.clone();
@@ -973,24 +944,33 @@ pub fn feed_page() -> Html {
             {
                 if selected_user.is_some() && !*is_loading && error.is_none() && posts.is_empty() {
                     html! {
-                        <div class="text-center text-muted my-5" aria-live="polite">
+                        <div class="text-center text-base-content/70 my-5" aria-live="polite">
                             { "No posts yet." }
                         </div>
                     }
                 } else { html!{} }
             }
 
-            <div class="row g-3 m-3 feed-grid" aria-busy={(*is_loading).to_string()}>
+            <div class={card_grid_class.to_string() + " m-3 feed-grid"} aria-busy={(*is_loading).to_string()}>
                 { feed_cards }
             </div>
 
             {
                 if *is_loading && posts.is_empty() {
-                    html! {
-                        <div class="d-flex justify-content-center my-4">
-                            <div class="spinner-border" role="status">
-                                <span class="visually-hidden">{ "Loading..." }</span>
+                    let count = (*grid).skeleton_count();
+                    let skeleton_card = |_| html! {
+                        <div class="card bg-base-100 shadow-sm">
+                            <div class="skeleton w-full" style="aspect-ratio: 1 / 1; border-radius: 0;"></div>
+                            <div class="card-body gap-2">
+                                <div class="skeleton h-4 w-3/4"></div>
+                                <div class="skeleton h-3 w-1/2"></div>
+                                <div class="skeleton h-3 w-2/3"></div>
                             </div>
+                        </div>
+                    };
+                    html! {
+                        <div class={card_grid_class.to_string() + " m-3 feed-grid"}>
+                            { for (0..count).map(skeleton_card) }
                         </div>
                     }
                 } else { html!{} }

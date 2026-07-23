@@ -19,7 +19,7 @@ use e621_account_parser_api::db::{
     self, get_account_by_id, get_account_preference_profile, get_tag_counts,
 };
 use e621_account_parser_api::errors::ApiError;
-use e621_account_parser_api::models::{cfg, ScoredPost};
+use e621_account_parser_api::models::{cfg, Post, ScoredPost};
 use e621_account_parser_api::utils::{
     current_global_relation, current_idf,
     CachedPostFeatures, ScoringContext,
@@ -78,10 +78,23 @@ fn stratified_sample(
     rng: &mut impl rand::Rng,
 ) -> Vec<ScoredPost> {
     let mut digest = Vec::with_capacity(20);
+    let mut seen: HashSet<i64> = HashSet::new();
+
+    let mut try_add = |sp: ScoredPost, max: usize| -> bool {
+        if digest.len() >= max {
+            return false;
+        }
+        if seen.insert(sp.post.id) {
+            digest.push(sp);
+            true
+        } else {
+            false
+        }
+    };
 
     // 1. Top-3 best picks
     for sp in scored.iter().take(3) {
-        digest.push(sp.clone());
+        try_add(sp.clone(), 20);
     }
 
     // 2. Semi-random from middle third of scored list
@@ -90,51 +103,32 @@ fn stratified_sample(
         let mid_end = (scored.len() * 2 / 3).min(scored.len());
         if mid_end > mid_start {
             let slice = &scored[mid_start..mid_end];
-            let sample = slice
-                .choose_multiple(rng, 4)
-                .cloned()
-                .collect::<Vec<_>>();
-            digest.extend(sample);
+            for sp in slice.choose_multiple(rng, 4).cloned() {
+                try_add(sp, 20);
+            }
         }
     }
 
     // 3. Trending
-    digest.extend(trending.into_iter().take(4));
+    for sp in trending.into_iter().take(4) {
+        try_add(sp, 20);
+    }
 
     // 4. Exploration: low-similarity posts
-    //    (already in trending/top, just fill remaining slots)
-    let mut remaining = 20usize.saturating_sub(digest.len());
     for sp in scored.iter().skip(3).rev() {
-        if remaining == 0 {
-            break;
-        }
-        if !digest.iter().any(|d| d.post.id == sp.post.id) {
-            digest.push(sp.clone());
-            remaining -= 1;
-        }
+        try_add(sp.clone(), 20);
     }
 
     // 5. Wildcards
     for sp in wildcards.into_iter().take(3) {
-        if !digest.iter().any(|d| d.post.id == sp.post.id) {
-            if digest.len() >= 20 {
-                break;
-            }
-            digest.push(sp);
-        }
+        try_add(sp, 20);
     }
 
     // 6. Recent added + popular new
     for sp in recent_added.into_iter().chain(popular_new).take(2) {
-        if !digest.iter().any(|d| d.post.id == sp.post.id) {
-            if digest.len() >= 20 {
-                break;
-            }
-            digest.push(sp);
-        }
+        try_add(sp, 20);
     }
 
-    digest.truncate(20);
     digest
 }
 
@@ -248,10 +242,33 @@ async fn build_personalized_digest(
         }
     };
 
-    // Build supporting lists for stratification.
+    // Score a batch of un-scored posts using the current ScoringContext.
+    let score_batch = |posts: Vec<Post>| -> Vec<ScoredPost> {
+        use rayon::prelude::*;
+        posts
+            .into_par_iter()
+            .map(|post| {
+                let cf = CachedPostFeatures::from_post_with_user(
+                    &post, &idf, &global_relation, Some(&user_relation),
+                );
+                let (s, breakdown, _) = ctx.score_cached_with_metrics(&cf);
+                ScoredPost { post, score: s, breakdown: Some(breakdown) }
+            })
+            .collect()
+    };
+
+    // Build supporting lists for stratification, now with full scoring.
     let mut rng = rand::thread_rng();
-    let trending = filter_owned(db::get_trending_posts(7, 6).unwrap_or_default());
-    let wildcards = filter_owned(db::get_random_posts_by_group(account_id, 5).unwrap_or_default());
+    let trending = {
+        let raw = db::get_trending_posts(7, 6).unwrap_or_default();
+        let posts: Vec<Post> = raw.into_iter().map(|sp| sp.post).collect();
+        filter_owned(score_batch(posts))
+    };
+    let wildcards = {
+        let raw = db::get_random_posts_by_group(account_id, 5).unwrap_or_default();
+        let posts: Vec<Post> = raw.into_iter().map(|sp| sp.post).collect();
+        filter_owned(score_batch(posts))
+    };
     // "Recent added" surfaces the user's own posts on purpose, so skip it
     // entirely when the user asked to hide saved items.
     let recent_added = if drop_owned {
@@ -262,17 +279,16 @@ async fn build_personalized_digest(
         if ids.is_empty() {
             Vec::new()
         } else {
-            db::hydrate_posts_by_ids(&ids)
-                .unwrap_or_default()
-                .into_iter()
-                .map(|post| ScoredPost { post, score: 0.0, breakdown: None })
-                .collect()
+            let posts = db::hydrate_posts_by_ids(&ids).unwrap_or_default();
+            score_batch(posts)
         }
     };
-    let popular_new = filter_owned(
-        db::get_popular_posts_since(Utc::now() - chrono::Duration::days(2), 3)
-            .unwrap_or_default(),
-    );
+    let popular_new = {
+        let raw = db::get_popular_posts_since(Utc::now() - chrono::Duration::days(2), 3)
+            .unwrap_or_default();
+        let posts: Vec<Post> = raw.into_iter().map(|sp| sp.post).collect();
+        filter_owned(score_batch(posts))
+    };
 
     let digest = stratified_sample(&scored, trending, wildcards, recent_added, popular_new, &mut rng);
 
@@ -290,12 +306,14 @@ async fn build_personalized_digest(
     Ok(digest)
 }
 
-/// Generic (non-personalised) digest — just trending + popular + random.
-/// No scoring pipeline, no user profile needed.
+/// Generic (non-personalised) digest — trending + popular + random.
+/// Scores posts using global defaults so breakdown is always available.
 async fn build_generic_digest(
     account_id: i32,
     exclude_saved: bool,
 ) -> Result<Vec<ScoredPost>, ApiError> {
+    use rayon::prelude::*;
+
     let mut rng = rand::thread_rng();
     let trending = db::get_trending_posts(7, 10).unwrap_or_default();
     let popular_new = db::get_popular_posts_since(
@@ -304,21 +322,48 @@ async fn build_generic_digest(
     .unwrap_or_default();
     let random = db::get_random_posts(5).unwrap_or_default();
 
-    let mut digest: Vec<ScoredPost> = Vec::with_capacity(20);
-    digest.extend(trending);
-    digest.extend(popular_new);
-    digest.extend(random);
+    let mut all_posts: Vec<ScoredPost> = Vec::with_capacity(20);
+    all_posts.extend(trending);
+    all_posts.extend(popular_new);
+    all_posts.extend(random);
 
     if exclude_saved {
         let owned: HashSet<i64> = db::get_owned_post_ids(account_id).unwrap_or_default();
         if !owned.is_empty() {
-            digest.retain(|sp| !owned.contains(&sp.post.id));
+            all_posts.retain(|sp| !owned.contains(&sp.post.id));
         }
     }
 
-    digest.shuffle(&mut rng);
-    digest.truncate(20);
-    Ok(digest)
+    all_posts.shuffle(&mut rng);
+    all_posts.truncate(20);
+
+    // Score with default priors so breakdown is populated even for cold users.
+    let idf = current_idf();
+    let global_relation = current_global_relation();
+    let mut priors = cfg().priors.clone();
+    priors.now = Utc::now();
+    let profile = e621_account_parser_api::models::AccountPreferenceProfile::default();
+    let ctx = ScoringContext::new(
+        &[],
+        &priors,
+        &idf,
+        &profile,
+        &global_relation,
+        &global_relation,
+    );
+
+    let scored: Vec<ScoredPost> = all_posts
+        .into_par_iter()
+        .map(|sp| {
+            let cf = CachedPostFeatures::from_post(
+                &sp.post, &idf, &global_relation,
+            );
+            let (s, breakdown, _) = ctx.score_cached_with_metrics(&cf);
+            ScoredPost { post: sp.post, score: s, breakdown: Some(breakdown) }
+        })
+        .collect();
+
+    Ok(scored)
 }
 
 // ---------------------------------------------------------------------------

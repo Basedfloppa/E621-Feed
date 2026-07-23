@@ -1,11 +1,15 @@
-*.lock
 **/target
 */dist
-*.db*
-config.toml
-config.js
 .idea/*
 .vscode/*
+*/node_modules
+
+*.lock
+package-lock.json
+*.db*
+tailwind-output.css
+config.toml
+config.js
 
 # Real security.txt — contains the deploy contact email + expiry, generated
 # from .well-known/security.example.txt during deploy. Keep it local so the

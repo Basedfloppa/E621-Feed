@@ -41,7 +41,7 @@ pub fn home_page() -> Html {
         Some(c) => c,
         None => {
             return html! {
-                <div class="container mt-4">
+                <div class="mt-4">
                     <div class="alert alert-danger" role="alert">
                         { "App configuration failed to load. Please reload the page; if the problem persists, check that /static/config.js is reachable." }
                     </div>
@@ -155,140 +155,138 @@ pub fn home_page() -> Html {
 
     html! {
         <div>
-            <div class="container mt-4">
-                <div class="row justify-content-center">
-                    <div class="col-lg-8">
-                        <div class="card shadow-sm">
-                            <div class="card-body">
-                                <h1 class="card-title text-center mb-4">{"e621 Tag Analyzer"}</h1>
+            <div class="flex justify-center">
+                <div class="w-full max-w-3xl">
+                    <div class="card bg-base-100 shadow-sm">
+                        <div class="card-body text-base-content">
+                            <h1 class="card-title text-2xl text-center">{"e621 Tag Analyzer"}</h1>
 
-                                <div id="home-account">
-                                    <SavedAccountsSelect
-                                        selected_user={selected_user.clone()}
-                                        is_loading={is_loading.clone()}
-                                    />
+                            <div id="home-account">
+                                <SavedAccountsSelect
+                                    selected_user={selected_user.clone()}
+                                    is_loading={is_loading.clone()}
+                                />
 
-                                    <UserSearchForm
+                                <UserSearchForm
+                                    found_user={selected_user.clone()}
+                                    error={error.clone()}
+                                    api_base={cfg.backend_domain.clone()}
+                                    is_loading={is_loading.clone()}
+                                />
+                            </div>
+
+                            <UserInfoAlert
+                                user={selected_user.clone()}
+                                error={error.clone()}
+                            />
+
+                            // Saved accounts quick-actions — show a
+                            // compact list of every saved account with
+                            // a one-click Re-analyze button so the user
+                            // doesn't have to switch to /account to
+                            // trigger an update.
+                            if !saved_accounts.is_empty() {
+                                <div class="mb-3">
+                                    <details open={saved_accounts.len() <= 3}>
+                                        <summary class="text-base-content/70 text-sm mb-2 cursor-pointer">
+                                            { format!("Saved accounts ({} total)", saved_accounts.len()) }
+                                        </summary>
+                                        <ul class="flex flex-col">
+                                            {for saved_accounts.iter().map(|acc| {
+                                                let acc_id = acc.id;
+                                                let name = acc.name.clone();
+                                                let on_msg = on_reanalyze_msg.clone();
+                                                let process_running = process_running.clone();
+                                                html! {
+                                                    <li class="flex justify-between items-center py-1 px-2">
+                                                        <span class="text-sm">
+                                                            <strong>{ &name }</strong>
+                                                            { format!(" (ID {})", acc.id) }
+                                                        </span>
+                                                        <div class="join join-sm" role="group">
+                                                            <ReanalyzeButton
+                                                                account_id={acc_id}
+                                                                api_base={cfg.backend_domain.clone()}
+                                                                on_complete={on_msg.clone()}
+                                                                blocked={process_running.contains(&acc.id)}
+                                                                on_running={{
+                                                                    let process_running = process_running.clone();
+                                                                    Callback::from(move |running: bool| {
+                                                                        let mut set = (*process_running).clone();
+                                                                        if running { set.insert(acc_id); }
+                                                                        else { set.remove(&acc_id); }
+                                                                        process_running.set(set);
+                                                                    })
+                                                                }}
+                                                            />
+                                                            <ReanalyzeButton
+                                                                mode="incremental"
+                                                                account_id={acc_id}
+                                                                api_base={cfg.backend_domain.clone()}
+                                                                on_complete={on_msg}
+                                                                blocked={process_running.contains(&acc.id)}
+                                                                on_running={{
+                                                                    let process_running = process_running.clone();
+                                                                    Callback::from(move |running: bool| {
+                                                                        let mut set = (*process_running).clone();
+                                                                        if running { set.insert(acc_id); }
+                                                                        else { set.remove(&acc_id); }
+                                                                        process_running.set(set);
+                                                                    })
+                                                                }}
+                                                            />
+                                                        </div>
+                                                    </li>
+                                                }
+                                            })}
+                                        </ul>
+                                    </details>
+                                </div>
+                            }
+
+                            // "Looked up but not saved" prompt. The
+                            // search routes fall back to an e621 lookup
+                            // when the account isn't in our DB, so a
+                            // hit here can be either a saved account
+                            // (analyzing works) or just an e621 lookup
+                            // (analyzing would 404 because the backend
+                            // requires a device-scoped row). We surface
+                            // the create flow before the user clicks
+                            // analyze and hits a confusing error.
+                            if selected_user.is_some() && !is_saved {
+                                <div class="alert alert-warning flex flex-wrap justify-between items-center gap-2 mb-3">
+                                    <span class="flex-1">
+                                        { "This account isn't saved on this device yet. Add it to your account list before analysing." }
+                                    </span>
+                                    <button
+                                        type="button"
+                                        class="btn btn-sm btn-primary"
+                                        onclick={on_create_account}
+                                    >
+                                        { "Create this account" }
+                                    </button>
+                                </div>
+                            }
+
+                            // The analyze section only renders for an
+                            // account that's actually persisted —
+                            // `is_saved` implies `selected_user.is_some()`
+                            // so the previous "user selected at all"
+                            // gate is now strictly stronger.
+                            if is_saved {
+                                <div id="home-analyzer">
+                                    <FetchAnalyzeButton
+                                        tag_count={tag_counts.clone()}
                                         found_user={selected_user.clone()}
                                         error={error.clone()}
                                         api_base={cfg.backend_domain.clone()}
                                         is_loading={is_loading.clone()}
                                     />
                                 </div>
-
-                                <UserInfoAlert
-                                    user={selected_user.clone()}
-                                    error={error.clone()}
-                                />
-
-                                // Saved accounts quick-actions — show a
-                                // compact list of every saved account with
-                                // a one-click Re-analyze button so the user
-                                // doesn't have to switch to /account to
-                                // trigger an update.
-                                if !saved_accounts.is_empty() {
-                                    <div class="mb-3">
-                                        <details open={saved_accounts.len() <= 3}>
-                                            <summary class="text-body-secondary small mb-2" style="cursor: pointer;">
-                                                { format!("Saved accounts ({} total)", saved_accounts.len()) }
-                                            </summary>
-                                            <ul class="list-group list-group-flush">
-                                                {for saved_accounts.iter().map(|acc| {
-                                                    let acc_id = acc.id;
-                                                    let name = acc.name.clone();
-                                                    let on_msg = on_reanalyze_msg.clone();
-                                                    let process_running = process_running.clone();
-                                                    html! {
-                                                        <li class="list-group-item d-flex justify-content-between align-items-center py-1 px-2">
-                                                            <span class="small">
-                                                                <strong>{ &name }</strong>
-                                                                { format!(" (ID {})", acc.id) }
-                                                            </span>
-                                                            <div class="btn-group btn-group-sm" role="group">
-                                                                <ReanalyzeButton
-                                                                    account_id={acc_id}
-                                                                    api_base={cfg.backend_domain.clone()}
-                                                                    on_complete={on_msg.clone()}
-                                                                    blocked={process_running.contains(&acc.id)}
-                                                                    on_running={{
-                                                                        let process_running = process_running.clone();
-                                                                        Callback::from(move |running: bool| {
-                                                                            let mut set = (*process_running).clone();
-                                                                            if running { set.insert(acc_id); }
-                                                                            else { set.remove(&acc_id); }
-                                                                            process_running.set(set);
-                                                                        })
-                                                                    }}
-                                                                />
-                                                                <ReanalyzeButton
-                                                                    mode="incremental"
-                                                                    account_id={acc_id}
-                                                                    api_base={cfg.backend_domain.clone()}
-                                                                    on_complete={on_msg}
-                                                                    blocked={process_running.contains(&acc.id)}
-                                                                    on_running={{
-                                                                        let process_running = process_running.clone();
-                                                                        Callback::from(move |running: bool| {
-                                                                            let mut set = (*process_running).clone();
-                                                                            if running { set.insert(acc_id); }
-                                                                            else { set.remove(&acc_id); }
-                                                                            process_running.set(set);
-                                                                        })
-                                                                    }}
-                                                                />
-                                                            </div>
-                                                        </li>
-                                                    }
-                                                })}
-                                            </ul>
-                                        </details>
-                                    </div>
-                                }
-
-                                // "Looked up but not saved" prompt. The
-                                // search routes fall back to an e621 lookup
-                                // when the account isn't in our DB, so a
-                                // hit here can be either a saved account
-                                // (analyzing works) or just an e621 lookup
-                                // (analyzing would 404 because the backend
-                                // requires a device-scoped row). We surface
-                                // the create flow before the user clicks
-                                // analyze and hits a confusing error.
-                                if selected_user.is_some() && !is_saved {
-                                    <div class="alert alert-warning d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
-                                        <span class="flex-grow-1">
-                                            { "This account isn't saved on this device yet. Add it to your account list before analysing." }
-                                        </span>
-                                        <button
-                                            type="button"
-                                            class="btn btn-sm btn-primary"
-                                            onclick={on_create_account}
-                                        >
-                                            { "Create this account" }
-                                        </button>
-                                    </div>
-                                }
-
-                                // The analyze section only renders for an
-                                // account that's actually persisted —
-                                // `is_saved` implies `selected_user.is_some()`
-                                // so the previous "user selected at all"
-                                // gate is now strictly stronger.
-                                if is_saved {
-                                    <div id="home-analyzer">
-                                        <FetchAnalyzeButton
-                                            tag_count={tag_counts.clone()}
-                                            found_user={selected_user.clone()}
-                                            error={error.clone()}
-                                            api_base={cfg.backend_domain.clone()}
-                                            is_loading={is_loading.clone()}
-                                        />
-                                    </div>
-                                }
-                            <div class="text-center text-body-tertiary small mt-4">
-                                {"Your data stays on this server. Your e621 favourites and profile are never shared with third parties."}
-                            </div>
-                            </div>
+                            }
+                        <div class="text-center text-base-content/60 text-sm mt-4">
+                            {"Your data stays on this server. Your e621 favourites and profile are never shared with third parties."}
+                        </div>
                         </div>
                     </div>
                 </div>
@@ -314,12 +312,12 @@ pub fn home_page() -> Html {
                     };
                     html! {
                         <>
-                            <div class="container mt-3">
-                                <div class="d-flex justify-content-center">
-                                    <div class="btn-group" role="group" aria-label="Tag visualisation switcher">
+                            <div class="mt-3">
+                                <div class="flex justify-center">
+                                    <div class="join" role="group" aria-label="Tag visualisation switcher">
                                         <button
                                             type="button"
-                                            class={classes!("btn", "btn-outline-primary", chart_active.then_some("active"))}
+                                            class={classes!("btn", "btn-outline", chart_active.then_some("btn-active"))}
                                             aria-pressed={chart_active.to_string()}
                                             onclick={on_chart}
                                         >
@@ -327,7 +325,7 @@ pub fn home_page() -> Html {
                                         </button>
                                         <button
                                             type="button"
-                                            class={classes!("btn", "btn-outline-primary", graph_active.then_some("active"))}
+                                            class={classes!("btn", "btn-outline", graph_active.then_some("btn-active"))}
                                             aria-pressed={graph_active.to_string()}
                                             onclick={on_graph}
                                         >

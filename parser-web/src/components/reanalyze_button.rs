@@ -1,7 +1,7 @@
 use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::Closure;
 use yew::{
-    Callback, Html, Properties, UseStateHandle, function_component, html, use_effect_with,
+    Callback, Html, Properties, UseStateHandle, classes, function_component, html, use_effect_with,
     use_state,
 };
 
@@ -35,8 +35,8 @@ impl ModeUi {
                 label_retry: "Retry update",
                 done_msg: "Update complete",
                 failed_msg: "Update failed",
-                class_idle: "btn btn-outline-info btn-sm",
-                class_progress: "bg-info",
+                class_idle: "btn btn-outline btn-info btn-sm",
+                class_progress: "progress-info",
                 tooltip_idle: "Fetch only new favourites since last import (cheap — no full rebuild)",
                 tooltip_running: "Incremental update in progress — status refreshes every 5s",
                 log_prefix: "incremental",
@@ -48,8 +48,8 @@ impl ModeUi {
                 label_retry: "Retry (full)",
                 done_msg: "Analysis complete",
                 failed_msg: "Analysis failed",
-                class_idle: "btn btn-outline-success btn-sm",
-                class_progress: "bg-warning",
+                class_idle: "btn btn-outline btn-success btn-sm",
+                class_progress: "progress-warning",
                 tooltip_idle: "Full re-download + rebuild of this account's tag profile",
                 tooltip_running: "Full scan in progress — status refreshes every 5s",
                 log_prefix: "re-analyze",
@@ -92,6 +92,9 @@ pub struct ReanalyzeButtonProps {
     /// `true` on start, `false` on completion / failure.
     #[prop_or_default]
     pub on_running: Callback<bool>,
+    /// Additional CSS class(es) to append to the button element.
+    #[prop_or_default]
+    pub class: String,
 }
 
 /// Self-contained process-launch button with live status polling.
@@ -347,8 +350,8 @@ pub fn reanalyze_button(props: &ReanalyzeButtonProps) -> Html {
             (s.pages_done as f32 / s.pages_total as f32 * 100.0).clamp(0.0, 100.0)
         });
 
-    let class_running = "btn btn-outline-warning btn-sm";
-    let class_failed = "btn btn-outline-danger btn-sm";
+    let class_running = "btn btn-outline btn-warning btn-sm";
+    let class_failed = "btn btn-outline btn-error btn-sm";
     let class_idle = ui.class_idle;
     let btn_class = if is_running {
         class_running
@@ -363,9 +366,9 @@ pub fn reanalyze_button(props: &ReanalyzeButtonProps) -> Html {
     let tooltip_running = ui.tooltip_running;
 
     html! {
-        <div>
+        <div class="w-full">
             <button
-                class={btn_class}
+                class={classes!(btn_class, props.class.clone())}
                 onclick={on_click}
                 disabled={is_running || *in_flight || props.blocked}
                 title={
@@ -376,7 +379,7 @@ pub fn reanalyze_button(props: &ReanalyzeButtonProps) -> Html {
             >
                 if is_running {
                     <span>
-                        <span class="spinner-border spinner-border-sm me-1" role="status" aria-hidden="true"></span>
+                        <span class="loading loading-spinner loading-sm me-1" role="status" aria-hidden="true"></span>
                         { label.clone() }
                     </span>
                 } else {
@@ -384,19 +387,12 @@ pub fn reanalyze_button(props: &ReanalyzeButtonProps) -> Html {
                 }
             </button>
             if let Some(pct) = progress_pct {
-                <div
-                    class="progress mt-1"
-                    role="progressbar"
-                    aria-valuenow={format!("{pct:.0}")}
-                    aria-valuemin="0"
-                    aria-valuemax="100"
+                <progress
+                    class={format!("progress mt-1 {class_progress}")}
                     style="height: 4px;"
-                >
-                    <div
-                        class={format!("progress-bar progress-bar-striped progress-bar-animated {class_progress}")}
-                        style={format!("width: {pct:.1}%")}
-                    />
-                </div>
+                    value={format!("{pct:.0}")}
+                    max="100"
+                />
             }
         </div>
     }

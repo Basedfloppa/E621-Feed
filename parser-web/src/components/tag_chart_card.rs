@@ -1,14 +1,14 @@
 use crate::TagCount;
-use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::Closure;
+use wasm_bindgen::JsCast;
 use web_sys::{
-    CanvasRenderingContext2d, HtmlCanvasElement, MutationObserver, MutationObserverInit, js_sys,
+    js_sys, CanvasRenderingContext2d, HtmlCanvasElement, MutationObserver, MutationObserverInit,
 };
 use yew::{
-    Callback, Html, NodeRef, Properties, classes, function_component, html, use_effect,
-    use_effect_with, use_state,
+    classes, function_component, html, use_effect, use_effect_with, use_state, Callback, Html,
+    NodeRef, Properties,
 };
-use yew::{UseStateHandle, use_memo};
+use yew::{use_memo, UseStateHandle};
 
 #[derive(Properties, PartialEq)]
 pub struct TagChartCardProps {
@@ -71,7 +71,7 @@ pub fn tag_chart_card(props: &TagChartCardProps) -> Html {
                         let mutation = mutations.get(i).dyn_into::<web_sys::MutationRecord>().ok();
                         if let Some(m) = mutation {
                             let attr = m.attribute_name();
-                            if attr.as_deref() == Some("data-bs-theme")
+                            if attr.as_deref() == Some("data-theme")
                                 || attr.as_deref() == Some("class")
                             {
                                 trigger.set(*trigger + 1);
@@ -143,29 +143,35 @@ pub fn tag_chart_card(props: &TagChartCardProps) -> Html {
     }
 
     html! {
-        <div class="card mt-4">
-            <div class="card-header bg-primary text-white">
-                <h5 class="mb-0">{"Tag Analysis"}</h5>
+        <div class="card bg-base-100 shadow mt-4">
+            <div class="bg-primary text-primary-content p-4">
+                <h5 class="card-title text-lg text-primary-content">{"Tag Analysis"}</h5>
             </div>
-            <div class="card-body">
-                <ul class="nav nav-tabs mb-3">
+            <div class="card-body text-base-content">
+                <div class="flex flex-wrap gap-2 mb-3">
                     {
                         for group_types.iter().map(|group| {
                             let is_active = *group == *selected_group;
                             let group_clone = group.clone();
                             html! {
-                                <li class="nav-item">
-                                    <button
-                                        class={classes!("nav-link", if is_active { "active" } else { "" })}
-                                        onclick={on_tab_click.reform(move |_| group_clone.clone())}
-                                    >
-                                        { group }
-                                    </button>
-                                </li>
+                                <button
+                                    class={classes!(
+                                        "px-3", "py-1.5", "rounded-lg", "text-sm",
+                                        "font-medium", "transition-all", "duration-150", "cursor-pointer",
+                                        if is_active {
+                                            "bg-primary text-primary-content shadow-sm"
+                                        } else {
+                                            "bg-base-200 text-base-content/70 hover:bg-base-300 hover:text-base-content hover:shadow-sm"
+                                        }
+                                    )}
+                                    onclick={on_tab_click.reform(move |_| group_clone.clone())}
+                                >
+                                    { group }
+                                </button>
                             }
                         })
                     }
-                </ul>
+                </div>
 
                 <div class="chart-container" style="max-width: 100%;">
                     <canvas
@@ -253,15 +259,16 @@ fn draw_chart(canvas: &HtmlCanvasElement, tag_counts: &[TagCount]) {
     let el: &web_sys::Element = canvas.as_ref();
 
     let colors = [
-        get_css_variable_value_on(el, "--bs-primary").unwrap_or("#0d6efd".into()),
-        get_css_variable_value_on(el, "--bs-success").unwrap_or("#198754".into()),
-        get_css_variable_value_on(el, "--bs-info").unwrap_or("#0dcaf0".into()),
-        get_css_variable_value_on(el, "--bs-warning").unwrap_or("#ffc107".into()),
-        get_css_variable_value_on(el, "--bs-danger").unwrap_or("#dc3545".into()),
-        get_css_variable_value_on(el, "--bs-secondary").unwrap_or("#6c757d".into()),
-        get_css_variable_value_on(el, "--bs-dark").unwrap_or("#212529".into()),
+        get_css_variable_value_on(el, "--color-primary").unwrap_or("oklch(55% 0.3 240)".into()),
+        get_css_variable_value_on(el, "--color-success").unwrap_or("oklch(65% 0.25 140)".into()),
+        get_css_variable_value_on(el, "--color-info").unwrap_or("oklch(70% 0.2 220)".into()),
+        get_css_variable_value_on(el, "--color-warning").unwrap_or("oklch(80% 0.25 80)".into()),
+        get_css_variable_value_on(el, "--color-error").unwrap_or("oklch(65% 0.3 30)".into()),
+        get_css_variable_value_on(el, "--color-secondary").unwrap_or("oklch(70% 0.25 200)".into()),
+        get_css_variable_value_on(el, "--color-neutral").unwrap_or("oklch(50% 0.05 240)".into()),
     ];
-    let text_color = get_css_variable_value_on(el, "--bs-body-color").unwrap_or("#212529".into());
+    let text_color = get_css_variable_value_on(el, "--color-base-content")
+        .unwrap_or("oklch(21% 0.006 285.885)".into());
 
     for (i, tag) in tag_counts.iter().enumerate() {
         let y = top_padding + i as f64 * bar_spacing;

@@ -28,7 +28,7 @@ pub fn user_info_alert(props: &InfoAlertProps) -> Html {
             {
                 if let Some(err) = &*props.error {
                     html! {
-                        <div class="alert alert-danger mb-3">{err}</div>
+                        <div class="alert alert-error mb-3">{err}</div>
                     }
                 } else {
                     html! {}

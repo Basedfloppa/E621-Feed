@@ -1,4 +1,4 @@
-use crate::ThemeToggle;
+use crate::components::{IconGithub, IconQuestion, ThemeToggle};
 use yew::{Callback, Html, MouseEvent, classes, function_component, html, use_effect_with};
 use yew_router::prelude::use_location;
 use crate::models::{read_config_from_head, start_tour, AttachTo, Button, Step};
@@ -230,83 +230,145 @@ pub fn header() -> Html {
     });
 
     html! {
-        <nav class="navbar navbar-expand-lg bg-body-tertiary border sticky-top" id="header">
-            <div class="container-fluid d-flex align-items-center gap-2">
-                <a class="navbar-brand text-nowrap me-auto" href="/">
-                    {"E621 Feed"}
-                </a>
-                <button
-                    type="button"
-                    class="btn btn-link nav-link order-lg-3"
-                    title="Replay the onboarding tour"
-                    aria-label="Replay onboarding tour"
-                    onclick={restart_tour}
-                >
-                    <i class="bi bi-question-circle" aria-hidden="true"></i>
-                </button>
-                <a
-                    class="btn btn-link nav-link order-lg-3"
-                    href="https://github.com/Basedfloppa/E621-Feed"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    title="GitHub repository"
-                    aria-label="GitHub repository"
-                >
-                    <i class="bi bi-github" aria-hidden="true"></i>
-                </a>
-                <div class="order-lg-3"><ThemeToggle /></div>
-                <button
-                    class="navbar-toggler order-lg-3"
-                    type="button"
-                    data-bs-toggle="collapse"
-                    data-bs-target="#header-nav-collapse"
-                    aria-controls="header-nav-collapse"
-                    aria-expanded="false"
-                    aria-label="Toggle navigation"
-                >
-                    <span class="navbar-toggler-icon"></span>
-                </button>
-                <div class="collapse navbar-collapse order-lg-2" id="header-nav-collapse">
-                    <ul class="navbar-nav me-auto gap-1">
-                        <li class="nav-item">
-                            <a
-                                class={classes!("nav-link", is_active("/").then_some("active"))}
-                                aria-current={is_active("/").then_some("page")}
-                                href="/"
-                            >
-                                {"Home"}
-                            </a>
-                        </li>
-                        <li class="nav-item">
-                            <a
-                                class={classes!("nav-link", is_active("/account").then_some("active"))}
-                                aria-current={is_active("/account").then_some("page")}
-                                href="/account"
-                            >
-                                {"Account"}
-                            </a>
-                        </li>
-                        <li class="nav-item">
-                            <a
-                                class={classes!("nav-link", is_active("/feed").then_some("active"))}
-                                aria-current={is_active("/feed").then_some("page")}
-                                href="/feed"
-                            >
-                                {"Feed"}
-                            </a>
-                        </li>
-                        <li class="nav-item">
-                            <a
-                                class={classes!("nav-link", is_active("/digest").then_some("active"))}
-                                aria-current={is_active("/digest").then_some("page")}
-                                href="/digest"
-                            >
-                                {"Digest"}
-                            </a>
-                        </li>
-                    </ul>
-                </div>
+        <div class="drawer">
+            <input id="header-drawer" type="checkbox" class="drawer-toggle" aria-label="Toggle navigation" />
+            <div class="drawer-content flex flex-col">
+                <nav class="navbar bg-base-100 border-b border-base-300 sticky top-0 shadow-md z-10" id="header">
+                    <div class="navbar-start">
+                        <label
+                            for="header-drawer"
+                            class="btn btn-ghost drawer-button lg:hidden"
+                            aria-label="Open navigation menu"
+                        >
+                            <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16" />
+                            </svg>
+                        </label>
+                        <a class="btn btn-ghost text-xl" href="/">
+                            {"E621 Feed"}
+                        </a>
+                    </div>
+                    <div class="navbar-center hidden lg:flex gap-1">
+                        <a
+                            class={classes!("btn", "btn-ghost", is_active("/").then_some("btn-active"))}
+                            aria-current={is_active("/").then_some("page")}
+                            href="/"
+                        >
+                            {"Home"}
+                        </a>
+                        <a
+                            class={classes!("btn", "btn-ghost", is_active("/account").then_some("btn-active"))}
+                            aria-current={is_active("/account").then_some("page")}
+                            href="/account"
+                        >
+                            {"Account"}
+                        </a>
+                        <a
+                            class={classes!("btn", "btn-ghost", is_active("/feed").then_some("btn-active"))}
+                            aria-current={is_active("/feed").then_some("page")}
+                            href="/feed"
+                        >
+                            {"Feed"}
+                        </a>
+                        <a
+                            class={classes!("btn", "btn-ghost", is_active("/trending").then_some("btn-active"))}
+                            aria-current={is_active("/trending").then_some("page")}
+                            href="/trending"
+                        >
+                            {"Trending"}
+                        </a>
+                        <a
+                            class={classes!("btn", "btn-ghost", is_active("/favorites").then_some("btn-active"))}
+                            aria-current={is_active("/favorites").then_some("page")}
+                            href="/favorites"
+                        >
+                            {"Favorites"}
+                        </a>
+                        <a
+                            class={classes!("btn", "btn-ghost", is_active("/digest").then_some("btn-active"))}
+                            aria-current={is_active("/digest").then_some("page")}
+                            href="/digest"
+                        >
+                            {"Digest"}
+                        </a>
+                    </div>
+                    <div class="navbar-end gap-1">
+                        <button
+                            type="button"
+                            class="btn btn-ghost btn-sm"
+                            title="Replay the onboarding tour"
+                            aria-label="Replay onboarding tour"
+                            onclick={restart_tour}
+>
+                            <IconQuestion />
+                        </button>
+                        <a
+                            class="btn btn-ghost btn-sm"
+                            href="https://github.com/Basedfloppa/E621-Feed"
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            title="GitHub repository"
+                            aria-label="GitHub repository"
+                        >
+                            <IconGithub />
+                        </a>
+                        <ThemeToggle />
+                    </div>
+                </nav>
             </div>
-        </nav>
+            <div class="drawer-side z-50">
+                <label for="header-drawer" aria-label="close sidebar" class="drawer-overlay"></label>
+                <ul class="menu p-4 w-80 min-h-full bg-base-200">
+                    <li>
+                        <a
+                            class={classes!("text-base-content", is_active("/").then_some("menu-active"))}
+                            href="/"
+                        >
+                            {"Home"}
+                        </a>
+                    </li>
+                    <li>
+                        <a
+                            class={classes!("text-base-content", is_active("/account").then_some("menu-active"))}
+                            href="/account"
+                        >
+                            {"Account"}
+                        </a>
+                    </li>
+                    <li>
+                        <a
+                            class={classes!("text-base-content", is_active("/feed").then_some("menu-active"))}
+                            href="/feed"
+                        >
+                            {"Feed"}
+                        </a>
+                    </li>
+                    <li>
+                        <a
+                            class={classes!("text-base-content", is_active("/trending").then_some("menu-active"))}
+                            href="/trending"
+                        >
+                            {"Trending"}
+                        </a>
+                    </li>
+                    <li>
+                        <a
+                            class={classes!("text-base-content", is_active("/favorites").then_some("menu-active"))}
+                            href="/favorites"
+                        >
+                            {"Favorites"}
+                        </a>
+                    </li>
+                    <li>
+                        <a
+                            class={classes!("text-base-content", is_active("/digest").then_some("menu-active"))}
+                            href="/digest"
+                        >
+                            {"Digest"}
+                        </a>
+                    </li>
+                </ul>
+            </div>
+        </div>
     }
 }
