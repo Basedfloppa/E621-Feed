@@ -488,9 +488,22 @@ pub fn digest_page() -> Html {
             GridType::One => 1,
         }.max(1);
 
+        let mut col_heights = vec![0.0f64; num_cols];
         let mut columns: Vec<Vec<ScoredPost>> = (0..num_cols).map(|_| Vec::new()).collect();
-        for (i, sp) in posts.iter().enumerate() {
-            columns[i % num_cols].push(sp.clone());
+        for sp in posts.iter() {
+            let aspect = {
+                let w = sp.post.files.original.width.max(1) as f64;
+                let h = sp.post.files.original.height.max(1) as f64;
+                h / w
+            };
+            let shortest = col_heights
+                .iter()
+                .enumerate()
+                .min_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
+                .map(|(i, _)| i)
+                .unwrap_or(0);
+            col_heights[shortest] += aspect;
+            columns[shortest].push(sp.clone());
         }
 
         let cfg = read_config_from_head();
@@ -499,14 +512,15 @@ pub fn digest_page() -> Html {
 
         html! {
             <div class={format!("{} m-3", grid_cls)} style="align-items: start;">
-                { for columns.into_iter().map(|col_posts| {
+                { for columns.into_iter().enumerate().map(|(col_idx, col_posts)| {
                     let cfg = cfg.clone();
                     html! {
-                        <div class="flex flex-col">
+                        <div key={col_idx} class="flex flex-col">
                             { for col_posts.iter().map(|sp| {
                                 let cfg = cfg.clone();
                                 html! {
                                     <PostCard
+                                        key={sp.post.id}
                                         post={std::rc::Rc::new(sp.post.clone())}
                                         affinity={sp.score}
                                         backend_url={cfg.as_ref().map(|c| c.backend_domain.clone()).unwrap_or_default()}

@@ -242,14 +242,31 @@ pub fn post_grid(props: &PostGridProps) -> Html {
         &props.grid_class
     };
 
-    // Split posts into N columns (round-robin) so that column 1 gets posts
-    // 0, N, 2N…, column 2 gets posts 1, N+1, 2N+1… etc.  This preserves
-    // row-major ordering: top of column 1 = post 0, top of column 2 = post 1.
+    // Split posts into N columns using shortest-column strategy.
+    // Instead of round-robin, each post is placed in the column with the
+    // lowest total image aspect ratio (height/width). This keeps columns
+    // visually balanced — tall images don't clump in one column.
     let columns: Vec<Vec<ScoredPost>> = {
         let n = num_columns.max(1);
+        let mut col_heights = vec![0.0f64; n];
         let mut cols: Vec<Vec<ScoredPost>> = (0..n).map(|_| Vec::new()).collect();
-        for (i, sp) in (*posts).iter().enumerate() {
-            cols[i % n].push(sp.clone());
+        for sp in (*posts).iter() {
+            // Estimate aspect ratio from original image dimensions.
+            // Higher aspect = taller image relative to its width.
+            let aspect = {
+                let w = sp.post.files.original.width.max(1) as f64;
+                let h = sp.post.files.original.height.max(1) as f64;
+                h / w
+            };
+            // Find the column with the smallest total aspect ratio.
+            let shortest = col_heights
+                .iter()
+                .enumerate()
+                .min_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
+                .map(|(i, _)| i)
+                .unwrap_or(0);
+            col_heights[shortest] += aspect;
+            cols[shortest].push(sp.clone());
         }
         cols
     };
@@ -263,10 +280,11 @@ pub fn post_grid(props: &PostGridProps) -> Html {
                     html! {
                         <>
                             <div class={format!("{} m-3", grid_class)} style="align-items: start;">
-                                { for columns.iter().map(|col_posts| html! {
-                                    <div class="flex flex-col">
+                                { for columns.iter().enumerate().map(|(col_idx, col_posts)| html! {
+                                    <div key={col_idx} class="flex flex-col">
                                         { for col_posts.iter().map(|sp| html! {
                                             <PostCard
+                                                key={sp.post.id}
                                                 post={Rc::new(sp.post.clone())}
                                                 affinity={sp.score}
                                                 backend_url={""}
