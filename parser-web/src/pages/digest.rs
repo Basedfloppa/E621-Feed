@@ -7,7 +7,7 @@ use web_sys::RequestInit;
 use web_sys::{Request, RequestMode, Response, window};
 use yew::prelude::*;
 
-use crate::components::*;
+use crate::components::{IconArrowClockwise, IconSliders, PostCard, SavedAccountsSelect};
 use crate::models::*;
 use crate::pages::UserInfo;
 
@@ -41,11 +41,11 @@ impl GridType {
     fn grid_class(self) -> &'static str {
         match self {
             GridType::Auto => {
-                "grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-2"
+                "grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-3"
             }
-            GridType::Three => "grid grid-cols-3 gap-2",
-            GridType::Two => "grid grid-cols-2 gap-2",
-            GridType::One => "grid grid-cols-1 gap-2",
+            GridType::Three => "grid grid-cols-3 gap-3",
+            GridType::Two => "grid grid-cols-2 gap-3",
+            GridType::One => "grid grid-cols-1 gap-3",
         }
     }
 }
@@ -469,6 +469,70 @@ pub fn digest_page() -> Html {
         html! {}
     };
 
+    // Column-based masonry layout (matches PostGrid logic).
+    let posts_grid_html: Html = if !posts.is_empty() {
+        let num_cols = match *grid {
+            GridType::Auto => {
+                let w = web_sys::window()
+                    .and_then(|w| w.inner_width().ok())
+                    .and_then(|w| w.as_f64())
+                    .unwrap_or(1024.0);
+                if w >= 1280.0 { 5 }
+                else if w >= 1024.0 { 4 }
+                else if w >= 768.0 { 3 }
+                else if w >= 640.0 { 2 }
+                else { 1 }
+            }
+            GridType::Three => 3,
+            GridType::Two => 2,
+            GridType::One => 1,
+        }.max(1);
+
+        let mut columns: Vec<Vec<ScoredPost>> = (0..num_cols).map(|_| Vec::new()).collect();
+        for (i, sp) in posts.iter().enumerate() {
+            columns[i % num_cols].push(sp.clone());
+        }
+
+        let cfg = read_config_from_head();
+        let account_id = selected_user.as_ref().map(|u| u.id as i32).unwrap_or(0);
+        let grid_cls = grid.grid_class();
+
+        html! {
+            <div class={format!("{} m-3", grid_cls)} style="align-items: start;">
+                { for columns.into_iter().map(|col_posts| {
+                    let cfg = cfg.clone();
+                    html! {
+                        <div class="flex flex-col">
+                            { for col_posts.iter().map(|sp| {
+                                let cfg = cfg.clone();
+                                html! {
+                                    <PostCard
+                                        post={std::rc::Rc::new(sp.post.clone())}
+                                        affinity={sp.score}
+                                        backend_url={cfg.as_ref().map(|c| c.backend_domain.clone()).unwrap_or_default()}
+                                        account_id={account_id}
+                                        session_id={String::new()}
+                                        position={0}
+                                        breakdown={sp.breakdown.clone()}
+                                        show_rating={*show_rating}
+                                        show_affinity={*show_affinity}
+                                        show_score={*show_score}
+                                        show_post_number={*show_post_number}
+                                        show_desc={*show_desc}
+                                        show_metadata={*show_metadata}
+                                        show_breakdown={*show_breakdown}
+                                    />
+                                }
+                            }) }
+                        </div>
+                    }
+                }) }
+            </div>
+        }
+    } else {
+        html! {}
+    };
+
     html! {
         <div class="container-fluid">
             <div class="flex flex-wrap items-center gap-2 mb-3">
@@ -651,33 +715,7 @@ pub fn digest_page() -> Html {
                 </div>
             }
 
-            <div class={grid.grid_class()}>
-                { for posts.iter().enumerate().map(|(i, sp)| {
-                    let Some(cfg) = read_config_from_head() else {
-                        return html! {};
-                    };
-                    html! {
-                        <div class="flex justify-center">
-                            <PostCard
-                                post={std::rc::Rc::new(sp.post.clone())}
-                                affinity={sp.score}
-                                backend_url={cfg.backend_domain.clone()}
-                                account_id={selected_user.as_ref().map(|u| u.id as i32).unwrap_or(0)}
-                                session_id={String::new()}
-                                position={i as i32}
-                                breakdown={sp.breakdown.clone()}
-                                show_rating={*show_rating}
-                                show_affinity={*show_affinity}
-                                show_score={*show_score}
-                                show_post_number={*show_post_number}
-                                show_desc={*show_desc}
-                                show_metadata={*show_metadata}
-                                show_breakdown={*show_breakdown}
-                            />
-                        </div>
-                    }
-                }) }
-            </div>
+            { posts_grid_html }
         </div>
     }
 }

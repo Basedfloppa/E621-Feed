@@ -7,6 +7,65 @@ use yew::prelude::*;
 use crate::components::PostCard;
 use crate::models::*;
 
+/// Determine the current number of columns from a `columns-*` / `grid-cols-*`
+/// class string by matching the viewport width against Tailwind breakpoints.
+fn current_column_count(grid_class: &str) -> usize {
+    // Determine which Tailwind breakpoints this class references and their
+    // corresponding column counts.
+    let width = web_sys::window()
+        .and_then(|w| w.inner_width().ok())
+        .and_then(|w| w.as_f64())
+        .unwrap_or(1024.0);
+
+    // Tailwind breakpoint min-widths.
+    // sm=640, md=768, lg=1024, xl=1280
+    let mut cols_by_bp: Vec<(f64, usize)> = Vec::new();
+    for part in grid_class.split_whitespace() {
+        let parsed = if let Some(c) = part
+            .strip_prefix("xl:grid-cols-")
+            .or_else(|| part.strip_prefix("xl:columns-"))
+        {
+            c.parse::<usize>().ok().map(|n| (1280.0, n))
+        } else if let Some(c) = part
+            .strip_prefix("lg:grid-cols-")
+            .or_else(|| part.strip_prefix("lg:columns-"))
+        {
+            c.parse::<usize>().ok().map(|n| (1024.0, n))
+        } else if let Some(c) = part
+            .strip_prefix("md:grid-cols-")
+            .or_else(|| part.strip_prefix("md:columns-"))
+        {
+            c.parse::<usize>().ok().map(|n| (768.0, n))
+        } else if let Some(c) = part
+            .strip_prefix("sm:grid-cols-")
+            .or_else(|| part.strip_prefix("sm:columns-"))
+        {
+            c.parse::<usize>().ok().map(|n| (640.0, n))
+        } else if let Some(c) = part
+            .strip_prefix("grid-cols-")
+            .or_else(|| part.strip_prefix("columns-"))
+        {
+            c.parse::<usize>().ok().map(|n| (0.0, n))
+        } else {
+            None
+        };
+        if let Some((bp, cols)) = parsed {
+            cols_by_bp.push((bp, cols));
+        }
+    }
+
+    cols_by_bp.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+
+    // The baseline default (no breakpoint prefix) applies below sm.
+    let mut result = cols_by_bp.first().map(|(_, n)| *n).unwrap_or(1);
+    for (bp, n) in &cols_by_bp {
+        if width >= *bp {
+            result = *n;
+        }
+    }
+    result
+}
+
 /// Reusable post grid with infinite scroll, status bar, and post-card display.
 #[derive(Properties, PartialEq)]
 pub struct PostGridProps {
@@ -163,11 +222,33 @@ pub fn post_grid(props: &PostGridProps) -> Html {
         });
     }
 
-    // Grid class — use prop override or default responsive layout.
+    // Determine the effective number of columns from viewport width + grid class.
+    let num_columns = {
+        let cls = if props.grid_class.is_empty() {
+            "grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-3"
+        } else {
+            &props.grid_class
+        };
+        current_column_count(cls)
+    };
+
+    // Outer CSS Grid with responsive column layout.
     let grid_class = if props.grid_class.is_empty() {
         "grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-3"
     } else {
         &props.grid_class
+    };
+
+    // Split posts into N columns (round-robin) so that column 1 gets posts
+    // 0, N, 2N…, column 2 gets posts 1, N+1, 2N+1… etc.  This preserves
+    // row-major ordering: top of column 1 = post 0, top of column 2 = post 1.
+    let columns: Vec<Vec<ScoredPost>> = {
+        let n = num_columns.max(1);
+        let mut cols: Vec<Vec<ScoredPost>> = (0..n).map(|_| Vec::new()).collect();
+        for (i, sp) in (*posts).iter().enumerate() {
+            cols[i % n].push(sp.clone());
+        }
+        cols
     };
 
     html! {
@@ -178,26 +259,28 @@ pub fn post_grid(props: &PostGridProps) -> Html {
                 } else {
                     html! {
                         <>
-                            <div class={grid_class.to_string() + " m-3"}>
-                                { for (*posts).iter().map(|sp| {
-                                    html! {
-                                        <PostCard
-                                            post={Rc::new(sp.post.clone())}
-                                            affinity={sp.score}
-                                            backend_url={""}
-                                            account_id={0}
-                                            session_id={(*session_id).clone()}
-                                            position={0}
-                                            breakdown={sp.breakdown.clone()}
-                                            show_rating={*props.show_rating}
-                                            show_affinity={*props.show_affinity}
-                                            show_score={*props.show_score}
-                                            show_post_number={*props.show_post_number}
-                                            show_desc={*props.show_desc}
-                                            show_metadata={*props.show_metadata}
-                                            show_breakdown={*props.show_breakdown}
-                                        />
-                                    }
+                            <div class={format!("{} m-3", grid_class)} style="align-items: start;">
+                                { for columns.iter().map(|col_posts| html! {
+                                    <div class="flex flex-col">
+                                        { for col_posts.iter().map(|sp| html! {
+                                            <PostCard
+                                                post={Rc::new(sp.post.clone())}
+                                                affinity={sp.score}
+                                                backend_url={""}
+                                                account_id={0}
+                                                session_id={(*session_id).clone()}
+                                                position={0}
+                                                breakdown={sp.breakdown.clone()}
+                                                show_rating={*props.show_rating}
+                                                show_affinity={*props.show_affinity}
+                                                show_score={*props.show_score}
+                                                show_post_number={*props.show_post_number}
+                                                show_desc={*props.show_desc}
+                                                show_metadata={*props.show_metadata}
+                                                show_breakdown={*props.show_breakdown}
+                                            />
+                                        }) }
+                                    </div>
                                 }) }
                             </div>
                             <div ref={scroll_sentinel} class="h-4"></div>

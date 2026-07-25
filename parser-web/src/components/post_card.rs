@@ -372,13 +372,14 @@ pub fn post_card(props: &PostCardProps) -> Html {
         "card",
         "post-card",
         "card-compact",
-        "h-full",
         "overflow-hidden",
         "w-full",
         "relative",
         "border",
         "border-base-300",
-        "shadow-sm"
+        "shadow-sm",
+        "break-inside-avoid",
+        "mb-3"
     );
     if *hidden {
         root_classes.push("post-card-hidden");
@@ -569,7 +570,7 @@ pub fn post_card(props: &PostCardProps) -> Html {
             // cards in a grid row have their footer starting at the same Y.
             {
                 if let Some(footer) = footer_content {
-                    html! { <div class="mt-auto">{ footer }</div> }
+                    html! { <div class="mt-auto bg-base-100 border-и border-base-300">{ footer }</div> }
                 } else { html!{} }
             }
         </>
@@ -578,7 +579,7 @@ pub fn post_card(props: &PostCardProps) -> Html {
     if *hidden {
         return html! {
             <div
-                class={classes!("card", "h-full", "post-card-hidden", "w-full", "p-3", "flex", "flex-col", "items-center", "justify-center", "text-center")}
+                class={classes!("card", "h-full", "post-card-hidden", "w-full", "p-3", "flex", "flex-col", "items-center", "justify-center", "text-center", "break-inside-avoid", "mb-3")}
                 ref={root_ref}
                 aria-label={format!("Post {} hidden", post.id)}
             >
