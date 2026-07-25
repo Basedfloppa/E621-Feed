@@ -199,6 +199,27 @@ curl -X POST http://localhost:9090/-/reload
 
 ### Grafana dashboard
 
+A pre-built dashboard is available at
+[`docs/grafana-dashboard.json`](grafana-dashboard.json).
+Import it in Grafana:
+
+1. Open Grafana → **Dashboards** → **New** → **Import**
+2. Upload `docs/grafana-dashboard.json`
+3. Select the `e621-feed` Prometheus data source
+4. Click **Import**
+
+The dashboard includes panels for:
+
+| Panel | Type | Source |
+|-------|------|-------|
+| DAU / WAU / MAU | Stats | `e621_feed_views_total`, `e621_digest_views_total`, `e621_browse_views_total` |
+| Total Accounts / Posts Created | Stats | `e621_accounts_total`, `e621_accounts_created_total` |
+| Feature Usage (Feed / Digest / Browse) | Time series | `e621_feed_views_total`, `e621_digest_views_total`, `e621_browse_views_total` |
+| Process Success Rate + Runs | Gauge + Time series | `e621_process_runs_total` |
+| Catalog Growth | Time series | `e621_catalog_posts_total` |
+| Feed Interactions | Time series (stacked) | `e621_feed_interactions_total` by type |
+| Top-10 Accounts per Feature | Bar gauges | Per-account aggregation |
+
 Create a new dashboard in Grafana using the `e621-feed` Prometheus data
 source. Useful panels:
 
