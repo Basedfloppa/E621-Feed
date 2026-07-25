@@ -15,6 +15,7 @@ pub mod cache_pruner;
 pub mod db;
 pub mod errors;
 pub mod jobs;
+pub mod metrics;
 pub mod models;
 pub mod pipeline;
 pub mod prefetch;

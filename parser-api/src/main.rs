@@ -88,6 +88,9 @@ async fn process_posts(
                         .field("account_id", account_id)
                         .field("error", e)
                         .emit();
+                    e621_account_parser_api::metrics::METRICS.process_runs_total
+                        .with_label_values(&["failed"])
+                        .inc();
                 }
                 jobs::finish(account_id, result);
             });
@@ -302,6 +305,7 @@ async fn rocket() -> _ {
         .manage(spec)
         .mount("/api", api_routes)
         .mount("/api", rocket::routes![routes::account::get_account_tag_relations])
+        .mount("/api", rocket::routes![routes::get_metrics])
         .register("/api", catchers![catch_404, catch_422, catch_500])
         .attach(Shield::new())
         .attach(DbInit);

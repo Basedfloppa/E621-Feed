@@ -193,6 +193,8 @@ pub(crate) async fn create_account(
         .field("account_id", acc_id_for_audit)
         .field("name", name_for_audit)
         .emit();
+    e621_account_parser_api::metrics::METRICS.accounts_created_total.inc();
+    e621_account_parser_api::metrics::METRICS.accounts_total.inc();
     Ok(Json(result))
 }
 
@@ -351,6 +353,8 @@ pub(crate) async fn delete_account(
         .field("account_id", account_id)
         .field("removed_links", removed)
         .emit();
+    e621_account_parser_api::metrics::METRICS.accounts_deleted_total.inc();
+    e621_account_parser_api::metrics::METRICS.accounts_total.dec();
     Ok(())
 }
 

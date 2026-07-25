@@ -25,6 +25,7 @@ rocket = { version = "0.5.1", features = ["json"] }
 rocket_cors = "0.6.0"
 tokio = { version = "1", features = ["full"] }
 chrono = { version = ">=0.4.38, <0.5", features = ["serde"] }
+prometheus = { version = "0.13", features = [] }
 serde = { version = "1", features = ["derive"] }
 urlencoding = "2"
 anyhow = "1.0.103"

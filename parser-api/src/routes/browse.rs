@@ -63,6 +63,9 @@ fn spawn_browse_persist(
                     .field("account_id", account_id)
                     .field("count", n)
                     .emit();
+                e621_account_parser_api::metrics::METRICS.browse_views_total
+                    .with_label_values(&[source])
+                    .inc();
             }
             Ok(Err(e)) => {
                 warn!("[browse] persist {source} failed for account {account_id}: {e}");

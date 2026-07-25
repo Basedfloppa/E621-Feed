@@ -420,6 +420,9 @@ pub(crate) async fn get_daily_digest(
             .field("mode", "cached")
             .field("returned", cached.len())
             .emit();
+        e621_account_parser_api::metrics::METRICS.digest_views_total
+            .with_label_values(&[&account_id.to_string()])
+            .inc();
         return Ok(Json(cached));
     }
 
@@ -448,6 +451,9 @@ pub(crate) async fn get_daily_digest(
         .field("returned", posts.len())
         .field("hide_saved", hide_saved)
         .emit();
+    e621_account_parser_api::metrics::METRICS.digest_views_total
+        .with_label_values(&[&account_id.to_string()])
+        .inc();
     cache_set(cache_key, posts.clone());
     Ok(Json(posts))
 }

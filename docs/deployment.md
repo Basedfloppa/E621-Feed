@@ -31,6 +31,7 @@ cargo build --release --bin e621-account-parser-api --features jemalloc
 ```
 
 For even more aggressive page return at runtime, add:
+
 ```bash
 MALLOC_CONF=dirty_decay_ms:0,muzzy_decay_ms:0 ./target/release/e621-account-parser-api
 ```
@@ -134,3 +135,128 @@ curl -sI -H 'Accept-Encoding: br' https://your.domain/ | grep -i content-encodin
 If you ever re-deploy without re-running the pre-compression step, nginx
 happily falls back to gzip / on-the-fly — `brotli_static` only serves
 what's on disk, it doesn't 404 when the sibling is missing.
+
+---
+
+## Monitoring & Metrics
+
+The backend exposes a Prometheus metrics endpoint at `/api/metrics`.
+No external dependencies — uses the pure-Rust `prometheus` crate.
+
+### Available metrics
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `e621_accounts_total` | Gauge | — | Current number of saved accounts |
+| `e621_accounts_created_total` | Counter | — | Total accounts created since server start |
+| `e621_accounts_deleted_total` | Counter | — | Total accounts deleted since server start |
+| `e621_catalog_posts_total` | Gauge | — | Total posts in the local catalog |
+| `e621_feed_views_total` | Counter | `account_id` | Feed recommendation views |
+| `e621_digest_views_total` | Counter | `account_id` | Daily digest views (cache hit + fresh) |
+| `e621_browse_views_total` | Counter | `source` (`trending` / `favorites`) | Browse page views |
+| `e621_process_runs_total` | Counter | `status` (`started` / `success` / `failed`) | /process pipeline runs |
+| `e621_feed_interactions_total` | Counter | `type` (`open` / `hide` / `impression`) | Per-post feed interactions |
+
+### Quick check
+
+```bash
+curl http://localhost:8080/api/metrics | head -20
+```
+
+Example output:
+
+```prometheus
+# HELP e621_accounts_total Current number of saved accounts
+# TYPE e621_accounts_total gauge
+e621_accounts_total 12
+# HELP e621_feed_views_total Feed recommendation views
+# TYPE e621_feed_views_total counter
+e621_feed_views_total{account_id="658288"} 128
+# HELP e621_catalog_posts_total Total posts in local catalog
+# TYPE e621_catalog_posts_total gauge
+e621_catalog_posts_total 1607
+```
+
+### Prometheus scrape config
+
+Add to your `prometheus.yml`:
+
+```yaml
+scrape_configs:
+  - job_name: e621-feed
+    static_configs:
+      - targets:
+          - host.docker.internal:8080   # if Prometheus is in Docker
+          # - 192.168.1.50:8080         # or the host IP directly
+    metrics_path: '/api/metrics'
+```
+
+Reload Prometheus after adding the job:
+
+```bash
+curl -X POST http://localhost:9090/-/reload
+```
+
+### Grafana dashboard
+
+Create a new dashboard in Grafana using the `e621-feed` Prometheus data
+source. Useful panels:
+
+**DAU (Daily Active Users)** — PromQL:
+
+```promql
+count by (account_id) (
+  sum(rate(e621_feed_views_total[24h])) > 0
+    or sum(rate(e621_digest_views_total[24h])) > 0
+    or sum(rate(e621_browse_views_total[24h])) > 0
+)
+```
+
+**Feature usage breakdown** — PromQL:
+
+```promql
+sum(rate(e621_feed_views_total[24h]))  # Feed
+sum(rate(e621_digest_views_total[24h]))  # Digest
+sum(rate(e621_browse_views_total[24h]))  # Browse
+```
+
+**Process success rate** — PromQL:
+
+```promql
+sum(rate(e621_process_runs_total{status="success"}[7d]))
+/
+sum(rate(e621_process_runs_total{status="started"}[7d]))
+```
+
+**Catalog growth** — PromQL:
+
+```promql
+e621_catalog_posts_total
+```
+
+### Security note
+
+The `/api/metrics` endpoint exposes `account_id` as label values. The
+endpoint is intentionally unauthenticated so Prometheus can scrape it
+without credentials. In production, restrict access via nginx:
+
+```nginx
+location = /api/metrics {
+    allow 127.0.0.1;
+    allow 10.0.0.0/8;      # docker network
+    deny all;
+    proxy_pass http://backend:8080;
+}
+```
+
+Or with Caddy:
+
+```caddy
+@metrics {
+    path /api/metrics
+    remote_ip 127.0.0.1 10.0.0.0/8
+}
+handle @metrics {
+    reverse_proxy localhost:8080
+}
+```

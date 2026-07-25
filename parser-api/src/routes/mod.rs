@@ -5,3 +5,13 @@ pub(crate) mod account;
 pub(crate) mod browse;
 pub(crate) mod digest;
 pub(crate) mod feed;
+
+use rocket::get;
+
+/// Prometheus metrics endpoint — returns all registered metrics in text format.
+#[get("/metrics")]
+pub(crate) fn get_metrics() -> String {
+    // Force-init the lazy metrics so the default registry is populated.
+    let _ = &*e621_account_parser_api::metrics::METRICS;
+    e621_account_parser_api::metrics::render()
+}

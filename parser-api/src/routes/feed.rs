@@ -55,8 +55,11 @@ pub(crate) async fn log_feed_interaction(
     audit::event("feed.interaction")
         .field("account_id", account_id)
         .field("post_id", post_id)
-        .field("event", event_str)
+        .field("event", &event_str)
         .emit();
+    e621_account_parser_api::metrics::METRICS.feed_interactions_total
+        .with_label_values(&[&event_str])
+        .inc();
     Ok(())
 }
 
@@ -193,6 +196,9 @@ pub(crate) async fn get_recommendations(
         .field("returned", scored.len())
         .field_opt("page", page)
         .emit();
+    e621_account_parser_api::metrics::METRICS.feed_views_total
+        .with_label_values(&[&account_id.to_string()])
+        .inc();
 
     Ok(Json(scored))
 }
@@ -641,6 +647,9 @@ pub(crate) async fn get_similar_posts(
         .field("post_id", post_id)
         .field("returned", scored.len())
         .emit();
+    e621_account_parser_api::metrics::METRICS.feed_views_total
+        .with_label_values(&[&account_id.to_string()])
+        .inc();
 
     Ok(Json(scored))
 }

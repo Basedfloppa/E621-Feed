@@ -131,6 +131,9 @@ pub async fn run_process_with_mode(
         .field("account_id", account_id)
         .field("requested_mode", mode.as_str())
         .emit();
+    crate::metrics::METRICS.process_runs_total
+        .with_label_values(&["started"])
+        .inc();
     let pipeline_start = std::time::Instant::now();
     let mut pipe = PipelineMetrics::new("process");
     let mut phase_start = std::time::Instant::now();
@@ -269,6 +272,9 @@ pub async fn run_process_with_mode(
         .field("new_or_persisted", new_count)
         .field("ms", pipeline_start.elapsed().as_millis())
         .emit();
+    crate::metrics::METRICS.process_runs_total
+        .with_label_values(&["success"])
+        .inc();
     Ok(())
 }
 
