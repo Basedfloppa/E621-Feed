@@ -1,4 +1,4 @@
-use crate::components::{IconGithub, IconQuestion, ThemeToggle};
+use crate::components::{IconGithub, IconPerson, IconQuestion, ThemeToggle};
 use yew::{Callback, Html, MouseEvent, classes, function_component, html, use_effect_with};
 use yew_router::prelude::use_location;
 use crate::models::{read_config_from_head, start_tour, AttachTo, Button, Step};
@@ -229,6 +229,8 @@ pub fn header() -> Html {
         }
     });
 
+    let account_active = is_active("/account");
+
     html! {
         <div class="drawer">
             <input id="header-drawer" type="checkbox" class="drawer-toggle" aria-label="Toggle navigation" />
@@ -248,58 +250,50 @@ pub fn header() -> Html {
                             {"E621 Feed"}
                         </a>
                     </div>
-                    <div class="navbar-center hidden lg:flex gap-1">
-                        <a
-                            class={classes!("btn", "btn-ghost", is_active("/").then_some("btn-active"))}
-                            aria-current={is_active("/").then_some("page")}
-                            href="/"
-                        >
-                            {"Home"}
-                        </a>
-                        <a
-                            class={classes!("btn", "btn-ghost", is_active("/account").then_some("btn-active"))}
-                            aria-current={is_active("/account").then_some("page")}
-                            href="/account"
-                        >
-                            {"Account"}
-                        </a>
-                        <a
-                            class={classes!("btn", "btn-ghost", is_active("/feed").then_some("btn-active"))}
-                            aria-current={is_active("/feed").then_some("page")}
-                            href="/feed"
-                        >
-                            {"Feed"}
-                        </a>
-                        <a
-                            class={classes!("btn", "btn-ghost", is_active("/trending").then_some("btn-active"))}
-                            aria-current={is_active("/trending").then_some("page")}
-                            href="/trending"
-                        >
-                            {"Trending"}
-                        </a>
-                        <a
-                            class={classes!("btn", "btn-ghost", is_active("/favorites").then_some("btn-active"))}
-                            aria-current={is_active("/favorites").then_some("page")}
-                            href="/favorites"
-                        >
-                            {"Favorites"}
-                        </a>
-                        <a
-                            class={classes!("btn", "btn-ghost", is_active("/digest").then_some("btn-active"))}
-                            aria-current={is_active("/digest").then_some("page")}
-                            href="/digest"
-                        >
-                            {"Digest"}
-                        </a>
+                    <div class="navbar-center hidden lg:flex">
+                        <div role="tablist" class="tabs tabs-box">
+                            <a role="tab"
+                                class={classes!("tab", is_active("/feed").then_some("tab-active"))}
+                                href="/feed"
+                            >
+                                {"For You"}
+                            </a>
+                            <a role="tab"
+                                class={classes!("tab", is_active("/trending").then_some("tab-active"))}
+                                href="/trending"
+                            >
+                                {"Trending"}
+                            </a>
+                            <a role="tab"
+                                class={classes!("tab", is_active("/favorites").then_some("tab-active"))}
+                                href="/favorites"
+                            >
+                                {"Favorites"}
+                            </a>
+                            <a role="tab"
+                                class={classes!("tab", is_active("/digest").then_some("tab-active"))}
+                                href="/digest"
+                            >
+                                {"Digest"}
+                            </a>
+                        </div>
                     </div>
                     <div class="navbar-end gap-1">
+                        <a
+                            class={classes!("btn", "btn-ghost", "btn-sm", account_active.then_some("btn-active"))}
+                            aria-label="Account settings"
+                            title="Account settings"
+                            href="/account"
+                        >
+                            <IconPerson active={account_active} />
+                        </a>
                         <button
                             type="button"
                             class="btn btn-ghost btn-sm"
                             title="Replay the onboarding tour"
                             aria-label="Replay onboarding tour"
                             onclick={restart_tour}
->
+                        >
                             <IconQuestion />
                         </button>
                         <a
@@ -315,10 +309,49 @@ pub fn header() -> Html {
                         <ThemeToggle />
                     </div>
                 </nav>
+                <div class="btm-nav btm-nav-sm lg:hidden border-t border-base-300 z-10">
+                    <a
+                        class={classes!(is_active("/feed").then_some("active"))}
+                        href="/feed"
+                    >
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 10h16M4 14h16M4 18h16" />
+                        </svg>
+                        <span>{"For You"}</span>
+                    </a>
+                    <a
+                        class={classes!(is_active("/trending").then_some("active"))}
+                        href="/trending"
+                    >
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6" />
+                        </svg>
+                        <span>{"Trending"}</span>
+                    </a>
+                    <a
+                        class={classes!(is_active("/favorites").then_some("active"))}
+                        href="/favorites"
+                    >
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4.318 6.318a4.5 4.5 0 000 6.364L12 20.364l7.682-7.682a4.5 4.5 0 00-6.364-6.364L12 7.636l-1.318-1.318a4.5 4.5 0 00-6.364 0z" />
+                        </svg>
+                        <span>{"Favorites"}</span>
+                    </a>
+                    <a
+                        class={classes!(is_active("/digest").then_some("active"))}
+                        href="/digest"
+                    >
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                        </svg>
+                        <span>{"Digest"}</span>
+                    </a>
+                </div>
             </div>
             <div class="drawer-side z-50">
                 <label for="header-drawer" aria-label="close sidebar" class="drawer-overlay"></label>
                 <ul class="menu p-4 w-80 min-h-full bg-base-200">
+                    <li class="menu-title"><span>{"Navigation"}</span></li>
                     <li>
                         <a
                             class={classes!("text-base-content", is_active("/").then_some("menu-active"))}
@@ -340,7 +373,7 @@ pub fn header() -> Html {
                             class={classes!("text-base-content", is_active("/feed").then_some("menu-active"))}
                             href="/feed"
                         >
-                            {"Feed"}
+                            {"For You"}
                         </a>
                     </li>
                     <li>

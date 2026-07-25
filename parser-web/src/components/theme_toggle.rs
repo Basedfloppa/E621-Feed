@@ -97,8 +97,9 @@ pub fn theme_toggle() -> Html {
     html!(
         <details class="dropdown dropdown-end">
             <summary class="btn btn-ghost btn-sm" aria-label="Select theme">
-                // Show current theme label or a generic icon
-                { "🎨" }
+                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5" aria-hidden="true" class="inline-block">
+                    <path d="M12 2C6.49 2 2 6.49 2 12s4.49 10 10 10c1.1 0 2-.9 2-2 0-.5-.19-.95-.5-1.3-.31-.36-.5-.81-.5-1.3 0-1.1.9-2 2-2H17c3.31 0 6-2.69 6-6 0-4.96-4.49-9-11-9zm0 4.5c-.83 0-1.5-.67-1.5-1.5s.67-1.5 1.5-1.5 1.5.67 1.5 1.5-.67 1.5-1.5 1.5zm-4.5 3c-.83 0-1.5-.67-1.5-1.5s.67-1.5 1.5-1.5 1.5.67 1.5 1.5-.67 1.5-1.5 1.5zm-1.5 4.5c-.83 0-1.5-.67-1.5-1.5s.67-1.5 1.5-1.5 1.5.67 1.5 1.5-.67 1.5-1.5 1.5z"/>
+                </svg>
             </summary>
             <ul class="dropdown-content menu p-2 shadow bg-base-100 rounded-box w-32 z-50">
                 { for THEMES.iter().map(|(key, label)| {
