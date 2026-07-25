@@ -21,6 +21,8 @@ pub fn tag_chart_card(props: &TagChartCardProps) -> Html {
     let theme_trigger = use_state(|| 0);
     let selected_group = use_state(String::new);
     let resize_trigger = use_state(|| 0);
+    // Force re-initialization when tag_counts become non-empty after being empty.
+    let _has_data_trigger = use_state(|| false);
 
     let current_tags = use_memo(
         (selected_group.clone(), props.tag_counts.clone()),
@@ -46,9 +48,13 @@ pub fn tag_chart_card(props: &TagChartCardProps) -> Html {
     });
 
     use_effect_with(
-        (selected_group.clone(), group_types.clone()),
-        |(selected_group, group_types)| {
-            if !selected_group.is_empty() || group_types.contains(&**selected_group) {
+        (
+            selected_group.clone(),
+            group_types.clone(),
+            props.tag_counts.len(),
+        ),
+        |(selected_group, group_types, _count)| {
+            if !selected_group.is_empty() && group_types.contains(&**selected_group) {
                 return;
             }
 

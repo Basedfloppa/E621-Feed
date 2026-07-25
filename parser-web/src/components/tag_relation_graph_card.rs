@@ -565,6 +565,8 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
     // the canvas — the node would snap back, the pan would freeze. Now
     // the user can throw a node anywhere on the page and release it
     // wherever; on release the pin clears regardless of cursor location.
+    // Dependency on `payload.is_some()` + `*tick` so the handlers are
+    // re-created once the SVG is actually in the DOM (after graph loads).
     {
         let pan = pan.clone();
         let layout = layout.clone();
@@ -573,7 +575,8 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
         let svg_ref = svg_ref.clone();
         let is_dragging = is_dragging.clone();
         let payload = payload.clone();
-        use_effect_with((), move |_| {
+        let dep = payload.is_some();
+        use_effect_with(dep, move |_| {
             let Some(window) = web_sys::window() else {
                 return Box::new(|| {}) as Box<dyn FnOnce()>;
             };
@@ -850,12 +853,13 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
         let community = l.communities.get(i).copied().unwrap_or(0);
         let color = community_color(community);
         let is_hover = cur_hover == Some(i);
+        let is_pinned = l.pinned.as_ref().map(|p| p.node_idx) == Some(i);
         let in_focus = node_focus_full(i);
         // Inactive nodes stay rendered at a low opacity instead of being
         // pulled from the DOM — this preserves spatial context when a
         // community is isolated or a node is hovered.
         let opacity: f64 = if in_focus { 1.0 } else { INACTIVE_OPACITY };
-        let stroke_width = if is_hover { 2.4 } else { 0.9 };
+        let stroke_width = if is_hover || is_pinned { 2.8 } else { 0.9 };
 
         let on_node_mousedown = {
             let layout = layout.clone();
@@ -911,9 +915,9 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
             })
         };
 
-        // Halo for the currently-hovered circle so a mouse pointer over a
-        // dense cluster has obvious feedback.
-        let halo = if is_hover {
+        // Halo for the currently-hovered or pinned circle.
+        // Pinned (dragged) nodes get a larger, more visible halo.
+        let hover_halo = if is_hover {
             Some(html! {
                 <circle
                     cx={format!("{:.2}", n.x)} cy={format!("{:.2}", n.y)}
@@ -927,6 +931,21 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
         } else {
             None
         };
+        let pinned_halo = if is_pinned {
+            Some(html! {
+                <circle
+                    cx={format!("{:.2}", n.x)} cy={format!("{:.2}", n.y)}
+                    r={format!("{:.2}", n.radius + 10.0)}
+                    fill="none"
+                    stroke="var(--color-primary)"
+                    stroke-width="2.4"
+                    stroke-opacity="0.7"
+                    stroke-dasharray="4 3"
+                />
+            })
+        } else {
+            None
+        };
 
         let tag_label_for_title = graph_nodes_ref
             .and_then(|g| g.nodes.get(i))
@@ -935,7 +954,8 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
 
         circles_html.push(html! {
             <g key={i}>
-                { halo }
+                { hover_halo }
+                { pinned_halo }
                 <circle
                     cx={format!("{:.2}", n.x)} cy={format!("{:.2}", n.y)}
                     r={format!("{:.2}", n.radius)}
@@ -1004,7 +1024,7 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
     // -------- Toolbar callbacks (controls + zoom) -------------------------
     let on_top_change = {
         let top_n = top_n.clone();
-        Callback::from(move |e: Event| {
+        Callback::from(move |e: web_sys::InputEvent| {
             let target: web_sys::HtmlInputElement = e.target_unchecked_into();
             if let Ok(v) = target.value().parse::<usize>() {
                 top_n.set(v.clamp(5, 250));
@@ -1013,7 +1033,7 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
     };
     let on_min_cooc_change = {
         let min_cooc = min_cooc.clone();
-        Callback::from(move |e: Event| {
+        Callback::from(move |e: web_sys::InputEvent| {
             let target: web_sys::HtmlInputElement = e.target_unchecked_into();
             if let Ok(v) = target.value().parse::<i64>() {
                 min_cooc.set(v.max(1));
@@ -1022,7 +1042,7 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
     };
     let on_edges_per_tag_change = {
         let edges_per_tag = edges_per_tag.clone();
-        Callback::from(move |e: Event| {
+        Callback::from(move |e: web_sys::InputEvent| {
             let target: web_sys::HtmlInputElement = e.target_unchecked_into();
             if let Ok(v) = target.value().parse::<usize>() {
                 edges_per_tag.set(v.clamp(2, 20));
@@ -1174,7 +1194,7 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
                         max="250"
                         step="5"
                         value={top_n.to_string()}
-                        onchange={on_top_change}
+                        oninput={on_top_change}
                     />
                     <span class="text-base-content text-sm mb-0">{"Min co-occurrence"}</span>
                     <input
@@ -1183,7 +1203,7 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
                         min="1"
                         step="1"
                         value={min_cooc.to_string()}
-                        onchange={on_min_cooc_change}
+                        oninput={on_min_cooc_change}
                     />
                     <span class="text-base-content text-sm mb-0" title="Each tag keeps only its strongest links to other tags. Lower = clearer backbone, higher = denser graph.">{"Edges per tag"}</span>
                     <input
@@ -1193,7 +1213,7 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
                         max="20"
                         step="1"
                         value={edges_per_tag.to_string()}
-                        onchange={on_edges_per_tag_change}
+                        oninput={on_edges_per_tag_change}
                     />
                     <div class="ms-auto">
                         <div class="join join-sm" role="group" aria-label="Zoom controls">
