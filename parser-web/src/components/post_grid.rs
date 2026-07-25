@@ -197,10 +197,13 @@ pub fn post_grid(props: &PostGridProps) -> Html {
     }
 
     // IntersectionObserver for infinite scroll (subsequent pages).
+    // Depend on posts length so the observer re-attaches once the sentinel
+    // element is actually in the DOM (after the first page loads).
     {
         let fetch_more = fetch_more.clone();
         let sentinel = scroll_sentinel.clone();
-        use_effect_with((), move |_| {
+        let posts_len = (*posts).len();
+        use_effect_with(posts_len, move |_| {
             let fetch = fetch_more.clone();
             let cb = Closure::<dyn FnMut(Vec<web_sys::IntersectionObserverEntry>)>::new(
                 move |entries: Vec<web_sys::IntersectionObserverEntry>| {
@@ -216,7 +219,7 @@ pub fn post_grid(props: &PostGridProps) -> Html {
             {
                 o.observe(&el);
                 cb.forget();
-                let _ = o;
+                std::mem::forget(o);
             }
             || ()
         });
