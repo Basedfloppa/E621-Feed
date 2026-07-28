@@ -7,7 +7,9 @@ use web_sys::RequestInit;
 use web_sys::{Request, RequestMode, Response, window};
 use yew::prelude::*;
 
-use crate::components::{IconArrowClockwise, IconSliders, PostCard, SavedAccountsSelect};
+use crate::components::{
+    IconArrowClockwise, IconSliders, SavedAccountsSelect, render_post_grid,
+};
 use crate::models::*;
 use crate::pages::UserInfo;
 
@@ -469,83 +471,25 @@ pub fn digest_page() -> Html {
         html! {}
     };
 
-    // Column-based masonry layout (matches PostGrid logic).
-    let posts_grid_html: Html = if !posts.is_empty() {
-        let num_cols = match *grid {
-            GridType::Auto => {
-                let w = web_sys::window()
-                    .and_then(|w| w.inner_width().ok())
-                    .and_then(|w| w.as_f64())
-                    .unwrap_or(1024.0);
-                if w >= 1280.0 { 5 }
-                else if w >= 1024.0 { 4 }
-                else if w >= 768.0 { 3 }
-                else if w >= 640.0 { 2 }
-                else { 1 }
-            }
-            GridType::Three => 3,
-            GridType::Two => 2,
-            GridType::One => 1,
-        }.max(1);
-
-        let mut col_heights = vec![0.0f64; num_cols];
-        let mut columns: Vec<Vec<ScoredPost>> = (0..num_cols).map(|_| Vec::new()).collect();
-        for sp in posts.iter() {
-            let aspect = {
-                let w = sp.post.files.original.width.max(1) as f64;
-                let h = sp.post.files.original.height.max(1) as f64;
-                h / w
-            };
-            let shortest = col_heights
-                .iter()
-                .enumerate()
-                .min_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
-                .map(|(i, _)| i)
-                .unwrap_or(0);
-            col_heights[shortest] += aspect;
-            columns[shortest].push(sp.clone());
-        }
-
-        let cfg = read_config_from_head();
-        let account_id = selected_user.as_ref().map(|u| u.id as i32).unwrap_or(0);
-        let grid_cls = grid.grid_class();
-
-        html! {
-            <div class={format!("{} m-3", grid_cls)} style="align-items: start;">
-                { for columns.into_iter().enumerate().map(|(col_idx, col_posts)| {
-                    let cfg = cfg.clone();
-                    html! {
-                        <div key={col_idx} class="flex flex-col">
-                            { for col_posts.iter().map(|sp| {
-                                let cfg = cfg.clone();
-                                html! {
-                                    <PostCard
-                                        key={sp.post.id}
-                                        post={std::rc::Rc::new(sp.post.clone())}
-                                        affinity={sp.score}
-                                        backend_url={cfg.as_ref().map(|c| c.backend_domain.clone()).unwrap_or_default()}
-                                        account_id={account_id}
-                                        session_id={String::new()}
-                                        position={0}
-                                        breakdown={sp.breakdown.clone()}
-                                        show_rating={*show_rating}
-                                        show_affinity={*show_affinity}
-                                        show_score={*show_score}
-                                        show_post_number={*show_post_number}
-                                        show_desc={*show_desc}
-                                        show_metadata={*show_metadata}
-                                        show_breakdown={*show_breakdown}
-                                    />
-                                }
-                            }) }
-                        </div>
-                    }
-                }) }
-            </div>
-        }
-    } else {
-        html! {}
-    };
+    let backend_url = read_config_from_head()
+        .map(|cfg| cfg.backend_domain)
+        .unwrap_or_default();
+    let account_id = selected_user.as_ref().map(|u| u.id as i32).unwrap_or_default();
+    let posts_grid_html = render_post_grid(
+        &posts,
+        grid.grid_class(),
+        &backend_url,
+        account_id,
+        "",
+        0,
+        *show_rating,
+        *show_affinity,
+        *show_score,
+        *show_post_number,
+        *show_desc,
+        *show_metadata,
+        *show_breakdown,
+    );
 
     html! {
         <div class="container-fluid">

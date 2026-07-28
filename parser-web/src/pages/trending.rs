@@ -63,17 +63,14 @@ pub fn trending_page() -> Html {
             || ()
         });
     }
-    // Compute fetch URL from selected user (recomputed on every render).
-    let fetch_url = {
-        let cfg = read_config_from_head();
-        selected_user
-            .as_ref()
-            .and_then(|u| {
-                cfg.as_ref()
-                    .map(|c| format!("{}/browse/trending/{}", c.backend_domain, u.id))
-            })
-            .unwrap_or_default()
-    };
+    // Compute fetch URL and card context from the same backend configuration.
+    let backend_url = read_config_from_head()
+        .map(|cfg| cfg.backend_domain)
+        .unwrap_or_default();
+    let fetch_url = selected_user
+        .as_ref()
+        .map(|u| format!("{}/browse/trending/{}", backend_url, u.id))
+        .unwrap_or_default();
 
     // Display settings.
     let show_rating = use_state(|| true);
@@ -149,6 +146,8 @@ pub fn trending_page() -> Html {
                     grid_class={(*grid).grid_class().to_string()}
                     fetch_url={fetch_url.clone()}
                     scored=false
+                    backend_url={backend_url.clone()}
+                    account_id={selected_user.as_ref().map(|u| u.id as i32).unwrap_or_default()}
                     show_rating={show_rating}
                     show_affinity={show_affinity}
                     show_score={show_score}

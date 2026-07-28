@@ -572,33 +572,21 @@ pub fn feed_page() -> Html {
     let card_account_id = selected_user.as_ref().map(|u| u.id as i32).unwrap_or_default();
     let card_grid_class = (*grid).grid_class();
     let card_session_id = (*session_id).clone();
-    let feed_cards: Html = posts
-        .iter()
-        .enumerate()
-        .map(|(idx, sp)| {
-            let position = (idx + 1) as i32;
-            html! {
-                <div key={sp.post.id} class="flex justify-center" style="min-width: 200px">
-                    <PostCard
-                        affinity={sp.score}
-                        post={Rc::new(sp.post.clone())}
-                        backend_url={backend_url.clone()}
-                        account_id={card_account_id}
-                        session_id={card_session_id.clone()}
-                        position={position}
-                        breakdown={sp.breakdown.clone()}
-                        show_desc={*show_desc.clone()}
-                        show_metadata={*show_metadata.clone()}
-                        show_breakdown={*show_breakdown.clone()}
-                        show_rating={*show_rating.clone()}
-                        show_affinity={*show_affinity.clone()}
-                        show_score={*show_score.clone()}
-                        show_post_number={*show_post_number.clone()}
-                    />
-                </div>
-            }
-        })
-        .collect();
+    let feed_cards = render_post_grid(
+        &posts,
+        card_grid_class,
+        &backend_url,
+        card_account_id,
+        &card_session_id,
+        1,
+        *show_rating,
+        *show_affinity,
+        *show_score,
+        *show_post_number,
+        *show_desc,
+        *show_metadata,
+        *show_breakdown,
+    );
 
     html! {
         <div class="m-4 gap-2 feed-page">
@@ -951,7 +939,7 @@ pub fn feed_page() -> Html {
                 } else { html!{} }
             }
 
-            <div class={card_grid_class.to_string() + " m-3 feed-grid"} aria-busy={(*is_loading).to_string()}>
+            <div class="feed-grid" aria-busy={(*is_loading).to_string()}>
                 { feed_cards }
             </div>
 

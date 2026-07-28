@@ -66,6 +66,79 @@ fn current_column_count(grid_class: &str) -> usize {
     result
 }
 
+/// Render the shared masonry-style post layout used by all post collections.
+pub fn render_post_grid(
+    posts: &[ScoredPost],
+    grid_class: &str,
+    backend_url: &str,
+    account_id: i32,
+    session_id: &str,
+    position_offset: usize,
+    show_rating: bool,
+    show_affinity: bool,
+    show_score: bool,
+    show_post_number: bool,
+    show_desc: bool,
+    show_metadata: bool,
+    show_breakdown: bool,
+) -> Html {
+    if posts.is_empty() {
+        return html! {};
+    }
+
+    let effective_class = if grid_class.is_empty() {
+        "grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-3"
+    } else {
+        grid_class
+    };
+    let num_columns = current_column_count(effective_class).max(1);
+    let mut col_heights = vec![0.0f64; num_columns];
+    let mut columns: Vec<Vec<(usize, &ScoredPost)>> =
+        (0..num_columns).map(|_| Vec::new()).collect();
+
+    for (post_index, post) in posts.iter().enumerate() {
+        let width = post.post.files.original.width.max(1) as f64;
+        let height = post.post.files.original.height.max(1) as f64;
+        let aspect = height / width;
+        let shortest = col_heights
+            .iter()
+            .enumerate()
+            .min_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|(index, _)| index)
+            .unwrap_or(0);
+        col_heights[shortest] += aspect;
+        columns[shortest].push((post_index, post));
+    }
+
+    html! {
+        <div class={format!("{} m-3", effective_class)} style="align-items: start;">
+            { for columns.into_iter().enumerate().map(|(column_index, column_posts)| html! {
+                <div key={column_index} class="flex flex-col">
+                    { for column_posts.into_iter().map(|(post_index, scored_post)| html! {
+                        <PostCard
+                            key={scored_post.post.id}
+                            post={Rc::new(scored_post.post.clone())}
+                            affinity={scored_post.score}
+                            backend_url={backend_url.to_string()}
+                            account_id={account_id}
+                            session_id={session_id.to_string()}
+                            position={(position_offset + post_index) as i32}
+                            breakdown={scored_post.breakdown.clone()}
+                            show_rating={show_rating}
+                            show_affinity={show_affinity}
+                            show_score={show_score}
+                            show_post_number={show_post_number}
+                            show_desc={show_desc}
+                            show_metadata={show_metadata}
+                            show_breakdown={show_breakdown}
+                        />
+                    }) }
+                </div>
+            }) }
+        </div>
+    }
+}
+
 /// Reusable post grid with infinite scroll, status bar, and post-card display.
 #[derive(Properties, PartialEq)]
 pub struct PostGridProps {
@@ -87,6 +160,11 @@ pub struct PostGridProps {
     /// Grid layout class (overrides default responsive grid).
     #[prop_or_default]
     pub grid_class: String,
+    /// Context forwarded to PostCard for interactions and account-scoped state.
+    #[prop_or_default]
+    pub backend_url: String,
+    #[prop_or_default]
+    pub account_id: i32,
 }
 
 #[function_component(PostGrid)]
@@ -225,50 +303,10 @@ pub fn post_grid(props: &PostGridProps) -> Html {
         });
     }
 
-    // Determine the effective number of columns from viewport width + grid class.
-    let num_columns = {
-        let cls = if props.grid_class.is_empty() {
-            "grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-3"
-        } else {
-            &props.grid_class
-        };
-        current_column_count(cls)
-    };
-
-    // Outer CSS Grid with responsive column layout.
     let grid_class = if props.grid_class.is_empty() {
         "grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-3"
     } else {
         &props.grid_class
-    };
-
-    // Split posts into N columns using shortest-column strategy.
-    // Instead of round-robin, each post is placed in the column with the
-    // lowest total image aspect ratio (height/width). This keeps columns
-    // visually balanced — tall images don't clump in one column.
-    let columns: Vec<Vec<ScoredPost>> = {
-        let n = num_columns.max(1);
-        let mut col_heights = vec![0.0f64; n];
-        let mut cols: Vec<Vec<ScoredPost>> = (0..n).map(|_| Vec::new()).collect();
-        for sp in (*posts).iter() {
-            // Estimate aspect ratio from original image dimensions.
-            // Higher aspect = taller image relative to its width.
-            let aspect = {
-                let w = sp.post.files.original.width.max(1) as f64;
-                let h = sp.post.files.original.height.max(1) as f64;
-                h / w
-            };
-            // Find the column with the smallest total aspect ratio.
-            let shortest = col_heights
-                .iter()
-                .enumerate()
-                .min_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
-                .map(|(i, _)| i)
-                .unwrap_or(0);
-            col_heights[shortest] += aspect;
-            cols[shortest].push(sp.clone());
-        }
-        cols
     };
 
     html! {
@@ -279,31 +317,21 @@ pub fn post_grid(props: &PostGridProps) -> Html {
                 } else {
                     html! {
                         <>
-                            <div class={format!("{} m-3", grid_class)} style="align-items: start;">
-                                { for columns.iter().enumerate().map(|(col_idx, col_posts)| html! {
-                                    <div key={col_idx} class="flex flex-col">
-                                        { for col_posts.iter().map(|sp| html! {
-                                            <PostCard
-                                                key={sp.post.id}
-                                                post={Rc::new(sp.post.clone())}
-                                                affinity={sp.score}
-                                                backend_url={""}
-                                                account_id={0}
-                                                session_id={(*session_id).clone()}
-                                                position={0}
-                                                breakdown={sp.breakdown.clone()}
-                                                show_rating={*props.show_rating}
-                                                show_affinity={*props.show_affinity}
-                                                show_score={*props.show_score}
-                                                show_post_number={*props.show_post_number}
-                                                show_desc={*props.show_desc}
-                                                show_metadata={*props.show_metadata}
-                                                show_breakdown={*props.show_breakdown}
-                                            />
-                                        }) }
-                                    </div>
-                                }) }
-                            </div>
+                            { render_post_grid(
+                                &posts,
+                                grid_class,
+                                &props.backend_url,
+                                props.account_id,
+                                &session_id,
+                                0,
+                                *props.show_rating,
+                                *props.show_affinity,
+                                *props.show_score,
+                                *props.show_post_number,
+                                *props.show_desc,
+                                *props.show_metadata,
+                                *props.show_breakdown,
+                            ) }
                             <div ref={scroll_sentinel} class="h-4"></div>
                             {
                                 if *is_loading {
