@@ -195,6 +195,12 @@ pub struct RuntimeConfig {
     /// completes). Set to 0 to keep the caches resident forever.
     #[serde(default = "default_cache_idle_eviction_secs")]
     pub cache_idle_eviction_secs: u64,
+
+    /// Interval (in seconds) for the background tag_aliases / tag_implications
+    /// import worker. Fetches all pages on first run, then incremental page 1
+    /// on subsequent ticks. 0 disables the worker entirely.
+    #[serde(default = "default_tag_alias_import_interval_secs")]
+    pub tag_alias_import_interval_secs: u64,
 }
 
 impl Default for RuntimeConfig {
@@ -221,8 +227,13 @@ impl Default for RuntimeConfig {
             prefetch_cooldown_secs: default_prefetch_cooldown_secs(),
             cache_validate_interval_secs: default_cache_validate_interval_secs(),
             cache_idle_eviction_secs: default_cache_idle_eviction_secs(),
+            tag_alias_import_interval_secs: default_tag_alias_import_interval_secs(),
         }
     }
+}
+
+fn default_tag_alias_import_interval_secs() -> u64 {
+    86400 // 24 h — daily sync of tag aliases / implications
 }
 
 fn default_user_agent() -> String {

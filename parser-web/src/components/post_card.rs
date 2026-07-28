@@ -445,7 +445,7 @@ pub fn post_card(props: &PostCardProps) -> Html {
 
     let inner: Html = html! {
         <>
-            <div class="relative p-0">
+            <div class="relative p-0 min-h-25">
                 {
                     if let Some(url) = img_url {
                         let is_video = matches!(
@@ -579,7 +579,7 @@ pub fn post_card(props: &PostCardProps) -> Html {
     if *hidden {
         return html! {
             <div
-                class={classes!("card", "h-full", "post-card-hidden", "w-full", "p-3", "flex", "flex-col", "items-center", "justify-center", "text-center", "break-inside-avoid", "mb-3")}
+                class={classes!("card", "min-h-25", "h-full", "post-card-hidden", "w-full", "p-3", "flex", "flex-col", "items-center", "justify-center", "text-center", "break-inside-avoid", "mb-3")}
                 ref={root_ref}
                 aria-label={format!("Post {} hidden", post.id)}
             >

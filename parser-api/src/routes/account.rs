@@ -16,13 +16,16 @@ use e621_account_parser_api::auth::OwnerToken;
 use e621_account_parser_api::{
     api,
     db::{
-        self, get_account_by_id, get_account_by_name, get_account_tag_relation_graph,
-        get_accounts_for_owner, get_tag_counts, set_account, update_device_blacklist,
+        self, get_account_by_id, get_account_by_name,
+        get_account_preference_profile, get_account_tag_relation_graph,
+        get_accounts_for_owner, get_tag_counts, set_account,
+        update_device_blacklist,
     },
     errors::ApiError,
     models::{
-        cfg, BlacklistPayload, DeviceScopedAccount, PreferredTagPayload, TagCount,
-        TagRelationScoring, TruncatedAccount, UserApiResponse,
+        cfg, AccountPreferenceProfile, BlacklistPayload, DeviceScopedAccount,
+        PreferredTagPayload, TagCount, TagRelationScoring, TruncatedAccount,
+        UserApiResponse,
     },
     ratelimit::{self, ClientIp},
     validation,
@@ -59,6 +62,30 @@ pub(crate) async fn get_account_tag_counts(
     })
     .await?;
     Ok(Json(counts))
+}
+
+/// Return the account's preference profile (rating, media, quality, recency
+/// stats) used for the "Your Taste Profile" dashboard.
+#[openapi(tag = "Users")]
+#[get("/account/<account_id>/profile")]
+pub(crate) async fn get_account_profile(
+    account_id: i32,
+    owner: OwnerToken,
+) -> Result<Json<AccountPreferenceProfile>, ApiError> {
+    validation::validate_account_id(account_id)?;
+    let owner_token = owner.0;
+    ratelimit::check(&format!("read:owner:{owner_token}"), 240, 60)?;
+    let profile = db_blocking(move || {
+        get_account_by_id(&owner_token, account_id)
+            .map_err(|e| format!("Failed to validate account access: {e}"))?;
+        get_account_preference_profile(account_id).map_err(|e| {
+            let m = format!("Failed to get profile: {e}");
+            error!("{m}");
+            m
+        })
+    })
+    .await?;
+    Ok(Json(profile))
 }
 
 #[openapi(tag = "Users")]

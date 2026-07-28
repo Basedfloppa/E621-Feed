@@ -271,3 +271,5 @@ pub struct ProcessJobState {
     pub phases: Vec<JobPhaseRecord>,
     pub elapsed_secs: f64,
 }
+
+// ── (reserved for tag alias resolution if needed) ──────────────────

@@ -769,6 +769,23 @@ pub async fn get_posts(account: &TruncatedAccount, page: Option<i32>) -> Result<
     Ok(posts)
 }
 
+/// Fetch one page of tag relation data from e621.
+/// Used for both `/tag_aliases.json` and `/tag_implications.json`.
+pub async fn fetch_tag_relations<T>(endpoint: &str, page: i32) -> Result<Vec<T>, String>
+where
+    T: serde::de::DeserializeOwned,
+{
+    let limit = crate::models::cfg().posts_limit.to_string();
+    let url = build_url(endpoint, &[("limit", limit), ("page", page.to_string())]);
+    debug!("GET (auth) /{endpoint} page={page}");
+    let body = fetch_authed_text(url, false, 86400)
+        .await
+        .map_err(|e| format!("{endpoint} request page {page}: {e}"))?;
+    let entries: Vec<T> = rocket::serde::json::from_str(&body)
+        .map_err(|e| format!("{endpoint} parse failed page {page}: {e}"))?;
+    Ok(entries)
+}
+
 #[cfg(test)]
 mod tests {
     use super::normalise_blacklist;

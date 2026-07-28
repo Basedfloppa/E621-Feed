@@ -1,6 +1,123 @@
+use std::collections::HashMap;
+
 use chrono::{DateTime, Utc};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+
+// ── Tag aliases & implications (from e621 API) ─────────────────────────
+
+/// A single tag alias as returned by e621's `/tag_aliases.json`.
+/// Maps `antecedent_name` (wrong/deprecated) → `consequent_name` (canonical).
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct TagAlias {
+    pub id: i64,
+    pub antecedent_name: String,
+    pub consequent_name: String,
+    pub status: String,
+    pub created_at: Option<String>,
+    pub updated_at: Option<String>,
+}
+
+/// A single tag implication as returned by e621's `/tag_implications.json`.
+/// `antecedent_name` implies `consequent_name` (if X then Y).
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct TagImplication {
+    pub id: i64,
+    pub antecedent_name: String,
+    pub consequent_name: String,
+    pub status: String,
+    pub created_at: Option<String>,
+    pub updated_at: Option<String>,
+}
+
+/// Response for `GET /tag_relations/resolve?tag=...`.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct TagResolveResponse {
+    /// The original tag as queried.
+    pub query: String,
+    /// The canonical (resolved) tag name after following the alias chain.
+    /// Same as `query` if no alias exists.
+    pub canonical: String,
+    /// All known synonyms (antecedents) of the canonical tag, including
+    /// the canonical name itself.
+    pub synonyms: Vec<String>,
+}
+
+/// Request body for `POST /tag_relations/resolve-batch`.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct TagResolveBatchRequest {
+    pub tags: Vec<String>,
+}
+
+/// Response for `POST /tag_relations/resolve-batch`.
+/// Maps each input tag to its canonical name (same as input if no alias).
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct TagResolveBatchResponse {
+    /// Map from original tag → canonical (resolved) tag.
+    pub resolved: HashMap<String, String>,
+    /// Set of all unique canonical names.
+    pub canonicals: Vec<String>,
+}
+
+/// A single tag within a Taste Theme, with its count and centrality.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct TasteThemeTag {
+    pub name: String,
+    pub count: i64,
+    /// PageRank centrality (0..1). High = more central to the theme.
+    pub centrality: f32,
+}
+
+/// One community cluster in the Taste Themes v3 pipeline.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct TasteTheme {
+    /// Thematic name = tag with max count among all tags in community.
+    pub name: String,
+    /// Core tags — high-centrality non-generic tags (centrality >= median).
+    pub core: Vec<TasteThemeTag>,
+    /// Kink tags — low-centrality non-generic tags (centrality <= p25).
+    /// These are the "unique" aspects of this theme for this user.
+    pub kink: Vec<TasteThemeTag>,
+    /// TF-IDF weighted importance score.
+    pub importance: f32,
+    /// Total tags in this community.
+    pub size: usize,
+}
+
+/// Pre-computed taste profile — returned by `GET /api/account/<id>/taste-profile`.
+/// Contains only Taste Themes v3 community clusters.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct TasteProfileResponse {
+    /// Taste Themes v3 — community clusters from Label Propagation.
+    pub themes: Vec<TasteTheme>,
+}
+
+/// Request body for `POST /tag_relations/implications-batch`.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct TagImplicationsBatchRequest {
+    pub tags: Vec<String>,
+}
+
+/// Response for `POST /tag_relations/implications-batch`.
+/// Maps each input tag to the list of tags it implies.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct TagImplicationsBatchResponse {
+    /// Map from tag → list of tags it implies (all active implications).
+    pub implications: HashMap<String, Vec<String>>,
+}
+
+/// Response for `GET /tag_relations/implications?tag=...`.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct TagImplicationsResponse {
+    /// The tag that was queried.
+    pub tag: String,
+    /// List of tags implied by the queried tag (implications where this
+    /// tag is the antecedent).
+    pub implies: Vec<String>,
+    /// List of tags that imply this tag (implications where this tag
+    /// is the consequent).
+    pub implied_by: Vec<String>,
+}
 
 #[derive(Debug, Serialize, Clone, JsonSchema)]
 pub struct TagCount {

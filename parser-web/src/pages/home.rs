@@ -33,6 +33,7 @@ pub struct UserInfo {
 enum TagView {
     Chart,
     Graph,
+    Profile,
 }
 
 #[function_component(HomePage)]
@@ -302,6 +303,7 @@ pub fn home_page() -> Html {
                 if is_saved {
                     let chart_active = matches!(*active_view, TagView::Chart);
                     let graph_active = matches!(*active_view, TagView::Graph);
+                    let profile_active = matches!(*active_view, TagView::Profile);
                     let on_chart = {
                         let active_view = active_view.clone();
                         Callback::from(move |_| active_view.set(TagView::Chart))
@@ -309,6 +311,10 @@ pub fn home_page() -> Html {
                     let on_graph = {
                         let active_view = active_view.clone();
                         Callback::from(move |_| active_view.set(TagView::Graph))
+                    };
+                    let on_profile = {
+                        let active_view = active_view.clone();
+                        Callback::from(move |_| active_view.set(TagView::Profile))
                     };
                     html! {
                         <>
@@ -321,7 +327,7 @@ pub fn home_page() -> Html {
                                             aria-pressed={chart_active.to_string()}
                                             onclick={on_chart}
                                         >
-                                            { "Bar chart" }
+                                            { "Tag list" }
                                         </button>
                                         <button
                                             type="button"
@@ -330,6 +336,14 @@ pub fn home_page() -> Html {
                                             onclick={on_graph}
                                         >
                                             { "Relation graph" }
+                                        </button>
+                                        <button
+                                            type="button"
+                                            class={classes!("btn", "btn-outline", profile_active.then_some("btn-active"))}
+                                            aria-pressed={profile_active.to_string()}
+                                            onclick={on_profile}
+                                        >
+                                            { "Taste Profile" }
                                         </button>
                                     </div>
                                 </div>
@@ -345,6 +359,12 @@ pub fn home_page() -> Html {
                                         },
                                         TagView::Graph => html! {
                                             <TagRelationGraphCard
+                                                found_user={selected_user.clone()}
+                                                api_base={cfg.backend_domain.clone()}
+                                            />
+                                        },
+                                        TagView::Profile => html! {
+                                            <TasteProfileCard
                                                 found_user={selected_user.clone()}
                                                 api_base={cfg.backend_domain.clone()}
                                             />

@@ -5,6 +5,8 @@ pub(crate) mod account;
 pub(crate) mod browse;
 pub(crate) mod digest;
 pub(crate) mod feed;
+pub(crate) mod tag_relations;
+pub(crate) mod taste_profile;
 
 use rocket::get;
 

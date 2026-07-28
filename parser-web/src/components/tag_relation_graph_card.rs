@@ -144,6 +144,21 @@ impl LayoutState {
         // communities we have so big graphs still get well-separated
         // sectors and small ones don't fly to the edges.
         let outer_r = (260.0 + (n_communities as f64).sqrt() * 32.0).min(360.0);
+        // Sort node indices within each community by name + count so the
+        // angular seeding order is fully deterministic — without this, nodes
+        // with equal-size communities visually jump around on every re-sync
+        // because the community vector's iteration order is unstable.
+        for ids in by_community.iter_mut().filter(|ids| !ids.is_empty()) {
+            ids.sort_by(|&a, &b| {
+                let an = graph.nodes.get(a).map(|n| n.name.as_str()).unwrap_or("");
+                let bn = graph.nodes.get(b).map(|n| n.name.as_str()).unwrap_or("");
+                an.to_ascii_lowercase()
+                    .cmp(&bn.to_ascii_lowercase())
+                    .then_with(|| bn.len().cmp(&an.len())) // longer after shorter when site differs
+                    .then_with(|| a.cmp(&b))
+            });
+        }
+
         for (c_idx, ids) in by_community.iter().enumerate() {
             if ids.is_empty() {
                 continue;
@@ -228,17 +243,16 @@ fn community_summary(
         .filter(|(_, e)| e.2 > 1)
         .map(|(c, (name, _, size))| (c, name, size))
         .collect();
-    // Two-stage sort: pick the top 10 by size, then re-sort the survivors
-    // alphabetically for display. HashMap iteration is non-deterministic,
-    // so without the final alphabetic pass equal-sized communities would
-    // visually swap positions on every physics tick — the legend flickers.
-    out.sort_by(|a, b| b.2.cmp(&a.2));
-    out.truncate(10);
+    // Sort by size descending, then alphabetically by top tag name to keep
+    // equal-sized communities in a deterministic stable order. HashMap
+    // iteration is non-deterministic, so without a fully-deterministic sort
+    // the legend entries would visually swap positions on every re-sync.
     out.sort_by(|a, b| {
-        a.1.to_ascii_lowercase()
-            .cmp(&b.1.to_ascii_lowercase())
+        b.2.cmp(&a.2)
+            .then_with(|| a.1.to_ascii_lowercase().cmp(&b.1.to_ascii_lowercase()))
             .then_with(|| a.0.cmp(&b.0))
     });
+    out.truncate(10);
     out
 }
 

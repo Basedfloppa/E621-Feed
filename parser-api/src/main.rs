@@ -11,6 +11,7 @@ extern crate rocket;
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
+use rocket::data::ByteUnit;
 use rocket::futures::lock::Mutex;
 use rocket::http::CookieJar;
 #[cfg(debug_assertions)]
@@ -278,6 +279,7 @@ async fn rocket() -> _ {
         routes::feed::log_feed_interaction_batch,
         routes::account::list_accounts,
         routes::account::get_account_tag_counts,
+        routes::account::get_account_profile,
         routes::account::get_account_id,
         routes::account::get_account_name,
         routes::account::create_account,
@@ -295,16 +297,30 @@ async fn rocket() -> _ {
         routes::browse::get_favorites,
         get_default_blacklist,
         session_bootstrap,
-        session_clear
+        session_clear,
+        routes::tag_relations::resolve_tag,
+        routes::tag_relations::resolve_tag_batch,
+        routes::taste_profile::get_taste_profile,
+        routes::tag_relations::get_tag_implications,
+        routes::tag_relations::get_tag_implications_batch, 
     ];
+
+    // Increase JSON limit for batch tag resolution (400+ tags = ~130KB).
+    // Default 64KiB is too small; 512KiB is safe for any realistic payload.
+    // Increase JSON limit for batch tag resolution (400+ tags = ~130KB).
+    // Keep existing env config (port, address, etc.) by reading via figment.
+    let figment = rocket::Config::figment()
+        .merge(("limits", rocket::data::Limits::default()
+            .limit("json", ByteUnit::Kibibyte(512))));
 
     // Empty Shield: nginx already sets stricter security headers. Rocket's
     // defaults (`XFO: SAMEORIGIN`, etc.) would conflict with nginx's `DENY`.
-    let r = rocket::build()
+    let r = rocket::custom(figment)
         .manage(Mutex::new(watcher))
         .manage(spec)
         .mount("/api", api_routes)
         .mount("/api", rocket::routes![routes::account::get_account_tag_relations])
+        // tag_relations routes are already in openapi_get_routes_spec! above
         .mount("/api", rocket::routes![routes::get_metrics])
         .register("/api", catchers![catch_404, catch_422, catch_500])
         .attach(Shield::new())
@@ -325,6 +341,7 @@ async fn rocket() -> _ {
 
     prefetch::spawn_prefetch_workers();
     e621_account_parser_api::cache_pruner::spawn_cache_pruner();
+    e621_account_parser_api::db::spawn_tag_relation_importer();
 
     attach_cors(r)
 }
