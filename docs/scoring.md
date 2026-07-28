@@ -174,11 +174,14 @@ the account's preference profile.
 
 ## Feedback decay + meta interaction
 
-Selecting **Not interested** from a post card's × recommendation menu hides the
-post and records a `hide` interaction. The interaction increments negative
-feedback for each tag on that post; future `interaction_fit` scores therefore
-reduce similar candidates rather than adding a permanent blacklist rule. The
-menu closes when the pointer leaves it or the user clicks outside it.
+The post card's … recommendation menu supports three explicit signals:
+**Like**, **Strong like**, and **Not interested**. Like records one positive
+feedback count for every tag on the post; Strong like records three. Not
+interested hides the post and records one negative count per tag, reducing
+future `interaction_fit` scores for similar candidates rather than creating a
+permanent blacklist rule. Undo removes the current session's hide interaction
+and reverses that negative tag feedback. The menu closes when the pointer
+leaves it or the user clicks outside it.
 
 Feedback counts are decayed eagerly at `/process` time. Between refreshes, a
 supplementary decay factor is applied per-tag in `interaction_fit` based on

@@ -15,13 +15,16 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 use rocket::State;
 use rocket::data::ByteUnit;
 use rocket::futures::lock::Mutex;
-use rocket::http::CookieJar;
 #[cfg(debug_assertions)]
 use rocket::http::Method;
+use rocket::http::{CookieJar, Status};
 use rocket::request::Request;
+use rocket::response::status;
 use rocket::serde::json::{Json, serde_json};
 use rocket::shield::Shield;
 use rusqlite::Result;
+use schemars::JsonSchema;
+use serde::Serialize;
 
 use e621_account_parser_api::{
     audit,
@@ -43,6 +46,50 @@ use rocket_okapi::swagger_ui::{SwaggerUIConfig, make_swagger_ui};
 use rocket_okapi::{openapi, openapi_get_routes_spec, settings::OpenApiSettings};
 
 mod routes;
+
+#[derive(Serialize, JsonSchema)]
+struct HealthResponse {
+    database: bool,
+    caches: bool,
+    e621: bool,
+}
+
+/// Readiness probe for the database, scoring caches, and upstream e621.
+/// It is intentionally unauthenticated so an orchestrator can use it.
+#[openapi(tag = "Operations")]
+#[get("/health")]
+async fn healthcheck(client_ip: ClientIp) -> status::Custom<Json<HealthResponse>> {
+    // Public endpoint: bound probe storms without involving the admin key.
+    if ratelimit::check(&format!("health:{}", client_ip.0), 12, 60).is_err() {
+        return status::Custom(
+            Status::TooManyRequests,
+            Json(HealthResponse {
+                database: false,
+                caches: false,
+                e621: false,
+            }),
+        );
+    }
+    let (database, e621) = tokio::join!(
+        db_blocking(e621_account_parser_api::db::check_database_health),
+        e621_account_parser_api::api::check_e621_reachable(),
+    );
+    // These accessors lazily build their snapshots. A successful call means
+    // recommendation scoring can use both caches immediately.
+    e621_account_parser_api::utils::current_idf();
+    e621_account_parser_api::utils::current_global_relation();
+    let response = HealthResponse {
+        database: database.is_ok(),
+        caches: true,
+        e621: e621.is_ok(),
+    };
+    let status = if response.database && response.caches && response.e621 {
+        Status::Ok
+    } else {
+        Status::ServiceUnavailable
+    };
+    status::Custom(status, Json(response))
+}
 
 /// Kicks off a background `/process` job and returns immediately with the
 /// current job state. If a job for this account is already running, returns
@@ -285,8 +332,10 @@ async fn rocket() -> _ {
         settings:
         process_posts,
         process_status,
+        healthcheck,
         routes::feed::log_feed_interaction,
         routes::feed::log_feed_interaction_batch,
+        routes::feed::undo_feed_interaction,
         routes::feed::clear_account_interactions,
         routes::account::list_accounts,
         routes::account::get_account_tag_counts,

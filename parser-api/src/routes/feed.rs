@@ -19,7 +19,7 @@ use e621_account_parser_api::{
         self, clear_feed_interactions, collect_local_candidate_ids, find_similar_post_ids,
         get_account_by_id, get_account_preference_profile, get_owned_post_ids, get_post_by_id,
         get_recently_seen_post_ids, get_tag_counts, hydrate_posts_by_ids, record_feed_interaction,
-        record_feed_interactions_batch, upsert_catalog_posts,
+        record_feed_interactions_batch, remove_feed_interaction, upsert_catalog_posts,
     },
     errors::ApiError,
     models::{
@@ -62,6 +62,20 @@ pub(crate) async fn log_feed_interaction(
         .with_label_values(&[&event_str])
         .inc();
     Ok(())
+}
+
+#[openapi(tag = "Recommendations")]
+#[delete("/interaction", data = "<payload>")]
+pub(crate) async fn undo_feed_interaction(
+    payload: Json<FeedInteractionRequest>,
+    owner: OwnerToken,
+) -> Result<Json<bool>, ApiError> {
+    let body = payload.into_inner();
+    validation::validate_feed_interaction(&body)?;
+    let owner_token = owner.0;
+    ratelimit::check(&format!("interaction_undo:owner:{owner_token}"), 30, 60)?;
+    let removed = db_blocking(move || remove_feed_interaction(&owner_token, &body)).await?;
+    Ok(Json(removed))
 }
 
 #[openapi(tag = "Recommendations")]

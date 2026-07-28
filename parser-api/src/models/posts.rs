@@ -240,6 +240,8 @@ pub enum Rating {
 pub enum FeedInteractionType {
     QualifiedImpression,
     Open,
+    Like,
+    StrongLike,
     Hide,
 
     #[serde(other)]
@@ -251,6 +253,8 @@ impl Display for FeedInteractionType {
         match self {
             FeedInteractionType::QualifiedImpression => write!(f, "qualified_impression"),
             FeedInteractionType::Open => write!(f, "open"),
+            FeedInteractionType::Like => write!(f, "like"),
+            FeedInteractionType::StrongLike => write!(f, "strong_like"),
             FeedInteractionType::Hide => write!(f, "hide"),
             FeedInteractionType::Unknown => write!(f, "unknown"),
         }

@@ -288,6 +288,22 @@ fn get_client() -> &'static Client {
     &HTTP_CLIENT
 }
 
+/// Lightweight upstream probe used by `/health`. It deliberately bypasses the
+/// normal retry path and cache: health checks must fail fast and must not turn
+/// a broken upstream into repeated admin-key traffic.
+pub async fn check_e621_reachable() -> Result<(), String> {
+    let url = build_url("posts.json", &[("limit", "1".to_string())]);
+    let response = timeout(Duration::from_secs(5), get_client().get(url).send())
+        .await
+        .map_err(|_| "e621 health probe timed out after 5 seconds".to_string())
+        .and_then(|result| result.map_err(|error| format!("e621 health probe failed: {error}")))?;
+    if response.status().is_success() {
+        Ok(())
+    } else {
+        Err(format!("e621 health probe returned {}", response.status()))
+    }
+}
+
 /// Pull diagnostic headers off a response into a compact string suitable
 /// for log lines. Captures Cloudflare's edge identifiers, e621's
 /// origin timing/request id, and any rate-limit hints. Empty fields

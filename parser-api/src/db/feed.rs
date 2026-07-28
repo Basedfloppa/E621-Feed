@@ -64,7 +64,8 @@ pub fn record_feed_interaction(
         if inserted > 0 {
             let (impression_delta, positive_delta, negative_delta) = match interaction.event_type {
                 FeedInteractionType::QualifiedImpression => (1, 0, 0),
-                FeedInteractionType::Open => (0, 1, 0),
+                FeedInteractionType::Open | FeedInteractionType::Like => (0, 1, 0),
+                FeedInteractionType::StrongLike => (0, 3, 0),
                 FeedInteractionType::Hide => (0, 0, 1),
                 FeedInteractionType::Unknown => (0, 0, 0),
             };
@@ -109,6 +110,50 @@ pub fn record_feed_interaction(
         }
 
         Ok(())
+    })
+}
+
+/// Remove one explicit feedback event and reverse its tag-feedback aggregate.
+/// The session is part of the identity, so Undo cannot affect another device.
+pub fn remove_feed_interaction(
+    owner_token: &str,
+    interaction: &FeedInteractionRequest,
+) -> Result<bool, String> {
+    super::with_write_tx(|tx| {
+        let linked: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM account_device_links WHERE owner_token = ?1 AND account_id = ?2)",
+            params![owner_token, interaction.account_id],
+            |row| row.get(0),
+        ).map_err(|e| format!("Failed to validate interaction owner link: {e}"))?;
+        if !linked {
+            return Err("Account is not linked to this device token".to_string());
+        }
+        let deleted = tx.execute(
+            "DELETE FROM feed_interactions WHERE account_id = ?1 AND post_id = ?2 AND event_type = ?3 AND session_id = ?4",
+            params![interaction.account_id, interaction.post_id, interaction.event_type.to_string(), interaction.session_id],
+        ).map_err(|e| format!("Failed to remove feed interaction: {e}"))?;
+        if deleted == 0 {
+            return Ok(false);
+        }
+        let (impressions, positives, negatives) = match interaction.event_type {
+            FeedInteractionType::QualifiedImpression => (1, 0, 0),
+            FeedInteractionType::Open | FeedInteractionType::Like => (0, 1, 0),
+            FeedInteractionType::StrongLike => (0, 3, 0),
+            FeedInteractionType::Hide => (0, 0, 1),
+            FeedInteractionType::Unknown => (0, 0, 0),
+        };
+        tx.execute(
+            "UPDATE account_tag_feedback SET
+                impression_count = MAX(0, impression_count - ?1),
+                positive_count = MAX(0, positive_count - ?2),
+                negative_count = MAX(0, negative_count - ?3),
+                last_interaction_at = ?4
+             WHERE account_id = ?5 AND tag_name IN (
+                SELECT t.name FROM tags t INNER JOIN tags_posts tp ON tp.tag_id = t.id WHERE tp.post_id = ?6
+             )",
+            params![impressions, positives, negatives, Utc::now().to_rfc3339(), interaction.account_id, interaction.post_id],
+        ).map_err(|e| format!("Failed to reverse tag feedback: {e}"))?;
+        Ok(true)
     })
 }
 
@@ -257,7 +302,8 @@ pub fn record_feed_interactions_batch(
                 let (impression_delta, positive_delta, negative_delta) =
                     match interaction.event_type {
                         FeedInteractionType::QualifiedImpression => (1, 0, 0),
-                        FeedInteractionType::Open => (0, 1, 0),
+                        FeedInteractionType::Open | FeedInteractionType::Like => (0, 1, 0),
+                        FeedInteractionType::StrongLike => (0, 3, 0),
                         FeedInteractionType::Hide => (0, 0, 1),
                         FeedInteractionType::Unknown => (0, 0, 0),
                     };

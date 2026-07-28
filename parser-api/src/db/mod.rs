@@ -164,6 +164,13 @@ pub fn ensure_sqlite() -> Result<(), String> {
     Ok(())
 }
 
+/// Verify that a pooled SQLite connection can execute a trivial query.
+pub fn check_database_health() -> Result<(), String> {
+    let conn = open_db()?;
+    conn.query_row("SELECT 1", [], |_| Ok(()))
+        .map_err(|e| format!("SQLite health check failed: {e}"))
+}
+
 pub(super) fn open_db() -> Result<DbConn, String> {
     pool()
         .get()

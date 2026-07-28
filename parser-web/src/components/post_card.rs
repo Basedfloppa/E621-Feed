@@ -108,8 +108,9 @@ pub fn post_card(props: &PostCardProps) -> Html {
         });
     }
 
-    // Force muted on video elements after mount — Yew's HTML attribute
-    // may not set the DOM property early enough to prevent audio on autoplay.
+    // Animated post-card previews autoplay silently. Belt-and-suspenders
+    // property writes cover browsers where Yew's boolean attribute is applied
+    // after the media element has begun loading.
     {
         let video_ref = video_ref.clone();
         let is_video = matches!(
@@ -119,6 +120,8 @@ pub fn post_card(props: &PostCardProps) -> Html {
         use_effect_with(post.id, move |_| {
             if is_video && let Some(el) = video_ref.cast::<web_sys::HtmlVideoElement>() {
                 el.set_muted(true);
+                el.set_default_muted(true);
+                el.set_volume(0.0);
             }
             || ()
         });
@@ -309,16 +312,16 @@ pub fn post_card(props: &PostCardProps) -> Html {
         });
     }
 
-    // Ensure video element is muted via DOM property (Yew's attribute may
-    // not set the underlying HTMLMediaElement.muted correctly for autoplay).
-    {
-        let vr = video_ref.clone();
-        use_effect_with(vr, move |vr| {
-            if let Some(video) = vr.cast::<web_sys::HtmlVideoElement>() {
-                video.set_muted(true);
-            }
-        });
-    }
+    let stop_video = Callback::from(|event: Event| {
+        if let Some(video) = event
+            .target()
+            .and_then(|target| target.dyn_into::<web_sys::HtmlVideoElement>().ok())
+        {
+            video.set_muted(true);
+            video.set_default_muted(true);
+            video.set_volume(0.0);
+        }
+    });
 
     let img_url = (*current_img_url).clone();
     let preview_count = preview_tag_count(*card_width);
@@ -375,12 +378,71 @@ pub fn post_card(props: &PostCardProps) -> Html {
         })
     };
 
+    let on_like = {
+        let backend_url = props.backend_url.to_string();
+        let session_id = props.session_id.to_string();
+        let account_id = props.account_id;
+        let position = props.position;
+        let post_id = post.id;
+        Callback::from(move |e: MouseEvent| {
+            e.stop_propagation();
+            e.prevent_default();
+            send_interaction(
+                backend_url.clone(),
+                FeedInteractionRequest {
+                    account_id,
+                    post_id,
+                    event_type: FeedInteractionType::Like,
+                    position,
+                    session_id: session_id.clone(),
+                },
+            );
+        })
+    };
+
+    let on_strong_like = {
+        let backend_url = props.backend_url.to_string();
+        let session_id = props.session_id.to_string();
+        let account_id = props.account_id;
+        let position = props.position;
+        let post_id = post.id;
+        Callback::from(move |e: MouseEvent| {
+            e.stop_propagation();
+            e.prevent_default();
+            send_interaction(
+                backend_url.clone(),
+                FeedInteractionRequest {
+                    account_id,
+                    post_id,
+                    event_type: FeedInteractionType::StrongLike,
+                    position,
+                    session_id: session_id.clone(),
+                },
+            );
+        })
+    };
+
     let on_unhide = {
         let hidden = hidden.clone();
+        let backend_url = props.backend_url.to_string();
+        let session_id = props.session_id.to_string();
+        let account_id = props.account_id;
+        let position = props.position;
+        let post_id = post.id;
         Callback::from(move |e: MouseEvent| {
             e.stop_propagation();
             e.prevent_default();
             hidden.set(false);
+            undo_interaction(
+                backend_url.clone(),
+                FeedInteractionRequest {
+                    account_id,
+                    post_id,
+                    event_type: FeedInteractionType::Hide,
+                    position,
+                    session_id: session_id.clone(),
+                },
+            );
         })
     };
 
@@ -553,9 +615,11 @@ pub fn post_card(props: &PostCardProps) -> Html {
                                         poster={url.clone()}
                                         autoplay={true}
                                         muted={true}
+                                        defaultmuted={true}
                                         loop={true}
                                         playsinline={true}
                                         preload="none"
+                                        onplay={stop_video.clone()}
                                     />
                                 }
                             } else {
@@ -626,7 +690,7 @@ pub fn post_card(props: &PostCardProps) -> Html {
                         title="Recommendation controls"
                         aria-label={format!("Recommendation controls for post {}", post.id)}
                     >
-                        { "×" }
+                        { "…" }
                     </summary>
                     <ul
                         class="dropdown-content menu rounded-box bg-base-100 shadow w-52 mt-1 p-2"
@@ -640,12 +704,22 @@ pub fn post_card(props: &PostCardProps) -> Html {
                         }}
                     >
                         <li>
+                            <button type="button" onclick={on_like}>
+                                <span>{ "Like" }</span>
+                            </button>
+                        </li>
+                        <li>
+                            <button type="button" onclick={on_strong_like}>
+                                <span>{ "Strong like" }</span>
+                            </button>
+                        </li>
+                        <li>
                             <button type="button" onclick={on_hide}>
                                 <span>{ "Not interested" }</span>
                             </button>
                         </li>
                         <li class="menu-title text-xs normal-case whitespace-normal">
-                            <span>{ "Hide this post and reduce the score of its matching tags in future recommendations." }</span>
+                            <span>{ "Like increases matching-tag affinity. Strong like counts three times. Not interested hides this post and reduces matching-tag affinity; it can be undone." }</span>
                         </li>
                     </ul>
                 </details>
@@ -732,6 +806,22 @@ fn send_interaction(backend_url: String, payload: FeedInteractionRequest) {
             .await
         {
             web_sys::console::warn_1(&format!("failed to send interaction: {err}").into());
+        }
+    });
+}
+
+fn undo_interaction(backend_url: String, payload: FeedInteractionRequest) {
+    spawn_local(async move {
+        let Ok(body) = serde_json::to_string(&payload) else {
+            return;
+        };
+        if let Err(err) = api_delete(&format!("{backend_url}/interaction"))
+            .header("Content-Type", "application/json")
+            .body(body)
+            .send()
+            .await
+        {
+            web_sys::console::warn_1(&format!("failed to undo interaction: {err}").into());
         }
     });
 }

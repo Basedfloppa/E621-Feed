@@ -41,9 +41,15 @@ A self-hosted alternative to e621's built-in feed: imports your favourites, buil
 - Persistent Search display/scoring preferences; score-dependent controls stay
   visible but disabled until result scoring is enabled
 - One mobile navigation entry point: the header drawer (no duplicate nav row)
-- A post-card recommendation menu: **Not interested** hides the post and
-  records a negative tag-feedback signal; it closes when the pointer leaves it
-  or the user clicks elsewhere
+- Animated post-card previews autoplay in a loop but are hard-muted at the
+  HTML attribute and media-property layers, so feed cards never emit audio
+- A post-card recommendation menu with **Like**, **Strong like**, and **Not
+  interested**. Like adds one positive tag-feedback signal, Strong like adds
+  three, and Not interested adds one negative signal and can be undone for the
+  current browsing session; the menu closes when the pointer leaves it or the
+  user clicks elsewhere
+- Public `GET /api/health` readiness probe for SQLite, scoring-cache readiness,
+  and e621 reachability (returns `503` when a dependency is unavailable)
 - Account owners can clear all interaction-derived recommendation state through
   `DELETE /api/account/<id>/interaction` without deleting favourites, blacklist,
   preferred tags, or the account itself
