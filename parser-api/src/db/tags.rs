@@ -39,6 +39,29 @@ pub fn clear_all_tag_counts_caches() {
     }
 }
 
+/// Replace catalog tag relations with the authoritative upstream tag set.
+///
+/// Hydration repairs historical imports, so retaining removed tags would leave
+/// stale scorer/category data. It deliberately does not update account
+/// co-occurrence: catalog hydration is not an account preference event.
+pub fn replace_posts_tags_batch(posts: &[Post]) -> Result<(), String> {
+    if posts.is_empty() {
+        return Ok(());
+    }
+    super::with_write_tx(|tx| {
+        let mut delete = tx
+            .prepare_cached("DELETE FROM tags_posts WHERE post_id = ?1")
+            .map_err(|e| format!("prep replace post tags: {e}"))?;
+        for post in posts {
+            delete
+                .execute(params![post.id])
+                .map_err(|e| format!("clear tags for post {}: {e}", post.id))?;
+        }
+        Ok(())
+    })?;
+    save_posts_tags_batch(posts, &HashSet::new(), false, None)
+}
+
 pub fn save_posts_tags_batch(
     posts: &[Post],
     blacklist: &HashSet<String>,

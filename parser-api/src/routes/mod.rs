@@ -17,3 +17,18 @@ pub(crate) fn get_metrics() -> String {
     let _ = &*e621_account_parser_api::metrics::METRICS;
     e621_account_parser_api::metrics::render()
 }
+
+/// Minimal authenticated read-route set for integration tests.
+#[doc(hidden)]
+#[allow(dead_code)] // Mounted from the integration-test binary, not production main.
+pub fn integration_test_routes() -> Vec<rocket::Route> {
+    rocket::routes![
+        account::list_accounts,
+        account::get_account_tag_counts,
+        account::get_account_profile,
+        feed::get_recommendations,
+        digest::get_daily_digest,
+        browse::get_trending,
+        browse::get_favorites,
+    ]
+}

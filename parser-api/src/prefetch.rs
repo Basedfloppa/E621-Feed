@@ -55,8 +55,8 @@ async fn prefetch_loop() {
 }
 
 /// A set of tag queries to fetch for one account in this tick.
-struct PrefetchQueries {
-    account_id: i32,
+pub struct PrefetchQueries {
+    pub account_id: i32,
     blacklist: String,
     /// Artist tag queries to fetch.
     artist_queries: Vec<String>,
@@ -159,7 +159,9 @@ async fn run_prefetch_tick() -> Result<(), String> {
 /// prefetched more recently than `cooldown_secs` are excluded. Selection is
 /// weighted by recency: the most recently active accounts are ~2× more likely
 /// to be picked than accounts at the edge of the active window.
-fn pick_prefetch_targets() -> Result<Vec<PrefetchQueries>, String> {
+/// Select the next local prefetch targets. Public for deterministic
+/// integration tests; the scheduled workers are its production caller.
+pub fn pick_prefetch_targets() -> Result<Vec<PrefetchQueries>, String> {
     let conn = crate::db::open_db_for_prefetch()?;
     let runtime = cfg().runtime.clone();
     let window_days = runtime.prefetch_active_window_days.max(1);
@@ -170,10 +172,10 @@ fn pick_prefetch_targets() -> Result<Vec<PrefetchQueries>, String> {
     let cutoff = (Utc::now() - chrono::Duration::days(window_days)).to_rfc3339();
     let cooldown_cutoff = Utc::now().timestamp().saturating_sub(cooldown_secs as i64);
 
-    // Pick candidate accounts weighted by recency.
-    // We use a random offset + LIMIT so the selection rotates over time
-    // rather than always picking the same top-1 account.
-    let seed_offset = Utc::now().timestamp() % 200;
+    // Pick a bounded recent candidate set. Rotation happens in the weighted
+    // sampling below; a SQL OFFSET could exceed the small candidate set and
+    // incorrectly turn an active account list into an empty tick.
+    let seed_offset = 0;
     let mut stmt = conn
         .prepare(
             "SELECT a.id, COALESCE(NULLIF(a.blacklisted_tags, ''), '')

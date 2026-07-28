@@ -11,6 +11,8 @@
 //! single tokio runtime per `#[tokio::test]` invocation but the lock
 //! is shared across all of them.
 
+mod support;
+
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::OnceLock;
@@ -18,6 +20,8 @@ use std::sync::OnceLock;
 use e621_account_parser_api::jobs::{self, ProcessJobPhase};
 use e621_account_parser_api::pipeline;
 use e621_account_parser_api::{api, db};
+use rocket::http::{Cookie, Status};
+use rocket::local::asynchronous::Client;
 use tokio::sync::Mutex;
 use wiremock::matchers::{method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -38,8 +42,17 @@ fn pipeline_lock() -> &'static Mutex<()> {
 fn install_mock_config(mock_uri: &str) -> tempfile::NamedTempFile {
     let example = std::fs::read_to_string(example_config_path()).expect("read config.example.toml");
 
+    // Preserve the process-isolated database installed by `support` before
+    // swapping in the mock e621 endpoint. The read pool is lazily created
+    // after this helper, so reverting to config.example's database.db would
+    // split reads from writes.
+    let modified = swap_toml_field(
+        &example,
+        "db_path",
+        &format!("\"{}\"", e621_account_parser_api::models::cfg().db_path),
+    );
     // posts_domain
-    let modified = swap_toml_field(&example, "posts_domain", &format!("\"{mock_uri}\""));
+    let modified = swap_toml_field(&modified, "posts_domain", &format!("\"{mock_uri}\""));
     // posts_limit — keep it small so tests fabricate fewer posts.
     let modified = swap_toml_field(&modified, "posts_limit", "4");
     // process_fetch_concurrency — keep it 1 so ordering is deterministic.
@@ -89,6 +102,7 @@ fn example_config_path() -> PathBuf {
 }
 
 fn ensure_migrations() {
+    support::install_isolated_db_config();
     db::ensure_sqlite().expect("DB migrations failed");
 }
 
@@ -1673,17 +1687,23 @@ async fn prefetch_target_selection_respects_cooldown() {
         .unwrap();
     }
 
-    // Verify the account's interaction data is queryable via the
-    // production DB path (prefetch uses the same DB file).
+    let targets = e621_account_parser_api::prefetch::pick_prefetch_targets().unwrap();
+    assert!(
+        targets.iter().any(|target| target.account_id == account_id),
+        "the production selector must choose the active account"
+    );
+
     let conn = db::open_db_for_calibration().unwrap();
-    let count: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM feed_interactions WHERE account_id = ?1",
-            rusqlite::params![account_id],
-            |r| r.get(0),
-        )
-        .unwrap();
-    assert_eq!(count, 1, "prefetch should find this account's interaction");
+    conn.execute(
+        "UPDATE accounts SET last_prefetched_at = ?1 WHERE id = ?2",
+        rusqlite::params![chrono::Utc::now().to_rfc3339(), account_id],
+    )
+    .unwrap();
+    let targets = e621_account_parser_api::prefetch::pick_prefetch_targets().unwrap();
+    assert!(
+        !targets.iter().any(|target| target.account_id == account_id),
+        "the production selector must honor cooldown"
+    );
 
     wipe_account(account_id);
 }
@@ -1774,4 +1794,79 @@ fn wipe_account_cleans_prefetch_state() {
     assert_eq!(interactions_after, 0, "interactions should be wiped");
     assert_eq!(tag_counts_after, 0, "tag_counts should be wiped");
     assert_eq!(account_count, 0, "account row should be wiped");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn media_hydrator_repairs_returned_posts_and_purges_absent_ids() {
+    let _guard = pipeline_lock().lock().await;
+    ensure_migrations();
+    let server = MockServer::start().await;
+    let _cfg = install_mock_config(&server.uri());
+    let ids = [9_200_001, 9_200_002];
+    db::delete_catalog_posts_by_ids(&ids).unwrap();
+
+    let returned: e621_account_parser_api::models::Post = serde_json::from_value(fake_post_json(
+        ids[0],
+        &["hydration_artist"],
+        &["hydration_tag"],
+    ))
+    .unwrap();
+    let mut stale = returned.clone();
+    stale.uploader_id = 0;
+    stale.files = Default::default();
+    let mut absent = stale.clone();
+    absent.id = ids[1];
+    db::upsert_catalog_posts(&[stale, absent]).unwrap();
+
+    Mock::given(method("GET"))
+        .and(path("/posts.json"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(vec![returned]))
+        .mount(&server)
+        .await;
+    e621_account_parser_api::media_hydrator::hydrate_catalog_once().await;
+
+    let repaired = db::hydrate_posts_by_ids(&[ids[0]]).unwrap();
+    assert_eq!(repaired[0].uploader_id, 42);
+    assert_eq!(repaired[0].tags.general, vec!["hydration_tag"]);
+    assert!(db::hydrate_posts_by_ids(&[ids[1]]).unwrap().is_empty());
+    db::delete_catalog_posts_by_ids(&ids).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn authenticated_browse_and_recommendation_routes_use_mock_e621() {
+    let _guard = pipeline_lock().lock().await;
+    ensure_migrations();
+    let server = MockServer::start().await;
+    let _cfg = install_mock_config(&server.uri());
+    let account_id = 9_200_100;
+    let owner = "route_owner_token_9200100";
+    wipe_account(account_id);
+    db::set_account(owner, account_id, "test_user", "").unwrap();
+    Mock::given(method("GET"))
+        .and(path("/posts.json"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(vec![fake_post_json(
+                9_200_101,
+                &["route_artist"],
+                &["route_tag"],
+            )]),
+        )
+        .mount(&server)
+        .await;
+    let client = Client::tracked(rocket::build().mount(
+        "/api",
+        e621_account_parser_api::routes::integration_test_routes(),
+    ))
+    .await
+    .unwrap();
+    let cookie = Cookie::new(e621_account_parser_api::auth::OWNER_TOKEN_COOKIE, owner);
+    for path in [
+        format!("/api/recommendations/{account_id}?page=1"),
+        format!("/api/browse/trending/{account_id}?page=1"),
+        format!("/api/browse/favorites/{account_id}?page=1"),
+    ] {
+        let response = client.get(path).cookie(cookie.clone()).dispatch().await;
+        assert_eq!(response.status(), Status::Ok);
+    }
+    wipe_account(account_id);
 }

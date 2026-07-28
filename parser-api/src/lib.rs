@@ -7,6 +7,9 @@
 
 #[macro_use]
 extern crate rocket;
+// Route modules are shared by the binary and integration-test library surface;
+// keep their existing crate-name imports valid in both compilation contexts.
+extern crate self as e621_account_parser_api;
 
 pub mod api;
 pub mod audit;
@@ -21,6 +24,8 @@ pub mod models;
 pub mod pipeline;
 pub mod prefetch;
 pub mod ratelimit;
+#[allow(dead_code)] // The binary mounts the full API; integration tests mount a subset.
+pub mod routes;
 pub mod utils;
 pub mod validation;
 

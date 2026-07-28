@@ -86,6 +86,17 @@ impl ProcessMode {
     }
 }
 
+/// Resolve the requested mode using the local and upstream favourite counts.
+/// Kept pure so the safety rule is independently testable from HTTP/SQLite.
+fn resolve_process_mode(mode: ProcessMode, local_count: i64, remote_count: i64) -> ProcessMode {
+    match mode {
+        ProcessMode::Full => ProcessMode::Full,
+        ProcessMode::Incremental => ProcessMode::Incremental,
+        ProcessMode::Auto if local_count == 0 || remote_count < local_count => ProcessMode::Full,
+        ProcessMode::Auto => ProcessMode::Incremental,
+    }
+}
+
 /// Strip every blacklisted tag from a post's tag groups in place.
 /// Exposed so callers that prepare posts outside the pipeline (e.g.,
 /// the `seed` binary, or tests fabricating fake feeds) can apply the
@@ -189,17 +200,7 @@ pub async fn run_process_with_mode(
         .map_err(|e| format!("count owned: {e}"))
     })
     .await?;
-    let resolved_mode = match mode {
-        ProcessMode::Full => ProcessMode::Full,
-        ProcessMode::Incremental => ProcessMode::Incremental,
-        ProcessMode::Auto => {
-            if local_count == 0 || (favcount as i64) < local_count {
-                ProcessMode::Full
-            } else {
-                ProcessMode::Incremental
-            }
-        }
-    };
+    let resolved_mode = resolve_process_mode(mode, local_count, i64::from(favcount));
     info!(
         "[process {account_id}] mode={} (requested={}, local={}, remote={favcount})",
         resolved_mode.as_str(),
@@ -501,4 +502,52 @@ async fn run_incremental_fetch(
         }
     }
     Ok(total_new)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ProcessMode, resolve_process_mode};
+
+    #[test]
+    fn process_mode_parses_documented_values_and_aliases() {
+        assert_eq!("".parse(), Ok(ProcessMode::Auto));
+        assert_eq!(" AUTO ".parse(), Ok(ProcessMode::Auto));
+        assert_eq!("full".parse(), Ok(ProcessMode::Full));
+        assert_eq!("INCREMENTAL".parse(), Ok(ProcessMode::Incremental));
+        assert_eq!("incr".parse(), Ok(ProcessMode::Incremental));
+        assert_eq!("delta".parse(), Ok(ProcessMode::Incremental));
+        assert!("fast".parse::<ProcessMode>().is_err());
+    }
+
+    #[test]
+    fn explicit_process_modes_are_never_overridden() {
+        assert_eq!(
+            resolve_process_mode(ProcessMode::Full, 10, 100),
+            ProcessMode::Full
+        );
+        assert_eq!(
+            resolve_process_mode(ProcessMode::Incremental, 0, 0),
+            ProcessMode::Incremental
+        );
+    }
+
+    #[test]
+    fn auto_process_mode_uses_full_for_cold_or_shrunk_accounts() {
+        assert_eq!(
+            resolve_process_mode(ProcessMode::Auto, 0, 100),
+            ProcessMode::Full
+        );
+        assert_eq!(
+            resolve_process_mode(ProcessMode::Auto, 101, 100),
+            ProcessMode::Full
+        );
+        assert_eq!(
+            resolve_process_mode(ProcessMode::Auto, 100, 100),
+            ProcessMode::Incremental
+        );
+        assert_eq!(
+            resolve_process_mode(ProcessMode::Auto, 100, 101),
+            ProcessMode::Incremental
+        );
+    }
 }

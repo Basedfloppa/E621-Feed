@@ -1,11 +1,9 @@
 //! Integration tests for the e621-account-parser DB layer.
 //!
-//! These tests exercise real SQLite reads/writes against the shared
-//! `database.db`, so they MUST use unique account IDs and clean up
-//! after themselves. Run with `cargo test --test integration`.
-//!
-//! Requires the database to be initialized (run the server once, or
-//! let the first test trigger `ensure_sqlite`).
+//! These tests exercise real SQLite reads/writes against a process-isolated
+//! temporary database. Run with `cargo test --test integration`.
+
+mod support;
 
 use std::collections::HashSet;
 
@@ -13,6 +11,8 @@ use e621_account_parser_api::db;
 use e621_account_parser_api::models::{
     FileMeta, FileOriginal, Files, Flags, Has, Post, Rating, Relationships, Score, Stats, Tags,
 };
+use rocket::http::{Cookie, Status};
+use rocket::local::asynchronous::Client;
 
 /// Helper: build a minimal Post for testing.
 fn make_post(id: i64, tags: Tags, uploader_id: i64) -> Post {
@@ -265,6 +265,7 @@ fn count_account_cooc(account_id: i32) -> i64 {
 // ------------------------------------------------------------------
 
 fn ensure_migrations() {
+    support::install_isolated_db_config();
     e621_account_parser_api::db::ensure_sqlite().expect("DB migrations failed");
 }
 
@@ -308,7 +309,7 @@ struct TestAccount {
 impl TestAccount {
     fn new(id: i32) -> Self {
         ensure_migrations();
-        let owner = "test_owner";
+        let owner = "test_owner_token_1234";
         let _ = e621_account_parser_api::db::set_account(owner, id, "test_user", "");
         let _ = e621_account_parser_api::db::drop_account_posts(id);
         let _ = e621_account_parser_api::db::drop_account_cooccurrence_batched(id, 1024, |_, _| {});
@@ -1340,4 +1341,129 @@ fn profile_preference_profile_aggregates_all() {
         pref.last_refreshed_at.is_some(),
         "refresh should set timestamp"
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn authenticated_read_routes_use_seeded_sqlite() {
+    let account = TestAccount::new(9_100_100);
+    let client = Client::tracked(rocket::build().mount(
+        "/api",
+        e621_account_parser_api::routes::integration_test_routes(),
+    ))
+    .await
+    .unwrap();
+    let cookie = Cookie::new(
+        e621_account_parser_api::auth::OWNER_TOKEN_COOKIE,
+        account.owner,
+    );
+
+    for path in [
+        "/api/accounts".to_owned(),
+        format!("/api/account/{}/tag_counts", account.id),
+        format!("/api/account/{}/profile", account.id),
+        format!("/api/digest/{}?full=false", account.id),
+    ] {
+        let response = client.get(path).cookie(cookie.clone()).dispatch().await;
+        assert_eq!(response.status(), Status::Ok);
+    }
+}
+
+#[test]
+fn catalog_hydration_scan_selects_only_incomplete_metadata() {
+    ensure_migrations();
+    let ids = [9_100_001, 9_100_002, 9_100_003, 9_100_004];
+    db::delete_catalog_posts_by_ids(&ids).unwrap();
+
+    let missing_media = make_post(
+        ids[0],
+        Tags {
+            general: vec!["test_hydration_media".into()],
+            ..Tags::default()
+        },
+        42,
+    );
+    let mut missing_tags = make_post(
+        ids[1],
+        Tags {
+            general: vec!["test_hydration_tags".into()],
+            ..Tags::default()
+        },
+        43,
+    );
+    let mut missing_uploader = make_post(
+        ids[2],
+        Tags {
+            general: vec!["test_hydration_uploader".into()],
+            ..Tags::default()
+        },
+        0,
+    );
+    let mut complete = make_post(
+        ids[3],
+        Tags {
+            general: vec!["test_hydration_complete".into()],
+            ..Tags::default()
+        },
+        44,
+    );
+    for post in [&mut missing_tags, &mut missing_uploader, &mut complete] {
+        post.files.original.url = Some("https://static1.e621.net/data/test.jpg".into());
+    }
+
+    let posts = vec![
+        missing_media.clone(),
+        missing_tags.clone(),
+        missing_uploader.clone(),
+        complete.clone(),
+    ];
+    db::upsert_catalog_posts(&posts).unwrap();
+    // Deliberately do not save missing_tags' relations.
+    db::save_posts_tags_batch(
+        &[missing_media, missing_uploader, complete],
+        &HashSet::new(),
+        false,
+        None,
+    )
+    .unwrap();
+
+    let selected = db::collect_post_ids_needing_hydration(10).unwrap();
+    assert!(selected.contains(&ids[0]), "missing media must be repaired");
+    assert!(selected.contains(&ids[1]), "missing tags must be repaired");
+    assert!(
+        selected.contains(&ids[2]),
+        "missing uploader must be repaired"
+    );
+    assert!(
+        !selected.contains(&ids[3]),
+        "complete catalog metadata must not be fetched again"
+    );
+
+    // Model the persistence phase after e621 returns a repaired record.
+    let mut repaired = make_post(
+        ids[0],
+        Tags {
+            general: vec!["test_hydration_repaired".into()],
+            artist: vec!["test_hydration_artist".into()],
+            ..Tags::default()
+        },
+        99,
+    );
+    repaired.files.preview.url = Some("https://static1.e621.net/data/preview/repaired.jpg".into());
+    db::upsert_catalog_posts(std::slice::from_ref(&repaired)).unwrap();
+    db::replace_posts_tags_batch(std::slice::from_ref(&repaired)).unwrap();
+    let restored = db::hydrate_posts_by_ids(&[ids[0]]).unwrap();
+    assert_eq!(restored.len(), 1);
+    assert_eq!(restored[0].uploader_id, 99);
+    assert_eq!(
+        restored[0].files.preview.url.as_deref(),
+        Some("https://static1.e621.net/data/preview/repaired.jpg")
+    );
+    assert_eq!(restored[0].tags.general, vec!["test_hydration_repaired"]);
+    assert_eq!(restored[0].tags.artist, vec!["test_hydration_artist"]);
+
+    // The worker uses this cascading deletion for IDs absent from e621.
+    assert_eq!(db::delete_catalog_posts_by_ids(&[ids[1]]).unwrap(), 1);
+    assert!(db::hydrate_posts_by_ids(&[ids[1]]).unwrap().is_empty());
+
+    db::delete_catalog_posts_by_ids(&ids).unwrap();
 }
