@@ -4,7 +4,7 @@ domain.com {
     # ====== Security headers ======
     header {
         Strict-Transport-Security     "max-age=31536000; includeSubDomains; preload"
-        Content-Security-Policy       "default-src 'self'; script-src 'self' 'wasm-unsafe-eval' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data: https://*.e621.net; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+        Content-Security-Policy       "default-src 'self'; script-src 'self' 'wasm-unsafe-eval' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data: https://*.e621.net; media-src https://*.e621.net; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
         Referrer-Policy               "no-referrer"
         X-Content-Type-Options        "nosniff"
         X-Frame-Options               "DENY"

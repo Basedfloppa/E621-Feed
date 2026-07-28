@@ -17,11 +17,11 @@ use rocket::data::ByteUnit;
 use rocket::futures::lock::Mutex;
 #[cfg(debug_assertions)]
 use rocket::http::Method;
-use rocket::http::{CookieJar, Status};
+use rocket::http::{CookieJar, Header, Status};
 use rocket::request::Request;
 use rocket::response::status;
 use rocket::serde::json::{Json, serde_json};
-use rocket::shield::Shield;
+use rocket::shield::{Policy, Shield};
 use rusqlite::Result;
 use schemars::JsonSchema;
 use serde::Serialize;
@@ -46,6 +46,19 @@ use rocket_okapi::swagger_ui::{SwaggerUIConfig, make_swagger_ui};
 use rocket_okapi::{openapi, openapi_get_routes_spec, settings::OpenApiSettings};
 
 mod routes;
+
+/// Custom Shield policy for Content-Security-Policy.
+/// Uses the configured posts_domain to allow images/media from e621.
+#[derive(Default)]
+struct Csp(String);
+
+impl Policy for Csp {
+    const NAME: &'static str = "Content-Security-Policy";
+
+    fn header(&self) -> Header<'static> {
+        Header::new(Self::NAME, self.0.clone())
+    }
+}
 
 #[derive(Serialize, JsonSchema)]
 struct HealthResponse {
@@ -377,8 +390,30 @@ async fn rocket() -> _ {
         rocket::data::Limits::default().limit("json", ByteUnit::Kibibyte(512)),
     ));
 
-    // Empty Shield: nginx already sets stricter security headers. Rocket's
-    // defaults (`XFO: SAMEORIGIN`, etc.) would conflict with nginx's `DENY`.
+    let mut shield = Shield::new();
+    // CSP: allow loading images and media from the configured e621 domain
+    // (static1.e621.net, static2.e621.net, etc.) and its subdomains.
+    // Default config uses "https://e621.net" which becomes "https://*.e621.net".
+    let posts_host = url::Url::parse(&cfg().posts_domain)
+        .ok()
+        .and_then(|u| u.host_str().map(|h| h.to_string()))
+        .unwrap_or_default();
+    if !posts_host.is_empty() {
+        let wildcard = format!("https://*.{posts_host}");
+        let csp = format!(
+            "default-src 'self'; \
+             script-src 'self' 'wasm-unsafe-eval' 'unsafe-inline'; \
+             style-src 'self' 'unsafe-inline'; \
+             font-src 'self'; \
+             img-src 'self' data: {wildcard}; \
+             media-src {wildcard}; \
+             connect-src 'self'; \
+             frame-ancestors 'none'; \
+             base-uri 'self'; \
+             form-action 'self'",
+        );
+        shield = shield.enable(Csp(csp));
+    }
     let r = rocket::custom(figment)
         .manage(Mutex::new(watcher))
         .manage(spec)
@@ -390,7 +425,7 @@ async fn rocket() -> _ {
         // tag_relations routes are already in openapi_get_routes_spec! above
         .mount("/api", rocket::routes![routes::get_metrics])
         .register("/api", catchers![catch_404, catch_422, catch_500])
-        .attach(Shield::new())
+        .attach(shield)
         .attach(DbInit);
 
     // Swagger UI / OpenAPI doc leak the full route map; mount only in
