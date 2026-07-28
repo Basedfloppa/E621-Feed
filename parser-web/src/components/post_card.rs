@@ -707,7 +707,14 @@ pub fn post_card(props: &PostCardProps) -> Html {
                                 Some("gif") | Some("GIF")
                             ));
 
-                        if is_video && !*video_failed {
+                        // Belt: never try to play a GIF through <video> even if the
+                // API sets a duration — browsers reject it.
+                let is_actually_video = is_video
+                    && !matches!(
+                        post.files.original.url.as_deref(),
+                        Some(u) if u.ends_with(".gif") || u.ends_with(".GIF")
+                    );
+                        if is_actually_video && !*video_failed {
                             if let Some(video_url) = &post.files.original.url {
                                 html! {
                                     <video
