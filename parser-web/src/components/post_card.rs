@@ -123,10 +123,14 @@ pub fn post_card(props: &PostCardProps) -> Html {
     // after the media element has begun loading.
     {
         let video_ref = video_ref.clone();
+        // Only treat as video for actual video containers.
+        // GIF files may have a duration set by the API but
+        // cannot be played through a <video> element.
         let is_video = matches!(
             post.files.meta.ext.as_deref(),
             Some("webm") | Some("mp4") | Some("WEBM") | Some("MP4")
-        ) || post.files.meta.duration.unwrap_or(0.0) > 0.0;
+        ) || (post.files.meta.duration.unwrap_or(0.0) > 0.0
+            && !matches!(post.files.meta.ext.as_deref(), Some("gif") | Some("GIF")));
         use_effect_with(post.id, move |_| {
             if is_video && let Some(el) = video_ref.cast::<web_sys::HtmlVideoElement>() {
                 el.set_muted(true);
@@ -697,7 +701,11 @@ pub fn post_card(props: &PostCardProps) -> Html {
                         let is_video = matches!(
                             post.files.meta.ext.as_deref(),
                             Some("webm") | Some("mp4") | Some("WEBM") | Some("MP4")
-                        ) || post.files.meta.duration.unwrap_or(0.0) > 0.0;
+                        ) || (post.files.meta.duration.unwrap_or(0.0) > 0.0
+                            && !matches!(
+                                post.files.meta.ext.as_deref(),
+                                Some("gif") | Some("GIF")
+                            ));
 
                         if is_video && !*video_failed {
                             if let Some(video_url) = &post.files.original.url {
