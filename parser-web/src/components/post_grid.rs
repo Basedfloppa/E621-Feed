@@ -9,6 +9,24 @@ use crate::models::*;
 
 /// Determine the current number of columns from a `columns-*` / `grid-cols-*`
 /// class string by matching the viewport width against Tailwind breakpoints.
+/// Best-known pixel dimensions for layout calculations.
+/// Prefers preview > sample > original, falling back to (4, 3) for 4:3.
+fn best_dimensions(files: &crate::models::Files) -> (i64, i64) {
+    let w = files.preview.width.max(1);
+    let h = files.preview.height.max(1);
+    if w > 1 && h > 1 {
+        return (w, h);
+    }
+    let w = files.sample.width.max(1);
+    let h = files.sample.height.max(1);
+    if w > 1 && h > 1 {
+        return (w, h);
+    }
+    let w = files.original.width.max(1);
+    let h = files.original.height.max(1);
+    if w > 1 && h > 1 { (w, h) } else { (4, 3) }
+}
+
 fn current_column_count(grid_class: &str) -> usize {
     // Determine which Tailwind breakpoints this class references and their
     // corresponding column counts.
@@ -101,8 +119,13 @@ pub fn render_post_grid(
         (0..num_columns).map(|_| Vec::new()).collect();
 
     for (post_index, post) in posts.iter().enumerate() {
-        let width = post.post.files.original.width.max(1) as f64;
-        let height = post.post.files.original.height.max(1) as f64;
+        // Use preview dimensions as the best proxy for the rendered card's
+        // aspect ratio — they always reflect the actual image proportions
+        // even when original/sample sizes are 0x0 (e.g. deleted posts with
+        // fallback preview URLs that have valid dimensions).
+        let (w, h) = best_dimensions(&post.post.files);
+        let width = w.max(1) as f64;
+        let height = h.max(1) as f64;
         let aspect = height / width;
         let shortest = col_heights
             .iter()

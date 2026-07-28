@@ -693,9 +693,12 @@ pub fn post_card(props: &PostCardProps) -> Html {
         }
     };
 
+    // Reserve minimum space so Masonry layout doesn't collapse while
+    // images are still loading. 300px is tall enough that a grid of 5
+    // columns is usable; the real height snaps in once the image loads.
     let inner: Html = html! {
         <>
-            <div class="relative p-0 min-h-25">
+            <div class="relative p-0" style="min-height: 300px;">
                 {
                     if let Some(url) = img_url {
                         let is_video = matches!(
