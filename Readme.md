@@ -46,10 +46,14 @@ A self-hosted alternative to e621's built-in feed: imports your favourites, buil
 - A post-card recommendation menu with **Like**, **Strong like**, and **Not
   interested**. Like adds one positive tag-feedback signal, Strong like adds
   three, and Not interested adds one negative signal and can be undone for the
-  current browsing session; the menu closes when the pointer leaves it or the
-  user clicks elsewhere
+  current browsing session. It can also add confirmed permanent e621 blacklist
+  rules for a tag, artist, uploader, rating, or media category; the menu closes
+  when the pointer leaves it or the user clicks elsewhere
 - Public `GET /api/health` readiness probe for SQLite, scoring-cache readiness,
   and e621 reachability (returns `503` when a dependency is unavailable)
+- Background [catalog hydration](docs/catalog-hydration.md) repairs stale media,
+  tags, and uploader metadata for every catalog post, including orphaned
+  recommendation candidates, while sharing the global e621 rate limit
 - Account owners can clear all interaction-derived recommendation state through
   `DELETE /api/account/<id>/interaction` without deleting favourites, blacklist,
   preferred tags, or the account itself

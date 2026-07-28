@@ -179,7 +179,10 @@ The post card's … recommendation menu supports three explicit signals:
 feedback count for every tag on the post; Strong like records three. Not
 interested hides the post and records one negative count per tag, reducing
 future `interaction_fit` scores for similar candidates rather than creating a
-permanent blacklist rule. Undo removes the current session's hide interaction
+permanent blacklist rule. The same menu can add a confirmed permanent account
+blacklist rule for a tag, artist, uploader, rating, or media category. The
+media rules use e621 meta tags: `video`, `animated`, or `-animated` (static
+media). Undo removes the current session's hide interaction
 and reverses that negative tag feedback. The menu closes when the pointer
 leaves it or the user clicks outside it.
 

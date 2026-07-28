@@ -327,30 +327,23 @@ fn post_upsert_params(post: &Post) -> Vec<rusqlite::types::Value> {
     let preview_url = post
         .files
         .preview
-        .jpg
+        .url
         .clone()
+        .or_else(|| post.files.preview.alt.clone())
+        .or_else(|| post.files.preview.jpg.clone())
         .or_else(|| post.files.preview.webp.clone());
     let preview_width = Some(post.files.preview.width);
     let preview_height = Some(post.files.preview.height);
-    let sample_url = if post.has.sample {
-        post.files
-            .sample
-            .jpg
-            .clone()
-            .or_else(|| post.files.sample.webp.clone())
-    } else {
-        None
-    };
-    let sample_width = if post.has.sample {
-        Some(post.files.sample.width)
-    } else {
-        None
-    };
-    let sample_height = if post.has.sample {
-        Some(post.files.sample.height)
-    } else {
-        None
-    };
+    let sample_url = post
+        .files
+        .sample
+        .url
+        .clone()
+        .or_else(|| post.files.sample.alt.clone())
+        .or_else(|| post.files.sample.jpg.clone())
+        .or_else(|| post.files.sample.webp.clone());
+    let sample_width = sample_url.as_ref().map(|_| post.files.sample.width);
+    let sample_height = sample_url.as_ref().map(|_| post.files.sample.height);
     let file_url = post.files.original.url.clone();
 
     fn opt_int(v: Option<i64>) -> Value {
@@ -392,6 +385,60 @@ fn post_upsert_params(post: &Post) -> Vec<rusqlite::types::Value> {
         opt_int(preview_height),
         Value::Integer(post.uploader_id),
     ]
+}
+
+/// Return catalog posts with incomplete upstream metadata. These can belong
+/// to no account (e.g. historic recommendation candidates), so the catalog
+/// maintenance worker repairs them independently of `/process`.
+pub fn collect_post_ids_needing_hydration(limit: usize) -> Result<Vec<i64>, String> {
+    let conn = open_db()?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT id FROM posts
+         WHERE is_deleted = 0
+           AND (
+                (COALESCE(file_url, '') NOT LIKE '%e621.net/%'
+                 AND COALESCE(preview_url, '') NOT LIKE '%e621.net/%'
+                 AND COALESCE(sample_url, '') NOT LIKE '%e621.net/%')
+                OR NOT EXISTS (SELECT 1 FROM tags_posts tp WHERE tp.post_id = posts.id)
+                OR COALESCE(uploader_id, 0) = 0
+           )
+         ORDER BY id DESC LIMIT ?1",
+        )
+        .map_err(|e| format!("prepare missing-media scan: {e}"))?;
+    stmt.query_map([limit.min(100) as i64], |row| row.get(0))
+        .map_err(|e| format!("query missing-media scan: {e}"))?
+        .collect::<Result<Vec<i64>, _>>()
+        .map_err(|e| format!("read missing-media IDs: {e}"))
+}
+
+/// Remove catalog posts which e621 has already marked deleted. Cascading FKs
+/// remove their tag, account-link, session, and interaction references.
+pub fn purge_deleted_catalog_posts(limit: usize) -> Result<usize, String> {
+    super::with_write_tx(|tx| {
+        tx.execute(
+            "DELETE FROM posts WHERE id IN (SELECT id FROM posts WHERE is_deleted = 1 LIMIT ?1)",
+            [limit.min(500) as i64],
+        )
+        .map_err(|e| format!("purge deleted catalog posts: {e}"))
+    })
+}
+
+/// Remove IDs absent from an upstream hydration response. e621 omits deleted
+/// posts from normal post searches, so retaining them would make every future
+/// media repair pass retry an unrecoverable row forever.
+pub fn delete_catalog_posts_by_ids(ids: &[i64]) -> Result<usize, String> {
+    if ids.is_empty() {
+        return Ok(0);
+    }
+    super::with_write_tx(|tx| {
+        let placeholders = vec!["?"; ids.len()].join(",");
+        tx.execute(
+            &format!("DELETE FROM posts WHERE id IN ({placeholders})"),
+            rusqlite::params_from_iter(ids.iter()),
+        )
+        .map_err(|e| format!("delete unrecoverable catalog posts: {e}"))
+    })
 }
 
 pub fn upsert_catalog_posts(posts: &[Post]) -> Result<(), String> {
@@ -441,7 +488,7 @@ pub fn hydrate_posts_by_ids(ids: &[i64]) -> Result<Vec<Post>, String> {
                     rating, file_ext, file_width, file_height, file_size, file_url,
                     preview_url, preview_width, preview_height,
                     sample_url, sample_width, sample_height,
-                    is_animated, duration, comment_count, has_notes, is_deleted, has_children
+                    is_animated, duration, comment_count, has_notes, is_deleted, has_children, uploader_id
              FROM posts WHERE id IN ({placeholders})"
         );
         let mut stmt = conn
@@ -478,6 +525,7 @@ pub fn hydrate_posts_by_ids(ids: &[i64]) -> Result<Vec<Post>, String> {
                 let has_notes: i64 = row.get(22)?;
                 let is_deleted: i64 = row.get(23)?;
                 let has_children: i64 = row.get(24)?;
+                let uploader_id: Option<i64> = row.get(25)?;
                 Ok((
                     id,
                     created_at_raw,
@@ -503,6 +551,7 @@ pub fn hydrate_posts_by_ids(ids: &[i64]) -> Result<Vec<Post>, String> {
                     has_notes,
                     is_deleted,
                     has_children,
+                    uploader_id,
                 ))
             })
             .map_err(|e| format!("query hydrate_posts_by_ids: {e}"))?;
@@ -534,6 +583,7 @@ pub fn hydrate_posts_by_ids(ids: &[i64]) -> Result<Vec<Post>, String> {
                 has_notes,
                 is_deleted,
                 has_children,
+                uploader_id,
             ) = row;
 
             let created_at = parse_db_datetime(&created_at_raw)
@@ -567,19 +617,23 @@ pub fn hydrate_posts_by_ids(ids: &[i64]) -> Result<Vec<Post>, String> {
                             url: file_url,
                         },
                         preview: FilePreview {
+                            url: preview_url.clone(),
+                            alt: None,
                             width: prev_w.unwrap_or(0),
                             height: prev_h.unwrap_or(0),
                             jpg: preview_url.clone(),
                             webp: None,
                         },
                         sample: FileSample {
+                            url: sample_url.clone(),
+                            alt: None,
                             width: sample_w.unwrap_or(0),
                             height: sample_h.unwrap_or(0),
                             jpg: sample_url.clone(),
                             webp: None,
                         },
                     },
-                    uploader_id: 0,
+                    uploader_id: uploader_id.unwrap_or(0),
                     uploader_name: None,
                     approver_id: None,
                     stats: Stats {

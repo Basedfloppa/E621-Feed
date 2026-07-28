@@ -406,6 +406,7 @@ async fn rocket() -> _ {
 
     prefetch::spawn_prefetch_workers();
     e621_account_parser_api::cache_pruner::spawn_cache_pruner();
+    e621_account_parser_api::media_hydrator::spawn_media_hydrator();
     e621_account_parser_api::db::spawn_tag_relation_importer();
 
     attach_cors(r)

@@ -875,9 +875,15 @@ fn find_similar_post_ids_ranks_by_overlap_and_filters() {
     ensure_migrations();
     let account_id = 91010;
     wipe_account(account_id);
+    let fixture_ids = [60001, 60002, 60003, 60004, 60005, 60006];
+    // Remove remnants from previous runs before inserting: `upsert` adds tag
+    // relations but intentionally does not replace historical associations.
+    db::delete_catalog_posts_by_ids(&fixture_ids).unwrap();
     db::set_account("similar_owner", account_id, "test_user", "").unwrap();
 
     let blacklist = std::collections::HashSet::new();
+    // The integration suite shares a catalog with the developer database. Use
+    // namespaced tags so real e621 posts cannot enter this ranking assertion.
     let make_post = |id: i64, general: Vec<&str>| e621_account_parser_api::models::Post {
         id,
         created_at: chrono::Utc::now(),
@@ -919,12 +925,48 @@ fn find_similar_post_ids_ranks_by_overlap_and_filters() {
 
     // Source post + three candidates, plus one "owned" and one "interacted"
     // that must be filtered.
-    let source = make_post(60001, vec!["x", "y", "z"]);
-    let high_overlap = make_post(60002, vec!["x", "y", "z", "w"]); // 3 overlap
-    let mid_overlap = make_post(60003, vec!["x", "y", "q"]); // 2 overlap
-    let low_overlap = make_post(60004, vec!["x", "p"]); // 1 overlap
-    let owned = make_post(60005, vec!["x", "y", "z"]); // owned
-    let interacted = make_post(60006, vec!["x", "y", "z"]); // interacted
+    let source = make_post(
+        60001,
+        vec![
+            "test_similar_91010_x",
+            "test_similar_91010_y",
+            "test_similar_91010_z",
+        ],
+    );
+    let high_overlap = make_post(
+        60002,
+        vec![
+            "test_similar_91010_x",
+            "test_similar_91010_y",
+            "test_similar_91010_z",
+            "test_similar_91010_w",
+        ],
+    ); // 3 overlap
+    let mid_overlap = make_post(
+        60003,
+        vec![
+            "test_similar_91010_x",
+            "test_similar_91010_y",
+            "test_similar_91010_q",
+        ],
+    ); // 2 overlap
+    let low_overlap = make_post(60004, vec!["test_similar_91010_x", "test_similar_91010_p"]); // 1 overlap
+    let owned = make_post(
+        60005,
+        vec![
+            "test_similar_91010_x",
+            "test_similar_91010_y",
+            "test_similar_91010_z",
+        ],
+    ); // owned
+    let interacted = make_post(
+        60006,
+        vec![
+            "test_similar_91010_x",
+            "test_similar_91010_y",
+            "test_similar_91010_z",
+        ],
+    ); // interacted
 
     let posts = vec![
         source.clone(),
@@ -967,6 +1009,7 @@ fn find_similar_post_ids_ranks_by_overlap_and_filters() {
     assert_eq!(ranked, vec![60002, 60003, 60004]);
 
     wipe_account(account_id);
+    db::delete_catalog_posts_by_ids(&fixture_ids).unwrap();
 }
 
 /// Digest "generic" path (cold account, no visit history) — must

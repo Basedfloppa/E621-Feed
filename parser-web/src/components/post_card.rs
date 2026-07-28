@@ -2,12 +2,18 @@ use std::rc::Rc;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
 use wasm_bindgen_futures::spawn_local;
-use web_sys::{Element, Node, ResizeObserver, ResizeObserverEntry, window};
+use web_sys::{Element, HtmlSelectElement, Node, ResizeObserver, ResizeObserverEntry, window};
 use yew::prelude::*;
 
 type OutsideMenuListener = (web_sys::Document, Closure<dyn FnMut(web_sys::MouseEvent)>);
 
-use crate::components::shared_observer;
+#[derive(Clone, PartialEq)]
+struct PendingBlacklistRule {
+    rule: String,
+    label: String,
+}
+
+use crate::components::{ConfirmModal, shared_observer};
 use crate::models::*;
 
 #[derive(Properties, PartialEq)]
@@ -52,6 +58,10 @@ pub fn post_card(props: &PostCardProps) -> Html {
     let negative_menu_ref = use_node_ref();
     let impression_logged = use_state(|| false);
     let hidden = use_state(|| false);
+    let video_failed = use_state(|| false);
+    let pending_blacklist_rule: UseStateHandle<Option<PendingBlacklistRule>> = use_state(|| None);
+    let tag_picker_open = use_state(|| false);
+    let selected_tag = use_state(String::new);
     let card_width = use_state(|| 0.0f64);
     let current_img_url = {
         let url = fallback_image_url(post);
@@ -312,6 +322,21 @@ pub fn post_card(props: &PostCardProps) -> Html {
         });
     }
 
+    let on_image_error = {
+        let post = Rc::clone(post);
+        let current_img_url = current_img_url.clone();
+        Callback::from(move |_event: Event| {
+            let current = (*current_img_url)
+                .as_ref()
+                .map(ToString::to_string)
+                .unwrap_or_default();
+            current_img_url.set(next_image_url(post.as_ref(), &current).map(AttrValue::from));
+        })
+    };
+    let on_video_error = {
+        let video_failed = video_failed.clone();
+        Callback::from(move |_event: Event| video_failed.set(true))
+    };
     let stop_video = Callback::from(|event: Event| {
         if let Some(video) = event
             .target()
@@ -445,6 +470,75 @@ pub fn post_card(props: &PostCardProps) -> Html {
             );
         })
     };
+
+    let mut blockable_tags: Vec<(String, String)> = Vec::new();
+    for (group, tags) in [
+        ("General", &post.tags.general),
+        ("Artist", &post.tags.artist),
+        ("Character", &post.tags.character),
+        ("Species", &post.tags.species),
+        ("Copyright", &post.tags.copyright),
+        ("Meta", &post.tags.meta),
+    ] {
+        for tag in tags {
+            blockable_tags.push((tag.clone(), group.to_string()));
+        }
+    }
+    blockable_tags.sort_by(|a, b| a.0.cmp(&b.0));
+    blockable_tags.dedup_by(|a, b| a.0 == b.0);
+    let artist_to_block = post.tags.artist.first().cloned();
+    let media_rule = match post
+        .files
+        .meta
+        .ext
+        .as_deref()
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("mp4") | Some("webm") => ("video", "Block video"),
+        Some("gif") => ("animated", "Block animated media"),
+        _ => ("-animated", "Block static images"),
+    };
+    let block_callback = |rule: String, label: String| {
+        let pending = pending_blacklist_rule.clone();
+        Callback::from(move |e: MouseEvent| {
+            e.stop_propagation();
+            e.prevent_default();
+            pending.set(Some(PendingBlacklistRule {
+                rule: rule.clone(),
+                label: label.clone(),
+            }));
+        })
+    };
+    let on_open_tag_picker = {
+        let open = tag_picker_open.clone();
+        Callback::from(move |e: MouseEvent| {
+            e.stop_propagation();
+            e.prevent_default();
+            open.set(true);
+        })
+    };
+    let on_select_tag = {
+        let selected = selected_tag.clone();
+        Callback::from(move |e: Event| {
+            selected.set(e.target_unchecked_into::<HtmlSelectElement>().value())
+        })
+    };
+    let on_block_artist = artist_to_block
+        .as_ref()
+        .map(|tag| block_callback(tag.clone(), format!("Block artist {tag}")));
+    let on_block_uploader = block_callback(
+        format!("uploader:!{}", post.uploader_id),
+        format!(
+            "Block uploads by {}",
+            post.uploader_name.as_deref().unwrap_or("this uploader")
+        ),
+    );
+    let on_block_rating = block_callback(
+        format!("rating:{}", rating_label.to_ascii_lowercase()),
+        format!("Block {}-rated posts", rating_label),
+    );
+    let on_block_media = block_callback(media_rule.0.to_string(), media_rule.1.to_string());
 
     let posts_domain = read_config_from_head().map(|c| c.posts_domain);
     let post_url = posts_domain
@@ -605,7 +699,7 @@ pub fn post_card(props: &PostCardProps) -> Html {
                             Some("webm") | Some("mp4") | Some("WEBM") | Some("MP4")
                         ) || post.files.meta.duration.unwrap_or(0.0) > 0.0;
 
-                        if is_video {
+                        if is_video && !*video_failed {
                             if let Some(video_url) = &post.files.original.url {
                                 html! {
                                     <video
@@ -620,6 +714,7 @@ pub fn post_card(props: &PostCardProps) -> Html {
                                         playsinline={true}
                                         preload="none"
                                         onplay={stop_video.clone()}
+                                        onerror={on_video_error.clone()}
                                     />
                                 }
                             } else {
@@ -630,6 +725,7 @@ pub fn post_card(props: &PostCardProps) -> Html {
                                         alt={(*alt_text).clone()}
                                         loading="lazy"
                                         decoding="async"
+                                        onerror={on_image_error.clone()}
                                     />
                                 }
                             }
@@ -641,6 +737,7 @@ pub fn post_card(props: &PostCardProps) -> Html {
                                     alt={(*alt_text).clone()}
                                     loading="lazy"
                                     decoding="async"
+                                    onerror={on_image_error.clone()}
                                 />
                             }
                         }
@@ -719,7 +816,19 @@ pub fn post_card(props: &PostCardProps) -> Html {
                             </button>
                         </li>
                         <li class="menu-title text-xs normal-case whitespace-normal">
-                            <span>{ "Like increases matching-tag affinity. Strong like counts three times. Not interested hides this post and reduces matching-tag affinity; it can be undone." }</span>
+                            <span>{ "Permanent blacklist" }</span>
+                        </li>
+                        if !blockable_tags.is_empty() {
+                            <li><button type="button" onclick={on_open_tag_picker}>{ "Block a tag…" }</button></li>
+                        }
+                        if let Some(on_block_artist) = on_block_artist {
+                            <li><button type="button" onclick={on_block_artist}>{ format!("Block artist {}", artist_to_block.unwrap_or_default()) }</button></li>
+                        }
+                        <li><button type="button" onclick={on_block_uploader}>{ "Block uploader" }</button></li>
+                        <li><button type="button" onclick={on_block_rating}>{ format!("Block rating {}", rating_label) }</button></li>
+                        <li><button type="button" onclick={on_block_media}>{ media_rule.1 }</button></li>
+                        <li class="menu-title text-xs normal-case whitespace-normal">
+                            <span>{ "Blacklist rules apply to future Feed and Search results. You will confirm the exact e621 rule before it is saved." }</span>
                         </li>
                     </ul>
                 </details>
@@ -779,14 +888,131 @@ pub fn post_card(props: &PostCardProps) -> Html {
         };
     }
 
+    let pending_rule = (*pending_blacklist_rule).clone();
+    let on_confirm_tag_picker = {
+        let open = tag_picker_open.clone();
+        let selected = selected_tag.clone();
+        let pending = pending_blacklist_rule.clone();
+        let fallback = blockable_tags
+            .first()
+            .map(|(tag, _)| tag.clone())
+            .unwrap_or_default();
+        Callback::from(move |_| {
+            let tag = if selected.is_empty() {
+                fallback.clone()
+            } else {
+                (*selected).clone()
+            };
+            if !tag.is_empty() {
+                pending.set(Some(PendingBlacklistRule {
+                    label: format!("Block tag {tag}"),
+                    rule: tag,
+                }));
+            }
+            open.set(false);
+        })
+    };
+    let on_cancel_tag_picker = {
+        let open = tag_picker_open.clone();
+        Callback::from(move |_| open.set(false))
+    };
+    let on_confirm_blacklist = {
+        let pending = pending_blacklist_rule.clone();
+        let backend_url = props.backend_url.to_string();
+        let account_id = props.account_id;
+        Callback::from(move |_| {
+            if let Some(rule) = (*pending).clone() {
+                append_blacklist_rule(backend_url.clone(), account_id, rule.rule);
+            }
+            pending.set(None);
+        })
+    };
+    let on_cancel_blacklist = {
+        let pending = pending_blacklist_rule.clone();
+        Callback::from(move |_| pending.set(None))
+    };
+
     html! {
-        <article
-            class={root_classes}
-            ref={root_ref}
-        >
-            { inner }
-        </article>
+        <>
+            <article class={root_classes} ref={root_ref}>{ inner }</article>
+            if *tag_picker_open {
+                <ConfirmModal
+                    open={true}
+                    title={"Block a tag"}
+                    confirm_label={"Continue"}
+                    on_confirm={on_confirm_tag_picker}
+                    on_cancel={on_cancel_tag_picker}
+                >
+                    <label class="label" for="post-card-block-tag"><span class="label-text">{ "Choose a tag from this post" }</span></label>
+                    <select id="post-card-block-tag" class="select select-bordered w-full" onchange={on_select_tag}>
+                        { for blockable_tags.iter().map(|(tag, group)| html! { <option value={tag.clone()}>{ format!("[{group}] {tag}") }</option> }) }
+                    </select>
+                </ConfirmModal>
+            }
+            if let Some(rule) = pending_rule {
+                <ConfirmModal
+                    open={true}
+                    title={rule.label.clone()}
+                    confirm_label={"Add blacklist rule"}
+                    destructive={true}
+                    on_confirm={on_confirm_blacklist}
+                    on_cancel={on_cancel_blacklist}
+                >
+                    <p>{ "This permanently adds the following e621 blacklist rule to this account:" }</p>
+                    <code class="mt-2 block rounded bg-base-200 p-2 break-all">{ rule.rule }</code>
+                    <p class="mt-2 text-sm text-base-content/70">{ "It will filter future Feed and Search results." }</p>
+                </ConfirmModal>
+            }
+        </>
     }
+}
+
+fn append_blacklist_rule(backend_url: String, account_id: i32, rule: String) {
+    spawn_local(async move {
+        let url = format!("{backend_url}/account/{account_id}/blacklist");
+        #[derive(serde::Deserialize)]
+        struct BlacklistResponse {
+            blacklist: Option<String>,
+        }
+        let current = match api_get(&url).send().await {
+            Ok(response) if response.ok() => response
+                .json::<BlacklistResponse>()
+                .await
+                .ok()
+                .and_then(|value| value.blacklist)
+                .unwrap_or_default(),
+            Ok(response) => {
+                web_sys::console::warn_1(
+                    &format!("failed to load blacklist: {}", response.status()).into(),
+                );
+                return;
+            }
+            Err(error) => {
+                web_sys::console::warn_1(&format!("failed to load blacklist: {error}").into());
+                return;
+            }
+        };
+        if current
+            .lines()
+            .any(|line| line.trim().eq_ignore_ascii_case(&rule))
+        {
+            return;
+        }
+        let next = if current.trim().is_empty() {
+            rule
+        } else {
+            format!("{current}\n{rule}")
+        };
+        let body = serde_json::json!({ "blacklist": next }).to_string();
+        if let Err(error) = api_patch(&url)
+            .header("Content-Type", "application/json")
+            .body(body)
+            .send()
+            .await
+        {
+            web_sys::console::warn_1(&format!("failed to update blacklist: {error}").into());
+        }
+    });
 }
 
 fn send_interaction(backend_url: String, payload: FeedInteractionRequest) {
@@ -844,40 +1070,57 @@ fn is_supported_image(url: &str) -> bool {
 fn preview_url(post: &Post) -> Option<&str> {
     post.files
         .preview
-        .jpg
+        .url
         .as_deref()
+        .or(post.files.preview.alt.as_deref())
+        .or(post.files.preview.jpg.as_deref())
         .or(post.files.preview.webp.as_deref())
 }
 
 fn sample_url(post: &Post) -> Option<&str> {
-    if post.has.sample {
-        post.files
-            .sample
-            .jpg
-            .as_deref()
-            .or(post.files.sample.webp.as_deref())
-    } else {
-        None
-    }
+    post.files
+        .sample
+        .url
+        .as_deref()
+        .or(post.files.sample.alt.as_deref())
+        .or(post.files.sample.jpg.as_deref())
+        .or(post.files.sample.webp.as_deref())
+}
+
+fn image_urls(post: &Post) -> Vec<String> {
+    [
+        post.files.preview.url.as_deref(),
+        post.files.preview.alt.as_deref(),
+        post.files.preview.jpg.as_deref(),
+        post.files.preview.webp.as_deref(),
+        post.files.sample.url.as_deref(),
+        post.files.sample.alt.as_deref(),
+        post.files.sample.jpg.as_deref(),
+        post.files.sample.webp.as_deref(),
+        post.files.original.url.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .filter(|url| is_supported_image(url))
+    .fold(Vec::new(), |mut urls, url| {
+        if !urls.iter().any(|candidate| candidate == url) {
+            urls.push(url.to_owned());
+        }
+        urls
+    })
 }
 
 fn fallback_image_url(post: &Post) -> String {
-    if let Some(url) = preview_url(post)
-        && is_supported_image(url)
-    {
-        return url.to_owned();
-    }
-    if let Some(url) = sample_url(post)
-        && is_supported_image(url)
-    {
-        return url.to_owned();
-    }
-    if let Some(url) = post.files.original.url.as_deref()
-        && is_supported_image(url)
-    {
-        return url.to_owned();
-    }
-    String::new()
+    image_urls(post).into_iter().next().unwrap_or_default()
+}
+
+/// Return the next smaller/safer image source after a load failure. The final
+/// candidate is always the original file when it is browser-displayable.
+fn next_image_url(post: &Post, failed_url: &str) -> Option<String> {
+    let urls = image_urls(post);
+    urls.iter()
+        .position(|url| url == failed_url)
+        .and_then(|index| urls.get(index + 1).cloned())
 }
 
 fn preferred_image_url(post: &Post, required_width: i64) -> Option<AttrValue> {

@@ -145,6 +145,10 @@ pub struct FileOriginal {
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Default)]
 pub struct FilePreview {
     #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub alt: Option<String>,
+    #[serde(default)]
     pub width: i64,
     #[serde(default)]
     pub height: i64,
@@ -154,6 +158,10 @@ pub struct FilePreview {
 
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Default)]
 pub struct FileSample {
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub alt: Option<String>,
     #[serde(default)]
     pub width: i64,
     #[serde(default)]

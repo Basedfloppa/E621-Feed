@@ -66,6 +66,12 @@ pub struct FileOriginal {
 
 #[derive(Deserialize, Serialize, Clone, PartialEq, Default)]
 pub struct FilePreview {
+    /// e621 v2 primary/alternate preview URLs. Legacy `jpg`/`webp` fields
+    /// remain for previously cached v1-shaped responses.
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub alt: Option<String>,
     #[serde(default)]
     pub width: i64,
     #[serde(default)]
@@ -78,6 +84,10 @@ pub struct FilePreview {
 
 #[derive(Deserialize, Serialize, Clone, PartialEq, Default)]
 pub struct FileSample {
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub alt: Option<String>,
     #[serde(default)]
     pub width: i64,
     #[serde(default)]

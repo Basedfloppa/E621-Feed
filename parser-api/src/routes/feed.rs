@@ -13,6 +13,33 @@ use e621_account_parser_api::utils::{
     CachedPostFeatures, ChannelTiming, PipelineMetrics, ScoringContext, ScoringMetrics,
     current_global_relation, current_idf, diversify_scored_posts, post_pair_similarity,
 };
+/// Apply supported blacklist metatags to locally cached candidates. e621
+/// handles these for live results; cached posts need the equivalent check.
+fn matches_local_blacklist_metatag(post: &Post, blacklist: &str) -> bool {
+    let meta = |tag: &str| {
+        post.tags
+            .meta
+            .iter()
+            .any(|value| value.eq_ignore_ascii_case(tag))
+    };
+    blacklist
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .any(|rule| match rule.to_ascii_lowercase().as_str() {
+            "video" => meta("video"),
+            "animated" => meta("animated"),
+            "-animated" => !meta("animated"),
+            "rating:s" | "rating:safe" => matches!(post.rating, models::Rating::S),
+            "rating:q" | "rating:questionable" => matches!(post.rating, models::Rating::Q),
+            "rating:e" | "rating:explicit" => matches!(post.rating, models::Rating::E),
+            rule if rule.starts_with("uploader:!") => rule[10..]
+                .parse::<i64>()
+                .is_ok_and(|id| id == post.uploader_id),
+            _ => false,
+        })
+}
+
 use e621_account_parser_api::{
     api, audit,
     db::{
@@ -421,7 +448,9 @@ async fn build_recommendations_shared(
     let local_posts = if local_to_hydrate.is_empty() {
         Vec::new()
     } else {
-        db_blocking(move || hydrate_posts_by_ids(&local_to_hydrate)).await?
+        let mut posts = db_blocking(move || hydrate_posts_by_ids(&local_to_hydrate)).await?;
+        posts.retain(|post| !matches_local_blacklist_metatag(post, &account.blacklist));
+        posts
     };
 
     // Filter live posts through the same dedup lens.
