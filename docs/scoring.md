@@ -147,6 +147,22 @@ user graph entirely for diversity even when `diversity_semantic_blend > 0`.
 |`diversity_semantic_max_tags`|fewer tags in O(T²) loop (faster)|more tags per group considered (slower, more signal)|
 |`diversity_user_pmi_weight`|global PMI dominates diversity signal|per-user tag co-occurrence patterns drive diversity personalisation; 0 = disable user graph|
 
+## Search result scoring
+
+The Search page normally returns raw e621 matches. Enabling **Score results**
+uses the selected account's full scoring context and returns a `ScoredPost` for
+each match, including the same breakdown used by the feed. Results are sorted
+by affinity before the client applies one of these per-page cutoffs:
+
+|Preset|Cutoff|Meaning|
+|---|---:|---|
+|Wide|0%|Keep every scored match.|
+|Balanced|30%|Drop the lowest-scoring 30% of the page.|
+|Strict|60%|Keep only the highest-scoring 40% of the page.|
+
+Cutoffs only affect Search presentation; they do not add a blacklist or alter
+the account's preference profile.
+
 ## Discrete-preference smoothing + strong-negative veto
 
 |Variable|Lower →|Higher →|

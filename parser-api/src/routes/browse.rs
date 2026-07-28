@@ -5,6 +5,7 @@
 //! - `/browse/favorites` saves posts + links them to the account (`accounts_post`)
 //! - `/browse/trending`  saves posts to the catalog only (no account link)
 
+use chrono::Utc;
 use rocket::serde::json::Json;
 use rocket_okapi::openapi;
 
@@ -12,9 +13,13 @@ use crate::db_blocking;
 use e621_account_parser_api::{
     api, audit,
     auth::OwnerToken,
-    db::{get_account_by_id, save_posts, upsert_catalog_posts},
+    db::{
+        get_account_by_id, get_account_preference_profile, get_tag_counts, save_posts,
+        upsert_catalog_posts,
+    },
     errors::ApiError,
-    models::Post,
+    models::{Post, ScoredPost, cfg},
+    utils::{CachedPostFeatures, ScoringContext, current_global_relation, current_idf},
     validation,
 };
 
@@ -87,6 +92,107 @@ fn spawn_browse_persist(
             }
         }
     });
+}
+
+/// Proxy a user-supplied e621 tag query through the server. The browser never
+/// contacts e621 directly, and the selected account's blacklist still applies.
+#[openapi(tag = "Browse")]
+#[get("/browse/search/<account_id>?<query>&<page>")]
+pub(crate) async fn search_posts(
+    account_id: i32,
+    query: &str,
+    page: Option<i32>,
+    owner: OwnerToken,
+) -> Result<Json<Vec<Post>>, ApiError> {
+    validation::validate_account_id(account_id)?;
+    let query = query.trim();
+    if query.is_empty() || query.len() > 250 || query.chars().any(char::is_control) {
+        return Err(ApiError::BadRequest(
+            "provide a valid e621 tag query (1–250 characters)".into(),
+        ));
+    }
+    let owner_token = owner.0;
+    let account =
+        db_blocking(move || get_account_by_id(&owner_token, account_id).map_err(|e| e.to_string()))
+            .await?;
+    let posts = api::get_posts_by_tags(&account.blacklist, query, page)
+        .await
+        .map_err(ApiError::Internal)?;
+    spawn_browse_persist(posts.clone(), "search", account_id, false);
+    Ok(Json(posts))
+}
+
+/// Search and score the resulting posts against the selected account's profile.
+#[openapi(tag = "Browse")]
+#[get("/browse/search_scored/<account_id>?<query>&<page>")]
+pub(crate) async fn search_scored_posts(
+    account_id: i32,
+    query: &str,
+    page: Option<i32>,
+    owner: OwnerToken,
+) -> Result<Json<Vec<ScoredPost>>, ApiError> {
+    validation::validate_account_id(account_id)?;
+    let query = query.trim();
+    if query.is_empty() || query.len() > 250 || query.chars().any(char::is_control) {
+        return Err(ApiError::BadRequest(
+            "provide a valid e621 tag query (1–250 characters)".into(),
+        ));
+    }
+    let owner_token = owner.0;
+    let (account, tags, profile) = rocket::tokio::join!(
+        db_blocking(move || get_account_by_id(&owner_token, account_id).map_err(|e| e.to_string())),
+        db_blocking(move || get_tag_counts(account_id).map_err(|e| e.to_string())),
+        db_blocking(move || get_account_preference_profile(account_id).map_err(|e| e.to_string())),
+    );
+    let account = account?;
+    let tags = tags?;
+    let profile = profile?;
+    let relation_tags = tags.clone();
+    let user_relation = db_blocking(move || {
+        e621_account_parser_api::db::load_account_tag_relation(account_id, &relation_tags)
+            .map_err(|e| e.to_string())
+    })
+    .await?;
+    let posts = api::get_posts_by_tags(&account.blacklist, query, page)
+        .await
+        .map_err(ApiError::Internal)?;
+    spawn_browse_persist(posts.clone(), "search", account_id, false);
+
+    let idf = current_idf();
+    let global_relation = current_global_relation();
+    let mut priors = cfg().priors.clone();
+    priors.now = Utc::now();
+    let ctx = ScoringContext::new(
+        &tags,
+        &priors,
+        &idf,
+        &profile,
+        &global_relation,
+        &user_relation,
+    );
+    let mut scored: Vec<ScoredPost> = posts
+        .into_iter()
+        .map(|post| {
+            let features = CachedPostFeatures::from_post_with_user(
+                &post,
+                &idf,
+                &global_relation,
+                Some(&user_relation),
+            );
+            let (score, breakdown, _) = ctx.score_cached_with_metrics(&features);
+            ScoredPost {
+                post,
+                score,
+                breakdown: Some(breakdown),
+            }
+        })
+        .collect();
+    scored.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    Ok(Json(scored))
 }
 
 /// Fetch trending posts (sorted by hotness on e621).

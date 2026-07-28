@@ -159,6 +159,9 @@ pub struct PostGridProps {
     pub show_desc: UseStateHandle<bool>,
     pub show_metadata: UseStateHandle<bool>,
     pub show_breakdown: UseStateHandle<bool>,
+    /// Optional per-page percentage of the lowest scored results to omit.
+    #[prop_or_default]
+    pub score_cutoff_pct: Option<f32>,
     /// Empty-state message when no user is selected.
     pub empty_message: String,
     /// Grid layout class (overrides default responsive grid).
@@ -177,6 +180,7 @@ pub fn post_grid(props: &PostGridProps) -> Html {
     let page = use_state(|| 0usize);
     let is_loading = use_state(|| false);
     let exhausted = use_state(|| false);
+    let error = use_state(|| Option::<String>::None);
     let scroll_sentinel = use_node_ref();
     // Random session token for dedup across pages.
     let session_id = use_state(|| {
@@ -190,9 +194,9 @@ pub fn post_grid(props: &PostGridProps) -> Html {
     // Fetch trigger — bumped when URL changes to start a fresh fetch.
     let fetch_trigger: UseStateHandle<u32> = use_state(|| 0);
 
-    // Reset + trigger first fetch when fetch_url changes.
+    // Reset + trigger first fetch when the source or score cutoff changes.
     {
-        let url = props.fetch_url.clone();
+        let url = (props.fetch_url.clone(), props.score_cutoff_pct);
         let posts = posts.clone();
         let page = page.clone();
         let exhausted = exhausted.clone();
@@ -213,13 +217,16 @@ pub fn post_grid(props: &PostGridProps) -> Html {
         let page = page.clone();
         let is_loading = is_loading.clone();
         let exhausted = exhausted.clone();
+        let error = error.clone();
         let scored = props.scored;
+        let score_cutoff_pct = props.score_cutoff_pct;
         let session_id = session_id.clone();
         Callback::from(move |_| {
             if *is_loading || *exhausted {
                 return;
             }
             is_loading.set(true);
+            error.set(None);
             let next = *page + 1;
             let sep = if url.contains('?') { "&" } else { "?" };
             let page_url = format!("{}{sep}page={}", url, next);
@@ -229,6 +236,7 @@ pub fn post_grid(props: &PostGridProps) -> Html {
             let page_cb = page.clone();
             let is_loading_cb = is_loading.clone();
             let exhausted_cb = exhausted.clone();
+            let error_cb = error.clone();
             wasm_bindgen_futures::spawn_local(async move {
                 match api_get(&page_url).send().await {
                     Ok(resp) if resp.ok() => {
@@ -246,6 +254,21 @@ pub fn post_grid(props: &PostGridProps) -> Html {
                                 })
                                 .collect()
                         };
+                        if let Some(cutoff) = score_cutoff_pct
+                            && scored
+                            && new_items.len() >= 2
+                        {
+                            let mut scores: Vec<f32> =
+                                new_items.iter().map(|item| item.score).collect();
+                            scores.sort_by(|a, b| {
+                                a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+                            });
+                            let index = ((scores.len() - 1) as f32
+                                * (cutoff / 100.0).clamp(0.0, 0.95))
+                                as usize;
+                            let threshold = scores[index];
+                            new_items.retain(|item| item.score >= threshold);
+                        }
                         // Dedup against already-loaded posts.
                         let mut merged = (*posts_cb).clone();
                         let mut seen: std::collections::HashSet<i64> =
@@ -260,10 +283,14 @@ pub fn post_grid(props: &PostGridProps) -> Html {
                         }
                         is_loading_cb.set(false);
                     }
-                    Ok(_) => {
+                    Ok(resp) => {
+                        let status = resp.status();
+                        let body = resp.text().await.unwrap_or_default();
+                        error_cb.set(Some(humanize_error_body(status, &body)));
                         is_loading_cb.set(false);
                     }
-                    Err(_) => {
+                    Err(err) => {
+                        error_cb.set(Some(humanize_network_error(err)));
                         is_loading_cb.set(false);
                     }
                 }
@@ -322,11 +349,28 @@ pub fn post_grid(props: &PostGridProps) -> Html {
     html! {
         <div>
             {
-                if (*posts).is_empty() && !*is_loading {
+                if (*posts).is_empty() && !*is_loading && error.is_none() {
                     html! { <p class="text-base-content/70 text-center my-8">{ &props.empty_message }</p> }
                 } else {
                     html! {
                         <>
+                            {
+                                if let Some(error) = &*error {
+                                    html! {
+                                        <div class="alert alert-error mb-3" role="alert" aria-live="polite">
+                                            <span>{ error }</span>
+                                            <button
+                                                type="button"
+                                                class="btn btn-sm btn-outline"
+                                                onclick={{
+                                                    let fetch_more = fetch_more.clone();
+                                                    Callback::from(move |_| fetch_more.emit(()))
+                                                }}
+                                            >{ "Retry" }</button>
+                                        </div>
+                                    }
+                                } else { html! {} }
+                            }
                             { render_post_grid(
                                 &posts,
                                 grid_class,

@@ -53,6 +53,18 @@ body {
 }
 
 @media (max-width: 767.98px) {
+  /* Hover is unavailable on touch screens: keep the recommendation control
+     reachable and make its touch target comfortably large. */
+  .post-card-hide-btn {
+    opacity: 1;
+    min-width: 2.5rem;
+    min-height: 2.5rem;
+  }
+
+  .post-card .dropdown-content {
+    max-width: calc(100vw - 1rem);
+  }
+
   .feed-page {
     padding-bottom: 1rem;
   }

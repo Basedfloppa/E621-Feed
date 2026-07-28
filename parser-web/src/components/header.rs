@@ -266,6 +266,12 @@ pub fn header() -> Html {
                                 {"Trending"}
                             </a>
                             <a role="tab"
+                                class={classes!("tab", is_active("/search").then_some("tab-active"))}
+                                href="/search"
+                            >
+                                {"Search"}
+                            </a>
+                            <a role="tab"
                                 class={classes!("tab", is_active("/favorites").then_some("tab-active"))}
                                 href="/favorites"
                             >
@@ -310,44 +316,6 @@ pub fn header() -> Html {
                         <ThemeToggle />
                     </div>
                 </nav>
-                <div class="btm-nav btm-nav-sm lg:hidden border-t border-base-300 z-10">
-                    <a
-                        class={classes!(is_active("/feed").then_some("active"))}
-                        href="/feed"
-                    >
-                        <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 10h16M4 14h16M4 18h16" />
-                        </svg>
-                        <span>{"For You"}</span>
-                    </a>
-                    <a
-                        class={classes!(is_active("/trending").then_some("active"))}
-                        href="/trending"
-                    >
-                        <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6" />
-                        </svg>
-                        <span>{"Trending"}</span>
-                    </a>
-                    <a
-                        class={classes!(is_active("/favorites").then_some("active"))}
-                        href="/favorites"
-                    >
-                        <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4.318 6.318a4.5 4.5 0 000 6.364L12 20.364l7.682-7.682a4.5 4.5 0 00-6.364-6.364L12 7.636l-1.318-1.318a4.5 4.5 0 00-6.364 0z" />
-                        </svg>
-                        <span>{"Favorites"}</span>
-                    </a>
-                    <a
-                        class={classes!(is_active("/digest").then_some("active"))}
-                        href="/digest"
-                    >
-                        <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-                        </svg>
-                        <span>{"Digest"}</span>
-                    </a>
-                </div>
             </div>
             <div class="drawer-side z-50">
                 <label for="header-drawer" aria-label="close sidebar" class="drawer-overlay"></label>
@@ -383,6 +351,14 @@ pub fn header() -> Html {
                             href="/trending"
                         >
                             {"Trending"}
+                        </a>
+                    </li>
+                    <li>
+                        <a
+                            class={classes!("text-base-content", is_active("/search").then_some("menu-active"))}
+                            href="/search"
+                        >
+                            {"Search"}
                         </a>
                     </li>
                     <li>

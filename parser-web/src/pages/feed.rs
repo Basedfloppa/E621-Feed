@@ -57,7 +57,7 @@ impl GridType {
             GridType::Auto => {
                 "grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-3"
             }
-            GridType::Three => "grid grid-cols-3 gap-3",
+            GridType::Three => "grid grid-cols-2 sm:grid-cols-3 gap-3",
             GridType::Two => "grid grid-cols-2 gap-3",
             GridType::One => "grid grid-cols-1 gap-3",
         }
@@ -979,7 +979,7 @@ async fn fetch_json<T: DeserializeOwned>(url: &str) -> Result<T, String> {
 
     let resp_value = wasm_bindgen_futures::JsFuture::from(window.fetch_with_request(&request))
         .await
-        .map_err(|e| format!("Fetch promise rejected: {e:?}"))?;
+        .map_err(|e| humanize_network_error(format!("{e:?}")))?;
 
     let resp: Response = resp_value
         .dyn_into()
@@ -990,7 +990,7 @@ async fn fetch_json<T: DeserializeOwned>(url: &str) -> Result<T, String> {
         .map_err(|e| format!("Failed to read response text: {e:?}"))?;
     let text_js = wasm_bindgen_futures::JsFuture::from(text_promise)
         .await
-        .map_err(|e| format!("Text promise rejected: {e:?}"))?;
+        .map_err(|e| humanize_network_error(format!("{e:?}")))?;
     let text = text_js
         .as_string()
         .ok_or("Response text not a string".to_string())?;

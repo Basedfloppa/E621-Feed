@@ -43,7 +43,7 @@ impl GridType {
             GridType::Auto => {
                 "grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-3"
             }
-            GridType::Three => "grid grid-cols-3 gap-3",
+            GridType::Three => "grid grid-cols-2 sm:grid-cols-3 gap-3",
             GridType::Two => "grid grid-cols-2 gap-3",
             GridType::One => "grid grid-cols-1 gap-3",
         }
@@ -649,7 +649,17 @@ pub fn digest_page() -> Html {
             </div>
 
             if let Some(ref e) = *error {
-                <div class="alert alert-error" role="alert">{ e }</div>
+                <div class="alert alert-error flex justify-between items-center" role="alert" aria-live="polite">
+                    <span>{ e }</span>
+                    <button
+                        type="button"
+                        class="btn btn-sm btn-outline"
+                        onclick={{
+                            let refresh_tick = refresh_tick.clone();
+                            Callback::from(move |_| refresh_tick.set(*refresh_tick + 1))
+                        }}
+                    >{ "Retry" }</button>
+                </div>
             }
 
             { process_banner }
@@ -686,26 +696,26 @@ async fn fetch_json<T: DeserializeOwned>(url: &str) -> Result<T, String> {
 
     let resp_value = wasm_bindgen_futures::JsFuture::from(window.fetch_with_request(&request))
         .await
-        .map_err(|e| format!("Fetch promise rejected: {e:?}"))?;
+        .map_err(|e| humanize_network_error(format!("{e:?}")))?;
 
     let resp: Response = resp_value
         .dyn_into()
         .map_err(|_| "Failed to cast Response".to_string())?;
 
-    if !resp.ok() {
-        let status = resp.status();
-        let status_text = resp.status_text();
-        return Err(format!("HTTP {status}: {status_text}"));
-    }
-
+    let status = resp.status();
     let text_promise = resp
         .text()
-        .map_err(|e| format!("Failed to get text promise: {e:?}"))?;
+        .map_err(|e| humanize_network_error(format!("{e:?}")))?;
     let text = wasm_bindgen_futures::JsFuture::from(text_promise)
         .await
-        .map_err(|e| format!("Text future rejected: {e:?}"))?
+        .map_err(|e| humanize_network_error(format!("{e:?}")))?
         .as_string()
         .ok_or("Response text is not a string".to_string())?;
 
-    serde_json::from_str(&text).map_err(|e| format!("JSON parse error: {e}"))
+    if !resp.ok() {
+        return Err(humanize_error_body(status, &text));
+    }
+
+    serde_json::from_str(&text)
+        .map_err(|_| "The server returned invalid data. Please try again.".to_string())
 }

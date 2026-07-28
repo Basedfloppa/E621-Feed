@@ -13,20 +13,51 @@ pub struct ApiErrorBody {
     pub code: u16,
 }
 
-/// Extract a human-readable error from a non-2xx body. Falls back to
-/// a clipped raw body for stray nginx/Cloudflare HTML pages.
+/// Render transport failures without exposing browser-/proxy-specific errors
+/// such as `TypeError: Failed to fetch` to the user.
+pub fn humanize_network_error(_detail: impl std::fmt::Display) -> String {
+    "Could not reach the server. Check your connection and try again.".to_string()
+}
+
+/// Extract a human-readable error from a non-2xx body. Falls back to a
+/// concise status-specific explanation rather than proxy HTML or a raw code.
 pub fn humanize_error_body(status: u16, body: &str) -> String {
-    if let Ok(parsed) = serde_json::from_str::<ApiErrorBody>(body) {
-        let msg = parsed.error.trim();
-        if !msg.is_empty() {
-            return msg.to_string();
-        }
+    let detail = serde_json::from_str::<ApiErrorBody>(body)
+        .ok()
+        .map(|parsed| parsed.error.trim().to_string())
+        .filter(|message| !message.is_empty());
+
+    match status {
+        429 => "Too many requests. Please wait a moment, then try again.".to_string(),
+        500..=599 => "The server is temporarily unavailable. Please try again shortly.".to_string(),
+        _ => detail.unwrap_or_else(|| {
+            let preview: String = body.trim().chars().take(200).collect();
+            if preview.is_empty() {
+                format!("Request failed (HTTP {status}).")
+            } else {
+                format!("Request failed (HTTP {status}): {preview}")
+            }
+        }),
     }
-    let trimmed = body.trim();
-    let preview: String = trimmed.chars().take(200).collect();
-    if preview.is_empty() {
-        format!("HTTP {status}")
-    } else {
-        format!("HTTP {status}: {preview}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::humanize_error_body;
+
+    #[test]
+    fn rate_limit_message_is_actionable() {
+        assert_eq!(
+            humanize_error_body(429, r#"{\"error\":\"rate limit exceeded\"}"#),
+            "Too many requests. Please wait a moment, then try again."
+        );
+    }
+
+    #[test]
+    fn server_failures_do_not_expose_proxy_body() {
+        assert_eq!(
+            humanize_error_body(503, "<html>upstream unavailable</html>"),
+            "The server is temporarily unavailable. Please try again shortly."
+        );
     }
 }

@@ -36,6 +36,11 @@ A self-hosted alternative to e621's built-in feed: imports your favourites, buil
   rating, media, popularity, interaction, tag-relation, uploader, exclusivity,
   novelty) and MMR diversification
 - Recommendation score breakdowns in the feed UI
+- Server-proxied `/search` page for e621 tag queries, alias suggestions, and
+  optional per-account result scoring with Wide/Balanced/Strict cutoffs
+- Persistent Search display/scoring preferences; score-dependent controls stay
+  visible but disabled until result scoring is enabled
+- One mobile navigation entry point: the header drawer (no duplicate nav row)
 - A post-card recommendation menu: **Not interested** hides the post and
   records a negative tag-feedback signal; it closes when the pointer leaves it
   or the user clicks elsewhere

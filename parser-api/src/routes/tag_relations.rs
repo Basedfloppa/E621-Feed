@@ -74,6 +74,17 @@ pub(crate) async fn resolve_tag(
     }))
 }
 
+/// Compatibility route for UI tag autocomplete. Keep the shorter `/tag`
+/// namespace while the relation graph continues to use `/tag_relations`.
+#[openapi(tag = "Tag Relations")]
+#[get("/tag/resolve?<tag>")]
+pub(crate) async fn resolve_tag_autocomplete(
+    tag: &str,
+    client_ip: ClientIp,
+) -> Result<Json<TagResolveResponse>, ApiError> {
+    resolve_tag(tag, client_ip).await
+}
+
 /// Look up implications for a tag: which tags it implies, and which tags
 /// imply it.
 ///
