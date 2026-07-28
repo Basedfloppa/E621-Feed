@@ -33,13 +33,7 @@ impl IdfIndex {
     /// Robertson-Sparck-Jones-style smoothed IDF. `df_floor`, `idf_max`,
     /// `rsj_smoothing` are all priors-supplied so calibrate can probe them.
     #[inline]
-    fn compute_idf(
-        df_raw: i64,
-        n_posts: i64,
-        df_floor: f32,
-        idf_max: f32,
-        rsj: f32,
-    ) -> f32 {
+    fn compute_idf(df_raw: i64, n_posts: i64, df_floor: f32, idf_max: f32, rsj: f32) -> f32 {
         let n = n_posts.max(1) as f32;
         let dfv = df_raw.max(0) as f32;
         let dfp = dfv + df_floor;
@@ -56,10 +50,7 @@ impl IdfIndex {
             let lc = tag.to_lowercase();
             df_lc.insert(lc, df_raw);
         }
-        Self {
-            df: df_lc,
-            n_posts,
-        }
+        Self { df: df_lc, n_posts }
     }
 
     pub fn from_db() -> rusqlite::Result<Self> {
@@ -179,10 +170,8 @@ static BUMP_DRIFT_COUNT: AtomicI64 = AtomicI64::new(0);
 ///
 /// `LAST_SYSTEM_ACCESS` — updated by background workers (`bump_idf`,
 /// `mark_idf_dirty`). Not consulted for idle-eviction.
-static LAST_USER_ACCESS: LazyLock<Mutex<Instant>> =
-    LazyLock::new(|| Mutex::new(Instant::now()));
-static LAST_SYSTEM_ACCESS: LazyLock<Mutex<Instant>> =
-    LazyLock::new(|| Mutex::new(Instant::now()));
+static LAST_USER_ACCESS: LazyLock<Mutex<Instant>> = LazyLock::new(|| Mutex::new(Instant::now()));
+static LAST_SYSTEM_ACCESS: LazyLock<Mutex<Instant>> = LazyLock::new(|| Mutex::new(Instant::now()));
 
 fn touch_user_access() {
     let mut g = LAST_USER_ACCESS.lock().unwrap_or_else(|p| p.into_inner());
@@ -440,19 +429,25 @@ mod tests {
 
         // lambda=0: blended = 1.0 + 0*(raw-1) = 1.0
         let zero_lambda = idx.idf_tempered("common", 0.4, 100.0, 0.35, 0.0, 1.0);
-        assert!((zero_lambda - 1.0).abs() < 1e-6,
-            "lambda=0 should give 1.0, got {zero_lambda}");
+        assert!(
+            (zero_lambda - 1.0).abs() < 1e-6,
+            "lambda=0 should give 1.0, got {zero_lambda}"
+        );
 
         // alpha=0: result^0 = 1.0
         let zero_alpha = idx.idf_tempered("common", 0.4, 100.0, 0.35, 1.0, 0.0);
-        assert!((zero_alpha - 1.0).abs() < 1e-6,
-            "alpha=0 should give 1.0, got {zero_alpha}");
+        assert!(
+            (zero_alpha - 1.0).abs() < 1e-6,
+            "alpha=0 should give 1.0, got {zero_alpha}"
+        );
 
         // lambda=1, alpha=1: should give raw IDF
         let full = idx.idf_tempered("common", 0.4, 100.0, 0.35, 1.0, 1.0);
         let raw = idx.idf_raw("common", 0.4, 100.0, 0.35);
-        assert!((full - raw).abs() < 1e-6,
-            "lambda=1, alpha=1 should equal raw IDF, got {full} vs {raw}");
+        assert!(
+            (full - raw).abs() < 1e-6,
+            "lambda=1, alpha=1 should equal raw IDF, got {full} vs {raw}"
+        );
     }
 
     #[test]
@@ -565,7 +560,9 @@ mod tests {
         assert!(idf > 0.0, "unknown tag gets positive IDF, got {idf}");
         // With n=1, df=0: dfp=0.4, n-dfp+rsj = 1-0.4+0.35 = 0.95, dfp+rsj = 0.75
         // 1 + 0.95/0.75 = 2.267, ln(2.267) = 0.818
-        assert!((idf - 0.82).abs() < 0.05,
-            "empty index, unknown tag → idf ≈ 0.82, got {idf}");
+        assert!(
+            (idf - 0.82).abs() < 0.05,
+            "empty index, unknown tag → idf ≈ 0.82, got {idf}"
+        );
     }
 }

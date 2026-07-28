@@ -135,12 +135,16 @@ pub fn record_feed_interactions_batch(
                 )
                 .map_err(|e| format!("Failed to validate feed interaction owner link: {e}"))?;
             if !linked {
-                return Err(format!("Account {} is not linked to this device token", aid));
+                return Err(format!(
+                    "Account {} is not linked to this device token",
+                    aid
+                ));
             }
         }
 
         // Pre-resolve experiment buckets for each account.
-        let mut buckets: HashMap<i32, Option<String>> = HashMap::with_capacity(distinct_accounts.len());
+        let mut buckets: HashMap<i32, Option<String>> =
+            HashMap::with_capacity(distinct_accounts.len());
         for aid in &distinct_accounts {
             let explicit: Option<String> = tx
                 .query_row(
@@ -195,9 +199,7 @@ pub fn record_feed_interactions_batch(
             .map_err(|e| format!("Failed to prepare batch feedback update: {e}"))?;
 
         for interaction in interactions {
-            let bucket = buckets
-                .get(&interaction.account_id)
-                .and_then(|b| b.clone());
+            let bucket = buckets.get(&interaction.account_id).and_then(|b| b.clone());
 
             let inserted = insert_interaction
                 .execute(params![
@@ -212,13 +214,13 @@ pub fn record_feed_interactions_batch(
                 .map_err(|e| format!("Failed to record batch feed interaction: {e}"))?;
 
             if inserted > 0 {
-                let (impression_delta, positive_delta, negative_delta) = match interaction.event_type
-                {
-                    FeedInteractionType::QualifiedImpression => (1, 0, 0),
-                    FeedInteractionType::Open => (0, 1, 0),
-                    FeedInteractionType::Hide => (0, 0, 1),
-                    FeedInteractionType::Unknown => (0, 0, 0),
-                };
+                let (impression_delta, positive_delta, negative_delta) =
+                    match interaction.event_type {
+                        FeedInteractionType::QualifiedImpression => (1, 0, 0),
+                        FeedInteractionType::Open => (0, 1, 0),
+                        FeedInteractionType::Hide => (0, 0, 1),
+                        FeedInteractionType::Unknown => (0, 0, 0),
+                    };
 
                 update_feedback
                     .execute(params![

@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
-# pre-commit hook — runs cargo audit on parser-api when Rust source or
-# Cargo.lock is staged. We have no CI, so this is the only line of defence
-# against landing a commit that re-introduces a known-vulnerable dep.
+# Local quality gate for Rust changes. Each affected crate is checked
+# independently so a frontend-only commit does not build the API, and vice versa.
 #
 # Activate once per clone:
 #   git config core.hooksPath .githooks
@@ -9,28 +8,87 @@
 # Bypass for a single commit (use sparingly, e.g. emergency revert):
 #   git commit --no-verify
 #
-# Configuration: parser-api/.cargo/audit.toml lists explicit ignores
-# (transitive advisories we can't fix without a parent-crate bump).
+# Configuration: parser-api/.cargo/audit.toml lists explicit audit ignores
+# (transitive advisories that cannot yet be fixed with a parent-crate bump).
 
 set -euo pipefail
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
+cd "$REPO_ROOT"
 
-# Skip if nothing under parser-api/ is staged. Doc-only / nginx-only /
-# frontend-only commits don't change the Rust dependency graph.
-if ! git diff --cached --name-only | grep -qE '^parser-api/'; then
+staged_files="$(git diff --cached --name-only)"
+api_changed=false
+web_changed=false
+api_dependencies_changed=false
+web_dependencies_changed=false
+
+while IFS= read -r file; do
+    case "$file" in
+        parser-api/*.rs|parser-api/src/*|parser-api/tests/*|parser-api/build.rs)
+            api_changed=true
+            ;;
+        parser-web/*.rs|parser-web/src/*|parser-web/tests/*|parser-web/build.rs)
+            web_changed=true
+            ;;
+    esac
+
+    case "$file" in
+        parser-api/Cargo.toml|parser-api/Cargo.lock|parser-api/.cargo/audit.toml)
+            api_changed=true
+            api_dependencies_changed=true
+            ;;
+        parser-web/Cargo.toml|parser-web/Cargo.lock|parser-web/.cargo/audit.toml)
+            web_changed=true
+            web_dependencies_changed=true
+            ;;
+    esac
+done <<< "$staged_files"
+
+if ! "$api_changed" && ! "$web_changed"; then
     exit 0
 fi
 
-if ! command -v cargo-audit >/dev/null 2>&1; then
-    cat >&2 <<'EOF'
-  pre-commit: cargo-audit is required but not installed.
-  install: cargo install cargo-audit --locked
-  bypass once: git commit --no-verify
+run_crate_checks() {
+    local crate="$1"
+
+    echo "pre-commit: cargo fmt --check ($crate)..."
+    cargo fmt --manifest-path "$crate/Cargo.toml" --all -- --check
+
+    echo "pre-commit: cargo clippy -D warnings ($crate)..."
+    cargo clippy --manifest-path "$crate/Cargo.toml" --all-targets -- -D warnings
+
+    echo "pre-commit: cargo test ($crate, serial SQLite integration tests)..."
+    cargo test --manifest-path "$crate/Cargo.toml" -- --test-threads=1
+}
+
+run_audit() {
+    local crate="$1"
+
+    if ! command -v cargo-audit >/dev/null 2>&1; then
+        cat >&2 <<'EOF'
+pre-commit: cargo-audit is required for dependency changes but is not installed.
+Install: cargo install cargo-audit --locked
+Bypass once: git commit --no-verify
 EOF
-    exit 1
+        exit 1
+    fi
+
+    echo "pre-commit: cargo audit --deny warnings ($crate)..."
+    (cd "$crate" && cargo audit --deny warnings)
+}
+
+if "$api_changed"; then
+    run_crate_checks parser-api
 fi
 
-echo "pre-commit: cargo audit --deny warnings (parser-api/)..."
-cd "$REPO_ROOT/parser-api"
-cargo audit --deny warnings
+if "$web_changed"; then
+    run_crate_checks parser-web
+fi
+
+if "$api_dependencies_changed"; then
+    run_audit parser-api
+fi
+
+if "$web_dependencies_changed"; then
+    run_audit parser-web
+fi

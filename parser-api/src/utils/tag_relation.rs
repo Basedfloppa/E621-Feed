@@ -297,9 +297,10 @@ impl TagRelationGraph {
                         return None;
                     }
                     if let Some(q) = queryable
-                        && (!q.contains(&a) || !q.contains(&b)) {
-                            return None;
-                        }
+                        && (!q.contains(&a) || !q.contains(&b))
+                    {
+                        return None;
+                    }
                     Some((a, b, c.max(0).min(u32::MAX as i64) as u32))
                 })
                 .collect(),
@@ -396,10 +397,8 @@ static GLOBAL_REBUILDING: AtomicBool = AtomicBool::new(false);
 ///
 /// `LAST_SYSTEM_ACCESS` — updated by background workers (`mark_global_relation_dirty`).
 /// Not consulted for idle-eviction.
-static LAST_USER_ACCESS: LazyLock<Mutex<Instant>> =
-    LazyLock::new(|| Mutex::new(Instant::now()));
-static LAST_SYSTEM_ACCESS: LazyLock<Mutex<Instant>> =
-    LazyLock::new(|| Mutex::new(Instant::now()));
+static LAST_USER_ACCESS: LazyLock<Mutex<Instant>> = LazyLock::new(|| Mutex::new(Instant::now()));
+static LAST_SYSTEM_ACCESS: LazyLock<Mutex<Instant>> = LazyLock::new(|| Mutex::new(Instant::now()));
 
 fn touch_user_access() {
     let mut g = LAST_USER_ACCESS.lock().unwrap_or_else(|p| p.into_inner());
@@ -625,7 +624,11 @@ mod tests {
         let id_b = g.intern(0, "bbb");
         g.insert_pair_by_id(id_b, id_a, 1);
         assert_eq!(g.cooc_by_id(id_a, id_b), 1, "canonical order query");
-        assert_eq!(g.cooc_by_id(id_b, id_a), 1, "reverse order query should match");
+        assert_eq!(
+            g.cooc_by_id(id_b, id_a),
+            1,
+            "reverse order query should match"
+        );
     }
 
     // ── insert_pair_by_id ──────────────────────────────────────────────
@@ -778,8 +781,8 @@ mod tests {
         g.insert_pair_by_id(a, c, 4);
 
         let mut queryable = std::collections::HashSet::new();
-        queryable.insert(a);  // a is in set
-        queryable.insert(b);  // b is in set
+        queryable.insert(a); // a is in set
+        queryable.insert(b); // b is in set
         // c is NOT in set
 
         g.freeze_with_query_set(&queryable, 1);
@@ -791,16 +794,31 @@ mod tests {
 
     #[test]
     fn from_train_posts_builds_graph() {
-        use crate::models::{Files, Stats, Has, Post, Score, Flags, Rating, Relationships, Tags};
+        use crate::models::{Files, Flags, Has, Post, Rating, Relationships, Score, Stats, Tags};
         let post = Post {
-            id: 1, created_at: chrono::Utc::now(), updated_at: chrono::Utc::now(),
+            id: 1,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
             change_seq: 0.0,
             files: Files::default(),
-            uploader_id: 0, uploader_name: None, approver_id: None,
-            stats: Stats { score: Score { up: 1, down: 0, total: 1 }, ..Default::default() },
-            flags: Flags::default(), has: Has::default(),
+            uploader_id: 0,
+            uploader_name: None,
+            approver_id: None,
+            stats: Stats {
+                score: Score {
+                    up: 1,
+                    down: 0,
+                    total: 1,
+                },
+                ..Default::default()
+            },
+            flags: Flags::default(),
+            has: Has::default(),
             relationships: Relationships::default(),
-            pools: vec![], rating: Rating::S, locked_tags: vec![], sources: vec![],
+            pools: vec![],
+            rating: Rating::S,
+            locked_tags: vec![],
+            sources: vec![],
             description: None,
             tags: Tags {
                 artist: vec!["artist_a".into()],
@@ -836,22 +854,43 @@ mod tests {
 
     #[test]
     fn from_train_posts_lowercases_tags() {
-        use crate::models::{Files, Stats, Has, Post, Score, Flags, Rating, Relationships, Tags};
+        use crate::models::{Files, Flags, Has, Post, Rating, Relationships, Score, Stats, Tags};
         let post = Post {
-            id: 1, created_at: chrono::Utc::now(), updated_at: chrono::Utc::now(),
+            id: 1,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
             change_seq: 0.0,
             files: Files::default(),
-            uploader_id: 0, uploader_name: None, approver_id: None,
-            stats: Stats { score: Score { up: 1, down: 0, total: 1 }, ..Default::default() },
-            flags: Flags::default(), has: Has::default(),
+            uploader_id: 0,
+            uploader_name: None,
+            approver_id: None,
+            stats: Stats {
+                score: Score {
+                    up: 1,
+                    down: 0,
+                    total: 1,
+                },
+                ..Default::default()
+            },
+            flags: Flags::default(),
+            has: Has::default(),
             relationships: Relationships::default(),
-            pools: vec![], rating: Rating::S, locked_tags: vec![], sources: vec![],
+            pools: vec![],
+            rating: Rating::S,
+            locked_tags: vec![],
+            sources: vec![],
             description: None,
-            tags: Tags { general: vec!["Fluffy".into()], ..Tags::default() },
+            tags: Tags {
+                general: vec!["Fluffy".into()],
+                ..Tags::default()
+            },
         };
         let g = TagRelationGraph::from_train_posts(&[post]);
         // Tag should be lowercased to "fluffy"
         assert!(g.tag_id(4, "fluffy").is_some(), "tag should be lowercased");
-        assert!(g.tag_id(4, "Fluffy").is_none(), "original case should not be stored");
+        assert!(
+            g.tag_id(4, "Fluffy").is_none(),
+            "original case should not be stored"
+        );
     }
 }

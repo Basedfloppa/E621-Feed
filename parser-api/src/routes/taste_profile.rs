@@ -9,10 +9,11 @@ use rocket_okapi::openapi;
 use e621_account_parser_api::{
     auth::OwnerToken,
     db::{
-        get_account_by_id, get_implications_batch_cached,
-        get_tag_counts, load_tag_relation_caches,
+        get_account_by_id, get_implications_batch_cached, get_tag_counts, load_tag_relation_caches,
     },
-    db_blocking, errors::ApiError, models::*,
+    db_blocking,
+    errors::ApiError,
+    models::*,
     ratelimit::{self},
     utils::taste_themes,
 };
@@ -216,9 +217,7 @@ pub(crate) async fn get_taste_profile(
     Ok(Json(result))
 }
 
-fn get_alias_consequent_batch_inline(
-    tags: &[String],
-) -> Result<HashMap<String, String>, String> {
+fn get_alias_consequent_batch_inline(tags: &[String]) -> Result<HashMap<String, String>, String> {
     use e621_account_parser_api::db::get_alias_consequent_cached;
     let mut result = HashMap::with_capacity(tags.len());
     for tag in tags {

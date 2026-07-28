@@ -3,13 +3,13 @@
 use crate::models::Post;
 use crate::utils::tag_relation::TagId;
 
+use super::Group;
 use super::context::ScoringContext;
 #[allow(unused_imports)]
 use super::util::{
-    blend2, blend3, confidence, ctr_score, discrete_preference_smooth, normalize_tag,
-    one_sided_ratio, sigmoid, wilson_lower_bound, PairAggregator, FEEDBACK_NEUTRAL, WILSON_Z,
+    FEEDBACK_NEUTRAL, PairAggregator, WILSON_Z, blend2, blend3, confidence, ctr_score,
+    discrete_preference_smooth, normalize_tag, one_sided_ratio, sigmoid, wilson_lower_bound,
 };
-use super::Group;
 
 impl<'a> ScoringContext<'a> {
     pub fn tag_similarity(&self, post: &Post) -> f32 {
@@ -58,7 +58,9 @@ impl<'a> ScoringContext<'a> {
                 if self.blacklisted_tags.contains(tlc.as_ref()) {
                     continue;
                 }
-                let idf_w = self.idf.idf_tempered(&tlc, df_floor, idf_max, rsj, lam, alpha);
+                let idf_w = self
+                    .idf
+                    .idf_tempered(&tlc, df_floor, idf_max, rsj, lam, alpha);
                 let pw = g * idf_w;
                 p_norm_sq += pw * pw;
                 post_tag_count += 1;
@@ -124,9 +126,8 @@ impl<'a> ScoringContext<'a> {
             } else {
                 0.5
             };
-            let w_sum = p.quality_w_absolute
-                + p.quality_w_relative_score
-                + p.quality_w_relative_comments;
+            let w_sum =
+                p.quality_w_absolute + p.quality_w_relative_score + p.quality_w_relative_comments;
             if w_sum > 0.0 {
                 score = (score * w_sum + upvote_ratio * p.quality_c) / (w_sum + p.quality_c);
             } else {
@@ -171,12 +172,13 @@ impl<'a> ScoringContext<'a> {
         let total = self.rating_total.max(1);
         let k = self.profile.rating.len().max(3);
         let boost = self.priors.coldstart_smoothing_boost.max(0.0);
-        let alpha = self.priors.discrete_smoothing_alpha
-            * (1.0 + (1.0 - self.personal_confidence) * boost);
+        let alpha =
+            self.priors.discrete_smoothing_alpha * (1.0 + (1.0 - self.personal_confidence) * boost);
 
         // Baseline smoothed rate (legacy behaviour, kept as the conservative
         // anchor for cold/ambiguous profiles).
-        let smoothed = discrete_preference_smooth(total, matched, k, alpha, self.priors.discrete_pref_floor);
+        let smoothed =
+            discrete_preference_smooth(total, matched, k, alpha, self.priors.discrete_pref_floor);
 
         // Confidence-weighted blend with the raw observed rate. When the
         // user has a strong preference for a rating (e.g. 500 S vs 50 Q),
@@ -198,8 +200,8 @@ impl<'a> ScoringContext<'a> {
             .unwrap_or(0);
         let k = self.profile.media.len().max(3);
         let boost = self.priors.coldstart_smoothing_boost.max(0.0);
-        let alpha = self.priors.discrete_smoothing_alpha
-            * (1.0 + (1.0 - self.personal_confidence) * boost);
+        let alpha =
+            self.priors.discrete_smoothing_alpha * (1.0 + (1.0 - self.personal_confidence) * boost);
         discrete_preference_smooth(
             self.media_total,
             matched,
@@ -224,12 +226,36 @@ impl<'a> ScoringContext<'a> {
         let half_life = self.priors.feedback_decay_half_life_days.max(1.0) as f64;
 
         let groups: [(Group, &Vec<String>, f32); 7] = [
-            (Group::Artist, &post.tags.artist, self.group_wts[Group::Artist as usize]),
-            (Group::Character, &post.tags.character, self.group_wts[Group::Character as usize]),
-            (Group::Copyright, &post.tags.copyright, self.group_wts[Group::Copyright as usize]),
-            (Group::Species, &post.tags.species, self.group_wts[Group::Species as usize]),
-            (Group::General, &post.tags.general, self.group_wts[Group::General as usize]),
-            (Group::Lore, &post.tags.lore, self.group_wts[Group::Lore as usize]),
+            (
+                Group::Artist,
+                &post.tags.artist,
+                self.group_wts[Group::Artist as usize],
+            ),
+            (
+                Group::Character,
+                &post.tags.character,
+                self.group_wts[Group::Character as usize],
+            ),
+            (
+                Group::Copyright,
+                &post.tags.copyright,
+                self.group_wts[Group::Copyright as usize],
+            ),
+            (
+                Group::Species,
+                &post.tags.species,
+                self.group_wts[Group::Species as usize],
+            ),
+            (
+                Group::General,
+                &post.tags.general,
+                self.group_wts[Group::General as usize],
+            ),
+            (
+                Group::Lore,
+                &post.tags.lore,
+                self.group_wts[Group::Lore as usize],
+            ),
             (Group::Meta, &post.tags.meta, meta_w),
         ];
 
@@ -261,8 +287,8 @@ impl<'a> ScoringContext<'a> {
                             let elapsed_days =
                                 ((self.priors.now.timestamp() as f64 - secs) / 86_400.0).max(0.0);
                             if elapsed_days > 0.0 {
-                                (-std::f32::consts::LN_2 * elapsed_days as f32
-                                    / half_life as f32).exp()
+                                (-std::f32::consts::LN_2 * elapsed_days as f32 / half_life as f32)
+                                    .exp()
                             } else {
                                 1.0
                             }
@@ -493,13 +519,10 @@ impl<'a> ScoringContext<'a> {
         // Class D v5.3: 2-piece kernel + Class F: 3-piece kernel.
         // Hot piece: posts younger than `recency_split_age_hours`.
         let age_hours = age_days * 24.0;
-        let tau = if !p.recency_tau_hot.is_nan()
-            && age_hours <= p.recency_split_age_hours.max(0.0)
+        let tau = if !p.recency_tau_hot.is_nan() && age_hours <= p.recency_split_age_hours.max(0.0)
         {
             p.recency_tau_hot.max(1e-3)
-        } else if !p.recency_tau_recent.is_nan()
-            && age_days <= p.recency_split_age_days.max(0.0)
-        {
+        } else if !p.recency_tau_recent.is_nan() && age_days <= p.recency_split_age_days.max(0.0) {
             p.recency_tau_recent.max(1e-3)
         } else {
             p.recency_tau_days.max(1e-3)
@@ -541,7 +564,9 @@ impl<'a> ScoringContext<'a> {
     /// to top-K tags by group weight, mirroring Cluster-PMI in tag_relation.
     pub fn exclusivity_fit(&self, post: &Post) -> f32 {
         let p = self.priors;
-        if p.mix_exclusivity <= 0.0 { return 0.0; }
+        if p.mix_exclusivity <= 0.0 {
+            return 0.0;
+        }
         let min_cooc = p.min_exclusivity_cooc.max(1) as f32;
         let scale = p.exclusivity_scale.max(0.01);
         let max_tags = p.exclusivity_max_tags;
@@ -563,12 +588,24 @@ impl<'a> ScoringContext<'a> {
             let g = group as u8;
             let g_idx = group as usize;
             let group_w = self.group_wts[g_idx];
-            if group_w <= 0.0 { continue; }
+            if group_w <= 0.0 {
+                continue;
+            }
 
             for t in tags {
-                if t.is_empty() { continue; }
+                if t.is_empty() {
+                    continue;
+                }
                 let lc = normalize_tag(t);
-                let idf_w = group_w * self.idf.idf_tempered(&lc, p.df_floor, p.idf_max, p.idf_rsj_smoothing, p.idf_lambda, p.idf_alpha);
+                let idf_w = group_w
+                    * self.idf.idf_tempered(
+                        &lc,
+                        p.df_floor,
+                        p.idf_max,
+                        p.idf_rsj_smoothing,
+                        p.idf_lambda,
+                        p.idf_alpha,
+                    );
                 let tid = self.global_relation.tag_id(g, lc.as_ref());
                 if let Some(id) = tid {
                     group_entries[g_idx].push((idf_w, lc.to_string(), g_idx, id));
@@ -595,8 +632,8 @@ impl<'a> ScoringContext<'a> {
         for entries in group_entries.iter() {
             for i in 0..entries.len() {
                 let tid_a = entries[i].3;
-                for j in i + 1..entries.len() {
-                    let tid_b = entries[j].3;
+                for entry_b in entries.iter().skip(i + 1) {
+                    let tid_b = entry_b.3;
                     let cooc = self.global_relation.cooc_by_id(tid_a, tid_b);
                     total_cooc_in += cooc.max(0);
                     pairs_in += 1;
@@ -611,7 +648,9 @@ impl<'a> ScoringContext<'a> {
             for bi in ai + 1..group_entries.len() {
                 let a_entries = &group_entries[ai];
                 let b_entries = &group_entries[bi];
-                if a_entries.is_empty() || b_entries.is_empty() { continue; }
+                if a_entries.is_empty() || b_entries.is_empty() {
+                    continue;
+                }
 
                 for a_tag in a_entries {
                     let tid_a = a_tag.3;
@@ -625,7 +664,9 @@ impl<'a> ScoringContext<'a> {
             }
         }
 
-        if pairs_in + pairs_cross == 0 { return 0.0; }
+        if pairs_in + pairs_cross == 0 {
+            return 0.0;
+        }
 
         // Blend: cross-group pairs get weighted by `exclusivity_cross_group_weight`.
         // The weight acts as a multiplier on cross-group avg-cooc before averaging
@@ -650,7 +691,9 @@ impl<'a> ScoringContext<'a> {
     /// The per-tag novelty scores are averaged across all tags on the post.
     pub fn novelty_fit(&self, post: &Post) -> f32 {
         let p = self.priors;
-        if p.mix_novelty <= 0.0 { return 0.0; }
+        if p.mix_novelty <= 0.0 {
+            return 0.0;
+        }
         let n0 = p.novelty_n0.max(0.5);
 
         let groups: [(Group, &Vec<String>); 7] = [
@@ -669,13 +712,17 @@ impl<'a> ScoringContext<'a> {
         for (group, tags) in groups {
             let g_idx = group as usize;
             let group_w = self.group_wts[g_idx];
-            if group_w <= 0.0 { continue; }
+            if group_w <= 0.0 {
+                continue;
+            }
 
             let user_map = &self.user[g_idx];
             let fb_map = &self.feedback[g_idx];
 
             for t in tags {
-                if t.is_empty() { continue; }
+                if t.is_empty() {
+                    continue;
+                }
                 let tlc = normalize_tag(t);
                 total += 1;
 
@@ -687,18 +734,21 @@ impl<'a> ScoringContext<'a> {
                 // Check feedback impressions if enabled.
                 if p.novelty_use_feedback
                     && let Some(fb) = fb_map.get(tlc.as_ref())
-                        && fb.impressions > 0 {
-                            let seen = confidence(fb.impressions as f32, n0, 1.0);
-                            novel_weight += 1.0 - seen;
-                            continue;
-                        }
+                    && fb.impressions > 0
+                {
+                    let seen = confidence(fb.impressions as f32, n0, 1.0);
+                    novel_weight += 1.0 - seen;
+                    continue;
+                }
 
                 // Tag is completely novel → full weight.
                 novel_weight += 1.0;
             }
         }
 
-        if total == 0 { return 0.0; }
+        if total == 0 {
+            return 0.0;
+        }
         (novel_weight / total as f32).clamp(0.0, 1.0)
     }
 }
@@ -883,10 +933,9 @@ pub fn post_tag_vector(
 mod tests {
     use super::*;
     use crate::models::{
-        AccountMediaStat, AccountPreferenceProfile, AccountQualityProfile,
-        AccountRatingStat, AccountRecencyProfile, AccountTagFeedback,
-        AccountUploaderStat, Files, FileMeta, FileOriginal, FilePreview, FileSample,
-        Flags, Has, Post, Rating, Relationships, Score, Stats, TagCount, Tags,
+        AccountMediaStat, AccountPreferenceProfile, AccountQualityProfile, AccountRatingStat,
+        AccountRecencyProfile, AccountTagFeedback, AccountUploaderStat, FileMeta, Files, Flags,
+        Has, Post, Rating, Relationships, Score, Stats, TagCount, Tags,
     };
     use crate::utils::idf::IdfIndex;
     use crate::utils::scorer::context::ScoringContext;
@@ -1042,9 +1091,18 @@ mod tests {
     fn default_profile() -> AccountPreferenceProfile {
         AccountPreferenceProfile {
             rating: vec![
-                AccountRatingStat { rating: "s".to_string(), count: 500 },
-                AccountRatingStat { rating: "q".to_string(), count: 100 },
-                AccountRatingStat { rating: "e".to_string(), count: 50 },
+                AccountRatingStat {
+                    rating: "s".to_string(),
+                    count: 500,
+                },
+                AccountRatingStat {
+                    rating: "q".to_string(),
+                    count: 100,
+                },
+                AccountRatingStat {
+                    rating: "e".to_string(),
+                    count: 50,
+                },
             ],
             media: vec![
                 AccountMediaStat {
@@ -1127,12 +1185,30 @@ mod tests {
 
     fn make_post(tags: Tags, score_total: i64, fav_count: i64, rating: Rating) -> Post {
         Post {
-            id: 1, created_at: Utc::now(), updated_at: Utc::now(), change_seq: 0.0,
+            id: 1,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            change_seq: 0.0,
             files: Files::default(),
-            uploader_id: 0, uploader_name: None, approver_id: None,
-            stats: Stats { score: Score { up: score_total.max(0), down: 0, total: score_total }, fav_count, ..Default::default() },
-            flags: Flags::default(), has: Has::default(), relationships: Relationships::default(),
-            pools: vec![], rating, locked_tags: vec![], sources: vec![],
+            uploader_id: 0,
+            uploader_name: None,
+            approver_id: None,
+            stats: Stats {
+                score: Score {
+                    up: score_total.max(0),
+                    down: 0,
+                    total: score_total,
+                },
+                fav_count,
+                ..Default::default()
+            },
+            flags: Flags::default(),
+            has: Has::default(),
+            relationships: Relationships::default(),
+            pools: vec![],
+            rating,
+            locked_tags: vec![],
+            sources: vec![],
             description: None,
             tags,
         }
@@ -1162,14 +1238,8 @@ mod tests {
             let user_graph = build_user_graph();
             let profile = default_profile();
             let counts = default_tag_counts();
-            let mut $ctx = ScoringContext::new(
-                &counts,
-                &priors,
-                &idf,
-                &profile,
-                &global_graph,
-                &user_graph,
-            );
+            let $ctx =
+                ScoringContext::new(&counts, &priors, &idf, &profile, &global_graph, &user_graph);
         };
         ($ctx:ident, $priors:expr) => {
             let priors = $priors;
@@ -1178,14 +1248,8 @@ mod tests {
             let user_graph = build_user_graph();
             let profile = default_profile();
             let counts = default_tag_counts();
-            let mut $ctx = ScoringContext::new(
-                &counts,
-                &priors,
-                &idf,
-                &profile,
-                &global_graph,
-                &user_graph,
-            );
+            let mut $ctx =
+                ScoringContext::new(&counts, &priors, &idf, &profile, &global_graph, &user_graph);
         };
     }
 
@@ -1246,7 +1310,14 @@ mod tests {
         let user_graph = build_user_graph();
         let profile = default_profile();
         let empty_counts = vec![];
-        let ctx = ScoringContext::new(&empty_counts, &priors, &idf, &profile, &global_graph, &user_graph);
+        let ctx = ScoringContext::new(
+            &empty_counts,
+            &priors,
+            &idf,
+            &profile,
+            &global_graph,
+            &user_graph,
+        );
         let mut tags = make_empty_tags();
         tags.artist.push("skeb".to_string());
         let post = make_post(tags, 0, 0, Rating::S);
@@ -1267,8 +1338,22 @@ mod tests {
         let user_graph = build_user_graph();
         let profile = default_profile();
         let counts = default_tag_counts();
-        let ctx_cos = ScoringContext::new(&counts, &priors_cos, &idf, &profile, &global_graph, &user_graph);
-        let ctx_jac = ScoringContext::new(&counts, &priors_jac, &idf, &profile, &global_graph, &user_graph);
+        let ctx_cos = ScoringContext::new(
+            &counts,
+            &priors_cos,
+            &idf,
+            &profile,
+            &global_graph,
+            &user_graph,
+        );
+        let ctx_jac = ScoringContext::new(
+            &counts,
+            &priors_jac,
+            &idf,
+            &profile,
+            &global_graph,
+            &user_graph,
+        );
 
         let mut tags = make_empty_tags();
         tags.artist.push("skeb".to_string());
@@ -1312,7 +1397,14 @@ mod tests {
         let ctx = ScoringContext::new(&counts, &priors, &idf, &profile, &global_graph, &user_graph);
 
         let post = Post {
-            stats: Stats { score: Score { up: 40, down: 10, total: 50 }, ..Default::default() },
+            stats: Stats {
+                score: Score {
+                    up: 40,
+                    down: 10,
+                    total: 50,
+                },
+                ..Default::default()
+            },
             ..make_post(make_empty_tags(), 0, 0, Rating::S)
         };
         let q = ctx.quality_fit(&post);
@@ -1353,7 +1445,10 @@ mod tests {
         let post = make_post(make_empty_tags(), 0, 25, Rating::S);
         let pop = ctx.popularity_fit(&post);
         // one_sided_ratio(25, 50, 0.5) = 0.7071
-        assert!(close(pop, std::f32::consts::FRAC_1_SQRT_2), "expected ~0.7071 got {pop}");
+        assert!(
+            close(pop, std::f32::consts::FRAC_1_SQRT_2),
+            "expected ~0.7071 got {pop}"
+        );
     }
 
     #[test]
@@ -1369,7 +1464,13 @@ mod tests {
         let ctx = ScoringContext::new(&counts, &priors, &idf, &profile, &global_graph, &user_graph);
 
         let post = Post {
-            files: Files { meta: FileMeta { duration: Some(60.0), ..Default::default() }, ..Default::default() },
+            files: Files {
+                meta: FileMeta {
+                    duration: Some(60.0),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
             ..make_post(make_empty_tags(), 0, 25, Rating::S)
         };
         let pop = ctx.popularity_fit(&post);
@@ -1404,7 +1505,11 @@ mod tests {
         let post = make_post(make_empty_tags(), 0, 0, Rating::Q);
         let r = ctx.rating_fit(&post);
         // profile has Q count = 100 / total 650 → raw = 0.1538
-        assert!(close(r, 100.0 / 650.0), "expected {} got {r}", 100.0 / 650.0);
+        assert!(
+            close(r, 100.0 / 650.0),
+            "expected {} got {r}",
+            100.0 / 650.0
+        );
     }
 
     // ==================================================================
@@ -1432,11 +1537,17 @@ mod tests {
         let ctx = ScoringContext::new(&counts, &priors, &idf, &profile, &global_graph, &user_graph);
 
         let post = Post {
-            files: Files { meta: FileMeta { ext: Some("swf".to_string()), ..Default::default() }, ..Default::default() },
+            files: Files {
+                meta: FileMeta {
+                    ext: Some("swf".to_string()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
             ..make_post(make_empty_tags(), 0, 0, Rating::S)
         };
         let m = ctx.media_fit(&post);
-        assert!(m >= 0.0 && m <= 1.0, "media fit out of range: {m}");
+        assert!((0.0..=1.0).contains(&m), "media fit out of range: {m}");
     }
 
     // ==================================================================
@@ -1483,7 +1594,10 @@ mod tests {
         tags.artist.push("unknown_artist".to_string());
         let post = make_post(tags, 0, 0, Rating::S);
         let (score, veto) = ctx.interaction_fit(&post);
-        assert!(close(score, FEEDBACK_NEUTRAL), "expected neutral, got {score}");
+        assert!(
+            close(score, FEEDBACK_NEUTRAL),
+            "expected neutral, got {score}"
+        );
         assert!(!veto, "expected no veto");
     }
 
@@ -1539,7 +1653,7 @@ mod tests {
 
         // Build a profile with feedback for "skeb" that's 180 days old.
         // This replaces the old last_refreshed_at approach with per-tag decay.
-        let stale_secs = (Utc::now() - ChronoDuration::days(180)).timestamp() as f64;
+        let _stale_secs = (Utc::now() - ChronoDuration::days(180)).timestamp() as f64;
         profile.feedback.push(AccountTagFeedback {
             tag_name: "skeb".to_string(),
             group_type: "artist".to_string(),
@@ -1556,7 +1670,10 @@ mod tests {
         let (score, _veto) = ctx.interaction_fit(&post);
         // Per-tag staleness = exp(-ln2 * 180/90) = 0.25 → score should be
         // noticeably below neutral (FEEDBACK_NEUTRAL ≈ 0.5) but > 0.
-        assert!(score > 0.0 && score < 0.85, "expected decayed score < 0.85 got {score}");
+        assert!(
+            score > 0.0 && score < 0.85,
+            "expected decayed score < 0.85 got {score}"
+        );
     }
 
     // ==================================================================
@@ -1661,7 +1778,7 @@ mod tests {
         tags.character.push("cat".to_string());
         let post = make_post(tags, 50, 10, Rating::S);
         let (score, breakdown) = ctx.score(&post);
-        assert!(score >= 0.0 && score <= 1.0, "score out of range: {score}");
+        assert!((0.0..=1.0).contains(&score), "score out of range: {score}");
         assert!(breakdown.tag_similarity >= 0.0 && breakdown.tag_similarity <= 1.0);
         assert!(breakdown.quality_fit >= 0.0 && breakdown.quality_fit <= 1.0);
         assert!(breakdown.recency_fit >= 0.0 && breakdown.recency_fit <= 1.0);
@@ -1687,16 +1804,36 @@ mod tests {
         let user_graph = build_user_graph();
         let profile = default_profile();
         let counts = default_tag_counts();
-        let ctx_no = ScoringContext::new(&counts, &priors_no, &idf, &profile, &global_graph, &user_graph);
-        let ctx_yes = ScoringContext::new(&counts, &priors_yes, &idf, &profile, &global_graph, &user_graph);
+        let ctx_no = ScoringContext::new(
+            &counts,
+            &priors_no,
+            &idf,
+            &profile,
+            &global_graph,
+            &user_graph,
+        );
+        let ctx_yes = ScoringContext::new(
+            &counts,
+            &priors_yes,
+            &idf,
+            &profile,
+            &global_graph,
+            &user_graph,
+        );
 
         let post = make_post(make_empty_tags(), 50, 0, Rating::S);
         let (score_no, _) = ctx_no.score(&post);
         let (score_yes, _) = ctx_yes.score(&post);
         if score_no > 0.5 {
-            assert!(score_yes >= score_no, "temperature should push high scores higher: {score_no} -> {score_yes}");
+            assert!(
+                score_yes >= score_no,
+                "temperature should push high scores higher: {score_no} -> {score_yes}"
+            );
         } else {
-            assert!(score_yes <= score_no, "temperature should push low scores lower: {score_no} -> {score_yes}");
+            assert!(
+                score_yes <= score_no,
+                "temperature should push low scores lower: {score_no} -> {score_yes}"
+            );
         }
     }
 
@@ -1730,7 +1867,10 @@ mod tests {
         let (score, _) = ctx.score(&post);
         // quality_fit = sigmoid(ln1p(100) + ln1p(10) - 3) = sigmoid(4.013) ≈ 0.982
         // With veto: 0.982 * (1 - 0.5) ≈ 0.491
-        assert!(close(score, 0.4911), "expected ~0.4911 with veto, got {score}");
+        assert!(
+            close(score, 0.4911),
+            "expected ~0.4911 with veto, got {score}"
+        );
     }
 
     // ==================================================================
@@ -1778,9 +1918,9 @@ mod tests {
         let mut profile = default_profile();
         profile.uploaders = vec![AccountUploaderStat {
             uploader_id: 42,
-            post_count: 100,       // well above n0=5 → high confidence
-            avg_score: 200.0,      // vs profile avg 100 → one_sided_ratio(200,100,0.5)=1.0
-            avg_fav: 80.0,         // vs profile avg 50  → one_sided_ratio(80,50,0.5)=1.0
+            post_count: 100,  // well above n0=5 → high confidence
+            avg_score: 200.0, // vs profile avg 100 → one_sided_ratio(200,100,0.5)=1.0
+            avg_fav: 80.0,    // vs profile avg 50  → one_sided_ratio(80,50,0.5)=1.0
         }];
         let mut priors = default_priors();
         priors.uploader_n0 = 5.0;
@@ -1817,7 +1957,7 @@ mod tests {
         let mut profile = default_profile();
         profile.uploaders = vec![AccountUploaderStat {
             uploader_id: 7,
-            post_count: 1,         // below n0=5 → low confidence
+            post_count: 1, // below n0=5 → low confidence
             avg_score: 200.0,
             avg_fav: 80.0,
         }];
@@ -1849,9 +1989,9 @@ mod tests {
         let mut profile = default_profile();
         profile.uploaders = vec![AccountUploaderStat {
             uploader_id: 7,
-            post_count: 100,       // high confidence
-            avg_score: 10.0,       // vs profile avg 100 → one_sided_ratio(10,100,0.5)=0.316
-            avg_fav: 5.0,          // vs profile avg 50  → one_sided_ratio(5,50,0.5)=0.316
+            post_count: 100, // high confidence
+            avg_score: 10.0, // vs profile avg 100 → one_sided_ratio(10,100,0.5)=0.316
+            avg_fav: 5.0,    // vs profile avg 50  → one_sided_ratio(5,50,0.5)=0.316
         }];
         let mut priors = default_priors();
         priors.uploader_n0 = 5.0;
@@ -1906,7 +2046,7 @@ mod tests {
     #[test]
     fn exclusivity_fit_rare_combination_scores_high() {
         let mut priors = default_priors();
-        priors.mix_exclusivity = 1.0;   // enable channel
+        priors.mix_exclusivity = 1.0; // enable channel
         priors.exclusivity_scale = 0.5;
         priors.min_exclusivity_cooc = 10;
         priors.exclusivity_cross_group_weight = 1.0; // ensure non-zero pairs
@@ -1955,8 +2095,22 @@ mod tests {
 
         let counts = default_tag_counts();
 
-        let ctx_default = ScoringContext::new(&counts, &priors_default, &idf, &profile, &global_graph, &user_graph);
-        let ctx_high = ScoringContext::new(&counts, &priors_high, &idf, &profile, &global_graph, &user_graph);
+        let ctx_default = ScoringContext::new(
+            &counts,
+            &priors_default,
+            &idf,
+            &profile,
+            &global_graph,
+            &user_graph,
+        );
+        let ctx_high = ScoringContext::new(
+            &counts,
+            &priors_high,
+            &idf,
+            &profile,
+            &global_graph,
+            &user_graph,
+        );
 
         // artist(skeb), character(cat, dog), general(furry, commission),
         // copyright(original_character) — 4 groups, multiple tags per group.
@@ -2010,8 +2164,8 @@ mod tests {
     fn exclusivity_fit_respects_zero_group_weights() {
         let mut priors = default_priors();
         priors.mix_exclusivity = 1.0;
-        priors.group_w_artist = 2.40;   // enabled
-        priors.group_w_character = 0.0;  // disabled
+        priors.group_w_artist = 2.40; // enabled
+        priors.group_w_character = 0.0; // disabled
         priors.group_w_copyright = 1.45; // enabled
         priors.group_w_species = 1.30;
         priors.group_w_general = 0.70;
@@ -2029,7 +2183,7 @@ mod tests {
         tags.artist.push("skeb".to_string());
         tags.character.push("cat".to_string()); // group weight = 0 → excluded
         tags.copyright.push("original_character".to_string());
-        tags.general.push("furry".to_string());  // general also enabled
+        tags.general.push("furry".to_string()); // general also enabled
         let post = make_post(tags, 0, 0, Rating::S);
         let e = ctx.exclusivity_fit(&post);
         // Only artist + copyright + general contribute; character is excluded.
@@ -2059,15 +2213,18 @@ mod tests {
 
         // Post with more than 2 general tags — only top-2 by idf_weight count.
         let mut tags = make_empty_tags();
-        tags.general.push("furry".to_string());    // high df=8000 → low idf
+        tags.general.push("furry".to_string()); // high df=8000 → low idf
         tags.general.push("commission".to_string()); // df=1500 → higher idf
         tags.general.push("detailed_background".to_string()); // df=500 → highest idf
-        tags.general.push("skeb".to_string());       // df=1000
-        tags.general.push("cat".to_string());        // df=5000
+        tags.general.push("skeb".to_string()); // df=1000
+        tags.general.push("cat".to_string()); // df=5000
         let post = make_post(tags, 0, 0, Rating::S);
         let e = ctx.exclusivity_fit(&post);
         // Should produce a valid score without panicking.
-        assert!(e >= 0.0 && e <= 1.0, "score in range with truncation: {e}");
+        assert!(
+            (0.0..=1.0).contains(&e),
+            "score in range with truncation: {e}"
+        );
     }
 
     /// Regression test: a post with exactly 1 tag per group produces
@@ -2100,4 +2257,3 @@ mod tests {
         assert!(e > 0.0, "rare pair should score positive: {e}");
     }
 }
-

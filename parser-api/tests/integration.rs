@@ -11,20 +11,36 @@ use std::collections::HashSet;
 
 use e621_account_parser_api::db;
 use e621_account_parser_api::models::{
-    Files, FileMeta, FileOriginal,
-    Flags, Has, Post, Rating, Relationships, Score, Stats, Tags,
+    FileMeta, FileOriginal, Files, Flags, Has, Post, Rating, Relationships, Score, Stats, Tags,
 };
 
 /// Helper: build a minimal Post for testing.
 fn make_post(id: i64, tags: Tags, uploader_id: i64) -> Post {
     Post {
-        id, created_at: chrono::Utc::now(), updated_at: chrono::Utc::now(),
+        id,
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
         change_seq: 0.0,
         files: Files::default(),
-        uploader_id, uploader_name: None, approver_id: None,
-        stats: Stats { score: Score { up: 10, down: 0, total: 10 }, fav_count: 5, ..Default::default() },
-        flags: Flags::default(), has: Has::default(), relationships: Relationships::default(),
-        pools: vec![], rating: Rating::S, locked_tags: vec![], sources: vec![],
+        uploader_id,
+        uploader_name: None,
+        approver_id: None,
+        stats: Stats {
+            score: Score {
+                up: 10,
+                down: 0,
+                total: 10,
+            },
+            fav_count: 5,
+            ..Default::default()
+        },
+        flags: Flags::default(),
+        has: Has::default(),
+        relationships: Relationships::default(),
+        pools: vec![],
+        rating: Rating::S,
+        locked_tags: vec![],
+        sources: vec![],
         description: None,
         tags,
     }
@@ -514,7 +530,7 @@ fn drop_account_cooccurrence_batched_loops_until_empty() {
     use std::cell::Cell;
     let calls = Cell::new(0usize);
     let total_seen = Cell::new(0usize);
-    let deleted = db::drop_account_cooccurrence_batched(account_id, 4, |batch, total| {
+    let deleted = db::drop_account_cooccurrence_batched(account_id, 4, |_batch, total| {
         calls.set(calls.get() + 1);
         total_seen.set(total);
     })
@@ -950,6 +966,10 @@ fn delete_device_link_three_phase_cascade() {
 
 /// Build a post with the given parameters — reduced copy to avoid importing
 /// the test crate's helper from the pipeline test file.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "The integration-test fixture deliberately exposes each post field used by a profile assertion."
+)]
 fn profile_post(
     id: i64,
     rating: &str,
@@ -967,21 +987,51 @@ fn profile_post(
         _ => Rating::S,
     };
     Post {
-        id, created_at: chrono::Utc::now(), updated_at: chrono::Utc::now(),
+        id,
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
         change_seq: 0.0,
         files: Files {
-            meta: FileMeta { ext: Some(ext.into()), size: 1234, md5: Some("dummy".into()), duration, ..Default::default() },
-            original: FileOriginal { width: 100, height: 100, url: Some("https://example.com/img".into()) },
+            meta: FileMeta {
+                ext: Some(ext.into()),
+                size: 1234,
+                md5: Some("dummy".into()),
+                duration,
+                ..Default::default()
+            },
+            original: FileOriginal {
+                width: 100,
+                height: 100,
+                url: Some("https://example.com/img".into()),
+            },
             ..Default::default()
         },
-        uploader_id, uploader_name: None, approver_id: None,
-        stats: Stats { score: Score { up: score_total.max(0), down: 0, total: score_total }, fav_count, comment_count, ..Default::default() },
+        uploader_id,
+        uploader_name: None,
+        approver_id: None,
+        stats: Stats {
+            score: Score {
+                up: score_total.max(0),
+                down: 0,
+                total: score_total,
+            },
+            fav_count,
+            comment_count,
+            ..Default::default()
+        },
         flags: Flags::default(),
         has: Has::default(),
         relationships: Relationships::default(),
-        pools: vec![], rating: r, locked_tags: vec![], sources: vec![],
+        pools: vec![],
+        rating: r,
+        locked_tags: vec![],
+        sources: vec![],
         description: None,
-        tags: Tags { general: vec!["tag".into()], artist: vec!["art".into()], ..Tags::default() },
+        tags: Tags {
+            general: vec!["tag".into()],
+            artist: vec!["art".into()],
+            ..Tags::default()
+        },
     }
 }
 
@@ -1029,18 +1079,41 @@ fn profile_media_profile() {
         profile_post(200015, "s", "mp4", None, 1, 0, 0, 1), // video
         // Post with duration > 0 but no file_ext (should be video)
         e621_account_parser_api::models::Post {
-            id: 200016, created_at: chrono::Utc::now(), updated_at: chrono::Utc::now(),
+            id: 200016,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
             change_seq: 0.0,
-            files: Files { meta: FileMeta { duration: Some(10.0), ..Default::default() }, ..Default::default() },
-            uploader_id: 1, uploader_name: None, approver_id: None,
-            stats: Stats { score: Score { up: 1, down: 0, total: 1 }, ..Default::default() },
+            files: Files {
+                meta: FileMeta {
+                    duration: Some(10.0),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            uploader_id: 1,
+            uploader_name: None,
+            approver_id: None,
+            stats: Stats {
+                score: Score {
+                    up: 1,
+                    down: 0,
+                    total: 1,
+                },
+                ..Default::default()
+            },
             flags: e621_account_parser_api::models::Flags::default(),
             has: Has::default(),
             relationships: Relationships::default(),
-            pools: vec![], rating: e621_account_parser_api::models::Rating::S,
-            locked_tags: vec![], sources: vec![],
+            pools: vec![],
+            rating: e621_account_parser_api::models::Rating::S,
+            locked_tags: vec![],
+            sources: vec![],
             description: None,
-            tags: Tags { general: vec!["tag".into()], artist: vec!["art".into()], ..Tags::default() },
+            tags: Tags {
+                general: vec!["tag".into()],
+                artist: vec!["art".into()],
+                ..Tags::default()
+            },
         },
     ];
     db::save_posts(&posts, acc.id).unwrap();
@@ -1113,18 +1186,35 @@ fn profile_recency_profile() {
     let now = Utc::now();
     let make_post = |id: i64, days_ago: f64| -> e621_account_parser_api::models::Post {
         e621_account_parser_api::models::Post {
-            id, created_at: now - Duration::seconds((days_ago * 86_400.0) as i64),
-            updated_at: now, change_seq: 0.0,
+            id,
+            created_at: now - Duration::seconds((days_ago * 86_400.0) as i64),
+            updated_at: now,
+            change_seq: 0.0,
             files: Files::default(),
-            uploader_id: 1, uploader_name: None, approver_id: None,
-            stats: Stats { score: Score { up: 1, down: 0, total: 1 }, ..Default::default() },
+            uploader_id: 1,
+            uploader_name: None,
+            approver_id: None,
+            stats: Stats {
+                score: Score {
+                    up: 1,
+                    down: 0,
+                    total: 1,
+                },
+                ..Default::default()
+            },
             flags: e621_account_parser_api::models::Flags::default(),
             has: Has::default(),
             relationships: Relationships::default(),
-            pools: vec![], rating: e621_account_parser_api::models::Rating::S,
-            locked_tags: vec![], sources: vec![],
+            pools: vec![],
+            rating: e621_account_parser_api::models::Rating::S,
+            locked_tags: vec![],
+            sources: vec![],
             description: None,
-            tags: Tags { general: vec!["tag".into()], artist: vec!["art".into()], ..Tags::default() },
+            tags: Tags {
+                general: vec!["tag".into()],
+                artist: vec!["art".into()],
+                ..Tags::default()
+            },
         }
     };
 

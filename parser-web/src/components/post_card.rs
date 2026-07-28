@@ -77,10 +77,9 @@ pub fn post_card(props: &PostCardProps) -> Html {
             Some("webm") | Some("mp4") | Some("WEBM") | Some("MP4")
         ) || post.files.meta.duration.unwrap_or(0.0) > 0.0;
         use_effect_with(post.id, move |_| {
-            if is_video
-                && let Some(el) = video_ref.cast::<web_sys::HtmlVideoElement>() {
-                    el.set_muted(true);
-                }
+            if is_video && let Some(el) = video_ref.cast::<web_sys::HtmlVideoElement>() {
+                el.set_muted(true);
+            }
             || ()
         });
     }
@@ -203,64 +202,64 @@ pub fn post_card(props: &PostCardProps) -> Html {
         use_effect_with(post.id, move |_| {
             let mut registration: Option<(Element, u64)> = None;
 
-            if !*impression_logged
-                && let Some(el) = root_ref.cast::<Element>() {
-                    let is_visible = std::rc::Rc::new(std::cell::Cell::new(false));
-                    let is_scheduled = std::rc::Rc::new(std::cell::Cell::new(false));
+            if !*impression_logged && let Some(el) = root_ref.cast::<Element>() {
+                let is_visible = std::rc::Rc::new(std::cell::Cell::new(false));
+                let is_scheduled = std::rc::Rc::new(std::cell::Cell::new(false));
 
-                    let on_entry: shared_observer::CardCallback = {
-                        let is_visible = is_visible.clone();
-                        let is_scheduled = is_scheduled.clone();
-                        let impression_logged = impression_logged.clone();
-                        let backend_url = backend_url.clone();
-                        let session_id = session_id.clone();
+                let on_entry: shared_observer::CardCallback = {
+                    let is_visible = is_visible.clone();
+                    let is_scheduled = is_scheduled.clone();
+                    let impression_logged = impression_logged.clone();
+                    let backend_url = backend_url.clone();
+                    let session_id = session_id.clone();
 
-                        Box::new(move |entry| {
-                            if entry.intersection_ratio() >= 0.5 {
-                                is_visible.set(true);
-                                if !is_scheduled.get() && !*impression_logged {
-                                    is_scheduled.set(true);
+                    Box::new(move |entry| {
+                        if entry.intersection_ratio() >= 0.5 {
+                            is_visible.set(true);
+                            if !is_scheduled.get() && !*impression_logged {
+                                is_scheduled.set(true);
 
-                                    let is_visible_timeout = is_visible.clone();
-                                    let is_scheduled_timeout = is_scheduled.clone();
-                                    let impression_logged = impression_logged.clone();
-                                    let backend_url = backend_url.clone();
-                                    let session_id = session_id.clone();
+                                let is_visible_timeout = is_visible.clone();
+                                let is_scheduled_timeout = is_scheduled.clone();
+                                let impression_logged = impression_logged.clone();
+                                let backend_url = backend_url.clone();
+                                let session_id = session_id.clone();
 
-                                    let timeout_cb = Closure::once_into_js(move || {
-                                        is_scheduled_timeout.set(false);
-                                        if is_visible_timeout.get() && !*impression_logged {
-                                            impression_logged.set(true);
-                                            send_interaction(
-                                                backend_url,
-                                                FeedInteractionRequest {
-                                                    account_id,
-                                                    post_id,
-                                                    event_type:
-                                                        FeedInteractionType::QualifiedImpression,
-                                                    position,
-                                                    session_id,
-                                                },
-                                            );
-                                        }
-                                    });
+                                let timeout_cb = Closure::once_into_js(move || {
+                                    is_scheduled_timeout.set(false);
+                                    if is_visible_timeout.get() && !*impression_logged {
+                                        impression_logged.set(true);
+                                        send_interaction(
+                                            backend_url,
+                                            FeedInteractionRequest {
+                                                account_id,
+                                                post_id,
+                                                event_type:
+                                                    FeedInteractionType::QualifiedImpression,
+                                                position,
+                                                session_id,
+                                            },
+                                        );
+                                    }
+                                });
 
-                                    if let Some(win) = window() {
-                                        let _ = win.set_timeout_with_callback_and_timeout_and_arguments_0(
+                                if let Some(win) = window() {
+                                    let _ = win
+                                        .set_timeout_with_callback_and_timeout_and_arguments_0(
                                             timeout_cb.as_ref().unchecked_ref(),
                                             800,
                                         );
-                                    }
                                 }
-                            } else {
-                                is_visible.set(false);
                             }
-                        })
-                    };
+                        } else {
+                            is_visible.set(false);
+                        }
+                    })
+                };
 
-                    let id = shared_observer::observe(&el, on_entry);
-                    registration = Some((el, id));
-                }
+                let id = shared_observer::observe(&el, on_entry);
+                registration = Some((el, id));
+            }
 
             move || {
                 if let Some((el, id)) = registration {
@@ -307,7 +306,10 @@ pub fn post_card(props: &PostCardProps) -> Html {
     let (rating_label, rating_classes) = rating_badge_classes(&post.rating);
 
     let score_summary = post.stats.score.total;
-    let score_detail = AttrValue::from(format!("↑ {}   ↓ {}", post.stats.score.up, post.stats.score.down));
+    let score_detail = AttrValue::from(format!(
+        "↑ {}   ↓ {}",
+        post.stats.score.up, post.stats.score.down
+    ));
 
     let on_hide = {
         let backend_url = props.backend_url.to_string();
@@ -407,17 +409,61 @@ pub fn post_card(props: &PostCardProps) -> Html {
         let mut parts: Vec<Html> = Vec::new();
         if let Some(bd) = props.breakdown.as_ref().filter(|_| props.show_breakdown) {
             let chs: [(&str, &str, f32); 11] = [
-                ("Tag",      "Cosine similarity between this post's tags and your favourites (TF-IDF weighted).", bd.tag_similarity),
-                ("Quality",  "How this post's score, favourites and comments compare to the typical post you like.", bd.quality_fit),
-                ("Recent",   "How close this post's age is to the ages you usually engage with.", bd.recency_fit),
-                ("Rating",   "Match between this post's rating (S/Q/E) and the rating mix of your favourites.", bd.rating_fit),
-                ("Media",    "Match between this post's media type (image / gif / video) and your usual preference.", bd.media_fit),
-                ("Popular",  "How this post's favourite count and duration compare to the norm in your profile.", bd.popularity_fit),
-                ("Interact", "Signal from your recent feed behaviour on this post's tags — impressions, opens, and hides.", bd.interaction_fit),
-                ("Relation", "How coherently this post's tags relate to each other — globally (PMI lift) and inside your own favourites (pair co-occurrence).", bd.tag_relation_fit),
-                ("Uploader", "How this post's uploader compares to the uploaders you tend to favourite.", bd.uploader_fit),
-                ("Exclusive", "How rare or unusual this post's tag combination is within your profile — favours distinctive picks.", bd.exclusivity_fit),
-                ("Novel",    "How fresh or unfamiliar this post's tags are compared to what you've seen recently.", bd.novelty_fit),
+                (
+                    "Tag",
+                    "Cosine similarity between this post's tags and your favourites (TF-IDF weighted).",
+                    bd.tag_similarity,
+                ),
+                (
+                    "Quality",
+                    "How this post's score, favourites and comments compare to the typical post you like.",
+                    bd.quality_fit,
+                ),
+                (
+                    "Recent",
+                    "How close this post's age is to the ages you usually engage with.",
+                    bd.recency_fit,
+                ),
+                (
+                    "Rating",
+                    "Match between this post's rating (S/Q/E) and the rating mix of your favourites.",
+                    bd.rating_fit,
+                ),
+                (
+                    "Media",
+                    "Match between this post's media type (image / gif / video) and your usual preference.",
+                    bd.media_fit,
+                ),
+                (
+                    "Popular",
+                    "How this post's favourite count and duration compare to the norm in your profile.",
+                    bd.popularity_fit,
+                ),
+                (
+                    "Interact",
+                    "Signal from your recent feed behaviour on this post's tags — impressions, opens, and hides.",
+                    bd.interaction_fit,
+                ),
+                (
+                    "Relation",
+                    "How coherently this post's tags relate to each other — globally (PMI lift) and inside your own favourites (pair co-occurrence).",
+                    bd.tag_relation_fit,
+                ),
+                (
+                    "Uploader",
+                    "How this post's uploader compares to the uploaders you tend to favourite.",
+                    bd.uploader_fit,
+                ),
+                (
+                    "Exclusive",
+                    "How rare or unusual this post's tag combination is within your profile — favours distinctive picks.",
+                    bd.exclusivity_fit,
+                ),
+                (
+                    "Novel",
+                    "How fresh or unfamiliar this post's tags are compared to what you've seen recently.",
+                    bd.novelty_fit,
+                ),
             ];
             parts.push(html! {
                 <div class="p-2 flex flex-wrap justify-center gap-1" aria-label="Score breakdown">
@@ -440,7 +486,11 @@ pub fn post_card(props: &PostCardProps) -> Html {
                 </div>
             });
         }
-        if parts.is_empty() { None } else { Some(parts.into_iter().collect()) }
+        if parts.is_empty() {
+            None
+        } else {
+            Some(parts.into_iter().collect())
+        }
     };
 
     let inner: Html = html! {
@@ -643,13 +693,19 @@ fn is_supported_image(url: &str) -> bool {
 }
 
 fn preview_url(post: &Post) -> Option<&str> {
-    post.files.preview.jpg.as_deref()
+    post.files
+        .preview
+        .jpg
+        .as_deref()
         .or(post.files.preview.webp.as_deref())
 }
 
 fn sample_url(post: &Post) -> Option<&str> {
     if post.has.sample {
-        post.files.sample.jpg.as_deref()
+        post.files
+            .sample
+            .jpg
+            .as_deref()
             .or(post.files.sample.webp.as_deref())
     } else {
         None
@@ -658,17 +714,20 @@ fn sample_url(post: &Post) -> Option<&str> {
 
 fn fallback_image_url(post: &Post) -> String {
     if let Some(url) = preview_url(post)
-        && is_supported_image(url) {
-            return url.to_owned();
-        }
+        && is_supported_image(url)
+    {
+        return url.to_owned();
+    }
     if let Some(url) = sample_url(post)
-        && is_supported_image(url) {
-            return url.to_owned();
-        }
+        && is_supported_image(url)
+    {
+        return url.to_owned();
+    }
     if let Some(url) = post.files.original.url.as_deref()
-        && is_supported_image(url) {
-            return url.to_owned();
-        }
+        && is_supported_image(url)
+    {
+        return url.to_owned();
+    }
     String::new()
 }
 
@@ -676,17 +735,20 @@ fn preferred_image_url(post: &Post, required_width: i64) -> Option<AttrValue> {
     let mut candidates: Vec<(AttrValue, i64)> = Vec::new();
 
     if let Some(url) = preview_url(post)
-        && is_supported_image(url) {
-            candidates.push((AttrValue::from(url.to_owned()), post.files.preview.width));
-        }
+        && is_supported_image(url)
+    {
+        candidates.push((AttrValue::from(url.to_owned()), post.files.preview.width));
+    }
     if let Some(url) = sample_url(post)
-        && is_supported_image(url) {
-            candidates.push((AttrValue::from(url.to_owned()), post.files.sample.width));
-        }
+        && is_supported_image(url)
+    {
+        candidates.push((AttrValue::from(url.to_owned()), post.files.sample.width));
+    }
     if let Some(url) = post.files.original.url.as_deref()
-        && is_supported_image(url) {
-            candidates.push((AttrValue::from(url.to_owned()), post.files.original.width));
-        }
+        && is_supported_image(url)
+    {
+        candidates.push((AttrValue::from(url.to_owned()), post.files.original.width));
+    }
 
     candidates.sort_by_key(|&(_, w)| w);
     if let Some((u, _)) = candidates.iter().find(|&&(_, w)| w >= required_width) {

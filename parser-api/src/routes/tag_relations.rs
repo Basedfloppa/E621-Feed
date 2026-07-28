@@ -6,7 +6,6 @@
 //! `tag_aliases` / `tag_implications` tables, which are synced from e621
 //! by the background `tag_relation_import` worker.
 
-
 use std::collections::{HashMap, HashSet};
 
 use rocket::serde::json::Json;
@@ -19,9 +18,8 @@ use e621_account_parser_api::{
     },
     errors::ApiError,
     models::{
-        TagImplicationsBatchRequest, TagImplicationsBatchResponse,
-        TagImplicationsResponse, TagResolveBatchRequest,
-        TagResolveBatchResponse, TagResolveResponse,
+        TagImplicationsBatchRequest, TagImplicationsBatchResponse, TagImplicationsResponse,
+        TagResolveBatchRequest, TagResolveBatchResponse, TagResolveResponse,
     },
     ratelimit::{self, ClientIp},
 };
@@ -33,7 +31,10 @@ use e621_account_parser_api::{
 /// "synonyms": ["canid", "canine", "canis", "dog", "wolf", ...] }`
 #[openapi(tag = "Tag Relations")]
 #[get("/tag_relations/resolve?<tag>")]
-pub(crate) async fn resolve_tag(tag: &str, client_ip: ClientIp) -> Result<Json<TagResolveResponse>, ApiError> {
+pub(crate) async fn resolve_tag(
+    tag: &str,
+    client_ip: ClientIp,
+) -> Result<Json<TagResolveResponse>, ApiError> {
     if tag.is_empty() {
         return Err(ApiError::BadRequest("tag parameter is required".into()));
     }
@@ -44,8 +45,7 @@ pub(crate) async fn resolve_tag(tag: &str, client_ip: ClientIp) -> Result<Json<T
     let canonical = {
         let t = tag_lc.clone();
         crate::db_blocking(move || {
-            get_alias_consequent_cached(&t)
-                .map_err(|e| format!("resolve alias: {e}"))
+            get_alias_consequent_cached(&t).map_err(|e| format!("resolve alias: {e}"))
         })
         .await?
         .unwrap_or_else(|| tag_lc.clone())
@@ -54,11 +54,8 @@ pub(crate) async fn resolve_tag(tag: &str, client_ip: ClientIp) -> Result<Json<T
     // Fetch all synonyms for the canonical tag (including itself).
     let mut synonyms = {
         let c = canonical.clone();
-        crate::db_blocking(move || {
-            get_aliases_for(&c)
-                .map_err(|e| format!("get aliases for: {e}"))
-        })
-        .await?
+        crate::db_blocking(move || get_aliases_for(&c).map_err(|e| format!("get aliases for: {e}")))
+            .await?
     };
     // Include the canonical name and the original query if different.
     if !synonyms.contains(&canonical) {
@@ -84,7 +81,10 @@ pub(crate) async fn resolve_tag(tag: &str, client_ip: ClientIp) -> Result<Json<T
 /// "implied_by": ["canyne", "canid"] }`
 #[openapi(tag = "Tag Relations")]
 #[get("/tag_relations/implications?<tag>")]
-pub(crate) async fn get_tag_implications(tag: &str, client_ip: ClientIp) -> Result<Json<TagImplicationsResponse>, ApiError> {
+pub(crate) async fn get_tag_implications(
+    tag: &str,
+    client_ip: ClientIp,
+) -> Result<Json<TagImplicationsResponse>, ApiError> {
     if tag.is_empty() {
         return Err(ApiError::BadRequest("tag parameter is required".into()));
     }
@@ -95,10 +95,7 @@ pub(crate) async fn get_tag_implications(tag: &str, client_ip: ClientIp) -> Resu
     let tag_lc = tag.to_ascii_lowercase();
     let canonical = crate::db_blocking({
         let tag_lc = tag_lc.clone();
-        move || {
-            get_alias_consequent_cached(&tag_lc)
-                .map_err(|e| format!("resolve alias: {e}"))
-        }
+        move || get_alias_consequent_cached(&tag_lc).map_err(|e| format!("resolve alias: {e}"))
     })
     .await?
     .unwrap_or_else(|| tag_lc.clone());
@@ -215,8 +212,7 @@ pub(crate) async fn get_tag_implications_batch(
     }
 
     let implications = crate::db_blocking(move || {
-        get_implications_batch_cached(&unique_tags)
-            .map_err(|e| format!("implications batch: {e}"))
+        get_implications_batch_cached(&unique_tags).map_err(|e| format!("implications batch: {e}"))
     })
     .await?;
 

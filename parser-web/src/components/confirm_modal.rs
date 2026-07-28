@@ -7,7 +7,7 @@
 //! Presentational: parents pass `open: bool` plus `on_confirm` /
 //! `on_cancel`. Backdrop click cancels.
 
-use yew::{function_component, html, Callback, Children, Html, MouseEvent, Properties};
+use yew::{Callback, Children, Html, MouseEvent, Properties, function_component, html};
 
 #[derive(Properties, PartialEq)]
 pub struct ConfirmModalProps {

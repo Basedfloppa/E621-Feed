@@ -9,24 +9,24 @@ use rocket_okapi::openapi;
 
 use crate::db_blocking;
 use e621_account_parser_api::auth::OwnerToken;
+use e621_account_parser_api::utils::{
+    CachedPostFeatures, ChannelTiming, PipelineMetrics, ScoringContext, ScoringMetrics,
+    current_global_relation, current_idf, diversify_scored_posts, post_pair_similarity,
+};
 use e621_account_parser_api::{
     api, audit,
     db::{
         self, collect_local_candidate_ids, find_similar_post_ids, get_account_by_id,
         get_account_preference_profile, get_owned_post_ids, get_post_by_id,
-        get_recently_seen_post_ids, get_tag_counts, hydrate_posts_by_ids,
-        record_feed_interaction, record_feed_interactions_batch, upsert_catalog_posts,
+        get_recently_seen_post_ids, get_tag_counts, hydrate_posts_by_ids, record_feed_interaction,
+        record_feed_interactions_batch, upsert_catalog_posts,
     },
     errors::ApiError,
     models::{
-        self, cfg, BatchInteractionRequest, ContinueResponse, FeedInteractionRequest, Post,
-        ScoredPost,
+        self, BatchInteractionRequest, ContinueResponse, FeedInteractionRequest, Post, ScoredPost,
+        cfg,
     },
     ratelimit, validation,
-};
-use e621_account_parser_api::utils::{
-    current_global_relation, current_idf, diversify_scored_posts, post_pair_similarity,
-    CachedPostFeatures, ChannelTiming, PipelineMetrics, ScoringContext, ScoringMetrics,
 };
 
 #[openapi(tag = "Recommendations")]
@@ -57,7 +57,8 @@ pub(crate) async fn log_feed_interaction(
         .field("post_id", post_id)
         .field("event", &event_str)
         .emit();
-    e621_account_parser_api::metrics::METRICS.feed_interactions_total
+    e621_account_parser_api::metrics::METRICS
+        .feed_interactions_total
         .with_label_values(&[&event_str])
         .inc();
     Ok(())
@@ -114,9 +115,16 @@ pub(crate) async fn get_recommendations(
     // and exploration bonus). The shared function applies the exploration
     // bonus so both endpoints behave identically — fixing the original bug
     // where build_recommendations_inner skipped it entirely.
-    let mut scored =
-        build_recommendations_shared(account_id, &owner_token, page, affinity_threshold, exploration, "recommendations", Some(&mut pipe))
-            .await?;
+    let mut scored = build_recommendations_shared(
+        account_id,
+        &owner_token,
+        page,
+        affinity_threshold,
+        exploration,
+        "recommendations",
+        Some(&mut pipe),
+    )
+    .await?;
 
     // Cross-page dedup: if a session_id is provided, filter out posts
     // already shown in previous pages and record the new page's IDs.
@@ -124,19 +132,21 @@ pub(crate) async fn get_recommendations(
     if let Some(ref sess) = session {
         // Ensure the session row exists (first page of a scroll creates it).
         let sess_for_touch = sess.clone();
-        db_blocking(move || db::touch_or_create_feed_session(&sess_for_touch, account_id))
-            .await?;
+        db_blocking(move || db::touch_or_create_feed_session(&sess_for_touch, account_id)).await?;
         let session_for_dedup = sess.clone();
-        let shown_ids = match db_blocking(move || db::get_session_shown_post_ids(&session_for_dedup)).await {
-            Ok(ids) => ids,
-            Err(_) => std::collections::HashSet::new(), // session doesn't exist yet or expired
-        };
+        let shown_ids: std::collections::HashSet<i64> =
+            db_blocking(move || db::get_session_shown_post_ids(&session_for_dedup))
+                .await
+                .unwrap_or_default(); // session does not exist yet or has expired
 
         if !shown_ids.is_empty() {
             let before = scored.len();
             scored.retain(|sp| !shown_ids.contains(&sp.post.id));
             if scored.len() < before {
-                debug!("[feed] cross-page dedup: dropped {} posts already shown", before - scored.len());
+                debug!(
+                    "[feed] cross-page dedup: dropped {} posts already shown",
+                    before - scored.len()
+                );
             }
         }
 
@@ -148,8 +158,10 @@ pub(crate) async fn get_recommendations(
             .collect();
         if !posts_to_record.is_empty() {
             let session_for_record = sess.clone();
-            db_blocking(move || db::record_session_shown_posts(&session_for_record, &posts_to_record))
-                .await?;
+            db_blocking(move || {
+                db::record_session_shown_posts(&session_for_record, &posts_to_record)
+            })
+            .await?;
         }
     }
 
@@ -161,16 +173,29 @@ pub(crate) async fn get_recommendations(
 
     // Log score breakdown for top-10 and bottom-10 posts (sorted copy).
     let mut sorted_for_log: Vec<&ScoredPost> = scored.iter().collect();
-    sorted_for_log.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    sorted_for_log.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     info!("── Score breakdown (top 10) ─────────────────");
     for sp in sorted_for_log.iter().take(10) {
         if let Some(b) = &sp.breakdown {
             info!(
                 "  post_id={} score={:.4}  sim={:.3} qual={:.3} rec={:.3} rate={:.3} med={:.3} pop={:.3} inter={:.3} rel={:.3} upl={:.3} exc={:.3} nov={:.3}",
-                sp.post.id, sp.score,
-                b.tag_similarity, b.quality_fit, b.recency_fit, b.rating_fit,
-                b.media_fit, b.popularity_fit, b.interaction_fit, b.tag_relation_fit, b.uploader_fit,
-                b.exclusivity_fit, b.novelty_fit,
+                sp.post.id,
+                sp.score,
+                b.tag_similarity,
+                b.quality_fit,
+                b.recency_fit,
+                b.rating_fit,
+                b.media_fit,
+                b.popularity_fit,
+                b.interaction_fit,
+                b.tag_relation_fit,
+                b.uploader_fit,
+                b.exclusivity_fit,
+                b.novelty_fit,
             );
         }
     }
@@ -180,10 +205,19 @@ pub(crate) async fn get_recommendations(
             if let Some(b) = &sp.breakdown {
                 info!(
                     "  post_id={} score={:.4}  sim={:.3} qual={:.3} rec={:.3} rate={:.3} med={:.3} pop={:.3} inter={:.3} rel={:.3} upl={:.3} exc={:.3} nov={:.3}",
-                    sp.post.id, sp.score,
-                    b.tag_similarity, b.quality_fit, b.recency_fit, b.rating_fit,
-                    b.media_fit, b.popularity_fit, b.interaction_fit, b.tag_relation_fit, b.uploader_fit,
-                    b.exclusivity_fit, b.novelty_fit,
+                    sp.post.id,
+                    sp.score,
+                    b.tag_similarity,
+                    b.quality_fit,
+                    b.recency_fit,
+                    b.rating_fit,
+                    b.media_fit,
+                    b.popularity_fit,
+                    b.interaction_fit,
+                    b.tag_relation_fit,
+                    b.uploader_fit,
+                    b.exclusivity_fit,
+                    b.novelty_fit,
                 );
             }
         }
@@ -196,7 +230,8 @@ pub(crate) async fn get_recommendations(
         .field("returned", scored.len())
         .field_opt("page", page)
         .emit();
-    e621_account_parser_api::metrics::METRICS.feed_views_total
+    e621_account_parser_api::metrics::METRICS
+        .feed_views_total
         .with_label_values(&[&account_id.to_string()])
         .inc();
 
@@ -224,40 +259,38 @@ async fn build_recommendations_shared(
     let runtime = cfg.runtime.clone();
 
     let owner_clone = owner_token.to_string();
-    let (tags_res, profile_res, account_res, seen_res, owned_res, local_res, bucket_res) =
-        rocket::tokio::join!(
-            rocket::tokio::task::spawn_blocking(move || {
-                get_tag_counts(account_id)
-                    .map_err(|e| format!("Failed to get tag counts: {e}"))
-            }),
-            rocket::tokio::task::spawn_blocking(move || {
-                get_account_preference_profile(account_id)
-                    .map_err(|e| format!("Failed to get account profile: {e}"))
-            }),
-            rocket::tokio::task::spawn_blocking({
-                let owner_token = owner_clone.clone();
-                move || {
-                    get_account_by_id(&owner_token, account_id)
-                        .map_err(|e| format!("Failed to get account: {e}"))
-                }
-            }),
-            rocket::tokio::task::spawn_blocking(move || {
-                get_recently_seen_post_ids(account_id, runtime.dedup_lookback_days)
-                    .map_err(|e| format!("Failed to load seen post ids: {e}"))
-            }),
-            rocket::tokio::task::spawn_blocking(move || {
-                get_owned_post_ids(account_id)
-                    .map_err(|e| format!("Failed to load owned post ids: {e}"))
-            }),
-            rocket::tokio::task::spawn_blocking(move || {
-                collect_local_candidate_ids(account_id, runtime.local_candidate_limit)
-                    .map_err(|e| format!("Failed to collect local candidate ids: {e}"))
-            }),
-            rocket::tokio::task::spawn_blocking(move || {
-                db::get_account_experiment_bucket(account_id)
-                    .map_err(|e| format!("Failed to load experiment bucket: {e}"))
-            }),
-        );
+    let (tags_res, profile_res, account_res, seen_res, owned_res, local_res, bucket_res) = rocket::tokio::join!(
+        rocket::tokio::task::spawn_blocking(move || {
+            get_tag_counts(account_id).map_err(|e| format!("Failed to get tag counts: {e}"))
+        }),
+        rocket::tokio::task::spawn_blocking(move || {
+            get_account_preference_profile(account_id)
+                .map_err(|e| format!("Failed to get account profile: {e}"))
+        }),
+        rocket::tokio::task::spawn_blocking({
+            let owner_token = owner_clone.clone();
+            move || {
+                get_account_by_id(&owner_token, account_id)
+                    .map_err(|e| format!("Failed to get account: {e}"))
+            }
+        }),
+        rocket::tokio::task::spawn_blocking(move || {
+            get_recently_seen_post_ids(account_id, runtime.dedup_lookback_days)
+                .map_err(|e| format!("Failed to load seen post ids: {e}"))
+        }),
+        rocket::tokio::task::spawn_blocking(move || {
+            get_owned_post_ids(account_id)
+                .map_err(|e| format!("Failed to load owned post ids: {e}"))
+        }),
+        rocket::tokio::task::spawn_blocking(move || {
+            collect_local_candidate_ids(account_id, runtime.local_candidate_limit)
+                .map_err(|e| format!("Failed to collect local candidate ids: {e}"))
+        }),
+        rocket::tokio::task::spawn_blocking(move || {
+            db::get_account_experiment_bucket(account_id)
+                .map_err(|e| format!("Failed to load experiment bucket: {e}"))
+        }),
+    );
 
     let tags = tags_res.map_err(|e| format!("Join error: {e}"))??;
     let profile = profile_res.map_err(|e| format!("Join error: {e}"))??;
@@ -283,10 +316,8 @@ async fn build_recommendations_shared(
         let ids_for_filter = local_candidate_ids.clone();
         let tags_for_filter = blacklisted_simple_tags.clone();
         let blacklisted_ids: HashSet<i64> =
-            db_blocking(move || {
-                db::load_blacklisted_post_ids(&ids_for_filter, &tags_for_filter)
-            })
-            .await?;
+            db_blocking(move || db::load_blacklisted_post_ids(&ids_for_filter, &tags_for_filter))
+                .await?;
         local_candidate_ids.retain(|id| !blacklisted_ids.contains(id));
     }
 
@@ -303,14 +334,18 @@ async fn build_recommendations_shared(
     priors.now = Utc::now();
 
     if let Some(explore) = exploration {
-        priors.exploration_epsilon = explore.min(0.5).max(0.0);
+        priors.exploration_epsilon = explore.clamp(0.0, 0.5);
     }
-    if let Some(p) = &mut pipe { p.mark("db_hydrate"); }
+    if let Some(p) = &mut pipe {
+        p.mark("db_hydrate");
+    }
 
     let live_posts: Vec<Post> = api::get_posts(&account, page)
         .await
         .map_err(|e| ApiError::Internal(format!("Failed to fetch posts: {e}")))?;
-    if let Some(p) = &mut pipe { p.mark("e621_fetch"); }
+    if let Some(p) = &mut pipe {
+        p.mark("e621_fetch");
+    }
 
     // Catalog persistence is fire-and-forget: SQLite is single-writer and
     // infinite scroll fires this several times per second. Pull off the
@@ -320,15 +355,14 @@ async fn build_recommendations_shared(
         let posts_for_persist = live_posts.clone();
         let ctx_label_for_audit = ctx_label.to_string();
         rocket::tokio::spawn(async move {
-            let res =
-                rocket::tokio::task::spawn_blocking(move || -> Result<(), String> {
-                    upsert_catalog_posts(&posts_for_persist)
-                        .map_err(|e| format!("Failed to store catalog posts: {e}"))?;
-                    db::save_posts_tags_batch(&posts_for_persist, &HashSet::new(), false, None) // skip cooccurrence: candidate browse posts aren't user truth
-                        .map_err(|e| format!("Failed to store catalog tags: {e}"))?;
-                    Ok(())
-                })
-                .await;
+            let res = rocket::tokio::task::spawn_blocking(move || -> Result<(), String> {
+                upsert_catalog_posts(&posts_for_persist)
+                    .map_err(|e| format!("Failed to store catalog posts: {e}"))?;
+                db::save_posts_tags_batch(&posts_for_persist, &HashSet::new(), false, None) // skip cooccurrence: candidate browse posts aren't user truth
+                    .map_err(|e| format!("Failed to store catalog tags: {e}"))?;
+                Ok(())
+            })
+            .await;
             if let Ok(Err(e)) = res {
                 warn!("background recommendation persist failed: {e}");
                 audit::event("feed.persist_failed")
@@ -395,11 +429,16 @@ async fn build_recommendations_shared(
         .iter()
         .map(|post| {
             CachedPostFeatures::from_post_with_user(
-                post, &idf, &global_relation, Some(&user_relation),
+                post,
+                &idf,
+                &global_relation,
+                Some(&user_relation),
             )
         })
         .collect();
-    if let Some(p) = &mut pipe { p.mark("cache_build"); }
+    if let Some(p) = &mut pipe {
+        p.mark("cache_build");
+    }
 
     // Parallel scoring via rayon — the closure captures &ctx, &idf,
     // &global_relation, &user_relation which are all Send + Sync.
@@ -424,11 +463,10 @@ async fn build_recommendations_shared(
     }
     metrics.log_summary();
 
-    let mut scored: Vec<ScoredPost> = scored_and_timing
-        .into_iter()
-        .map(|(sp, _)| sp)
-        .collect();
-    if let Some(p) = &mut pipe { p.mark("scoring"); }
+    let mut scored: Vec<ScoredPost> = scored_and_timing.into_iter().map(|(sp, _)| sp).collect();
+    if let Some(p) = &mut pipe {
+        p.mark("scoring");
+    }
 
     // Threshold (if requested) before diversification so we don't pay
     // MMR cost on posts we're going to drop anyway.
@@ -442,8 +480,11 @@ async fn build_recommendations_shared(
     // MMR interleaving. Callers can `truncate(N)` to keep the top-N
     // best-balanced posts. Passes `user_relation` so PMI-based soft
     // similarity personalises around per-account tag co-occurrences.
-    let mut scored = diversify_scored_posts(scored, &global_relation, Some(&user_relation), &priors);
-    if let Some(p) = &mut pipe { p.mark("diversify_post"); }
+    let mut scored =
+        diversify_scored_posts(scored, &global_relation, Some(&user_relation), &priors);
+    if let Some(p) = &mut pipe {
+        p.mark("diversify_post");
+    }
 
     // Class F: ε-greedy exploration bonus (applied in the shared pipeline
     // so both endpoints behave identically).
@@ -451,7 +492,10 @@ async fn build_recommendations_shared(
         let eps = priors.exploration_epsilon.min(0.5);
         for sp in &mut scored {
             let tag_novelty = 1.0
-                - sp.breakdown.as_ref().map(|b| b.tag_similarity).unwrap_or(0.0);
+                - sp.breakdown
+                    .as_ref()
+                    .map(|b| b.tag_similarity)
+                    .unwrap_or(0.0);
             sp.score = (sp.score + eps * tag_novelty).clamp(0.0, 1.0);
         }
     }
@@ -484,10 +528,9 @@ pub(crate) async fn get_recommendations_continue(
     //   Active   — existing valid session, touched
     //   Expired  — existed but past TTL; do NOT touch, tell client to rotate
     let session_for_check = session.clone();
-    let session_state = db_blocking(move || {
-        db::touch_or_create_feed_session(&session_for_check, account_id)
-    })
-    .await?;
+    let session_state =
+        db_blocking(move || db::touch_or_create_feed_session(&session_for_check, account_id))
+            .await?;
 
     let fresh_start = matches!(session_state, db::FeedSessionState::Expired);
 
@@ -509,7 +552,8 @@ pub(crate) async fn get_recommendations_continue(
     // `build_recommendations_shared` returns posts already sorted (and
     // diversified) so `truncate` keeps the top-N, not an arbitrary N.
     let mut posts =
-        build_recommendations_shared(account_id, &owner_token, None, None, None, "continue", None).await?;
+        build_recommendations_shared(account_id, &owner_token, None, None, None, "continue", None)
+            .await?;
     if !shown_ids.is_empty() {
         posts.retain(|sp| !shown_ids.contains(&sp.post.id));
     }
@@ -524,10 +568,8 @@ pub(crate) async fn get_recommendations_continue(
             .enumerate()
             .map(|(i, sp)| (sp.post.id, i as i32))
             .collect();
-        db_blocking(move || {
-            db::record_session_shown_posts(&session_for_record, &shown_for_record)
-        })
-        .await?;
+        db_blocking(move || db::record_session_shown_posts(&session_for_record, &shown_for_record))
+            .await?;
     }
 
     let session_state_str = match session_state {
@@ -541,10 +583,7 @@ pub(crate) async fn get_recommendations_continue(
         .field("returned", posts.len())
         .emit();
 
-    Ok(Json(ContinueResponse {
-        posts,
-        fresh_start,
-    }))
+    Ok(Json(ContinueResponse { posts, fresh_start }))
 }
 
 #[openapi(tag = "Posts")]
@@ -585,9 +624,10 @@ pub(crate) async fn get_similar_posts(
             let posts = api::get_posts_by_ids(&[post_id])
                 .await
                 .map_err(|e| ApiError::Internal(format!("Failed to fetch post from e621: {e}")))?;
-            posts.into_iter().next().ok_or_else(|| {
-                ApiError::NotFound(format!("Post {post_id} not found"))
-            })?
+            posts
+                .into_iter()
+                .next()
+                .ok_or_else(|| ApiError::NotFound(format!("Post {post_id} not found")))?
         }
     };
 
@@ -604,7 +644,8 @@ pub(crate) async fn get_similar_posts(
 
     // Hydrate candidates with tags.
     let candidates = db_blocking(move || {
-        hydrate_posts_by_ids(&candidate_ids).map_err(|e| format!("Failed to hydrate candidates: {e}"))
+        hydrate_posts_by_ids(&candidate_ids)
+            .map_err(|e| format!("Failed to hydrate candidates: {e}"))
     })
     .await?;
 
@@ -639,7 +680,11 @@ pub(crate) async fn get_similar_posts(
         .collect();
 
     // Sort by similarity descending.
-    scored.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    scored.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     scored.truncate(limit as usize);
 
     audit::event("feed.similar")
@@ -647,7 +692,8 @@ pub(crate) async fn get_similar_posts(
         .field("post_id", post_id)
         .field("returned", scored.len())
         .emit();
-    e621_account_parser_api::metrics::METRICS.feed_views_total
+    e621_account_parser_api::metrics::METRICS
+        .feed_views_total
         .with_label_values(&[&account_id.to_string()])
         .inc();
 

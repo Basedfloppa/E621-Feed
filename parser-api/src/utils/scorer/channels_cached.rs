@@ -10,13 +10,13 @@
 //! `media_fit`) don't have cached variants — they don't benefit and the
 //! calibrate fast path calls the existing `&Post` versions directly.
 
+use super::Group;
 use super::cached::{CachedPostFeatures, CachedTag};
 use super::context::ScoringContext;
 use super::util::{
-    blend2, blend3, confidence, ctr_score, discrete_preference_smooth, one_sided_ratio, sigmoid,
-    wilson_lower_bound, PairAggregator, FEEDBACK_NEUTRAL, WILSON_Z,
+    FEEDBACK_NEUTRAL, PairAggregator, WILSON_Z, blend2, blend3, confidence, ctr_score,
+    discrete_preference_smooth, one_sided_ratio, sigmoid, wilson_lower_bound,
 };
-use super::Group;
 use crate::utils::tag_relation::TagId;
 
 impl<'a> ScoringContext<'a> {
@@ -131,8 +131,7 @@ impl<'a> ScoringContext<'a> {
                         let elapsed_days =
                             ((self.priors.now.timestamp() as f64 - secs) / 86_400.0).max(0.0);
                         if elapsed_days > 0.0 {
-                            (-std::f32::consts::LN_2 * elapsed_days as f32
-                                / half_life as f32).exp()
+                            (-std::f32::consts::LN_2 * elapsed_days as f32 / half_life as f32).exp()
                         } else {
                             1.0
                         }
@@ -298,7 +297,11 @@ impl<'a> ScoringContext<'a> {
                     }
                     PairAggregator::Max => global_score.max(user_score),
                     PairAggregator::GeoMean => {
-                        let g = if global_has_signal { global_score } else { 0.5_f32 };
+                        let g = if global_has_signal {
+                            global_score
+                        } else {
+                            0.5_f32
+                        };
                         let u = if user_has_signal { user_score } else { 0.5_f32 };
                         (g.max(0.0) * u.max(0.0)).sqrt()
                     }
@@ -362,9 +365,8 @@ impl<'a> ScoringContext<'a> {
             } else {
                 0.5
             };
-            let w_sum = p.quality_w_absolute
-                + p.quality_w_relative_score
-                + p.quality_w_relative_comments;
+            let w_sum =
+                p.quality_w_absolute + p.quality_w_relative_score + p.quality_w_relative_comments;
             if w_sum > 0.0 {
                 score = (score * w_sum + upvote_ratio * p.quality_c) / (w_sum + p.quality_c);
             } else {
@@ -411,11 +413,12 @@ impl<'a> ScoringContext<'a> {
         let total = self.rating_total.max(1);
         let k = self.profile.rating.len().max(3);
         let boost = self.priors.coldstart_smoothing_boost.max(0.0);
-        let alpha = self.priors.discrete_smoothing_alpha
-            * (1.0 + (1.0 - self.personal_confidence) * boost);
+        let alpha =
+            self.priors.discrete_smoothing_alpha * (1.0 + (1.0 - self.personal_confidence) * boost);
 
         // Baseline smoothed rate (legacy behaviour).
-        let smoothed = discrete_preference_smooth(total, matched, k, alpha, self.priors.discrete_pref_floor);
+        let smoothed =
+            discrete_preference_smooth(total, matched, k, alpha, self.priors.discrete_pref_floor);
 
         // Confidence-weighted blend with raw observed rate.
         let confidence = (matched as f32 / (matched as f32 + alpha)).sqrt();
@@ -434,8 +437,8 @@ impl<'a> ScoringContext<'a> {
             .unwrap_or(0);
         let k = self.profile.media.len().max(3);
         let boost = self.priors.coldstart_smoothing_boost.max(0.0);
-        let alpha = self.priors.discrete_smoothing_alpha
-            * (1.0 + (1.0 - self.personal_confidence) * boost);
+        let alpha =
+            self.priors.discrete_smoothing_alpha * (1.0 + (1.0 - self.personal_confidence) * boost);
         discrete_preference_smooth(
             self.media_total,
             matched,
@@ -483,7 +486,9 @@ impl<'a> ScoringContext<'a> {
     /// fields (`global_tid`, `lc`, `group`) to skip tag-ID lookups.
     pub fn exclusivity_fit_cached(&self, post: &CachedPostFeatures) -> f32 {
         let p = self.priors;
-        if p.mix_exclusivity <= 0.0 { return 0.0; }
+        if p.mix_exclusivity <= 0.0 {
+            return 0.0;
+        }
         let min_cooc = p.min_exclusivity_cooc.max(1) as f32;
         let scale = p.exclusivity_scale.max(0.01);
         let max_tags = p.exclusivity_max_tags;
@@ -495,11 +500,18 @@ impl<'a> ScoringContext<'a> {
         for ct in &post.tags {
             let g = ct.group as usize;
             let gw = self.group_wts[g];
-            if gw <= 0.0 { continue; }
-            let weight = gw * self.idf.idf_tempered_from_df(
-                ct.df_raw, p.df_floor, p.idf_max, p.idf_rsj_smoothing,
-                p.idf_lambda, p.idf_alpha,
-            );
+            if gw <= 0.0 {
+                continue;
+            }
+            let weight = gw
+                * self.idf.idf_tempered_from_df(
+                    ct.df_raw,
+                    p.df_floor,
+                    p.idf_max,
+                    p.idf_rsj_smoothing,
+                    p.idf_lambda,
+                    p.idf_alpha,
+                );
             if let Some(tid) = ct.global_tid {
                 group_tags[g].push((weight, tid));
             }
@@ -523,8 +535,8 @@ impl<'a> ScoringContext<'a> {
         for entries in group_tags.iter() {
             for i in 0..entries.len() {
                 let tid_a = entries[i].1;
-                for j in i + 1..entries.len() {
-                    let tid_b = entries[j].1;
+                for entry_b in entries.iter().skip(i + 1) {
+                    let tid_b = entry_b.1;
                     let cooc = self.global_relation.cooc_by_id(tid_a, tid_b);
                     total_cooc_in += cooc.max(0);
                     pairs_in += 1;
@@ -539,7 +551,9 @@ impl<'a> ScoringContext<'a> {
             for bi in ai + 1..group_tags.len() {
                 let a_tags = &group_tags[ai];
                 let b_tags = &group_tags[bi];
-                if a_tags.is_empty() || b_tags.is_empty() { continue; }
+                if a_tags.is_empty() || b_tags.is_empty() {
+                    continue;
+                }
 
                 for a_tag in a_tags {
                     let tid_a = a_tag.1;
@@ -553,7 +567,9 @@ impl<'a> ScoringContext<'a> {
             }
         }
 
-        if pairs_in + pairs_cross == 0 { return 0.0; }
+        if pairs_in + pairs_cross == 0 {
+            return 0.0;
+        }
 
         // Blend: cross-group pairs get weighted by `exclusivity_cross_group_weight`.
         // Default 0.5 → cross-group pairs contribute ~⅓ of total.
@@ -571,7 +587,9 @@ impl<'a> ScoringContext<'a> {
     /// HashMaps (same data as the uncached path).
     pub fn novelty_fit_cached(&self, post: &CachedPostFeatures) -> f32 {
         let p = self.priors;
-        if p.mix_novelty <= 0.0 { return 0.0; }
+        if p.mix_novelty <= 0.0 {
+            return 0.0;
+        }
         let n0 = p.novelty_n0.max(0.5);
 
         let mut total = 0u32;
@@ -579,7 +597,9 @@ impl<'a> ScoringContext<'a> {
 
         for ct in &post.tags {
             let g = ct.group as usize;
-            if self.group_wts[g] <= 0.0 { continue; }
+            if self.group_wts[g] <= 0.0 {
+                continue;
+            }
             total += 1;
 
             // Known from favourites → not novel.
@@ -590,17 +610,20 @@ impl<'a> ScoringContext<'a> {
             // Check feedback impressions if enabled.
             if p.novelty_use_feedback
                 && let Some(fb) = self.feedback[g].get(ct.lc.as_str())
-                    && fb.impressions > 0 {
-                        let seen = confidence(fb.impressions as f32, n0, 1.0);
-                        novel_weight += 1.0 - seen;
-                        continue;
-                    }
+                && fb.impressions > 0
+            {
+                let seen = confidence(fb.impressions as f32, n0, 1.0);
+                novel_weight += 1.0 - seen;
+                continue;
+            }
 
             // Tag is completely novel.
             novel_weight += 1.0;
         }
 
-        if total == 0 { return 0.0; }
+        if total == 0 {
+            return 0.0;
+        }
         (novel_weight / total as f32).clamp(0.0, 1.0)
     }
 }
@@ -615,9 +638,9 @@ fn _phantom(_: &CachedTag) {}
 mod tests {
     use super::*;
     use crate::models::{
-        AccountMediaStat, AccountPreferenceProfile, AccountQualityProfile,
-        AccountRatingStat, AccountRecencyProfile, AccountTagFeedback, Files, Flags, Has, Post,
-        Rating, Relationships, Score, Stats, TagCount, Tags,
+        AccountMediaStat, AccountPreferenceProfile, AccountQualityProfile, AccountRatingStat,
+        AccountRecencyProfile, AccountTagFeedback, Files, Flags, Has, Post, Rating, Relationships,
+        Score, Stats, TagCount, Tags,
     };
     use crate::utils::idf::IdfIndex;
     use crate::utils::scorer::cached::CachedPostFeatures;
@@ -768,9 +791,18 @@ mod tests {
     fn default_profile() -> AccountPreferenceProfile {
         AccountPreferenceProfile {
             rating: vec![
-                AccountRatingStat { rating: "s".to_string(), count: 500 },
-                AccountRatingStat { rating: "q".to_string(), count: 100 },
-                AccountRatingStat { rating: "e".to_string(), count: 50 },
+                AccountRatingStat {
+                    rating: "s".to_string(),
+                    count: 500,
+                },
+                AccountRatingStat {
+                    rating: "q".to_string(),
+                    count: 100,
+                },
+                AccountRatingStat {
+                    rating: "e".to_string(),
+                    count: 50,
+                },
             ],
             media: vec![
                 AccountMediaStat {
@@ -867,12 +899,31 @@ mod tests {
 
     fn make_post(tags: Tags) -> Post {
         Post {
-            id: 1, created_at: Utc::now(), updated_at: Utc::now(), change_seq: 0.0,
+            id: 1,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            change_seq: 0.0,
             files: Files::default(),
-            uploader_id: 0, uploader_name: None, approver_id: None,
-            stats: Stats { score: Score { up: 100, down: 0, total: 100 }, fav_count: 50, comment_count: 5, ..Default::default() },
-            flags: Flags::default(), has: Has::default(), relationships: Relationships::default(),
-            pools: vec![], rating: Rating::S, locked_tags: vec![], sources: vec![],
+            uploader_id: 0,
+            uploader_name: None,
+            approver_id: None,
+            stats: Stats {
+                score: Score {
+                    up: 100,
+                    down: 0,
+                    total: 100,
+                },
+                fav_count: 50,
+                comment_count: 5,
+                ..Default::default()
+            },
+            flags: Flags::default(),
+            has: Has::default(),
+            relationships: Relationships::default(),
+            pools: vec![],
+            rating: Rating::S,
+            locked_tags: vec![],
+            sources: vec![],
             description: None,
             tags,
         }
@@ -900,14 +951,8 @@ mod tests {
             let user_graph = build_user_graph();
             let profile = default_profile();
             let counts = default_tag_counts();
-            let mut $ctx = ScoringContext::new(
-                &counts,
-                &priors,
-                &$idf,
-                &profile,
-                &$global,
-                &user_graph,
-            );
+            let $ctx =
+                ScoringContext::new(&counts, &priors, &$idf, &profile, &$global, &user_graph);
         };
     }
 
@@ -1096,7 +1141,15 @@ mod tests {
         let ctx = ScoringContext::new(&counts, &priors, &idf, &profile, &global, &user_graph);
 
         let post = Post {
-            stats: Stats { score: Score { up: 40, down: 10, total: 50 }, fav_count: 0, ..Default::default() },
+            stats: Stats {
+                score: Score {
+                    up: 40,
+                    down: 10,
+                    total: 50,
+                },
+                fav_count: 0,
+                ..Default::default()
+            },
             ..make_post(make_empty_tags())
         };
         let cached = cache_post(&post, &idf, &global);

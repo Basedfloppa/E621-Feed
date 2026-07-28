@@ -39,7 +39,7 @@ pub(super) fn upsert_account_cooccurrence_pairs(
 
     for chunk in pairs.chunks(COOC_ACCOUNT_PAIRS_PER_STMT) {
         let mut sql = String::from(
-            "INSERT INTO account_tag_cooccurrence (account_id, tag1_name, tag1_group, tag2_name, tag2_group, cooc_count) VALUES "
+            "INSERT INTO account_tag_cooccurrence (account_id, tag1_name, tag1_group, tag2_name, tag2_group, cooc_count) VALUES ",
         );
         // Use ?1 for account_id (shared), then 4 sequential ? per pair.
         let mut param_idx = 2usize;
@@ -48,8 +48,13 @@ pub(super) fn upsert_account_cooccurrence_pairs(
                 sql.push(',');
             }
             // (?1, ?P, ?P+1, ?P+2, ?P+3, 1) where P = param_idx
-            sql.push_str(&format!("(?1, ?{p}, ?{p1}, ?{p2}, ?{p3}, 1)",
-                p = param_idx, p1 = param_idx + 1, p2 = param_idx + 2, p3 = param_idx + 3));
+            sql.push_str(&format!(
+                "(?1, ?{p}, ?{p1}, ?{p2}, ?{p3}, 1)",
+                p = param_idx,
+                p1 = param_idx + 1,
+                p2 = param_idx + 2,
+                p3 = param_idx + 3
+            ));
             param_idx += 4;
         }
         sql.push_str(
@@ -62,8 +67,12 @@ pub(super) fn upsert_account_cooccurrence_pairs(
         let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = Vec::with_capacity(chunk.len() * 4 + 1);
         params_vec.push(Box::new(account_id));
         for (a, b) in chunk {
-            let (na, ga) = tag_id_to_meta.get(a).ok_or_else(|| format!("missing tag_id {a} in account cooc meta map"))?;
-            let (nb, gb) = tag_id_to_meta.get(b).ok_or_else(|| format!("missing tag_id {b} in account cooc meta map"))?;
+            let (na, ga) = tag_id_to_meta
+                .get(a)
+                .ok_or_else(|| format!("missing tag_id {a} in account cooc meta map"))?;
+            let (nb, gb) = tag_id_to_meta
+                .get(b)
+                .ok_or_else(|| format!("missing tag_id {b} in account cooc meta map"))?;
             // Canonical ordering by (name, group) strings
             if (na, ga) <= (nb, gb) {
                 params_vec.push(Box::new(na.clone()));
@@ -77,7 +86,8 @@ pub(super) fn upsert_account_cooccurrence_pairs(
                 params_vec.push(Box::new(ga.clone()));
             }
         }
-        let params_refs: Vec<&dyn rusqlite::ToSql> = params_vec.iter().map(|b| b.as_ref()).collect();
+        let params_refs: Vec<&dyn rusqlite::ToSql> =
+            params_vec.iter().map(|b| b.as_ref()).collect();
         stmt.execute(rusqlite::params_from_iter(params_refs))
             .map_err(|e| format!("exec account cooc batch: {e}"))?;
     }
@@ -186,9 +196,7 @@ pub fn load_global_tag_relation() -> rusqlite::Result<crate::utils::TagRelationG
     // ---- Pass 1: tags table → marginals + sqlite_id → TagId map -----------
     let mut sqlite_to_local: HashMap<i64, crate::utils::TagId> = HashMap::new();
     {
-        let mut stmt = conn.prepare(
-            "SELECT id, name, group_type, COALESCE(df, 0) FROM tags",
-        )?;
+        let mut stmt = conn.prepare("SELECT id, name, group_type, COALESCE(df, 0) FROM tags")?;
         let rows = stmt.query_map([], |row| {
             Ok((
                 row.get::<_, i64>(0)?,

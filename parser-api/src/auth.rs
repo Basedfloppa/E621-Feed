@@ -193,7 +193,11 @@ mod tests {
         // `build_owner_cookie` uses `cfg!(not(debug_assertions))` for Secure.
         // Under `cargo test` (debug profile) it must be false.
         let cookie = build_owner_cookie("x".into());
-        assert_eq!(cookie.secure(), Some(false), "Secure must be false in debug/test profile");
+        assert_eq!(
+            cookie.secure(),
+            Some(false),
+            "Secure must be false in debug/test profile"
+        );
     }
 
     #[test]

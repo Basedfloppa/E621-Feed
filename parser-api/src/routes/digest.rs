@@ -19,10 +19,9 @@ use e621_account_parser_api::db::{
     self, get_account_by_id, get_account_preference_profile, get_tag_counts,
 };
 use e621_account_parser_api::errors::ApiError;
-use e621_account_parser_api::models::{cfg, Post, ScoredPost};
+use e621_account_parser_api::models::{Post, ScoredPost, cfg};
 use e621_account_parser_api::utils::{
-    current_global_relation, current_idf,
-    CachedPostFeatures, ScoringContext,
+    CachedPostFeatures, ScoringContext, current_global_relation, current_idf,
 };
 use e621_account_parser_api::validation;
 
@@ -52,10 +51,13 @@ fn cache_get(key: &str) -> Option<Vec<ScoredPost>> {
 
 fn cache_set(key: String, posts: Vec<ScoredPost>) {
     let mut map = DIGEST_CACHE.lock().expect("digest cache poisoned");
-    map.insert(key, CachedDigest {
-        posts,
-        cached_at: Instant::now(),
-    });
+    map.insert(
+        key,
+        CachedDigest {
+            posts,
+            cached_at: Instant::now(),
+        },
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -151,8 +153,7 @@ async fn build_personalized_digest(
     // Parallel independent reads (same pattern as recommendations).
     let (tags_res, profile_res) = tokio::join!(
         tokio::task::spawn_blocking(move || {
-            get_tag_counts(account_id)
-                .map_err(|e| format!("Failed to get tag counts: {e}"))
+            get_tag_counts(account_id).map_err(|e| format!("Failed to get tag counts: {e}"))
         }),
         tokio::task::spawn_blocking(move || {
             get_account_preference_profile(account_id)
@@ -194,8 +195,9 @@ async fn build_personalized_digest(
     let drop_owned = exclude_saved;
 
     // Get local candidate posts.
-    let local_ids = db::collect_local_candidate_ids(account_id, cfg().runtime.local_candidate_limit)
-        .map_err(|e| format!("Failed to collect local candidates: {e}"))?;
+    let local_ids =
+        db::collect_local_candidate_ids(account_id, cfg().runtime.local_candidate_limit)
+            .map_err(|e| format!("Failed to collect local candidates: {e}"))?;
     let local_posts = if local_ids.is_empty() {
         Vec::new()
     } else {
@@ -215,7 +217,14 @@ async fn build_personalized_digest(
     use rayon::prelude::*;
     let cached: Vec<CachedPostFeatures> = local_posts
         .par_iter()
-        .map(|post| CachedPostFeatures::from_post_with_user(post, &idf, &global_relation, Some(&user_relation)))
+        .map(|post| {
+            CachedPostFeatures::from_post_with_user(
+                post,
+                &idf,
+                &global_relation,
+                Some(&user_relation),
+            )
+        })
         .collect();
 
     let mut scored: Vec<ScoredPost> = local_posts
@@ -231,12 +240,16 @@ async fn build_personalized_digest(
         })
         .collect();
     scored.sort_by(|a, b| {
-        b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal)
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
     });
 
     let filter_owned = |list: Vec<ScoredPost>| -> Vec<ScoredPost> {
         if drop_owned {
-            list.into_iter().filter(|sp| !owned.contains(&sp.post.id)).collect()
+            list.into_iter()
+                .filter(|sp| !owned.contains(&sp.post.id))
+                .collect()
         } else {
             list
         }
@@ -249,10 +262,17 @@ async fn build_personalized_digest(
             .into_par_iter()
             .map(|post| {
                 let cf = CachedPostFeatures::from_post_with_user(
-                    &post, &idf, &global_relation, Some(&user_relation),
+                    &post,
+                    &idf,
+                    &global_relation,
+                    Some(&user_relation),
                 );
                 let (s, breakdown, _) = ctx.score_cached_with_metrics(&cf);
-                ScoredPost { post, score: s, breakdown: Some(breakdown) }
+                ScoredPost {
+                    post,
+                    score: s,
+                    breakdown: Some(breakdown),
+                }
             })
             .collect()
     };
@@ -290,7 +310,14 @@ async fn build_personalized_digest(
         filter_owned(score_batch(posts))
     };
 
-    let digest = stratified_sample(&scored, trending, wildcards, recent_added, popular_new, &mut rng);
+    let digest = stratified_sample(
+        &scored,
+        trending,
+        wildcards,
+        recent_added,
+        popular_new,
+        &mut rng,
+    );
 
     // Mark that a personalised digest was built for this user today.
     // Non-fatal failure: the next request still works, the user just
@@ -316,10 +343,8 @@ async fn build_generic_digest(
 
     let mut rng = rand::thread_rng();
     let trending = db::get_trending_posts(7, 10).unwrap_or_default();
-    let popular_new = db::get_popular_posts_since(
-        Utc::now() - chrono::Duration::days(2), 5,
-    )
-    .unwrap_or_default();
+    let popular_new =
+        db::get_popular_posts_since(Utc::now() - chrono::Duration::days(2), 5).unwrap_or_default();
     let random = db::get_random_posts(5).unwrap_or_default();
 
     let mut all_posts: Vec<ScoredPost> = Vec::with_capacity(20);
@@ -355,11 +380,13 @@ async fn build_generic_digest(
     let scored: Vec<ScoredPost> = all_posts
         .into_par_iter()
         .map(|sp| {
-            let cf = CachedPostFeatures::from_post(
-                &sp.post, &idf, &global_relation,
-            );
+            let cf = CachedPostFeatures::from_post(&sp.post, &idf, &global_relation);
             let (s, breakdown, _) = ctx.score_cached_with_metrics(&cf);
-            ScoredPost { post: sp.post, score: s, breakdown: Some(breakdown) }
+            ScoredPost {
+                post: sp.post,
+                score: s,
+                breakdown: Some(breakdown),
+            }
         })
         .collect();
 
@@ -420,7 +447,8 @@ pub(crate) async fn get_daily_digest(
             .field("mode", "cached")
             .field("returned", cached.len())
             .emit();
-        e621_account_parser_api::metrics::METRICS.digest_views_total
+        e621_account_parser_api::metrics::METRICS
+            .digest_views_total
             .with_label_values(&[&account_id.to_string()])
             .inc();
         return Ok(Json(cached));
@@ -451,7 +479,8 @@ pub(crate) async fn get_daily_digest(
         .field("returned", posts.len())
         .field("hide_saved", hide_saved)
         .emit();
-    e621_account_parser_api::metrics::METRICS.digest_views_total
+    e621_account_parser_api::metrics::METRICS
+        .digest_views_total
         .with_label_values(&[&account_id.to_string()])
         .inc();
     cache_set(cache_key, posts.clone());

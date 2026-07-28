@@ -9,7 +9,10 @@ extern "C" {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct AttachTo { pub element: String, pub on: String }
+pub struct AttachTo {
+    pub element: String,
+    pub on: String,
+}
 
 #[derive(Serialize)]
 pub struct Button {
@@ -53,9 +56,10 @@ pub struct TourOptions {
 
 pub fn start_tour(steps: Vec<Step>) {
     let steps_js = serde_wasm_bindgen::to_value(&steps).unwrap();
-    let opts_js  = serde_wasm_bindgen::to_value(&TourOptions {
+    let opts_js = serde_wasm_bindgen::to_value(&TourOptions {
         default_step_options: None,
         tour_options: None,
-    }).unwrap();
+    })
+    .unwrap();
     start_tour_js(&steps_js, &opts_js);
 }

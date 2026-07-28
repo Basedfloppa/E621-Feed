@@ -10,8 +10,8 @@ use rusqlite::params;
 
 use e621_account_parser_api::db;
 use e621_account_parser_api::models::{
-    cfg, AccountMediaStat, AccountPreferenceProfile, AccountQualityProfile, AccountRatingStat,
-    AccountRecencyProfile, Post, TagCount,
+    AccountMediaStat, AccountPreferenceProfile, AccountQualityProfile, AccountRatingStat,
+    AccountRecencyProfile, Post, TagCount, cfg,
 };
 use e621_account_parser_api::utils::{
     CachedPostFeatures, DiversityFeatures, IdfIndex, ScoringContext, TagRelationGraph,
@@ -353,8 +353,7 @@ pub(crate) fn prepare_eval_dataset(opts: &GridOptions) -> anyhow::Result<EvalDat
                                     });
 
                                     let take = n_hard.min(scored.len());
-                                    for i in 0..take {
-                                        let id = scored[i].0;
+                                    for &(id, _) in scored.iter().take(take) {
                                         scratch.insert(id);
                                         negs.push(id);
                                     }

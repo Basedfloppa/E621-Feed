@@ -5,8 +5,8 @@
 //! format for scraping.
 
 use prometheus::{
-    register_int_counter, register_int_counter_vec, register_int_gauge, IntCounter, IntCounterVec,
-    IntGauge,
+    IntCounter, IntCounterVec, IntGauge, register_int_counter, register_int_counter_vec,
+    register_int_gauge,
 };
 use std::sync::LazyLock;
 

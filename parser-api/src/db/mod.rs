@@ -191,4 +191,3 @@ pub(super) fn parse_db_datetime(raw: &str) -> Result<DateTime<Utc>, String> {
         })
         .map_err(|e| format!("Failed to parse datetime '{raw}': {e}"))
 }
-

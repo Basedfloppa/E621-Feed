@@ -38,15 +38,15 @@
 use std::collections::HashSet;
 
 use crate::{
-    api, audit, db, db_blocking,
+    api, audit, db,
     db::{get_account_by_id, refresh_account_profiles_skip_cooc},
-    jobs,
-    models::{cfg, Post, TruncatedAccount, UserApiResponse},
-    utils::{mark_idf_dirty, PipelineMetrics},
+    db_blocking, jobs,
+    models::{Post, TruncatedAccount, UserApiResponse, cfg},
+    utils::{PipelineMetrics, mark_idf_dirty},
 };
 
 /// Which strategy `run_process` should use. Wire-form (`?mode=...`)
-/// is parsed by the HTTP handler via [`ProcessMode::from_str`].
+/// is parsed by the HTTP handler with [`str::parse`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProcessMode {
     /// Tear down and rebuild from scratch. Authoritative; expensive.
@@ -59,10 +59,12 @@ pub enum ProcessMode {
     Auto,
 }
 
-impl ProcessMode {
-    /// Parse `?mode=...` query strings. Accepts the documented
-    /// values plus a permissive empty/None fallback to `Auto`.
-    pub fn from_str(s: &str) -> Result<Self, String> {
+impl std::str::FromStr for ProcessMode {
+    type Err = String;
+
+    /// Parse `?mode=...` query strings. Accepts the documented values plus a
+    /// permissive empty/None fallback to `Auto`.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.trim().to_ascii_lowercase().as_str() {
             "" | "auto" => Ok(ProcessMode::Auto),
             "full" => Ok(ProcessMode::Full),
@@ -72,7 +74,9 @@ impl ProcessMode {
             )),
         }
     }
+}
 
+impl ProcessMode {
     fn as_str(self) -> &'static str {
         match self {
             ProcessMode::Full => "full",
@@ -99,7 +103,6 @@ pub fn strip_blacklisted_tags(mut p: Post, blacklist: &HashSet<String>) -> Post 
     filter(&mut p.tags.species);
     p
 }
-
 
 /// Two adjacent hard fetch failures abort the whole job — e621 is
 /// reliably unhappy at that point and we'd just burn ~2 minutes per
@@ -131,7 +134,8 @@ pub async fn run_process_with_mode(
         .field("account_id", account_id)
         .field("requested_mode", mode.as_str())
         .emit();
-    crate::metrics::METRICS.process_runs_total
+    crate::metrics::METRICS
+        .process_runs_total
         .with_label_values(&["started"])
         .inc();
     let pipeline_start = std::time::Instant::now();
@@ -141,17 +145,15 @@ pub async fn run_process_with_mode(
     let cfg = cfg();
     let blacklist: HashSet<String> = cfg.tag_blacklist.iter().map(|s| s.to_lowercase()).collect();
 
-    let account = db_blocking(move || {
-        get_account_by_id(&owner_token, account_id).map_err(|e| e.to_string())
-    })
-    .await?;
+    let account =
+        db_blocking(move || get_account_by_id(&owner_token, account_id).map_err(|e| e.to_string()))
+            .await?;
     let user = api::get_account(&account).await?;
     let favcount = match user {
         UserApiResponse::FullCurrentUser(u) => u.favorite_count,
         UserApiResponse::FullUser(u) => u.favorite_count,
     };
-    let pages =
-        (favcount / cfg.posts_limit) + (if favcount % cfg.posts_limit > 0 { 1 } else { 0 });
+    let pages = (favcount / cfg.posts_limit) + (if favcount % cfg.posts_limit > 0 { 1 } else { 0 });
 
     macro_rules! record_phase {
         ($name:expr) => {{
@@ -159,7 +161,10 @@ pub async fn run_process_with_mode(
             jobs::record_phase(account_id, $name, elapsed);
             pipe.mark($name);
             let secs = elapsed / 1000.0;
-            info!("[process {account_id}] phase '{name}' done in {secs:.1}s", name = $name);
+            info!(
+                "[process {account_id}] phase '{name}' done in {secs:.1}s",
+                name = $name
+            );
             audit::event("process.phase")
                 .field("account_id", account_id)
                 .field("phase", $name)
@@ -220,9 +225,7 @@ pub async fn run_process_with_mode(
         let drop_cooc_batch = cfg.runtime.drop_cooc_batch_size.max(1_000);
         let deleted_cooc = db_blocking(move || {
             db::drop_account_cooccurrence_batched(account_id, drop_cooc_batch, |batch, total| {
-                info!(
-                    "[process {account_id}] drop_cooc deleted {batch} rows (total: {total})"
-                );
+                info!("[process {account_id}] drop_cooc deleted {batch} rows (total: {total})");
                 audit::event("process.drop_cooc_progress")
                     .field("account_id", account_id)
                     .field("deleted", total)
@@ -246,7 +249,14 @@ pub async fn run_process_with_mode(
 
     // ── Fetch + save ─────────────────────────────────────────────
     let new_count = if resolved_mode == ProcessMode::Full {
-        run_full_fetch(account_id, &account, &blacklist, pages, cfg.runtime.process_fetch_concurrency.max(1)).await?
+        run_full_fetch(
+            account_id,
+            &account,
+            &blacklist,
+            pages,
+            cfg.runtime.process_fetch_concurrency.max(1),
+        )
+        .await?
     } else {
         run_incremental_fetch(account_id, &account, &blacklist, pages).await?
     };
@@ -272,7 +282,8 @@ pub async fn run_process_with_mode(
         .field("new_or_persisted", new_count)
         .field("ms", pipeline_start.elapsed().as_millis())
         .emit();
-    crate::metrics::METRICS.process_runs_total
+    crate::metrics::METRICS
+        .process_runs_total
         .with_label_values(&["success"])
         .inc();
     Ok(())
@@ -334,8 +345,7 @@ async fn run_full_fetch(
         info!("{posts_len} post(s) found on page {page}");
         let bl = blacklist.clone();
         db_blocking(move || -> Result<(), String> {
-            db::save_posts(&posts, acc_id)
-                .map_err(|e| format!("Failed to save posts: {e}"))?;
+            db::save_posts(&posts, acc_id).map_err(|e| format!("Failed to save posts: {e}"))?;
             db::save_posts_tags_batch(&posts, &bl, true, Some(acc_id))
                 .map_err(|e| format!("Failed to save tags for page {page}: {e}"))?;
             Ok(())
@@ -366,12 +376,10 @@ async fn run_full_fetch(
 /// reverse-chronological order. Edge cases the loop handles:
 ///   * page is entirely new           — save all, continue to next page
 ///   * page mixes new + known         — save the new ones, stop
-///   * page is entirely already-known — stop (cold path: only happens
-///                                       if a previous incremental
-///                                       run was interrupted mid-save)
-///   * page is empty                  — past the end of pagination
-///   * page fetch errors              — same consecutive-failure rule
-///                                       as full mode
+///   * page is entirely already-known — stop (cold path: only happens if a
+///     previous incremental run was interrupted mid-save)
+///   * page is empty — past the end of pagination
+///   * page fetch errors — same consecutive-failure rule as full mode
 ///
 /// Skipped vs full: no `drop_*` phases, only new posts go through the
 /// DB writer. Saves ~20 min on 2.6M-row accounts.
@@ -474,9 +482,7 @@ async fn run_incremental_fetch(
         }
         total_new += new_count;
 
-        info!(
-            "[process {account_id}] (incremental) page {page}: {new_count} new of {posts_len}"
-        );
+        info!("[process {account_id}] (incremental) page {page}: {new_count} new of {posts_len}");
         audit::event("process.page_done")
             .field("account_id", account_id)
             .field("page", page)

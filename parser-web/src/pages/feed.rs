@@ -228,18 +228,16 @@ pub fn feed_page() -> Html {
 
     // Persist badge visibility toggles.
     macro_rules! persist_bool {
-        ($s:expr, $key:expr) => {
-            {
-                let s = $s.clone();
-                let key = $key;
-                use_effect_with(*s, move |a: &bool| {
-                    if let Some(store) = window().and_then(|w| w.local_storage().ok().flatten()) {
-                        let _ = store.set_item(key, &a.to_string());
-                    }
-                    || ()
-                });
-            }
-        };
+        ($s:expr, $key:expr) => {{
+            let s = $s.clone();
+            let key = $key;
+            use_effect_with(*s, move |a: &bool| {
+                if let Some(store) = window().and_then(|w| w.local_storage().ok().flatten()) {
+                    let _ = store.set_item(key, &a.to_string());
+                }
+                || ()
+            });
+        }};
     }
     persist_bool!(show_rating, "feed_show_rating");
     persist_bool!(show_affinity, "feed_show_affinity");
@@ -330,14 +328,12 @@ pub fn feed_page() -> Html {
                         // when the model gets more discriminative and
                         // pushes scores towards the extremes.
                         if cutoff_value > 0.0 && new_items.len() >= 2 {
-                            let mut sorted: Vec<f32> =
-                                new_items.iter().map(|p| p.score).collect();
+                            let mut sorted: Vec<f32> = new_items.iter().map(|p| p.score).collect();
                             sorted.sort_by(|a, b| {
                                 a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
                             });
                             let frac = (cutoff_value / 100.0).clamp(0.0, 0.99);
-                            let idx =
-                                ((sorted.len() as f32 - 1.0) * frac).round() as usize;
+                            let idx = ((sorted.len() as f32 - 1.0) * frac).round() as usize;
                             let threshold = sorted[idx.min(sorted.len() - 1)];
                             new_items.retain(|p| p.score >= threshold);
                         }
@@ -569,7 +565,10 @@ pub fn feed_page() -> Html {
     let backend_url = read_config_from_head()
         .map(|cfg| cfg.backend_domain)
         .unwrap_or_default();
-    let card_account_id = selected_user.as_ref().map(|u| u.id as i32).unwrap_or_default();
+    let card_account_id = selected_user
+        .as_ref()
+        .map(|u| u.id as i32)
+        .unwrap_or_default();
     let card_grid_class = (*grid).grid_class();
     let card_session_id = (*session_id).clone();
     let feed_cards = render_post_grid(

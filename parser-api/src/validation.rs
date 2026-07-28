@@ -475,10 +475,12 @@ mod tests {
     #[test]
     fn blacklist_payload_validation() {
         assert!(validate_blacklist_payload(&BlacklistPayload { blacklist: None }).is_ok());
-        assert!(validate_blacklist_payload(&BlacklistPayload {
-            blacklist: Some("cub".to_string()),
-        })
-        .is_ok());
+        assert!(
+            validate_blacklist_payload(&BlacklistPayload {
+                blacklist: Some("cub".to_string()),
+            })
+            .is_ok()
+        );
         assert!(is_bad(validate_blacklist_payload(&BlacklistPayload {
             blacklist: Some("<script".to_string()),
         })));
@@ -518,10 +520,12 @@ mod tests {
                 interactions: vec![],
             }
         )));
-        assert!(validate_batch_interaction(&BatchInteractionRequest {
-            interactions: vec![single.clone()],
-        })
-        .is_ok());
+        assert!(
+            validate_batch_interaction(&BatchInteractionRequest {
+                interactions: vec![single.clone()],
+            })
+            .is_ok()
+        );
         let many = vec![single.clone(); 100];
         assert!(
             validate_batch_interaction(&BatchInteractionRequest { interactions: many }).is_ok()

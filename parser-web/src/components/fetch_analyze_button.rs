@@ -5,9 +5,7 @@ use yew::{
     use_effect_with, use_state,
 };
 
-use crate::models::{
-    ProcessJobPhase, ProcessJobState, api_get, api_post, humanize_error_body,
-};
+use crate::models::{ProcessJobPhase, ProcessJobState, api_get, api_post, humanize_error_body};
 use crate::pages::{TagCount, UserInfo};
 
 const STATUS_POLL_INTERVAL_MS: i32 = 60000;
@@ -52,17 +50,15 @@ pub fn fetch_analyze_button(props: &AnalyzeButtonProps) -> Html {
             let job_status = job_status.clone();
             wasm_bindgen_futures::spawn_local(async move {
                 match api_get(&url).send().await {
-                    Ok(resp) if resp.ok() => {
-                        match resp.json::<Option<ProcessJobState>>().await {
-                            Ok(s) => job_status.set(s),
-                            Err(e) => {
-                                web_sys::console::warn_1(
-                                    &format!("Bad /process status response: {e}").into(),
-                                );
-                                job_status.set(None);
-                            }
+                    Ok(resp) if resp.ok() => match resp.json::<Option<ProcessJobState>>().await {
+                        Ok(s) => job_status.set(s),
+                        Err(e) => {
+                            web_sys::console::warn_1(
+                                &format!("Bad /process status response: {e}").into(),
+                            );
+                            job_status.set(None);
                         }
-                    }
+                    },
                     Ok(resp) => {
                         web_sys::console::warn_1(
                             &format!("/process/status bootstrap HTTP {}", resp.status()).into(),
@@ -208,9 +204,8 @@ pub fn fetch_analyze_button(props: &AnalyzeButtonProps) -> Html {
                                         // Transient network blip — surface it
                                         // but keep the loop running so we
                                         // recover when connectivity returns.
-                                        error_for_poll.set(Some(format!(
-                                            "Status network error: {e}"
-                                        )));
+                                        error_for_poll
+                                            .set(Some(format!("Status network error: {e}")));
                                     }
                                 }
                             });
@@ -222,9 +217,9 @@ pub fn fetch_analyze_button(props: &AnalyzeButtonProps) -> Html {
                                     cb.as_ref().unchecked_ref(),
                                     STATUS_POLL_INTERVAL_MS,
                                 )
-                            {
-                                handle = Some(h);
-                            }
+                        {
+                            handle = Some(h);
+                        }
                         _closure = Some(cb);
                     }
                 }
@@ -250,9 +245,10 @@ pub fn fetch_analyze_button(props: &AnalyzeButtonProps) -> Html {
 
             move || {
                 if let Some(h) = handle
-                    && let Some(w) = web_sys::window() {
-                        w.clear_interval_with_handle(h);
-                    }
+                    && let Some(w) = web_sys::window()
+                {
+                    w.clear_interval_with_handle(h);
+                }
                 drop(_closure);
             }
         });

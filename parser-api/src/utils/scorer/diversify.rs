@@ -42,7 +42,7 @@ use crate::models::{Post, ScoredPost};
 use crate::utils::tag_relation::TagRelationGraph;
 
 use super::priors::Priors;
-use super::util::{normalize_tag, FEEDBACK_NEUTRAL};
+use super::util::{FEEDBACK_NEUTRAL, normalize_tag};
 
 type TagId = u32;
 
@@ -216,6 +216,10 @@ fn pmi_group_similarity(
 /// is positive — capturing personalized tag co-occurrence so MMR diversity
 /// personalises around per-user tag associations (e.g. a `skeb`+`canine`
 /// co-favorite gets less MMR penalty for that specific pair).
+#[allow(
+    clippy::too_many_arguments,
+    reason = "The scoring inputs are distinct model parameters; a context struct would obscure the call-site blend configuration."
+)]
 fn group_similarity(
     a: &[(u64, Option<TagId>)],
     b: &[(u64, Option<TagId>)],
@@ -490,7 +494,11 @@ fn enforce_diversity_quota(scored: &mut [ScoredPost]) {
         sp.post.tags.artist.first().map(|a| a.to_ascii_lowercase())
     });
     enforce_group_quota(scored, top_k, MIN_CHARACTERS, |sp| {
-        sp.post.tags.character.first().map(|c| c.to_ascii_lowercase())
+        sp.post
+            .tags
+            .character
+            .first()
+            .map(|c| c.to_ascii_lowercase())
     });
 }
 
@@ -557,12 +565,22 @@ mod tests {
     /// placeholder.
     fn post(id: i64, artists: &[&str], characters: &[&str]) -> Post {
         Post {
-            id, created_at: Utc::now(), updated_at: Utc::now(), change_seq: 0.0,
+            id,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            change_seq: 0.0,
             files: Files::default(),
-            uploader_id: 0, uploader_name: None, approver_id: None,
-            stats: Stats::default(), flags: Flags::default(),
-            has: Has::default(), relationships: Relationships::default(),
-            pools: vec![], rating: Rating::S, locked_tags: vec![], sources: vec![],
+            uploader_id: 0,
+            uploader_name: None,
+            approver_id: None,
+            stats: Stats::default(),
+            flags: Flags::default(),
+            has: Has::default(),
+            relationships: Relationships::default(),
+            pools: vec![],
+            rating: Rating::S,
+            locked_tags: vec![],
+            sources: vec![],
             description: None,
             tags: Tags {
                 artist: artists.iter().map(|s| s.to_string()).collect(),
@@ -598,7 +616,9 @@ mod tests {
         for sp in posts.iter().take(window) {
             if let Some(a) = sp.post.tags.artist.first() {
                 let a = a.to_ascii_lowercase();
-                if !set.contains(&a) { set.push(a); }
+                if !set.contains(&a) {
+                    set.push(a);
+                }
             }
         }
         set.len()
@@ -609,7 +629,9 @@ mod tests {
         for sp in posts.iter().take(window) {
             if let Some(c) = sp.post.tags.character.first() {
                 let c = c.to_ascii_lowercase();
-                if !set.contains(&c) { set.push(c); }
+                if !set.contains(&c) {
+                    set.push(c);
+                }
             }
         }
         set.len()

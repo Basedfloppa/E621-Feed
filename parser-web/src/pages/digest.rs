@@ -1,5 +1,5 @@
-use std::collections::HashSet;
 use serde::de::DeserializeOwned;
+use std::collections::HashSet;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
 use wasm_bindgen_futures::spawn_local;
@@ -7,9 +7,7 @@ use web_sys::RequestInit;
 use web_sys::{Request, RequestMode, Response, window};
 use yew::prelude::*;
 
-use crate::components::{
-    IconArrowClockwise, IconSliders, SavedAccountsSelect, render_post_grid,
-};
+use crate::components::{IconArrowClockwise, IconSliders, SavedAccountsSelect, render_post_grid};
 use crate::models::*;
 use crate::pages::UserInfo;
 
@@ -185,17 +183,15 @@ pub fn digest_page() -> Html {
             let process_status = process_status.clone();
             spawn_local(async move {
                 match api_get(&url).send().await {
-                    Ok(resp) if resp.ok() => {
-                        match resp.json::<Option<ProcessJobState>>().await {
-                            Ok(s) => process_status.set(s),
-                            Err(e) => {
-                                web_sys::console::warn_1(
-                                    &format!("digest process status parse: {e}").into(),
-                                );
-                                process_status.set(None);
-                            }
+                    Ok(resp) if resp.ok() => match resp.json::<Option<ProcessJobState>>().await {
+                        Ok(s) => process_status.set(s),
+                        Err(e) => {
+                            web_sys::console::warn_1(
+                                &format!("digest process status parse: {e}").into(),
+                            );
+                            process_status.set(None);
                         }
-                    }
+                    },
                     Ok(_) => process_status.set(None),
                     Err(e) => {
                         web_sys::console::warn_1(
@@ -289,10 +285,7 @@ pub fn digest_page() -> Html {
             .as_ref()
             .map(|s| s.phase.clone())
             .unwrap_or(ProcessJobPhase::Done);
-        let account_id = process_status
-            .as_ref()
-            .map(|s| s.account_id)
-            .unwrap_or(0);
+        let account_id = process_status.as_ref().map(|s| s.account_id).unwrap_or(0);
         let started_at = process_status
             .as_ref()
             .map(|s| s.started_at.clone())
@@ -306,58 +299,59 @@ pub fn digest_page() -> Html {
 
                 if matches!(phase, ProcessJobPhase::Running) && *account_id > 0 {
                     if let Some(cfg) = read_config_from_head() {
-                    let url = format!("{}/process/{}/status", cfg.backend_domain, account_id);
-                    let process_status = process_status.clone();
-                    let refresh_tick = refresh_tick.clone();
-
-                    let cb = Closure::<dyn FnMut()>::new(move || {
-                        let url = url.clone();
+                        let url = format!("{}/process/{}/status", cfg.backend_domain, account_id);
                         let process_status = process_status.clone();
                         let refresh_tick = refresh_tick.clone();
-                        spawn_local(async move {
-                            match api_get(&url).send().await {
-                                Ok(resp) if resp.ok() => {
-                                    match resp.json::<Option<ProcessJobState>>().await {
-                                        Ok(Some(s)) => {
-                                            let was_done = matches!(
-                                                s.phase,
-                                                ProcessJobPhase::Done | ProcessJobPhase::Failed,
-                                            );
-                                            let was_previously_running =
-                                                process_status
+
+                        let cb = Closure::<dyn FnMut()>::new(move || {
+                            let url = url.clone();
+                            let process_status = process_status.clone();
+                            let refresh_tick = refresh_tick.clone();
+                            spawn_local(async move {
+                                match api_get(&url).send().await {
+                                    Ok(resp) if resp.ok() => {
+                                        match resp.json::<Option<ProcessJobState>>().await {
+                                            Ok(Some(s)) => {
+                                                let was_done = matches!(
+                                                    s.phase,
+                                                    ProcessJobPhase::Done | ProcessJobPhase::Failed,
+                                                );
+                                                let was_previously_running = process_status
                                                     .as_ref()
-                                                    .map(|old| old.phase == ProcessJobPhase::Running)
+                                                    .map(|old| {
+                                                        old.phase == ProcessJobPhase::Running
+                                                    })
                                                     .unwrap_or(false);
-                                            process_status.set(Some(s));
-                                            // Auto-refresh digest when a
-                                            // running job finishes.
-                                            if was_done && was_previously_running {
-                                                refresh_tick.set(*refresh_tick + 1);
+                                                process_status.set(Some(s));
+                                                // Auto-refresh digest when a
+                                                // running job finishes.
+                                                if was_done && was_previously_running {
+                                                    refresh_tick.set(*refresh_tick + 1);
+                                                }
+                                            }
+                                            Ok(None) => {
+                                                process_status.set(None);
+                                            }
+                                            Err(e) => {
+                                                web_sys::console::warn_1(
+                                                    &format!("digest status parse: {e}").into(),
+                                                );
                                             }
                                         }
-                                        Ok(None) => {
-                                            process_status.set(None);
-                                        }
-                                        Err(e) => {
-                                            web_sys::console::warn_1(
-                                                &format!("digest status parse: {e}").into(),
-                                            );
-                                        }
+                                    }
+                                    Ok(resp) => {
+                                        web_sys::console::warn_1(
+                                            &format!("digest status HTTP {}", resp.status()).into(),
+                                        );
+                                    }
+                                    Err(e) => {
+                                        web_sys::console::warn_1(
+                                            &format!("digest status network: {e}").into(),
+                                        );
                                     }
                                 }
-                                Ok(resp) => {
-                                    web_sys::console::warn_1(
-                                        &format!("digest status HTTP {}", resp.status()).into(),
-                                    );
-                                }
-                                Err(e) => {
-                                    web_sys::console::warn_1(
-                                        &format!("digest status network: {e}").into(),
-                                    );
-                                }
-                            }
+                            });
                         });
-                    });
 
                         if let Some(window) = web_sys::window()
                             && let Ok(h) = window
@@ -429,8 +423,6 @@ pub fn digest_page() -> Html {
         Callback::from(move |_: MouseEvent| grid.set(g))
     };
 
-
-
     // Compute the process-running banner outside the html! macro so we
     // can use let bindings without tripping the macro's element parser.
     let process_banner = if process_is_running {
@@ -474,7 +466,10 @@ pub fn digest_page() -> Html {
     let backend_url = read_config_from_head()
         .map(|cfg| cfg.backend_domain)
         .unwrap_or_default();
-    let account_id = selected_user.as_ref().map(|u| u.id as i32).unwrap_or_default();
+    let account_id = selected_user
+        .as_ref()
+        .map(|u| u.id as i32)
+        .unwrap_or_default();
     let posts_grid_html = render_post_grid(
         &posts,
         grid.grid_class(),

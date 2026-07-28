@@ -507,9 +507,10 @@ impl BucketOverride {
         }
         // Apply generic priors overrides via JSON merge.
         if let Some(json) = &self.priors
-            && let Ok(overrides) = serde_json::from_value::<Priors>(json.clone()) {
-                merge_priors(p, &overrides);
-            }
+            && let Ok(overrides) = serde_json::from_value::<Priors>(json.clone())
+        {
+            merge_priors(p, &overrides);
+        }
     }
 }
 
@@ -519,123 +520,300 @@ impl BucketOverride {
 /// This avoids requiring every field to be `Option<T>` in Priors itself.
 fn merge_priors(base: &mut Priors, overrides: &Priors) {
     // --- mix weights ---
-    if overrides.mix_sim != 0.0 { base.mix_sim = overrides.mix_sim; }
-    if overrides.mix_quality != 0.0 { base.mix_quality = overrides.mix_quality; }
-    if overrides.mix_recency != 0.0 { base.mix_recency = overrides.mix_recency; }
-    if overrides.mix_rating != 0.0 { base.mix_rating = overrides.mix_rating; }
-    if overrides.mix_media != 0.0 { base.mix_media = overrides.mix_media; }
-    if overrides.mix_popularity != 0.0 { base.mix_popularity = overrides.mix_popularity; }
-    if overrides.mix_interaction != 0.0 { base.mix_interaction = overrides.mix_interaction; }
-    if overrides.mix_tag_relation != 0.08 { base.mix_tag_relation = overrides.mix_tag_relation; }
-    if overrides.mix_uploader != 0.05 { base.mix_uploader = overrides.mix_uploader; }
-    if overrides.mix_exclusivity != 0.0 { base.mix_exclusivity = overrides.mix_exclusivity; }
-    if overrides.mix_novelty != 0.0 { base.mix_novelty = overrides.mix_novelty; }
+    if overrides.mix_sim != 0.0 {
+        base.mix_sim = overrides.mix_sim;
+    }
+    if overrides.mix_quality != 0.0 {
+        base.mix_quality = overrides.mix_quality;
+    }
+    if overrides.mix_recency != 0.0 {
+        base.mix_recency = overrides.mix_recency;
+    }
+    if overrides.mix_rating != 0.0 {
+        base.mix_rating = overrides.mix_rating;
+    }
+    if overrides.mix_media != 0.0 {
+        base.mix_media = overrides.mix_media;
+    }
+    if overrides.mix_popularity != 0.0 {
+        base.mix_popularity = overrides.mix_popularity;
+    }
+    if overrides.mix_interaction != 0.0 {
+        base.mix_interaction = overrides.mix_interaction;
+    }
+    if overrides.mix_tag_relation != 0.08 {
+        base.mix_tag_relation = overrides.mix_tag_relation;
+    }
+    if overrides.mix_uploader != 0.05 {
+        base.mix_uploader = overrides.mix_uploader;
+    }
+    if overrides.mix_exclusivity != 0.0 {
+        base.mix_exclusivity = overrides.mix_exclusivity;
+    }
+    if overrides.mix_novelty != 0.0 {
+        base.mix_novelty = overrides.mix_novelty;
+    }
 
     // --- IDF / freq ---
-    if overrides.idf_lambda != 1.0 { base.idf_lambda = overrides.idf_lambda; }
-    if overrides.idf_alpha != 1.0 { base.idf_alpha = overrides.idf_alpha; }
-    if overrides.freq_alpha != 0.95 { base.freq_alpha = overrides.freq_alpha; }
-    if overrides.df_floor != 0.4 { base.df_floor = overrides.df_floor; }
-    if overrides.idf_max != 100.0 { base.idf_max = overrides.idf_max; }
-    if overrides.bm25_k != 2.25 { base.bm25_k = overrides.bm25_k; }
-    if overrides.idf_rsj_smoothing != 0.35 { base.idf_rsj_smoothing = overrides.idf_rsj_smoothing; }
-    if overrides.one_sided_ratio_exp != 0.5 { base.one_sided_ratio_exp = overrides.one_sided_ratio_exp; }
-    if !overrides.idf_lambda_meta.is_nan() { base.idf_lambda_meta = overrides.idf_lambda_meta; }
+    if overrides.idf_lambda != 1.0 {
+        base.idf_lambda = overrides.idf_lambda;
+    }
+    if overrides.idf_alpha != 1.0 {
+        base.idf_alpha = overrides.idf_alpha;
+    }
+    if overrides.freq_alpha != 0.95 {
+        base.freq_alpha = overrides.freq_alpha;
+    }
+    if overrides.df_floor != 0.4 {
+        base.df_floor = overrides.df_floor;
+    }
+    if overrides.idf_max != 100.0 {
+        base.idf_max = overrides.idf_max;
+    }
+    if overrides.bm25_k != 2.25 {
+        base.bm25_k = overrides.bm25_k;
+    }
+    if overrides.idf_rsj_smoothing != 0.35 {
+        base.idf_rsj_smoothing = overrides.idf_rsj_smoothing;
+    }
+    if overrides.one_sided_ratio_exp != 0.5 {
+        base.one_sided_ratio_exp = overrides.one_sided_ratio_exp;
+    }
+    if !overrides.idf_lambda_meta.is_nan() {
+        base.idf_lambda_meta = overrides.idf_lambda_meta;
+    }
 
     // --- quality channel ---
-    if overrides.quality_a != 0.5 { base.quality_a = overrides.quality_a; }
-    if overrides.quality_b != 0.2 { base.quality_b = overrides.quality_b; }
-    if overrides.quality_log_bias != -3.0 { base.quality_log_bias = overrides.quality_log_bias; }
-    if overrides.quality_w_absolute != 0.55 { base.quality_w_absolute = overrides.quality_w_absolute; }
-    if overrides.quality_w_relative_score != 0.3 { base.quality_w_relative_score = overrides.quality_w_relative_score; }
-    if overrides.quality_w_relative_comments != 0.15 { base.quality_w_relative_comments = overrides.quality_w_relative_comments; }
-    if overrides.quality_c != 0.3 { base.quality_c = overrides.quality_c; }
+    if overrides.quality_a != 0.5 {
+        base.quality_a = overrides.quality_a;
+    }
+    if overrides.quality_b != 0.2 {
+        base.quality_b = overrides.quality_b;
+    }
+    if overrides.quality_log_bias != -3.0 {
+        base.quality_log_bias = overrides.quality_log_bias;
+    }
+    if overrides.quality_w_absolute != 0.55 {
+        base.quality_w_absolute = overrides.quality_w_absolute;
+    }
+    if overrides.quality_w_relative_score != 0.3 {
+        base.quality_w_relative_score = overrides.quality_w_relative_score;
+    }
+    if overrides.quality_w_relative_comments != 0.15 {
+        base.quality_w_relative_comments = overrides.quality_w_relative_comments;
+    }
+    if overrides.quality_c != 0.3 {
+        base.quality_c = overrides.quality_c;
+    }
 
     // --- recency channel ---
-    if overrides.recency_tau_days != 10.0 { base.recency_tau_days = overrides.recency_tau_days; }
-    if overrides.recency_w_global != 0.4 { base.recency_w_global = overrides.recency_w_global; }
-    if overrides.recency_w_personal != 0.6 { base.recency_w_personal = overrides.recency_w_personal; }
-    if overrides.recency_personal_floor_frac != 1.0 { base.recency_personal_floor_frac = overrides.recency_personal_floor_frac; }
-    if !overrides.recency_log_personal { base.recency_log_personal = overrides.recency_log_personal; }
-    if !overrides.recency_tau_hot.is_nan() { base.recency_tau_hot = overrides.recency_tau_hot; }
-    if !overrides.recency_tau_recent.is_nan() { base.recency_tau_recent = overrides.recency_tau_recent; }
-    if overrides.recency_split_age_hours != 24.0 { base.recency_split_age_hours = overrides.recency_split_age_hours; }
-    if overrides.recency_split_age_days != 30.0 { base.recency_split_age_days = overrides.recency_split_age_days; }
+    if overrides.recency_tau_days != 10.0 {
+        base.recency_tau_days = overrides.recency_tau_days;
+    }
+    if overrides.recency_w_global != 0.4 {
+        base.recency_w_global = overrides.recency_w_global;
+    }
+    if overrides.recency_w_personal != 0.6 {
+        base.recency_w_personal = overrides.recency_w_personal;
+    }
+    if overrides.recency_personal_floor_frac != 1.0 {
+        base.recency_personal_floor_frac = overrides.recency_personal_floor_frac;
+    }
+    if !overrides.recency_log_personal {
+        base.recency_log_personal = overrides.recency_log_personal;
+    }
+    if !overrides.recency_tau_hot.is_nan() {
+        base.recency_tau_hot = overrides.recency_tau_hot;
+    }
+    if !overrides.recency_tau_recent.is_nan() {
+        base.recency_tau_recent = overrides.recency_tau_recent;
+    }
+    if overrides.recency_split_age_hours != 24.0 {
+        base.recency_split_age_hours = overrides.recency_split_age_hours;
+    }
+    if overrides.recency_split_age_days != 30.0 {
+        base.recency_split_age_days = overrides.recency_split_age_days;
+    }
 
     // --- popularity channel ---
-    if overrides.popularity_w_fav != 0.8 { base.popularity_w_fav = overrides.popularity_w_fav; }
-    if overrides.popularity_w_duration != 0.2 { base.popularity_w_duration = overrides.popularity_w_duration; }
+    if overrides.popularity_w_fav != 0.8 {
+        base.popularity_w_fav = overrides.popularity_w_fav;
+    }
+    if overrides.popularity_w_duration != 0.2 {
+        base.popularity_w_duration = overrides.popularity_w_duration;
+    }
 
     // --- tag relation channel ---
-    if overrides.tag_relation_w_global != 0.4 { base.tag_relation_w_global = overrides.tag_relation_w_global; }
-    if overrides.tag_relation_w_personal != 0.6 { base.tag_relation_w_personal = overrides.tag_relation_w_personal; }
-    if overrides.tag_relation_pmi_scale != 3.5 { base.tag_relation_pmi_scale = overrides.tag_relation_pmi_scale; }
-    if overrides.tag_relation_min_cooc != 2 { base.tag_relation_min_cooc = overrides.tag_relation_min_cooc; }
-    if overrides.tag_relation_user_min_cooc != 1 { base.tag_relation_user_min_cooc = overrides.tag_relation_user_min_cooc; }
-    if overrides.tag_relation_cooc_ref != 16.0 { base.tag_relation_cooc_ref = overrides.tag_relation_cooc_ref; }
-    if overrides.tag_relation_user_cooc_ref != 5.0 { base.tag_relation_user_cooc_ref = overrides.tag_relation_user_cooc_ref; }
-    if !overrides.tag_relation_pmi_scale_user.is_nan() { base.tag_relation_pmi_scale_user = overrides.tag_relation_pmi_scale_user; }
-    if overrides.tag_relation_pair_aggregator != "mean" { base.tag_relation_pair_aggregator.clone_from(&overrides.tag_relation_pair_aggregator); }
-    if overrides.tag_relation_max_tags != 20 { base.tag_relation_max_tags = overrides.tag_relation_max_tags; }
+    if overrides.tag_relation_w_global != 0.4 {
+        base.tag_relation_w_global = overrides.tag_relation_w_global;
+    }
+    if overrides.tag_relation_w_personal != 0.6 {
+        base.tag_relation_w_personal = overrides.tag_relation_w_personal;
+    }
+    if overrides.tag_relation_pmi_scale != 3.5 {
+        base.tag_relation_pmi_scale = overrides.tag_relation_pmi_scale;
+    }
+    if overrides.tag_relation_min_cooc != 2 {
+        base.tag_relation_min_cooc = overrides.tag_relation_min_cooc;
+    }
+    if overrides.tag_relation_user_min_cooc != 1 {
+        base.tag_relation_user_min_cooc = overrides.tag_relation_user_min_cooc;
+    }
+    if overrides.tag_relation_cooc_ref != 16.0 {
+        base.tag_relation_cooc_ref = overrides.tag_relation_cooc_ref;
+    }
+    if overrides.tag_relation_user_cooc_ref != 5.0 {
+        base.tag_relation_user_cooc_ref = overrides.tag_relation_user_cooc_ref;
+    }
+    if !overrides.tag_relation_pmi_scale_user.is_nan() {
+        base.tag_relation_pmi_scale_user = overrides.tag_relation_pmi_scale_user;
+    }
+    if overrides.tag_relation_pair_aggregator != "mean" {
+        base.tag_relation_pair_aggregator
+            .clone_from(&overrides.tag_relation_pair_aggregator);
+    }
+    if overrides.tag_relation_max_tags != 20 {
+        base.tag_relation_max_tags = overrides.tag_relation_max_tags;
+    }
 
     // --- group weights ---
-    if overrides.group_w_artist != 2.4 { base.group_w_artist = overrides.group_w_artist; }
-    if overrides.group_w_character != 2.0 { base.group_w_character = overrides.group_w_character; }
-    if overrides.group_w_copyright != 1.45 { base.group_w_copyright = overrides.group_w_copyright; }
-    if overrides.group_w_species != 1.3 { base.group_w_species = overrides.group_w_species; }
-    if overrides.group_w_general != 0.7 { base.group_w_general = overrides.group_w_general; }
-    if overrides.group_w_lore != 0.4 { base.group_w_lore = overrides.group_w_lore; }
+    if overrides.group_w_artist != 2.4 {
+        base.group_w_artist = overrides.group_w_artist;
+    }
+    if overrides.group_w_character != 2.0 {
+        base.group_w_character = overrides.group_w_character;
+    }
+    if overrides.group_w_copyright != 1.45 {
+        base.group_w_copyright = overrides.group_w_copyright;
+    }
+    if overrides.group_w_species != 1.3 {
+        base.group_w_species = overrides.group_w_species;
+    }
+    if overrides.group_w_general != 0.7 {
+        base.group_w_general = overrides.group_w_general;
+    }
+    if overrides.group_w_lore != 0.4 {
+        base.group_w_lore = overrides.group_w_lore;
+    }
 
     // --- interaction / feedback ---
-    if overrides.interaction_ctr_prior_alpha != 4.0 { base.interaction_ctr_prior_alpha = overrides.interaction_ctr_prior_alpha; }
-    if overrides.meta_interaction_weight != 0.3 { base.meta_interaction_weight = overrides.meta_interaction_weight; }
-    if overrides.feedback_decay_half_life_days != 90.0 { base.feedback_decay_half_life_days = overrides.feedback_decay_half_life_days; }
-    if overrides.strong_negative_count != 3 { base.strong_negative_count = overrides.strong_negative_count; }
-    if overrides.strong_negative_penalty != 0.4 { base.strong_negative_penalty = overrides.strong_negative_penalty; }
-    if overrides.strong_negative_wilson_threshold != 0.55 { base.strong_negative_wilson_threshold = overrides.strong_negative_wilson_threshold; }
+    if overrides.interaction_ctr_prior_alpha != 4.0 {
+        base.interaction_ctr_prior_alpha = overrides.interaction_ctr_prior_alpha;
+    }
+    if overrides.meta_interaction_weight != 0.3 {
+        base.meta_interaction_weight = overrides.meta_interaction_weight;
+    }
+    if overrides.feedback_decay_half_life_days != 90.0 {
+        base.feedback_decay_half_life_days = overrides.feedback_decay_half_life_days;
+    }
+    if overrides.strong_negative_count != 3 {
+        base.strong_negative_count = overrides.strong_negative_count;
+    }
+    if overrides.strong_negative_penalty != 0.4 {
+        base.strong_negative_penalty = overrides.strong_negative_penalty;
+    }
+    if overrides.strong_negative_wilson_threshold != 0.55 {
+        base.strong_negative_wilson_threshold = overrides.strong_negative_wilson_threshold;
+    }
 
     // --- cold-start / smoothing ---
-    if overrides.discrete_smoothing_alpha != 1.0 { base.discrete_smoothing_alpha = overrides.discrete_smoothing_alpha; }
-    if overrides.discrete_pref_floor != 0.05 { base.discrete_pref_floor = overrides.discrete_pref_floor; }
-    if overrides.coldstart_smoothing_boost != 2.0 { base.coldstart_smoothing_boost = overrides.coldstart_smoothing_boost; }
-    if overrides.coldstart_n0 != 25.0 { base.coldstart_n0 = overrides.coldstart_n0; }
+    if overrides.discrete_smoothing_alpha != 1.0 {
+        base.discrete_smoothing_alpha = overrides.discrete_smoothing_alpha;
+    }
+    if overrides.discrete_pref_floor != 0.05 {
+        base.discrete_pref_floor = overrides.discrete_pref_floor;
+    }
+    if overrides.coldstart_smoothing_boost != 2.0 {
+        base.coldstart_smoothing_boost = overrides.coldstart_smoothing_boost;
+    }
+    if overrides.coldstart_n0 != 25.0 {
+        base.coldstart_n0 = overrides.coldstart_n0;
+    }
 
     // --- diversity / MMR ---
-    if overrides.diversity_window != 32 { base.diversity_window = overrides.diversity_window; }
-    if overrides.diversity_w_artist != 0.22 { base.diversity_w_artist = overrides.diversity_w_artist; }
-    if overrides.diversity_w_character != 0.16 { base.diversity_w_character = overrides.diversity_w_character; }
-    if overrides.diversity_w_copyright != 1.8 { base.diversity_w_copyright = overrides.diversity_w_copyright; }
-    if overrides.diversity_w_species != 1.5 { base.diversity_w_species = overrides.diversity_w_species; }
-    if overrides.diversity_w_general != 0.08 { base.diversity_w_general = overrides.diversity_w_general; }
-    if overrides.diversity_max_penalty != 0.45 { base.diversity_max_penalty = overrides.diversity_max_penalty; }
-    if overrides.diversity_interaction_damp != 0.35 { base.diversity_interaction_damp = overrides.diversity_interaction_damp; }
+    if overrides.diversity_window != 32 {
+        base.diversity_window = overrides.diversity_window;
+    }
+    if overrides.diversity_w_artist != 0.22 {
+        base.diversity_w_artist = overrides.diversity_w_artist;
+    }
+    if overrides.diversity_w_character != 0.16 {
+        base.diversity_w_character = overrides.diversity_w_character;
+    }
+    if overrides.diversity_w_copyright != 1.8 {
+        base.diversity_w_copyright = overrides.diversity_w_copyright;
+    }
+    if overrides.diversity_w_species != 1.5 {
+        base.diversity_w_species = overrides.diversity_w_species;
+    }
+    if overrides.diversity_w_general != 0.08 {
+        base.diversity_w_general = overrides.diversity_w_general;
+    }
+    if overrides.diversity_max_penalty != 0.45 {
+        base.diversity_max_penalty = overrides.diversity_max_penalty;
+    }
+    if overrides.diversity_interaction_damp != 0.35 {
+        base.diversity_interaction_damp = overrides.diversity_interaction_damp;
+    }
     // --- v5.11 Class J: diversity semantic similarity ---
-    if overrides.diversity_semantic_blend != 0.0 { base.diversity_semantic_blend = overrides.diversity_semantic_blend; }
-    if overrides.diversity_pmi_threshold != 0.0 { base.diversity_pmi_threshold = overrides.diversity_pmi_threshold; }
-    if overrides.diversity_semantic_max_tags != 10 { base.diversity_semantic_max_tags = overrides.diversity_semantic_max_tags; }
+    if overrides.diversity_semantic_blend != 0.0 {
+        base.diversity_semantic_blend = overrides.diversity_semantic_blend;
+    }
+    if overrides.diversity_pmi_threshold != 0.0 {
+        base.diversity_pmi_threshold = overrides.diversity_pmi_threshold;
+    }
+    if overrides.diversity_semantic_max_tags != 10 {
+        base.diversity_semantic_max_tags = overrides.diversity_semantic_max_tags;
+    }
 
     // --- uploader channel ---
-    if overrides.uploader_n0 != 5.0 { base.uploader_n0 = overrides.uploader_n0; }
-    if overrides.uploader_w_avg_score != 0.6 { base.uploader_w_avg_score = overrides.uploader_w_avg_score; }
-    if overrides.uploader_w_avg_fav != 0.4 { base.uploader_w_avg_fav = overrides.uploader_w_avg_fav; }
+    if overrides.uploader_n0 != 5.0 {
+        base.uploader_n0 = overrides.uploader_n0;
+    }
+    if overrides.uploader_w_avg_score != 0.6 {
+        base.uploader_w_avg_score = overrides.uploader_w_avg_score;
+    }
+    if overrides.uploader_w_avg_fav != 0.4 {
+        base.uploader_w_avg_fav = overrides.uploader_w_avg_fav;
+    }
 
     // --- exclusivity channel ---
-    if overrides.min_exclusivity_cooc != 2 { base.min_exclusivity_cooc = overrides.min_exclusivity_cooc; }
-    if overrides.exclusivity_scale != 0.5 { base.exclusivity_scale = overrides.exclusivity_scale; }
-    if overrides.exclusivity_max_tags != 15 { base.exclusivity_max_tags = overrides.exclusivity_max_tags; }
+    if overrides.min_exclusivity_cooc != 2 {
+        base.min_exclusivity_cooc = overrides.min_exclusivity_cooc;
+    }
+    if overrides.exclusivity_scale != 0.5 {
+        base.exclusivity_scale = overrides.exclusivity_scale;
+    }
+    if overrides.exclusivity_max_tags != 15 {
+        base.exclusivity_max_tags = overrides.exclusivity_max_tags;
+    }
 
     // --- novelty channel ---
-    if overrides.novelty_n0 != 3.0 { base.novelty_n0 = overrides.novelty_n0; }
-    if !overrides.novelty_use_feedback { base.novelty_use_feedback = overrides.novelty_use_feedback; }
+    if overrides.novelty_n0 != 3.0 {
+        base.novelty_n0 = overrides.novelty_n0;
+    }
+    if !overrides.novelty_use_feedback {
+        base.novelty_use_feedback = overrides.novelty_use_feedback;
+    }
 
     // --- algorithmic shape ---
-    if overrides.score_temperature != 0.0 { base.score_temperature = overrides.score_temperature; }
-    if overrides.confidence_steepness != 1.0 { base.confidence_steepness = overrides.confidence_steepness; }
-    if overrides.mmr_redundancy_exp != 1.0 { base.mmr_redundancy_exp = overrides.mmr_redundancy_exp; }
-    if overrides.tag_sim_jaccard_blend != 0.0 { base.tag_sim_jaccard_blend = overrides.tag_sim_jaccard_blend; }
+    if overrides.score_temperature != 0.0 {
+        base.score_temperature = overrides.score_temperature;
+    }
+    if overrides.confidence_steepness != 1.0 {
+        base.confidence_steepness = overrides.confidence_steepness;
+    }
+    if overrides.mmr_redundancy_exp != 1.0 {
+        base.mmr_redundancy_exp = overrides.mmr_redundancy_exp;
+    }
+    if overrides.tag_sim_jaccard_blend != 0.0 {
+        base.tag_sim_jaccard_blend = overrides.tag_sim_jaccard_blend;
+    }
 
     // --- exploration ---
-    if overrides.exploration_epsilon != 0.0 { base.exploration_epsilon = overrides.exploration_epsilon; }
+    if overrides.exploration_epsilon != 0.0 {
+        base.exploration_epsilon = overrides.exploration_epsilon;
+    }
 }
 
 impl Config {
@@ -658,9 +836,10 @@ impl Config {
                 }
             });
         if let Some(name) = &chosen_name
-            && let Some(ovr) = self.buckets.get(name) {
-                ovr.apply_to(&mut priors);
-            }
+            && let Some(ovr) = self.buckets.get(name)
+        {
+            ovr.apply_to(&mut priors);
+        }
         (chosen_name, priors)
     }
 }
@@ -701,19 +880,20 @@ pub fn start_config_watcher(path: PathBuf) -> anyhow::Result<ConfigWatcher> {
                 break;
             }
             if let Ok(mtime) = file_mtime(&path)
-                && last_mtime.is_none_or(|old| old < mtime) {
-                    thread::sleep(Duration::from_millis(120));
+                && last_mtime.is_none_or(|old| old < mtime)
+            {
+                thread::sleep(Duration::from_millis(120));
 
-                    match reload_from(&path) {
-                        Ok(_) => {
-                            last_mtime = Some(mtime);
-                            info!("[config] reloaded {}", path.display());
-                        }
-                        Err(e) => {
-                            error!("[config] reload failed: {e:#}");
-                        }
+                match reload_from(&path) {
+                    Ok(_) => {
+                        last_mtime = Some(mtime);
+                        info!("[config] reloaded {}", path.display());
+                    }
+                    Err(e) => {
+                        error!("[config] reload failed: {e:#}");
                     }
                 }
+            }
         }
     });
 
@@ -805,32 +985,61 @@ diversity_w_general    = 0.08
         Priors {
             now: "2025-01-01T00:00:00Z".parse().unwrap(),
             recency_tau_days: 10.0,
-            quality_a: 0.5, quality_b: 0.2, quality_log_bias: -3.0,
-            mix_sim: 0.72, mix_quality: 0.02, mix_recency: 0.02,
-            mix_rating: 0.04, mix_media: 0.05, mix_popularity: 0.02,
-            mix_interaction: 0.10, mix_tag_relation: 0.08,
-            mix_uploader: 0.05, mix_exclusivity: 0.0, mix_novelty: 0.0,
-            idf_lambda: 1.0, idf_alpha: 1.05, freq_alpha: 0.95,
-            df_floor: 0.4, idf_max: 100.0, bm25_k: 2.25,
-            idf_rsj_smoothing: 0.35, one_sided_ratio_exp: 0.5,
-            quality_w_absolute: 0.55, quality_w_relative_score: 0.30,
-            quality_w_relative_comments: 0.15, quality_c: 0.3,
-            recency_w_global: 0.4, recency_w_personal: 0.6,
-            recency_personal_floor_frac: 1.0, recency_log_personal: true,
-            popularity_w_fav: 0.8, popularity_w_duration: 0.2,
-            tag_relation_w_global: 0.4, tag_relation_w_personal: 0.6,
-            tag_relation_pmi_scale: 3.5, tag_relation_min_cooc: 2,
-            tag_relation_user_min_cooc: 1, tag_relation_cooc_ref: 16.0,
-            tag_relation_user_cooc_ref: 5.0, tag_relation_max_tags: 20,
-            group_w_artist: 2.4, group_w_character: 2.0,
-            group_w_copyright: 1.45, group_w_species: 1.3,
-            group_w_general: 0.7, group_w_lore: 0.4,
+            quality_a: 0.5,
+            quality_b: 0.2,
+            quality_log_bias: -3.0,
+            mix_sim: 0.72,
+            mix_quality: 0.02,
+            mix_recency: 0.02,
+            mix_rating: 0.04,
+            mix_media: 0.05,
+            mix_popularity: 0.02,
+            mix_interaction: 0.10,
+            mix_tag_relation: 0.08,
+            mix_uploader: 0.05,
+            mix_exclusivity: 0.0,
+            mix_novelty: 0.0,
+            idf_lambda: 1.0,
+            idf_alpha: 1.05,
+            freq_alpha: 0.95,
+            df_floor: 0.4,
+            idf_max: 100.0,
+            bm25_k: 2.25,
+            idf_rsj_smoothing: 0.35,
+            one_sided_ratio_exp: 0.5,
+            quality_w_absolute: 0.55,
+            quality_w_relative_score: 0.30,
+            quality_w_relative_comments: 0.15,
+            quality_c: 0.3,
+            recency_w_global: 0.4,
+            recency_w_personal: 0.6,
+            recency_personal_floor_frac: 1.0,
+            recency_log_personal: true,
+            popularity_w_fav: 0.8,
+            popularity_w_duration: 0.2,
+            tag_relation_w_global: 0.4,
+            tag_relation_w_personal: 0.6,
+            tag_relation_pmi_scale: 3.5,
+            tag_relation_min_cooc: 2,
+            tag_relation_user_min_cooc: 1,
+            tag_relation_cooc_ref: 16.0,
+            tag_relation_user_cooc_ref: 5.0,
+            tag_relation_max_tags: 20,
+            group_w_artist: 2.4,
+            group_w_character: 2.0,
+            group_w_copyright: 1.45,
+            group_w_species: 1.3,
+            group_w_general: 0.7,
+            group_w_lore: 0.4,
             coldstart_smoothing_boost: 2.0,
             interaction_ctr_prior_alpha: 4.0,
-            coldstart_n0: 25.0, discrete_pref_floor: 0.05,
+            coldstart_n0: 25.0,
+            discrete_pref_floor: 0.05,
             diversity_window: 32,
-            diversity_w_artist: 0.22, diversity_w_character: 0.16,
-            diversity_w_copyright: 1.8, diversity_w_species: 1.5,
+            diversity_w_artist: 0.22,
+            diversity_w_character: 0.16,
+            diversity_w_copyright: 1.8,
+            diversity_w_species: 1.5,
             diversity_w_general: 0.08,
             diversity_max_penalty: 0.45,
             diversity_interaction_damp: 0.35,
@@ -841,8 +1050,10 @@ diversity_w_general    = 0.08
             feedback_decay_half_life_days: 90.0,
             meta_interaction_weight: 0.3,
             tag_relation_pair_aggregator: "mean".into(),
-            score_temperature: 0.0, confidence_steepness: 1.0,
-            mmr_redundancy_exp: 1.0, tag_sim_jaccard_blend: 0.0,
+            score_temperature: 0.0,
+            confidence_steepness: 1.0,
+            mmr_redundancy_exp: 1.0,
+            tag_sim_jaccard_blend: 0.0,
             idf_lambda_meta: f32::NAN,
             tag_relation_pmi_scale_user: f32::NAN,
             recency_tau_recent: f32::NAN,
@@ -850,11 +1061,14 @@ diversity_w_general    = 0.08
             recency_tau_hot: f32::NAN,
             recency_split_age_hours: 24.0,
             exploration_epsilon: 0.0,
-            uploader_n0: 5.0, uploader_w_avg_score: 0.6,
+            uploader_n0: 5.0,
+            uploader_w_avg_score: 0.6,
             uploader_w_avg_fav: 0.4,
-            min_exclusivity_cooc: 2, exclusivity_scale: 0.5,
+            min_exclusivity_cooc: 2,
+            exclusivity_scale: 0.5,
             exclusivity_max_tags: 15,
-            novelty_n0: 3.0, novelty_use_feedback: true,
+            novelty_n0: 3.0,
+            novelty_use_feedback: true,
             diversity_semantic_blend: 0.0,
             diversity_pmi_threshold: 0.0,
             diversity_semantic_max_tags: 10,
@@ -963,15 +1177,21 @@ max_retries = 1
 
         // Override a few fields with non-default values
         let overrides = Priors {
-            mix_sim: 0.8,       // different from default 0.72
+            mix_sim: 0.8,        // different from default 0.72
             group_w_artist: 3.0, // different from default 2.4
             ..make_default_priors()
         };
 
         merge_priors(&mut base, &overrides);
 
-        assert!((base.mix_sim - 0.8).abs() < 1e-6, "mix_sim should be overridden");
-        assert!((base.group_w_artist - 3.0).abs() < 1e-6, "group_w_artist should be overridden");
+        assert!(
+            (base.mix_sim - 0.8).abs() < 1e-6,
+            "mix_sim should be overridden"
+        );
+        assert!(
+            (base.group_w_artist - 3.0).abs() < 1e-6,
+            "group_w_artist should be overridden"
+        );
         // Unchanged defaults — must not have been touched
         assert!((base.mix_quality - 0.02).abs() < 1e-6);
         assert!((base.group_w_character - 2.0).abs() < 1e-6);
@@ -989,8 +1209,10 @@ max_retries = 1
         };
 
         merge_priors(&mut base, &overrides);
-        assert!((base.mix_sim - snapshot.mix_sim).abs() < 1e-6,
-            "mix_sim should remain unchanged when override matches default");
+        assert!(
+            (base.mix_sim - snapshot.mix_sim).abs() < 1e-6,
+            "mix_sim should remain unchanged when override matches default"
+        );
         assert!((base.mix_quality - snapshot.mix_quality).abs() < 1e-6);
         assert!((base.idf_lambda - snapshot.idf_lambda).abs() < 1e-6);
     }
@@ -1015,17 +1237,19 @@ max_retries = 1
         ovr.apply_to(&mut p);
 
         assert!((p.mix_sim - 0.9).abs() < 1e-6, "mix_sim should be 0.9");
-        assert!((p.mix_quality - 0.05).abs() < 1e-6, "mix_quality should be 0.05");
+        assert!(
+            (p.mix_quality - 0.05).abs() < 1e-6,
+            "mix_quality should be 0.05"
+        );
         // Unchanged fields
         assert!((p.mix_recency - 0.02).abs() < 1e-6, "mix_recency unchanged");
-        assert!((p.mix_interaction - 0.10).abs() < 1e-6, "mix_interaction unchanged");
+        assert!(
+            (p.mix_interaction - 0.10).abs() < 1e-6,
+            "mix_interaction unchanged"
+        );
     }
 
     // ── Config::pick_bucket ────────────────────────────────────────────
-
-    fn default_priors() -> Priors {
-        make_default_priors()
-    }
 
     #[test]
     fn pick_bucket_empty_buckets_returns_none() {
@@ -1088,7 +1312,11 @@ mix_quality = 0.1
 
         // Unknown explicit name falls through to hash selection
         let (name, _) = cfg.pick_bucket(42, Some("nonexistent"));
-        assert_eq!(name.as_deref(), Some("control"), "falls back to hash-based when explicit name not found");
+        assert_eq!(
+            name.as_deref(),
+            Some("control"),
+            "falls back to hash-based when explicit name not found"
+        );
     }
 
     #[test]
@@ -1147,11 +1375,13 @@ mix_sim = 0.6
         // Both must be one of the defined bucket names
         assert!(
             name_a.as_deref() == Some("a") || name_a.as_deref() == Some("b"),
-            "bucket must be 'a' or 'b', got {:?}", name_a
+            "bucket must be 'a' or 'b', got {:?}",
+            name_a
         );
         assert!(
             name_b.as_deref() == Some("a") || name_b.as_deref() == Some("b"),
-            "bucket must be 'a' or 'b', got {:?}", name_b
+            "bucket must be 'a' or 'b', got {:?}",
+            name_b
         );
     }
 

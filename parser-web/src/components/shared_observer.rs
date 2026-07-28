@@ -14,9 +14,7 @@ use wasm_bindgen::JsCast;
 use wasm_bindgen::JsValue;
 use wasm_bindgen::prelude::Closure;
 use web_sys::js_sys;
-use web_sys::{
-    Element, IntersectionObserver, IntersectionObserverEntry, IntersectionObserverInit,
-};
+use web_sys::{Element, IntersectionObserver, IntersectionObserverEntry, IntersectionObserverInit};
 
 pub type CardCallback = Box<dyn Fn(&IntersectionObserverEntry)>;
 
@@ -39,7 +37,10 @@ fn get_or_init_observer() -> IntersectionObserver {
             |entries: js_sys::Array, _obs: IntersectionObserver| {
                 let len = entries.length();
                 for i in 0..len {
-                    let Some(entry) = entries.get(i).dyn_ref::<IntersectionObserverEntry>().cloned()
+                    let Some(entry) = entries
+                        .get(i)
+                        .dyn_ref::<IntersectionObserverEntry>()
+                        .cloned()
                     else {
                         continue;
                     };

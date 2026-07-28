@@ -11,40 +11,38 @@ extern crate rocket;
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
+#[cfg(debug_assertions)]
+use rocket::State;
 use rocket::data::ByteUnit;
 use rocket::futures::lock::Mutex;
 use rocket::http::CookieJar;
 #[cfg(debug_assertions)]
 use rocket::http::Method;
 use rocket::request::Request;
-use rocket::serde::json::{serde_json, Json};
+use rocket::serde::json::{Json, serde_json};
 use rocket::shield::Shield;
-#[cfg(debug_assertions)]
-use rocket::State;
 use rusqlite::Result;
 
 use e621_account_parser_api::{
     audit,
     auth::{self, OwnerToken},
-    db::{get_account_by_id, DbInit},
+    db::{DbInit, get_account_by_id},
     db_blocking,
     errors::ApiError,
     jobs,
     jobs::{BeginResult, ProcessJobState},
     models::{cfg, default_path, reload_from, start_config_watcher},
-    pipeline,
-    prefetch,
+    pipeline, prefetch,
     ratelimit::{self, ClientIp},
     validation,
 };
 #[cfg(debug_assertions)]
 use rocket_okapi::okapi::openapi3::OpenApi;
-use rocket_okapi::{openapi, openapi_get_routes_spec, settings::OpenApiSettings};
 #[cfg(debug_assertions)]
-use rocket_okapi::swagger_ui::{make_swagger_ui, SwaggerUIConfig};
+use rocket_okapi::swagger_ui::{SwaggerUIConfig, make_swagger_ui};
+use rocket_okapi::{openapi, openapi_get_routes_spec, settings::OpenApiSettings};
 
 mod routes;
-
 
 /// Kicks off a background `/process` job and returns immediately with the
 /// current job state. If a job for this account is already running, returns
@@ -69,7 +67,10 @@ async fn process_posts(
     let owner_for_check = owner_token.clone();
     db_blocking(move || get_account_by_id(&owner_for_check, account_id).map_err(|e| e.to_string()))
         .await?;
-    let process_mode = pipeline::ProcessMode::from_str(mode.as_deref().unwrap_or(""))
+    let process_mode = mode
+        .as_deref()
+        .unwrap_or("")
+        .parse::<pipeline::ProcessMode>()
         .map_err(ApiError::BadRequest)?;
 
     match jobs::try_begin(account_id) {
@@ -89,7 +90,8 @@ async fn process_posts(
                         .field("account_id", account_id)
                         .field("error", e)
                         .emit();
-                    e621_account_parser_api::metrics::METRICS.process_runs_total
+                    e621_account_parser_api::metrics::METRICS
+                        .process_runs_total
                         .with_label_values(&["failed"])
                         .inc();
                 }
@@ -156,10 +158,12 @@ async fn session_clear(cookies: &CookieJar<'_>) -> Result<Json<serde_json::Value
     if let Some(c) = cookies.get(auth::OWNER_TOKEN_COOKIE) {
         let token = c.value().to_string();
         if validation::validate_owner_token(&token).is_ok() {
-            db_blocking(move || auth::revoke(&token)).await.map_err(|e| {
-                warn!("session revoke failed: {e}");
-                ApiError::Internal("Failed to revoke session".into())
-            })?;
+            db_blocking(move || auth::revoke(&token))
+                .await
+                .map_err(|e| {
+                    warn!("session revoke failed: {e}");
+                    ApiError::Internal("Failed to revoke session".into())
+                })?;
         }
     }
     cookies.add(auth::build_owner_cookie_clear());
@@ -175,8 +179,7 @@ fn mint_owner_token() -> String {
 }
 
 fn base64_url_encode(bytes: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
     let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
     let mut i = 0;
     while i + 3 <= bytes.len() {
@@ -238,10 +241,17 @@ fn attach_cors(rocket: rocket::Rocket<rocket::Build>) -> rocket::Rocket<rocket::
     let cors = rocket_cors::CorsOptions {
         allowed_origins: exact,
         allow_credentials: true,
-        allowed_methods: vec![Method::Get, Method::Post, Method::Put, Method::Patch, Method::Delete, Method::Options]
-            .into_iter()
-            .map(From::from)
-            .collect(),
+        allowed_methods: vec![
+            Method::Get,
+            Method::Post,
+            Method::Put,
+            Method::Patch,
+            Method::Delete,
+            Method::Options,
+        ]
+        .into_iter()
+        .map(From::from)
+        .collect(),
         allowed_headers: rocket_cors::AllowedHeaders::all(),
         ..Default::default()
     }
@@ -302,16 +312,17 @@ async fn rocket() -> _ {
         routes::tag_relations::resolve_tag_batch,
         routes::taste_profile::get_taste_profile,
         routes::tag_relations::get_tag_implications,
-        routes::tag_relations::get_tag_implications_batch, 
+        routes::tag_relations::get_tag_implications_batch,
     ];
 
     // Increase JSON limit for batch tag resolution (400+ tags = ~130KB).
     // Default 64KiB is too small; 512KiB is safe for any realistic payload.
     // Increase JSON limit for batch tag resolution (400+ tags = ~130KB).
     // Keep existing env config (port, address, etc.) by reading via figment.
-    let figment = rocket::Config::figment()
-        .merge(("limits", rocket::data::Limits::default()
-            .limit("json", ByteUnit::Kibibyte(512))));
+    let figment = rocket::Config::figment().merge((
+        "limits",
+        rocket::data::Limits::default().limit("json", ByteUnit::Kibibyte(512)),
+    ));
 
     // Empty Shield: nginx already sets stricter security headers. Rocket's
     // defaults (`XFO: SAMEORIGIN`, etc.) would conflict with nginx's `DENY`.
@@ -319,7 +330,10 @@ async fn rocket() -> _ {
         .manage(Mutex::new(watcher))
         .manage(spec)
         .mount("/api", api_routes)
-        .mount("/api", rocket::routes![routes::account::get_account_tag_relations])
+        .mount(
+            "/api",
+            rocket::routes![routes::account::get_account_tag_relations],
+        )
         // tag_relations routes are already in openapi_get_routes_spec! above
         .mount("/api", rocket::routes![routes::get_metrics])
         .register("/api", catchers![catch_404, catch_422, catch_500])
@@ -329,15 +343,13 @@ async fn rocket() -> _ {
     // Swagger UI / OpenAPI doc leak the full route map; mount only in
     // dev. nginx 404s these paths in prod as defense-in-depth.
     #[cfg(debug_assertions)]
-    let r = r
-        .mount("/api", routes![openapi_json])
-        .mount(
-            "/api/swagger-ui",
-            make_swagger_ui(&SwaggerUIConfig {
-                url: "/api/openapi.json".to_owned(),
-                ..Default::default()
-            }),
-        );
+    let r = r.mount("/api", routes![openapi_json]).mount(
+        "/api/swagger-ui",
+        make_swagger_ui(&SwaggerUIConfig {
+            url: "/api/openapi.json".to_owned(),
+            ..Default::default()
+        }),
+    );
 
     prefetch::spawn_prefetch_workers();
     e621_account_parser_api::cache_pruner::spawn_cache_pruner();

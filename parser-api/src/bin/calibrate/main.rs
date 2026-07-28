@@ -43,7 +43,7 @@ mod options;
 mod probe;
 mod sampling;
 
-use crate::dataset::{prepare_eval_dataset, EvalDataset};
+use crate::dataset::{EvalDataset, prepare_eval_dataset};
 use crate::grid::run_grid_with_dataset;
 use crate::knobs::{GRID_KNOBS, KnobSpec, MIX_ONLY_KNOBS};
 use crate::metrics::{print_metrics, score_with_progress};
@@ -126,7 +126,10 @@ fn run_modes(modes: &[Mode], mix_only: bool, opts: GridOptions) -> anyhow::Resul
     let t_total = std::time::Instant::now();
     let dataset_pair = if needs_dataset {
         let t_prep = std::time::Instant::now();
-        eprintln!("[run] preparing dataset (shared across {} mode(s))...", modes.len());
+        eprintln!(
+            "[run] preparing dataset (shared across {} mode(s))...",
+            modes.len()
+        );
         let ds = prepare_eval_dataset(&opts)?;
         eprintln!(
             "[run] dataset ready in {:.1}s",

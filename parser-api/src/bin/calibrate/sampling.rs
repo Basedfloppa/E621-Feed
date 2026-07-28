@@ -62,10 +62,7 @@ pub(crate) fn split_train_test(
 /// timestamp ascending, and hold the newest `test_frac` as test. Mirrors
 /// the production "predict next favourite" task more honestly than the
 /// post-id-based split when post ids aren't strictly monotonic with time.
-pub(crate) fn split_train_test_time(
-    favs: &[(i64, i64)],
-    test_frac: f32,
-) -> (Vec<i64>, Vec<i64>) {
+pub(crate) fn split_train_test_time(favs: &[(i64, i64)], test_frac: f32) -> (Vec<i64>, Vec<i64>) {
     let mut sorted: Vec<(i64, i64)> = favs.to_vec();
     sorted.sort_by_key(|(id, ts)| (*ts, *id));
     let n = sorted.len();
@@ -167,8 +164,10 @@ pub(crate) fn sample_negatives_mixed(
         let mut tries = 0;
         let max_tries = target_pop.saturating_mul(5).max(100);
         while out.len() < target_total && tries < max_tries {
-            let pivot: i32 =
-                test_posts[next(&mut rng) % test_posts.len()].stats.fav_count.max(0) as i32;
+            let pivot: i32 = test_posts[next(&mut rng) % test_posts.len()]
+                .stats
+                .fav_count
+                .max(0) as i32;
             // 70%-150% of pivot fav_count (asymmetric: matched-or-slightly-higher).
             let lo = ((pivot as f32) * 0.7) as i32;
             let hi = ((pivot as f32) * 1.5).max((pivot + 50) as f32) as i32;

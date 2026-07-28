@@ -221,6 +221,10 @@ pub(crate) struct TagEdge {
 
 // ── Core API ─────────────────────────────────────────────────────────
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "This public computation boundary receives independently cached datasets and tuning inputs."
+)]
 pub fn compute_taste_themes(
     tag_counts: &[crate::models::TagCount],
     user_graph: &TagRelationGraph,
@@ -680,6 +684,10 @@ fn page_rank_full(n: usize, edges: &[TagEdge]) -> Vec<f32> {
 
 // ── Step 6-10: Build themes ──────────────────────────────────────────
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "The theme builder consumes distinct graph, profile, and catalog datasets."
+)]
 fn build_themes(
     nodes: &[TagNode],
     communities: &[usize],

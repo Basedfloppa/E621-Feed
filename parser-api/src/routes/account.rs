@@ -7,7 +7,7 @@ use std::io::Cursor;
 use rocket::http::{ContentType, Header, Status};
 use rocket::request::{self, FromRequest, Request};
 use rocket::response::{self, Responder, Response};
-use rocket::serde::json::{serde_json, Json};
+use rocket::serde::json::{Json, serde_json};
 
 use rocket_okapi::openapi;
 
@@ -16,16 +16,14 @@ use e621_account_parser_api::auth::OwnerToken;
 use e621_account_parser_api::{
     api,
     db::{
-        self, get_account_by_id, get_account_by_name,
-        get_account_preference_profile, get_account_tag_relation_graph,
-        get_accounts_for_owner, get_tag_counts, set_account,
+        self, get_account_by_id, get_account_by_name, get_account_preference_profile,
+        get_account_tag_relation_graph, get_accounts_for_owner, get_tag_counts, set_account,
         update_device_blacklist,
     },
     errors::ApiError,
     models::{
-        cfg, AccountPreferenceProfile, BlacklistPayload, DeviceScopedAccount,
-        PreferredTagPayload, TagCount, TagRelationScoring, TruncatedAccount,
-        UserApiResponse,
+        AccountPreferenceProfile, BlacklistPayload, DeviceScopedAccount, PreferredTagPayload,
+        TagCount, TagRelationScoring, TruncatedAccount, UserApiResponse, cfg,
     },
     ratelimit::{self, ClientIp},
     validation,
@@ -220,8 +218,12 @@ pub(crate) async fn create_account(
         .field("account_id", acc_id_for_audit)
         .field("name", name_for_audit)
         .emit();
-    e621_account_parser_api::metrics::METRICS.accounts_created_total.inc();
-    e621_account_parser_api::metrics::METRICS.accounts_total.inc();
+    e621_account_parser_api::metrics::METRICS
+        .accounts_created_total
+        .inc();
+    e621_account_parser_api::metrics::METRICS
+        .accounts_total
+        .inc();
     Ok(Json(result))
 }
 
@@ -364,10 +366,7 @@ pub(crate) async fn get_account_experiment_bucket(
 /// underlying account row + derived tables when this was the last link.
 #[openapi(tag = "Accounts")]
 #[delete("/account/<account_id>")]
-pub(crate) async fn delete_account(
-    account_id: i32,
-    owner: OwnerToken,
-) -> Result<(), ApiError> {
+pub(crate) async fn delete_account(account_id: i32, owner: OwnerToken) -> Result<(), ApiError> {
     validation::validate_account_id(account_id)?;
     let owner_token = owner.0;
     let removed = db_blocking(move || db::delete_device_link(&owner_token, account_id)).await?;
@@ -380,8 +379,12 @@ pub(crate) async fn delete_account(
         .field("account_id", account_id)
         .field("removed_links", removed)
         .emit();
-    e621_account_parser_api::metrics::METRICS.accounts_deleted_total.inc();
-    e621_account_parser_api::metrics::METRICS.accounts_total.dec();
+    e621_account_parser_api::metrics::METRICS
+        .accounts_deleted_total
+        .inc();
+    e621_account_parser_api::metrics::METRICS
+        .accounts_total
+        .dec();
     Ok(())
 }
 

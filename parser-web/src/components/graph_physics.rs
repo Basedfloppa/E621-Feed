@@ -200,12 +200,13 @@ impl LayoutState {
         // other nodes see it at the cursor position rather than at its
         // pre-step location.
         if let Some(p) = &self.pinned
-            && let Some(node) = self.nodes.get_mut(p.node_idx) {
-                node.x = p.target_x;
-                node.y = p.target_y;
-                node.vx = 0.0;
-                node.vy = 0.0;
-            }
+            && let Some(node) = self.nodes.get_mut(p.node_idx)
+        {
+            node.x = p.target_x;
+            node.y = p.target_y;
+            node.vx = 0.0;
+            node.vy = 0.0;
+        }
 
         // Hard collision resolution. The continuous repulsion above keeps
         // most pairs apart on its own, but high-degree hubs in dense

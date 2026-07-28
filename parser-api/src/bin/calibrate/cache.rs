@@ -29,11 +29,11 @@ use chrono::{DateTime, Utc};
 use rayon::prelude::*;
 
 use e621_account_parser_api::utils::{
-    context_fingerprint, diversify_indices, CachedPostFeatures, ContextBase, Priors, ScoringContext,
+    CachedPostFeatures, ContextBase, Priors, ScoringContext, context_fingerprint, diversify_indices,
 };
 
 use crate::dataset::EvalDataset;
-use crate::metrics::{mrr_pub, ndcg_at_k_pub, pool, recall_at_k_pub, Metrics};
+use crate::metrics::{Metrics, mrr_pub, ndcg_at_k_pub, pool, recall_at_k_pub};
 
 // ---- ChannelMask -----------------------------------------------------------
 //

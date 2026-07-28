@@ -79,9 +79,10 @@ pub fn home_page() -> Html {
                     wasm_bindgen_futures::spawn_local(async move {
                         if let Ok(resp) = api_get(&url).send().await
                             && resp.ok()
-                                && let Ok(accts) = resp.json::<Vec<UserInfo>>().await {
-                                    saved_accounts.set(accts);
-                                }
+                            && let Ok(accts) = resp.json::<Vec<UserInfo>>().await
+                        {
+                            saved_accounts.set(accts);
+                        }
                     });
                 }
             };
@@ -122,11 +123,9 @@ pub fn home_page() -> Html {
     // We re-use the existing `error` state to show the outcome.
     let on_reanalyze_msg = {
         let error = error.clone();
-        Callback::from(move |result: Result<String, String>| {
-            match result {
-                Ok(msg) => error.set(Some(msg)),
-                Err(e) => error.set(Some(e)),
-            }
+        Callback::from(move |result: Result<String, String>| match result {
+            Ok(msg) => error.set(Some(msg)),
+            Err(e) => error.set(Some(e)),
         })
     };
 

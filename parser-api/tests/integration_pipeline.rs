@@ -15,9 +15,9 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
-use e621_account_parser_api::{api, db};
 use e621_account_parser_api::jobs::{self, ProcessJobPhase};
 use e621_account_parser_api::pipeline;
+use e621_account_parser_api::{api, db};
 use tokio::sync::Mutex;
 use wiremock::matchers::{method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -36,8 +36,7 @@ fn pipeline_lock() -> &'static Mutex<()> {
 /// — we only override `posts_domain`, `posts_limit`, and
 /// `process_fetch_concurrency`.
 fn install_mock_config(mock_uri: &str) -> tempfile::NamedTempFile {
-    let example = std::fs::read_to_string(example_config_path())
-        .expect("read config.example.toml");
+    let example = std::fs::read_to_string(example_config_path()).expect("read config.example.toml");
 
     // posts_domain
     let modified = swap_toml_field(&example, "posts_domain", &format!("\"{mock_uri}\""));
@@ -51,7 +50,8 @@ fn install_mock_config(mock_uri: &str) -> tempfile::NamedTempFile {
 
     let mut file = tempfile::NamedTempFile::new().expect("temp file");
     use std::io::Write;
-    file.write_all(modified.as_bytes()).expect("write temp config");
+    file.write_all(modified.as_bytes())
+        .expect("write temp config");
     file.flush().expect("flush temp config");
 
     e621_account_parser_api::models::reload_from(file.path()).expect("reload config");
@@ -67,9 +67,7 @@ fn swap_toml_field(toml: &str, key: &str, new_value: &str) -> String {
     for line in toml.lines() {
         if !replaced {
             let trimmed = line.trim_start();
-            if trimmed.starts_with(key)
-                && trimmed[key.len()..].trim_start().starts_with('=')
-            {
+            if trimmed.starts_with(key) && trimmed[key.len()..].trim_start().starts_with('=') {
                 out.push_str(&format!("{key} = {new_value}\n"));
                 replaced = true;
                 continue;
@@ -365,18 +363,34 @@ async fn analyze_account_e621_user_error_returns_err() {
 
     // Seed cooc so we can assert teardown DID NOT run.
     let p = e621_account_parser_api::models::Post {
-        id: 30001, created_at: chrono::Utc::now(), updated_at: chrono::Utc::now(),
+        id: 30001,
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
         change_seq: 0.0,
         files: e621_account_parser_api::models::Files::default(),
-        uploader_id: 42, uploader_name: None, approver_id: None,
-        stats: e621_account_parser_api::models::Stats { score: e621_account_parser_api::models::Score { up: 1, down: 0, total: 1 }, ..Default::default() },
+        uploader_id: 42,
+        uploader_name: None,
+        approver_id: None,
+        stats: e621_account_parser_api::models::Stats {
+            score: e621_account_parser_api::models::Score {
+                up: 1,
+                down: 0,
+                total: 1,
+            },
+            ..Default::default()
+        },
         flags: e621_account_parser_api::models::Flags::default(),
         has: e621_account_parser_api::models::Has::default(),
         relationships: e621_account_parser_api::models::Relationships::default(),
-        pools: vec![], rating: e621_account_parser_api::models::Rating::S,
-        locked_tags: vec![], sources: vec![],
+        pools: vec![],
+        rating: e621_account_parser_api::models::Rating::S,
+        locked_tags: vec![],
+        sources: vec![],
         description: None,
-        tags: e621_account_parser_api::models::Tags { general: vec!["a".into(), "b".into()], ..Default::default() },
+        tags: e621_account_parser_api::models::Tags {
+            general: vec!["a".into(), "b".into()],
+            ..Default::default()
+        },
     };
     db::save_posts(std::slice::from_ref(&p), account_id).unwrap();
     db::save_posts_tags_batch(
@@ -441,8 +455,14 @@ async fn get_favorites_malformed_200_returns_err() {
         Err(error) => error.to_string(),
     };
 
-    assert!(error.contains("favorites page 1"), "missing page context: {error}");
-    assert!(error.contains("malformed 200 response"), "wrong error: {error}");
+    assert!(
+        error.contains("favorites page 1"),
+        "missing page context: {error}"
+    );
+    assert!(
+        error.contains("malformed 200 response"),
+        "wrong error: {error}"
+    );
 
     jobs::try_begin(account_id);
     let pipeline_error = pipeline::run_process(account_id, "pipeline_owner".to_string())
@@ -453,7 +473,10 @@ async fn get_favorites_malformed_200_returns_err() {
         "wrong pipeline error: {pipeline_error}"
     );
     let state = jobs::get_state(account_id).expect("job state recorded");
-    assert_eq!(state.pages_done, 0, "malformed page must not be marked done");
+    assert_eq!(
+        state.pages_done, 0,
+        "malformed page must not be marked done"
+    );
 
     jobs::finish(account_id, Err(pipeline_error));
     wipe_account(account_id);
@@ -485,9 +508,13 @@ async fn analyze_account_aborts_on_consecutive_page_failures() {
     Mock::given(method("GET"))
         .and(path("/favorites.json"))
         .and(query_param("page", "1"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
-            fake_post_json(60010, &["a"], &["x"])
-        ])))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(serde_json::json!([fake_post_json(
+                60010,
+                &["a"],
+                &["x"]
+            )])),
+        )
         .mount(&server)
         .await;
     // Pages 2 and 3 both 500 — `send_with_retry` will exhaust the retry
@@ -585,18 +612,34 @@ async fn analyze_account_re_analyze_replaces_state() {
 
     // Seed prior state: two posts with tag "old".
     let make_p = |id: i64, general_tag: &str| e621_account_parser_api::models::Post {
-        id, created_at: chrono::Utc::now(), updated_at: chrono::Utc::now(),
+        id,
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
         change_seq: 0.0,
         files: e621_account_parser_api::models::Files::default(),
-        uploader_id: 42, uploader_name: None, approver_id: None,
-        stats: e621_account_parser_api::models::Stats { score: e621_account_parser_api::models::Score { up: 1, down: 0, total: 1 }, ..Default::default() },
+        uploader_id: 42,
+        uploader_name: None,
+        approver_id: None,
+        stats: e621_account_parser_api::models::Stats {
+            score: e621_account_parser_api::models::Score {
+                up: 1,
+                down: 0,
+                total: 1,
+            },
+            ..Default::default()
+        },
         flags: e621_account_parser_api::models::Flags::default(),
         has: e621_account_parser_api::models::Has::default(),
         relationships: e621_account_parser_api::models::Relationships::default(),
-        pools: vec![], rating: e621_account_parser_api::models::Rating::S,
-        locked_tags: vec![], sources: vec![],
+        pools: vec![],
+        rating: e621_account_parser_api::models::Rating::S,
+        locked_tags: vec![],
+        sources: vec![],
         description: None,
-        tags: e621_account_parser_api::models::Tags { general: vec![general_tag.into()], ..Default::default() },
+        tags: e621_account_parser_api::models::Tags {
+            general: vec![general_tag.into()],
+            ..Default::default()
+        },
     };
     db::set_account("pipeline_owner", account_id, "test_user", "").unwrap();
     let old_posts = vec![make_p(40001, "old_tag"), make_p(40002, "old_tag")];
@@ -641,9 +684,7 @@ async fn analyze_account_re_analyze_replaces_state() {
     let linked: Vec<i64> = {
         let conn = db::open_db_for_calibration().unwrap();
         let mut stmt = conn
-            .prepare(
-                "SELECT post_id FROM accounts_post WHERE account_id = ?1 ORDER BY post_id",
-            )
+            .prepare("SELECT post_id FROM accounts_post WHERE account_id = ?1 ORDER BY post_id")
             .unwrap();
         let rows = stmt
             .query_map(rusqlite::params![account_id], |r| r.get::<_, i64>(0))
@@ -695,8 +736,7 @@ async fn analyze_account_global_blacklist_strips_tags() {
     let cfg_file = install_mock_config(&server.uri());
     {
         let toml = std::fs::read_to_string(cfg_file.path()).unwrap();
-        let patched =
-            swap_toml_field(&toml, "tag_blacklist", "[\"fluffy\", \"sound_warning\"]");
+        let patched = swap_toml_field(&toml, "tag_blacklist", "[\"fluffy\", \"sound_warning\"]");
         std::fs::write(cfg_file.path(), patched).unwrap();
         e621_account_parser_api::models::reload_from(cfg_file.path()).unwrap();
     }
@@ -766,24 +806,45 @@ fn strip_blacklisted_tags_is_case_insensitive_and_per_group() {
         .collect();
 
     let post = e621_account_parser_api::models::Post {
-        id: 1, created_at: chrono::Utc::now(), updated_at: chrono::Utc::now(),
+        id: 1,
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
         change_seq: 0.0,
         files: e621_account_parser_api::models::Files::default(),
-        uploader_id: 0, uploader_name: None, approver_id: None,
-        stats: e621_account_parser_api::models::Stats { score: e621_account_parser_api::models::Score { up: 1, down: 0, total: 1 }, ..Default::default() },
+        uploader_id: 0,
+        uploader_name: None,
+        approver_id: None,
+        stats: e621_account_parser_api::models::Stats {
+            score: e621_account_parser_api::models::Score {
+                up: 1,
+                down: 0,
+                total: 1,
+            },
+            ..Default::default()
+        },
         flags: e621_account_parser_api::models::Flags::default(),
         has: e621_account_parser_api::models::Has::default(),
         relationships: e621_account_parser_api::models::Relationships::default(),
-        pools: vec![], rating: e621_account_parser_api::models::Rating::S,
-        locked_tags: vec![], sources: vec![],
+        pools: vec![],
+        rating: e621_account_parser_api::models::Rating::S,
+        locked_tags: vec![],
+        sources: vec![],
         description: None,
         tags: e621_account_parser_api::models::Tags {
-            general: vec!["keep".into(), "BAD".into(), "alsobad".into(), "  trim_me  ".into()],
+            general: vec![
+                "keep".into(),
+                "BAD".into(),
+                "alsobad".into(),
+                "  trim_me  ".into(),
+            ],
             artist: vec!["keep_artist".into(), "bad".into()],
             character: vec!["bad".into()],
-            copyright: vec![], species: vec!["bad".into()],
-            invalid: vec![], meta: vec!["bad".into()],
-            lore: vec!["bad".into()], contributor: vec![],
+            copyright: vec![],
+            species: vec!["bad".into()],
+            invalid: vec![],
+            meta: vec!["bad".into()],
+            lore: vec!["bad".into()],
+            contributor: vec![],
         },
     };
 
@@ -817,37 +878,53 @@ fn find_similar_post_ids_ranks_by_overlap_and_filters() {
     db::set_account("similar_owner", account_id, "test_user", "").unwrap();
 
     let blacklist = std::collections::HashSet::new();
-    let make_post = |id: i64, general: Vec<&str>| {
-        e621_account_parser_api::models::Post {
-            id, created_at: chrono::Utc::now(), updated_at: chrono::Utc::now(),
-            change_seq: 0.0,
-            files: e621_account_parser_api::models::Files {
-                preview: e621_account_parser_api::models::FilePreview {
-                    width: 1, height: 1, jpg: Some("p".into()),
-                    ..Default::default()
-                },
+    let make_post = |id: i64, general: Vec<&str>| e621_account_parser_api::models::Post {
+        id,
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+        change_seq: 0.0,
+        files: e621_account_parser_api::models::Files {
+            preview: e621_account_parser_api::models::FilePreview {
+                width: 1,
+                height: 1,
+                jpg: Some("p".into()),
                 ..Default::default()
             },
-            uploader_id: 0, uploader_name: None, approver_id: None,
-            stats: e621_account_parser_api::models::Stats { score: e621_account_parser_api::models::Score { up: 1, down: 0, total: 1 }, ..Default::default() },
-            flags: e621_account_parser_api::models::Flags::default(),
-            has: e621_account_parser_api::models::Has::default(),
-            relationships: e621_account_parser_api::models::Relationships::default(),
-            pools: vec![], rating: e621_account_parser_api::models::Rating::S,
-            locked_tags: vec![], sources: vec![],
-            description: None,
-            tags: e621_account_parser_api::models::Tags { general: general.iter().map(|s| s.to_string()).collect(), ..Default::default() },
-        }
+            ..Default::default()
+        },
+        uploader_id: 0,
+        uploader_name: None,
+        approver_id: None,
+        stats: e621_account_parser_api::models::Stats {
+            score: e621_account_parser_api::models::Score {
+                up: 1,
+                down: 0,
+                total: 1,
+            },
+            ..Default::default()
+        },
+        flags: e621_account_parser_api::models::Flags::default(),
+        has: e621_account_parser_api::models::Has::default(),
+        relationships: e621_account_parser_api::models::Relationships::default(),
+        pools: vec![],
+        rating: e621_account_parser_api::models::Rating::S,
+        locked_tags: vec![],
+        sources: vec![],
+        description: None,
+        tags: e621_account_parser_api::models::Tags {
+            general: general.iter().map(|s| s.to_string()).collect(),
+            ..Default::default()
+        },
     };
 
     // Source post + three candidates, plus one "owned" and one "interacted"
     // that must be filtered.
     let source = make_post(60001, vec!["x", "y", "z"]);
     let high_overlap = make_post(60002, vec!["x", "y", "z", "w"]); // 3 overlap
-    let mid_overlap = make_post(60003, vec!["x", "y", "q"]);       // 2 overlap
-    let low_overlap = make_post(60004, vec!["x", "p"]);            // 1 overlap
-    let owned = make_post(60005, vec!["x", "y", "z"]);             // owned
-    let interacted = make_post(60006, vec!["x", "y", "z"]);        // interacted
+    let mid_overlap = make_post(60003, vec!["x", "y", "q"]); // 2 overlap
+    let low_overlap = make_post(60004, vec!["x", "p"]); // 1 overlap
+    let owned = make_post(60005, vec!["x", "y", "z"]); // owned
+    let interacted = make_post(60006, vec!["x", "y", "z"]); // interacted
 
     let posts = vec![
         source.clone(),
@@ -907,24 +984,43 @@ async fn digest_generic_returns_mixed_posts() {
     let blacklist = std::collections::HashSet::new();
     let posts: Vec<_> = (0..10)
         .map(|i| e621_account_parser_api::models::Post {
-            id: 70000 + i, created_at: chrono::Utc::now(), updated_at: chrono::Utc::now(),
+            id: 70000 + i,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
             change_seq: 0.0,
             files: e621_account_parser_api::models::Files {
                 preview: e621_account_parser_api::models::FilePreview {
-                    width: 1, height: 1, jpg: Some("p".into()),
+                    width: 1,
+                    height: 1,
+                    jpg: Some("p".into()),
                     ..Default::default()
                 },
                 ..Default::default()
             },
-            uploader_id: 42, uploader_name: None, approver_id: None,
-            stats: e621_account_parser_api::models::Stats { score: e621_account_parser_api::models::Score { up: 10 + i, down: 0, total: 10 + i }, fav_count: 5, ..Default::default() },
+            uploader_id: 42,
+            uploader_name: None,
+            approver_id: None,
+            stats: e621_account_parser_api::models::Stats {
+                score: e621_account_parser_api::models::Score {
+                    up: 10 + i,
+                    down: 0,
+                    total: 10 + i,
+                },
+                fav_count: 5,
+                ..Default::default()
+            },
             flags: e621_account_parser_api::models::Flags::default(),
             has: e621_account_parser_api::models::Has::default(),
             relationships: e621_account_parser_api::models::Relationships::default(),
-            pools: vec![], rating: e621_account_parser_api::models::Rating::S,
-            locked_tags: vec![], sources: vec![],
+            pools: vec![],
+            rating: e621_account_parser_api::models::Rating::S,
+            locked_tags: vec![],
+            sources: vec![],
             description: None,
-            tags: e621_account_parser_api::models::Tags { general: vec!["tag".into()], ..Default::default() },
+            tags: e621_account_parser_api::models::Tags {
+                general: vec!["tag".into()],
+                ..Default::default()
+            },
         })
         .collect();
     db::upsert_catalog_posts(&posts).unwrap();
@@ -953,18 +1049,34 @@ fn feed_interaction_round_trip_writes_both_tables() {
 
     // Seed a post with tags so the feedback fan-out has something to count.
     let p = e621_account_parser_api::models::Post {
-        id: 80001, created_at: chrono::Utc::now(), updated_at: chrono::Utc::now(),
+        id: 80001,
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
         change_seq: 0.0,
         files: e621_account_parser_api::models::Files::default(),
-        uploader_id: 0, uploader_name: None, approver_id: None,
-        stats: e621_account_parser_api::models::Stats { score: e621_account_parser_api::models::Score { up: 1, down: 0, total: 1 }, ..Default::default() },
+        uploader_id: 0,
+        uploader_name: None,
+        approver_id: None,
+        stats: e621_account_parser_api::models::Stats {
+            score: e621_account_parser_api::models::Score {
+                up: 1,
+                down: 0,
+                total: 1,
+            },
+            ..Default::default()
+        },
         flags: e621_account_parser_api::models::Flags::default(),
         has: e621_account_parser_api::models::Has::default(),
         relationships: e621_account_parser_api::models::Relationships::default(),
-        pools: vec![], rating: e621_account_parser_api::models::Rating::S,
-        locked_tags: vec![], sources: vec![],
+        pools: vec![],
+        rating: e621_account_parser_api::models::Rating::S,
+        locked_tags: vec![],
+        sources: vec![],
         description: None,
-        tags: e621_account_parser_api::models::Tags { general: vec!["g1".into(), "g2".into()], ..Default::default() },
+        tags: e621_account_parser_api::models::Tags {
+            general: vec!["g1".into(), "g2".into()],
+            ..Default::default()
+        },
     };
     db::save_posts(std::slice::from_ref(&p), account_id).unwrap();
     db::save_posts_tags_batch(
@@ -1036,21 +1148,40 @@ fn feed_interactions_batch_dedups_duplicates() {
     db::set_account("batch_owner", account_id, "test_user", "").unwrap();
 
     let p = e621_account_parser_api::models::Post {
-        id: 80003, created_at: chrono::Utc::now(), updated_at: chrono::Utc::now(),
+        id: 80003,
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
         change_seq: 0.0,
         files: e621_account_parser_api::models::Files::default(),
-        uploader_id: 0, uploader_name: None, approver_id: None,
-        stats: e621_account_parser_api::models::Stats { score: e621_account_parser_api::models::Score { up: 1, down: 0, total: 1 }, ..Default::default() },
+        uploader_id: 0,
+        uploader_name: None,
+        approver_id: None,
+        stats: e621_account_parser_api::models::Stats {
+            score: e621_account_parser_api::models::Score {
+                up: 1,
+                down: 0,
+                total: 1,
+            },
+            ..Default::default()
+        },
         flags: e621_account_parser_api::models::Flags::default(),
         has: e621_account_parser_api::models::Has::default(),
         relationships: e621_account_parser_api::models::Relationships::default(),
-        pools: vec![], rating: e621_account_parser_api::models::Rating::S,
-        locked_tags: vec![], sources: vec![],
+        pools: vec![],
+        rating: e621_account_parser_api::models::Rating::S,
+        locked_tags: vec![],
+        sources: vec![],
         description: None,
         tags: e621_account_parser_api::models::Tags {
             general: vec!["g".into()],
-            artist: vec![], copyright: vec![], character: vec![], species: vec![],
-            invalid: vec![], meta: vec![], lore: vec![], contributor: vec![],
+            artist: vec![],
+            copyright: vec![],
+            character: vec![],
+            species: vec![],
+            invalid: vec![],
+            meta: vec![],
+            lore: vec![],
+            contributor: vec![],
         },
     };
     db::save_posts(std::slice::from_ref(&p), account_id).unwrap();
@@ -1072,11 +1203,8 @@ fn feed_interactions_batch_dedups_duplicates() {
 
     // Three identical interactions in one batch — `INSERT OR IGNORE`
     // collapses them to exactly one stored row.
-    db::record_feed_interactions_batch(
-        "batch_owner",
-        &[make_req(), make_req(), make_req()],
-    )
-    .unwrap();
+    db::record_feed_interactions_batch("batch_owner", &[make_req(), make_req(), make_req()])
+        .unwrap();
     assert_eq!(count_table_for_account("feed_interactions", account_id), 1);
 
     // Same batch again across a second call — still 1 row.
@@ -1127,7 +1255,11 @@ fn preferred_tags_set_get_round_trip() {
     db::set_preferred_tags(
         "pref_owner",
         account_id,
-        &[PreferredTag { tag: "cat".into(), group: "species".into(), weight: 1.0 }],
+        &[PreferredTag {
+            tag: "cat".into(),
+            group: "species".into(),
+            weight: 1.0,
+        }],
     )
     .unwrap();
     let got = db::get_account_preferred_tags(account_id).unwrap();
@@ -1155,24 +1287,42 @@ fn recommendations_owned_dedup_invariant() {
     db::set_account("dedup_owner", account_id, "test_user", "").unwrap();
 
     let make = |id: i64| e621_account_parser_api::models::Post {
-        id, created_at: chrono::Utc::now(), updated_at: chrono::Utc::now(),
+        id,
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
         change_seq: 0.0,
         files: e621_account_parser_api::models::Files {
             preview: e621_account_parser_api::models::FilePreview {
-                width: 1, height: 1, jpg: Some("p".into()),
+                width: 1,
+                height: 1,
+                jpg: Some("p".into()),
                 ..Default::default()
             },
             ..Default::default()
         },
-        uploader_id: 0, uploader_name: None, approver_id: None,
-        stats: e621_account_parser_api::models::Stats { score: e621_account_parser_api::models::Score { up: 1, down: 0, total: 1 }, ..Default::default() },
+        uploader_id: 0,
+        uploader_name: None,
+        approver_id: None,
+        stats: e621_account_parser_api::models::Stats {
+            score: e621_account_parser_api::models::Score {
+                up: 1,
+                down: 0,
+                total: 1,
+            },
+            ..Default::default()
+        },
         flags: e621_account_parser_api::models::Flags::default(),
         has: e621_account_parser_api::models::Has::default(),
         relationships: e621_account_parser_api::models::Relationships::default(),
-        pools: vec![], rating: e621_account_parser_api::models::Rating::S,
-        locked_tags: vec![], sources: vec![],
+        pools: vec![],
+        rating: e621_account_parser_api::models::Rating::S,
+        locked_tags: vec![],
+        sources: vec![],
         description: None,
-        tags: e621_account_parser_api::models::Tags { general: vec!["shared_tag".into()], ..Default::default() },
+        tags: e621_account_parser_api::models::Tags {
+            general: vec!["shared_tag".into()],
+            ..Default::default()
+        },
     };
 
     let owned_post = make(90001);
@@ -1325,11 +1475,13 @@ async fn recommendations_cross_page_dedup_filters_shown_posts() {
         conn.execute(
             "DELETE FROM feed_session_posts WHERE session_id = ?1",
             rusqlite::params![session_id],
-        ).unwrap();
+        )
+        .unwrap();
         conn.execute(
             "DELETE FROM feed_sessions WHERE session_id = ?1",
             rusqlite::params![session_id],
-        ).unwrap();
+        )
+        .unwrap();
         // Create the session row (Fresh).
         conn.execute(
             "INSERT OR IGNORE INTO feed_sessions (session_id, account_id, created_at, last_accessed_at) \
@@ -1341,12 +1493,14 @@ async fn recommendations_cross_page_dedup_filters_shown_posts() {
             "INSERT OR IGNORE INTO feed_session_posts (session_id, post_id, position, shown_at)
              VALUES (?1, ?2, ?3, ?4)",
             rusqlite::params![session_id, 101_i64, 1, chrono::Utc::now().to_rfc3339()],
-        ).unwrap();
+        )
+        .unwrap();
         conn.execute(
             "INSERT OR IGNORE INTO feed_session_posts (session_id, post_id, position, shown_at)
              VALUES (?1, ?2, ?3, ?4)",
             rusqlite::params![session_id, 103_i64, 2, chrono::Utc::now().to_rfc3339()],
-        ).unwrap();
+        )
+        .unwrap();
     }
 
     // Verify the DB-level dedup set matches what the route would load.
@@ -1367,7 +1521,8 @@ async fn recommendations_cross_page_dedup_filters_shown_posts() {
         .filter(|id| !shown_ids.contains(id))
         .collect();
     assert_eq!(
-        after_dedup, vec![102, 104, 105, 106],
+        after_dedup,
+        vec![102, 104, 105, 106],
         "page 2 candidates must exclude shown posts 101 and 103"
     );
 
@@ -1387,7 +1542,10 @@ async fn recommendations_cross_page_dedup_filters_shown_posts() {
         shown_after.len()
     );
     for id in [101, 102, 103, 104, 105, 106] {
-        assert!(shown_after.contains(&id), "post {id} should be in shown set");
+        assert!(
+            shown_after.contains(&id),
+            "post {id} should be in shown set"
+        );
     }
 
     wipe_account(account_id);
@@ -1416,18 +1574,36 @@ async fn prefetch_target_selection_respects_cooldown() {
 
     // Seed a post so tag_counts will be populated.
     let p = e621_account_parser_api::models::Post {
-        id: 50001, created_at: chrono::Utc::now(), updated_at: chrono::Utc::now(),
+        id: 50001,
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
         change_seq: 0.0,
         files: e621_account_parser_api::models::Files::default(),
-        uploader_id: 42, uploader_name: None, approver_id: None,
-        stats: e621_account_parser_api::models::Stats { score: e621_account_parser_api::models::Score { up: 10, down: 0, total: 10 }, fav_count: 5, ..Default::default() },
+        uploader_id: 42,
+        uploader_name: None,
+        approver_id: None,
+        stats: e621_account_parser_api::models::Stats {
+            score: e621_account_parser_api::models::Score {
+                up: 10,
+                down: 0,
+                total: 10,
+            },
+            fav_count: 5,
+            ..Default::default()
+        },
         flags: e621_account_parser_api::models::Flags::default(),
         has: e621_account_parser_api::models::Has::default(),
         relationships: e621_account_parser_api::models::Relationships::default(),
-        pools: vec![], rating: e621_account_parser_api::models::Rating::S,
-        locked_tags: vec![], sources: vec![],
+        pools: vec![],
+        rating: e621_account_parser_api::models::Rating::S,
+        locked_tags: vec![],
+        sources: vec![],
         description: None,
-        tags: e621_account_parser_api::models::Tags { general: vec!["artist_a".into()], artist: vec!["artist_a".into()], ..Default::default() },
+        tags: e621_account_parser_api::models::Tags {
+            general: vec!["artist_a".into()],
+            artist: vec!["artist_a".into()],
+            ..Default::default()
+        },
     };
     db::save_posts(std::slice::from_ref(&p), account_id).unwrap();
 
@@ -1450,17 +1626,20 @@ async fn prefetch_target_selection_respects_cooldown() {
             "INSERT OR REPLACE INTO account_tag_counts (account_id, tag_name, group_type, count)
              VALUES (?1, 'artist_a', 'artist', 3)",
             rusqlite::params![account_id],
-        ).unwrap();
+        )
+        .unwrap();
     }
 
     // Verify the account's interaction data is queryable via the
     // production DB path (prefetch uses the same DB file).
     let conn = db::open_db_for_calibration().unwrap();
-    let count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM feed_interactions WHERE account_id = ?1",
-        rusqlite::params![account_id],
-        |r| r.get(0),
-    ).unwrap();
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM feed_interactions WHERE account_id = ?1",
+            rusqlite::params![account_id],
+            |r| r.get(0),
+        )
+        .unwrap();
     assert_eq!(count, 1, "prefetch should find this account's interaction");
 
     wipe_account(account_id);
@@ -1499,7 +1678,8 @@ fn wipe_account_cleans_prefetch_state() {
             "INSERT INTO account_tag_counts (account_id, tag_name, group_type, count)
              VALUES (?1, 'test_tag', 'artist', 5)",
             rusqlite::params![account_id],
-        ).unwrap();
+        )
+        .unwrap();
     }
 
     let interactions_before: i64 = {
@@ -1508,9 +1688,13 @@ fn wipe_account_cleans_prefetch_state() {
             "SELECT COUNT(*) FROM feed_interactions WHERE account_id = ?1",
             rusqlite::params![account_id],
             |r| r.get(0),
-        ).unwrap()
+        )
+        .unwrap()
     };
-    assert_eq!(interactions_before, 1, "should have 1 interaction before wipe");
+    assert_eq!(
+        interactions_before, 1,
+        "should have 1 interaction before wipe"
+    );
 
     // Wipe
     wipe_account(account_id);
@@ -1522,7 +1706,8 @@ fn wipe_account_cleans_prefetch_state() {
             "SELECT COUNT(*) FROM feed_interactions WHERE account_id = ?1",
             rusqlite::params![account_id],
             |r| r.get(0),
-        ).unwrap_or(0)
+        )
+        .unwrap_or(0)
     };
     let tag_counts_after: i64 = {
         let conn = db::open_db_for_calibration().unwrap();
@@ -1530,7 +1715,8 @@ fn wipe_account_cleans_prefetch_state() {
             "SELECT COUNT(*) FROM account_tag_counts WHERE account_id = ?1",
             rusqlite::params![account_id],
             |r| r.get(0),
-        ).unwrap_or(0)
+        )
+        .unwrap_or(0)
     };
     let account_count: i64 = {
         let conn = db::open_db_for_calibration().unwrap();
@@ -1538,7 +1724,8 @@ fn wipe_account_cleans_prefetch_state() {
             "SELECT COUNT(*) FROM accounts WHERE id = ?1",
             rusqlite::params![account_id],
             |r| r.get(0),
-        ).unwrap_or(0)
+        )
+        .unwrap_or(0)
     };
 
     assert_eq!(interactions_after, 0, "interactions should be wiped");

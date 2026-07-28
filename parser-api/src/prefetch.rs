@@ -77,9 +77,15 @@ async fn run_prefetch_tick() -> Result<(), String> {
 
     for target in &targets {
         let mut queries: Vec<String> = Vec::new();
-        for q in &target.artist_queries { queries.push(q.clone()); }
-        for q in &target.character_queries { queries.push(q.clone()); }
-        for q in &target.recent_popular { queries.push(q.clone()); }
+        for q in &target.artist_queries {
+            queries.push(q.clone());
+        }
+        for q in &target.character_queries {
+            queries.push(q.clone());
+        }
+        for q in &target.recent_popular {
+            queries.push(q.clone());
+        }
 
         for q in &queries {
             match api::get_posts_by_tags(&target.blacklist, q, Some(1)).await {
@@ -161,11 +167,8 @@ fn pick_prefetch_targets() -> Result<Vec<PrefetchQueries>, String> {
     let n_tags = (runtime.prefetch_tags_per_group.max(1)) as i32;
     let include_recent = runtime.prefetch_include_recent_popular;
 
-    let cutoff = (Utc::now() - chrono::Duration::days(window_days))
-        .to_rfc3339();
-    let cooldown_cutoff = Utc::now()
-        .timestamp()
-        .saturating_sub(cooldown_secs as i64);
+    let cutoff = (Utc::now() - chrono::Duration::days(window_days)).to_rfc3339();
+    let cooldown_cutoff = Utc::now().timestamp().saturating_sub(cooldown_secs as i64);
 
     // Pick candidate accounts weighted by recency.
     // We use a random offset + LIMIT so the selection rotates over time
@@ -219,8 +222,14 @@ fn pick_prefetch_targets() -> Result<Vec<PrefetchQueries>, String> {
     let pick_count = 5.min(n);
     let mut picked = vec![false; n];
     for _ in 0..pick_count {
-        let total_weight: f64 = weighted_idx.iter().filter(|(idx, _)| !picked[*idx]).map(|(_, w)| w).sum();
-        if total_weight <= 0.0 { break; }
+        let total_weight: f64 = weighted_idx
+            .iter()
+            .filter(|(idx, _)| !picked[*idx])
+            .map(|(_, w)| w)
+            .sum();
+        if total_weight <= 0.0 {
+            break;
+        }
 
         let mut r = (rng_state.wrapping_mul(lcg_a).wrapping_add(lcg_c) >> 33) as f64;
         r = r / (u64::MAX as f64) * total_weight;
@@ -238,7 +247,9 @@ fn pick_prefetch_targets() -> Result<Vec<PrefetchQueries>, String> {
     }
 
     for (i, (account_id, blacklist)) in rows.into_iter().enumerate() {
-        if !picked[i] { continue; }
+        if !picked[i] {
+            continue;
+        }
 
         let top_tags = |group_type: &str| -> Result<Vec<String>, String> {
             let mut stmt = conn
@@ -269,7 +280,8 @@ fn pick_prefetch_targets() -> Result<Vec<PrefetchQueries>, String> {
             }
         }
 
-        if !artist_queries.is_empty() || !character_queries.is_empty() || !recent_popular.is_empty() {
+        if !artist_queries.is_empty() || !character_queries.is_empty() || !recent_popular.is_empty()
+        {
             targets.push(PrefetchQueries {
                 account_id,
                 blacklist,

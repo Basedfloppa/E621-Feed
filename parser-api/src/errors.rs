@@ -88,8 +88,8 @@ impl<'r> Responder<'r, 'static> for ApiError {
             error: self.message().to_string(),
             code: status.code,
         };
-        let bytes =
-            serde_json::to_vec(&body).unwrap_or_else(|_| br#"{"error":"serialize failed","code":500}"#.to_vec());
+        let bytes = serde_json::to_vec(&body)
+            .unwrap_or_else(|_| br#"{"error":"serialize failed","code":500}"#.to_vec());
         Response::build()
             .status(status)
             .header(ContentType::JSON)

@@ -58,7 +58,7 @@ mod util;
 
 pub use cached::{CachedPostFeatures, CachedTag};
 pub use channels::{post_pair_similarity, post_tag_vector};
-pub use context::{context_fingerprint, ContextBase, ScoringContext};
-pub use diversify::{diversify_indices, diversify_scored_posts, DiversityFeatures};
+pub use context::{ContextBase, ScoringContext, context_fingerprint};
+pub use diversify::{DiversityFeatures, diversify_indices, diversify_scored_posts};
 pub use metrics::{ChannelTiming, PhaseRecord, PipelineMetrics, ScoringMetrics};
 pub use priors::Priors;

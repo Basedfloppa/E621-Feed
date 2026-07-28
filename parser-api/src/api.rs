@@ -7,9 +7,7 @@ use tokio::sync::Mutex;
 use tokio::time::{Instant, sleep, timeout};
 use urlencoding::encode;
 
-use crate::models::{
-    Post, TruncatedAccount, UserApiResponse, UserSearchResult, cfg,
-};
+use crate::models::{Post, TruncatedAccount, UserApiResponse, UserSearchResult, cfg};
 
 /// Global rate gate. Outbound sends share one token-bucket budget so
 /// prefetchers and live fetches don't each enforce `rps_delay_ms`
@@ -194,11 +192,10 @@ async fn fetch_authed_text(
     });
     let max_entries = cfg.e621_cache_max_entries;
 
-    if !bypass_cache
-        && let Some(body) = api_cache_get(&url, ttl) {
-            debug!("e621 cache hit: {url}");
-            return Ok(body);
-        }
+    if !bypass_cache && let Some(body) = api_cache_get(&url, ttl) {
+        debug!("e621 cache hit: {url}");
+        return Ok(body);
+    }
 
     let client = get_client();
     let resp = send_with_retry(
@@ -260,7 +257,10 @@ fn build_url(path: &str, params: &[(&str, String)]) -> String {
 
 static HTTP_CLIENT: LazyLock<Client> = LazyLock::new(|| {
     let cfg = cfg();
-    info!("Building shared HTTP client (user_agent={})", cfg.user_agent);
+    info!(
+        "Building shared HTTP client (user_agent={})",
+        cfg.user_agent
+    );
     Client::builder()
         .user_agent(cfg.user_agent.clone())
         .connect_timeout(Duration::from_secs(10))
@@ -483,9 +483,7 @@ async fn send_with_retry(builder: reqwest::RequestBuilder) -> Result<Response, S
                     url_for_logs,
                     e
                 );
-                Err(format!(
-                    "request failed after retries [{kind}]: {e}"
-                ))
+                Err(format!("request failed after retries [{kind}]: {e}"))
             }
         };
     }
@@ -628,8 +626,7 @@ pub async fn get_user_by_name(name: &str) -> Result<UserApiResponse, String> {
     let body = fetch_authed_text(url, false, 0)
         .await
         .map_err(|e| format!("user-by-name {e}"))?;
-    json::from_str::<UserApiResponse>(&body)
-        .map_err(|e| format!("user-by-name parse failed: {e}"))
+    json::from_str::<UserApiResponse>(&body).map_err(|e| format!("user-by-name parse failed: {e}"))
 }
 
 /// Normalise the order of blacklist tags so two semantically identical
@@ -687,8 +684,8 @@ pub async fn get_posts_by_tags(
     let body = fetch_authed_text(url, true, 0)
         .await
         .map_err(|e| format!("posts request {e}"))?;
-    let posts = json::from_str::<Vec<Post>>(&body)
-        .map_err(|e| format!("posts parse failed: {e}"))?;
+    let posts =
+        json::from_str::<Vec<Post>>(&body).map_err(|e| format!("posts parse failed: {e}"))?;
     Ok(posts)
 }
 
@@ -714,8 +711,8 @@ pub async fn get_posts_by_ids(ids: &[i64]) -> Result<Vec<Post>, String> {
     let body = fetch_authed_text(url, true, 0)
         .await
         .map_err(|e| format!("posts by ids request: {e}"))?;
-    let posts = json::from_str::<Vec<Post>>(&body)
-        .map_err(|e| format!("posts parse failed: {e}"))?;
+    let posts =
+        json::from_str::<Vec<Post>>(&body).map_err(|e| format!("posts parse failed: {e}"))?;
     Ok(posts)
 }
 
@@ -724,7 +721,7 @@ pub async fn get_posts_by_ids(ids: &[i64]) -> Result<Vec<Post>, String> {
 /// pages: configured global TTL.
 fn posts_cache_ttl(page: Option<i32>) -> u64 {
     match page.unwrap_or(1) {
-        1 => 120,               // first page — fresh content matters
+        1 => 120,                       // first page — fresh content matters
         _ => cfg().e621_cache_ttl_secs, // deeper pages — longer TTL
     }
 }
@@ -744,7 +741,11 @@ pub async fn get_posts(account: &TruncatedAccount, page: Option<i32>) -> Result<
     debug!(
         "Preparing posts fetch: page={} blacklist_len={}",
         page.unwrap_or(1),
-        if blacklist.is_empty() { 0 } else { blacklist.split_whitespace().count() }
+        if blacklist.is_empty() {
+            0
+        } else {
+            blacklist.split_whitespace().count()
+        }
     );
     let cfg = cfg();
     let ttl_secs = posts_cache_ttl(page);
@@ -762,8 +763,8 @@ pub async fn get_posts(account: &TruncatedAccount, page: Option<i32>) -> Result<
     let body = fetch_authed_text(url, false, ttl_secs)
         .await
         .map_err(|e| format!("posts request {e}"))?;
-    let posts = json::from_str::<Vec<Post>>(&body)
-        .map_err(|e| format!("posts parse failed: {e}"))?;
+    let posts =
+        json::from_str::<Vec<Post>>(&body).map_err(|e| format!("posts parse failed: {e}"))?;
 
     info!("Fetched {} posts", posts.len());
     Ok(posts)

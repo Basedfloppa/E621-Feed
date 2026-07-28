@@ -11,9 +11,9 @@ use crate::utils::tag_relation::TagRelationGraph;
 
 use super::priors::Priors;
 use super::util::{
-    confidence, normalize_tag, sigmoid, CompactFeedback, MixWeights, PairAggregator,
+    CompactFeedback, MixWeights, PairAggregator, confidence, normalize_tag, sigmoid,
 };
-use super::{Group, GROUP_COUNT};
+use super::{GROUP_COUNT, Group};
 use crate::db::parse_db_datetime;
 
 pub struct ScoringContext<'a> {

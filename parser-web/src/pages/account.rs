@@ -88,14 +88,15 @@ pub fn account_creator() -> Html {
         let loc = location.clone();
         use_effect_with((), move |_| {
             if let Some(l) = loc
-                && let Ok(q) = l.query::<AccountPrefill>() {
-                    if !q.id.is_empty() {
-                        id.set(q.id);
-                    }
-                    if !q.name.is_empty() {
-                        name.set(q.name);
-                    }
+                && let Ok(q) = l.query::<AccountPrefill>()
+            {
+                if !q.id.is_empty() {
+                    id.set(q.id);
                 }
+                if !q.name.is_empty() {
+                    name.set(q.name);
+                }
+            }
             || ()
         });
     }
@@ -106,15 +107,16 @@ pub fn account_creator() -> Html {
                 wasm_bindgen_futures::spawn_local(async move {
                     let url = format!("{}/defaults/blacklist", cfg.backend_domain);
                     if let Ok(resp) = api_get(&url).send().await
-                        && resp.ok() {
-                            #[derive(serde::Deserialize)]
-                            struct Resp {
-                                blacklist: Vec<String>,
-                            }
-                            if let Ok(parsed) = resp.json::<Resp>().await {
-                                default_blacklist.set(parsed.blacklist);
-                            }
+                        && resp.ok()
+                    {
+                        #[derive(serde::Deserialize)]
+                        struct Resp {
+                            blacklist: Vec<String>,
                         }
+                        if let Ok(parsed) = resp.json::<Resp>().await {
+                            default_blacklist.set(parsed.blacklist);
+                        }
+                    }
                 });
             }
             || ()
@@ -148,9 +150,10 @@ pub fn account_creator() -> Html {
                     let url = format!("{}/accounts", cfg.backend_domain);
                     if let Ok(response) = api_get(&url).send().await
                         && response.ok()
-                            && let Ok(accounts) = response.json::<Vec<UserInfo>>().await {
-                                saved_accounts.set(accounts);
-                            }
+                        && let Ok(accounts) = response.json::<Vec<UserInfo>>().await
+                    {
+                        saved_accounts.set(accounts);
+                    }
                 });
             }
             || ()
@@ -165,25 +168,24 @@ pub fn account_creator() -> Html {
             let ids = ids.clone();
             let cfg = read_config_from_head();
             if !ids.is_empty()
-                && let Some(cfg) = cfg {
-                    wasm_bindgen_futures::spawn_local(async move {
-                        let mut found: HashMap<i64, String> = HashMap::new();
-                        for id in ids {
-                            let url = format!(
-                                "{}/account/{}/experiment_bucket",
-                                cfg.backend_domain, id
-                            );
-                            if let Ok(resp) = api_get(&url).send().await
-                                && resp.ok()
-                                    && let Ok(v) = resp.json::<serde_json::Value>().await
-                                        && let Some(name) = v.get("bucket").and_then(|b| b.as_str())
-                                        {
-                                            found.insert(id, name.to_string());
-                                        }
+                && let Some(cfg) = cfg
+            {
+                wasm_bindgen_futures::spawn_local(async move {
+                    let mut found: HashMap<i64, String> = HashMap::new();
+                    for id in ids {
+                        let url =
+                            format!("{}/account/{}/experiment_bucket", cfg.backend_domain, id);
+                        if let Ok(resp) = api_get(&url).send().await
+                            && resp.ok()
+                            && let Ok(v) = resp.json::<serde_json::Value>().await
+                            && let Some(name) = v.get("bucket").and_then(|b| b.as_str())
+                        {
+                            found.insert(id, name.to_string());
                         }
-                        experiment_buckets.set(found);
-                    });
-                }
+                    }
+                    experiment_buckets.set(found);
+                });
+            }
             || ()
         });
     }
@@ -192,7 +194,11 @@ pub fn account_creator() -> Html {
         let id = id.clone();
         Callback::from(move |e: Event| {
             let input: HtmlInputElement = e.target_unchecked_into();
-            let cleaned: String = input.value().chars().filter(|c| c.is_ascii_digit()).collect();
+            let cleaned: String = input
+                .value()
+                .chars()
+                .filter(|c| c.is_ascii_digit())
+                .collect();
             if cleaned != input.value() {
                 input.set_value(&cleaned);
             }
@@ -355,16 +361,14 @@ pub fn account_creator() -> Html {
     let on_reanalyze_complete = {
         let message = message.clone();
         let error = error.clone();
-        Callback::from(move |result: Result<String, String>| {
-            match result {
-                Ok(msg) => {
-                    message.set(msg);
-                    error.set(false);
-                }
-                Err(e) => {
-                    message.set(e);
-                    error.set(true);
-                }
+        Callback::from(move |result: Result<String, String>| match result {
+            Ok(msg) => {
+                message.set(msg);
+                error.set(false);
+            }
+            Err(e) => {
+                message.set(e);
+                error.set(true);
             }
         })
     };

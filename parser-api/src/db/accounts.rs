@@ -1,7 +1,7 @@
 use chrono::{NaiveDate, Utc};
 use rusqlite::params;
 
-use crate::models::{cfg, PreferredTag, TruncatedAccount};
+use crate::models::{PreferredTag, TruncatedAccount, cfg};
 
 use super::open_db;
 
@@ -99,7 +99,8 @@ pub fn get_visit_stats(account_id: i32) -> Result<VisitStats, String> {
         )
         .map_err(|e| match e {
             rusqlite::Error::QueryReturnedNoRows => {
-                "Visit tracker row not found for account — call update_visit_tracker first".to_string()
+                "Visit tracker row not found for account — call update_visit_tracker first"
+                    .to_string()
             }
             other => format!("get_visit_stats: {other}"),
         })?;
@@ -208,12 +209,7 @@ pub fn update_device_blacklist(
             SET blacklisted_tags = ?3, last_seen_at = ?4
             WHERE owner_token = ?1 AND account_id = ?2
             ",
-            params![
-                owner_token,
-                account_id,
-                resolved,
-                Utc::now().to_rfc3339(),
-            ],
+            params![owner_token, account_id, resolved, Utc::now().to_rfc3339(),],
         )
         .map_err(|e| format!("Failed to update device blacklist: {e}"))
     })?;
@@ -366,11 +362,8 @@ pub fn delete_device_link(owner_token: &str, account_id: i32) -> Result<usize, S
     // self-healing on the next /process run.
     let batch_size = crate::models::cfg().runtime.drop_cooc_batch_size.max(1_000);
     let cooc_dropped = super::drop_account_cooccurrence_batched(account_id, batch_size, |_, _| {})?;
-    let feed_dropped = super::drop_account_feed_interactions_batched(
-        account_id,
-        batch_size,
-        |_, _| {},
-    )?;
+    let feed_dropped =
+        super::drop_account_feed_interactions_batched(account_id, batch_size, |_, _| {})?;
     if cooc_dropped > 0 || feed_dropped > 0 {
         info!(
             "delete_device_link {account_id}: pre-cascade dropped cooc={cooc_dropped} feed_int={feed_dropped}"

@@ -65,9 +65,10 @@ pub fn get_state(account_id: i32) -> Option<ProcessJobState> {
 pub fn try_begin(account_id: i32) -> BeginResult {
     let mut map = registry().write().unwrap_or_else(|e| e.into_inner());
     if let Some(existing) = map.get(&account_id)
-        && existing.phase == ProcessJobPhase::Running {
-            return BeginResult::AlreadyRunning(existing.clone());
-        }
+        && existing.phase == ProcessJobPhase::Running
+    {
+        return BeginResult::AlreadyRunning(existing.clone());
+    }
     let state = ProcessJobState {
         account_id,
         phase: ProcessJobPhase::Running,
@@ -85,16 +86,18 @@ pub fn try_begin(account_id: i32) -> BeginResult {
 
 pub fn set_pages_total(account_id: i32, total: i32) {
     if let Ok(mut map) = registry().write()
-        && let Some(s) = map.get_mut(&account_id) {
-            s.pages_total = total;
-        }
+        && let Some(s) = map.get_mut(&account_id)
+    {
+        s.pages_total = total;
+    }
 }
 
 pub fn record_page_done(account_id: i32) {
     if let Ok(mut map) = registry().write()
-        && let Some(s) = map.get_mut(&account_id) {
-            s.pages_done += 1;
-        }
+        && let Some(s) = map.get_mut(&account_id)
+    {
+        s.pages_done += 1;
+    }
 }
 
 /// Drop old Done/Failed entries. Running jobs older than
@@ -138,17 +141,18 @@ pub fn record_phase(account_id: i32, name: impl Into<String>, elapsed_ms: f64) {
 
 pub fn finish(account_id: i32, result: Result<(), String>) {
     if let Ok(mut map) = registry().write()
-        && let Some(s) = map.get_mut(&account_id) {
-            match result {
-                Ok(()) => {
-                    s.phase = ProcessJobPhase::Done;
-                    s.error = None;
-                }
-                Err(e) => {
-                    s.phase = ProcessJobPhase::Failed;
-                    s.error = Some(e);
-                }
+        && let Some(s) = map.get_mut(&account_id)
+    {
+        match result {
+            Ok(()) => {
+                s.phase = ProcessJobPhase::Done;
+                s.error = None;
             }
-            s.finished_at = Some(Utc::now());
+            Err(e) => {
+                s.phase = ProcessJobPhase::Failed;
+                s.error = Some(e);
+            }
         }
+        s.finished_at = Some(Utc::now());
+    }
 }

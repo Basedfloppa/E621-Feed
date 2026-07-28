@@ -67,6 +67,10 @@ fn current_column_count(grid_class: &str) -> usize {
 }
 
 /// Render the shared masonry-style post layout used by all post collections.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "The shared renderer accepts display settings independently so pages can persist and choose each option."
+)]
 pub fn render_post_grid(
     posts: &[ScoredPost],
     grid_class: &str,
@@ -212,7 +216,9 @@ pub fn post_grid(props: &PostGridProps) -> Html {
         let scored = props.scored;
         let session_id = session_id.clone();
         Callback::from(move |_| {
-            if *is_loading || *exhausted { return; }
+            if *is_loading || *exhausted {
+                return;
+            }
             is_loading.set(true);
             let next = *page + 1;
             let sep = if url.contains('?') { "&" } else { "?" };
@@ -228,12 +234,11 @@ pub fn post_grid(props: &PostGridProps) -> Html {
                     Ok(resp) if resp.ok() => {
                         let raw = resp.text().await.unwrap_or_default();
                         let mut new_items: Vec<ScoredPost> = if scored {
-                            serde_json::from_str::<Vec<ScoredPost>>(&raw)
-                                .unwrap_or_default()
+                            serde_json::from_str::<Vec<ScoredPost>>(&raw).unwrap_or_default()
                         } else {
-                            let posts: Vec<Post> = serde_json::from_str(&raw)
-                                .unwrap_or_default();
-                            posts.into_iter()
+                            let posts: Vec<Post> = serde_json::from_str(&raw).unwrap_or_default();
+                            posts
+                                .into_iter()
                                 .map(|p| ScoredPost {
                                     post: p,
                                     score: 0.0,
@@ -243,8 +248,8 @@ pub fn post_grid(props: &PostGridProps) -> Html {
                         };
                         // Dedup against already-loaded posts.
                         let mut merged = (*posts_cb).clone();
-                        let mut seen: std::collections::HashSet<i64>
-                            = merged.iter().map(|p| p.post.id).collect();
+                        let mut seen: std::collections::HashSet<i64> =
+                            merged.iter().map(|p| p.post.id).collect();
                         new_items.retain(|p| seen.insert(p.post.id));
                         if new_items.is_empty() {
                             exhausted_cb.set(true);
@@ -255,8 +260,12 @@ pub fn post_grid(props: &PostGridProps) -> Html {
                         }
                         is_loading_cb.set(false);
                     }
-                    Ok(_) => { is_loading_cb.set(false); }
-                    Err(_) => { is_loading_cb.set(false); }
+                    Ok(_) => {
+                        is_loading_cb.set(false);
+                    }
+                    Err(_) => {
+                        is_loading_cb.set(false);
+                    }
                 }
             });
         })
@@ -286,9 +295,10 @@ pub fn post_grid(props: &PostGridProps) -> Html {
             let cb = Closure::<dyn FnMut(Vec<web_sys::IntersectionObserverEntry>)>::new(
                 move |entries: Vec<web_sys::IntersectionObserverEntry>| {
                     if let Some(entry) = entries.first()
-                        && entry.is_intersecting() {
-                            fetch.emit(());
-                        }
+                        && entry.is_intersecting()
+                    {
+                        fetch.emit(());
+                    }
                 },
             );
             let observer = web_sys::IntersectionObserver::new(cb.as_ref().unchecked_ref()).ok();

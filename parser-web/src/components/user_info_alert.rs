@@ -1,4 +1,4 @@
-use yew::{function_component, html,  Html, Properties, UseStateHandle};
+use yew::{Html, Properties, UseStateHandle, function_component, html};
 
 use crate::pages::UserInfo;
 

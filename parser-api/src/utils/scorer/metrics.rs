@@ -60,20 +60,23 @@ impl ScoringMetrics {
         }
         let c = &self.channel;
         let n = self.count as f64;
-        info!("── Scoring metrics ({} posts) ─────────────────", self.count);
+        info!(
+            "── Scoring metrics ({} posts) ─────────────────",
+            self.count
+        );
         let rows = [
-            ("tag_similarity",    c.tag_similarity),
-            ("quality_fit",       c.quality_fit),
-            ("popularity_fit",    c.popularity_fit),
-            ("rating_fit",        c.rating_fit),
-            ("media_fit",         c.media_fit),
-            ("interaction_fit",   c.interaction_fit),
-            ("recency_fit",       c.recency_fit),
-            ("tag_relation_fit",  c.tag_relation_fit),
-            ("uploader_fit",      c.uploader_fit),
-            ("exclusivity_fit",   c.exclusivity_fit),
-            ("novelty_fit",       c.novelty_fit),
-            ("final_blend",       c.final_blend),
+            ("tag_similarity", c.tag_similarity),
+            ("quality_fit", c.quality_fit),
+            ("popularity_fit", c.popularity_fit),
+            ("rating_fit", c.rating_fit),
+            ("media_fit", c.media_fit),
+            ("interaction_fit", c.interaction_fit),
+            ("recency_fit", c.recency_fit),
+            ("tag_relation_fit", c.tag_relation_fit),
+            ("uploader_fit", c.uploader_fit),
+            ("exclusivity_fit", c.exclusivity_fit),
+            ("novelty_fit", c.novelty_fit),
+            ("final_blend", c.final_blend),
         ];
         let total_all: u64 = rows.iter().map(|(_, ns)| ns).sum();
         for (name, ns) in &rows {
@@ -175,8 +178,12 @@ impl PipelineMetrics {
             }
             let total: u64 = self.phases.iter().map(|p| p.nanos).sum();
             let n = self.phases.len();
-            info!("── Pipeline: {} ({} phases, {:.1} ms total) ─────────────────",
-                self.label, n, total as f64 / 1_000_000.0);
+            info!(
+                "── Pipeline: {} ({} phases, {:.1} ms total) ─────────────────",
+                self.label,
+                n,
+                total as f64 / 1_000_000.0
+            );
             for p in &self.phases {
                 let ms = p.nanos as f64 / 1_000_000.0;
                 let pct = if total > 0 {
@@ -223,8 +230,7 @@ impl<'a> super::context::ScoringContext<'a> {
         let (media, m_ns) = timed_channel!(self, media_fit_cached, features);
         let ((interaction, veto), i_ns) = timed_channel!(self, interaction_fit_cached, features);
 
-        let age_days =
-            (self.priors.now - features.created_at).num_seconds() as f32 / 86_400.0;
+        let age_days = (self.priors.now - features.created_at).num_seconds() as f32 / 86_400.0;
         let (recency, rec_ns) = {
             let _start = Instant::now();
             let r = self.recency_fit(age_days);
@@ -237,8 +243,18 @@ impl<'a> super::context::ScoringContext<'a> {
 
         let blend_start = Instant::now();
         let score = self.final_blend(
-            sim, quality, recency, rating, media, popularity, interaction, tag_relation, uploader,
-            exclusivity, novelty, veto,
+            sim,
+            quality,
+            recency,
+            rating,
+            media,
+            popularity,
+            interaction,
+            tag_relation,
+            uploader,
+            exclusivity,
+            novelty,
+            veto,
         );
         let blend_ns = blend_start.elapsed().as_nanos() as u64;
 
@@ -344,7 +360,11 @@ mod tests {
         p.mark("phase_one");
         assert_eq!(p.phases.len(), 1);
         assert_eq!(p.phases[0].name, "phase_one");
-        assert!(p.phases[0].nanos > 0, "expected positive nanos, got {}", p.phases[0].nanos);
+        assert!(
+            p.phases[0].nanos > 0,
+            "expected positive nanos, got {}",
+            p.phases[0].nanos
+        );
 
         p.mark("phase_two");
         assert_eq!(p.phases.len(), 2);
@@ -364,7 +384,10 @@ mod tests {
         let mut p = PipelineMetrics::new("sleep_test");
         std::thread::sleep(std::time::Duration::from_micros(10));
         p.mark("slept");
-        assert!(p.phases[0].nanos >= 10_000,
-            "expected at least 10_000 ns, got {}", p.phases[0].nanos);
+        assert!(
+            p.phases[0].nanos >= 10_000,
+            "expected at least 10_000 ns, got {}",
+            p.phases[0].nanos
+        );
     }
 }

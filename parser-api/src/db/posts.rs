@@ -232,7 +232,7 @@ fn delete_by_account_in_batches(
         other => {
             return Err(format!(
                 "delete_by_account_in_batches: unknown table {other}"
-            ))
+            ));
         }
     };
     let mut total: usize = 0;
@@ -333,12 +333,24 @@ fn post_upsert_params(post: &Post) -> Vec<rusqlite::types::Value> {
     let preview_width = Some(post.files.preview.width);
     let preview_height = Some(post.files.preview.height);
     let sample_url = if post.has.sample {
-        post.files.sample.jpg.clone().or_else(|| post.files.sample.webp.clone())
+        post.files
+            .sample
+            .jpg
+            .clone()
+            .or_else(|| post.files.sample.webp.clone())
     } else {
         None
     };
-    let sample_width = if post.has.sample { Some(post.files.sample.width) } else { None };
-    let sample_height = if post.has.sample { Some(post.files.sample.height) } else { None };
+    let sample_width = if post.has.sample {
+        Some(post.files.sample.width)
+    } else {
+        None
+    };
+    let sample_height = if post.has.sample {
+        Some(post.files.sample.height)
+    } else {
+        None
+    };
     let file_url = post.files.original.url.clone();
 
     fn opt_int(v: Option<i64>) -> Value {
@@ -407,8 +419,10 @@ pub fn post_count() -> i64 {
 /// locally (sources, pools, alternates) get default values; the scorer and
 /// feed UI don't read them.
 pub fn hydrate_posts_by_ids(ids: &[i64]) -> Result<Vec<Post>, String> {
-    use crate::models::{FileMeta, FileOriginal, FilePreview, FileSample, Files, Flags,
-        Has, Rating, Relationships, Score, Stats, Tags};
+    use crate::models::{
+        FileMeta, FileOriginal, FilePreview, FileSample, Files, Flags, Has, Rating, Relationships,
+        Score, Stats, Tags,
+    };
 
     if ids.is_empty() {
         return Ok(Vec::new());

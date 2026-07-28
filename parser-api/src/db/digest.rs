@@ -34,9 +34,7 @@ pub fn get_trending_posts(days: i64, limit: usize) -> Result<Vec<ScoredPost>, St
     let conn = open_db()?;
     let cutoff = (Utc::now() - chrono::Duration::days(days)).to_rfc3339();
     let mut stmt = conn
-        .prepare(
-            "SELECT id FROM posts WHERE created_at >= ?1 ORDER BY score_total DESC LIMIT ?2",
-        )
+        .prepare("SELECT id FROM posts WHERE created_at >= ?1 ORDER BY score_total DESC LIMIT ?2")
         .map_err(|e| format!("get_trending_posts prep: {e}"))?;
     let ids: Vec<i64> = stmt
         .query_map(params![cutoff, limit as i64], |r| r.get::<_, i64>(0))
@@ -47,13 +45,14 @@ pub fn get_trending_posts(days: i64, limit: usize) -> Result<Vec<ScoredPost>, St
 }
 
 /// Popular posts created since `since`, ordered by `score_total DESC`.
-pub fn get_popular_posts_since(since: DateTime<Utc>, limit: usize) -> Result<Vec<ScoredPost>, String> {
+pub fn get_popular_posts_since(
+    since: DateTime<Utc>,
+    limit: usize,
+) -> Result<Vec<ScoredPost>, String> {
     let conn = open_db()?;
     let since_str = since.to_rfc3339();
     let mut stmt = conn
-        .prepare(
-            "SELECT id FROM posts WHERE created_at >= ?1 ORDER BY score_total DESC LIMIT ?2",
-        )
+        .prepare("SELECT id FROM posts WHERE created_at >= ?1 ORDER BY score_total DESC LIMIT ?2")
         .map_err(|e| format!("get_popular_posts_since prep: {e}"))?;
     let ids: Vec<i64> = stmt
         .query_map(params![since_str, limit as i64], |r| r.get::<_, i64>(0))
@@ -67,9 +66,7 @@ pub fn get_popular_posts_since(since: DateTime<Utc>, limit: usize) -> Result<Vec
 pub fn get_random_posts(limit: usize) -> Result<Vec<ScoredPost>, String> {
     let conn = open_db()?;
     let mut stmt = conn
-        .prepare(
-            "SELECT id FROM posts ORDER BY RANDOM() LIMIT ?1",
-        )
+        .prepare("SELECT id FROM posts ORDER BY RANDOM() LIMIT ?1")
         .map_err(|e| format!("get_random_posts prep: {e}"))?;
     let ids: Vec<i64> = stmt
         .query_map(params![limit as i64], |r| r.get::<_, i64>(0))
@@ -120,7 +117,11 @@ pub fn get_random_posts_by_group(account_id: i32, limit: usize) -> Result<Vec<Sc
     }
 
     // Build dynamic SQL with placeholders for tag_ids.
-    let placeholders: Vec<String> = tag_ids.iter().enumerate().map(|(i, _)| format!("?{}", i + 2)).collect();
+    let placeholders: Vec<String> = tag_ids
+        .iter()
+        .enumerate()
+        .map(|(i, _)| format!("?{}", i + 2))
+        .collect();
     let sql = format!(
         "SELECT DISTINCT tp.post_id FROM tags_posts tp \
          INNER JOIN posts p ON p.id = tp.post_id \
@@ -128,15 +129,19 @@ pub fn get_random_posts_by_group(account_id: i32, limit: usize) -> Result<Vec<Sc
          ORDER BY RANDOM() LIMIT ?1",
         placeholders.join(",")
     );
-    let mut stmt = conn.prepare(&sql).map_err(|e| format!("get_random_posts_by_group posts prep: {e}"))?;
+    let mut stmt = conn
+        .prepare(&sql)
+        .map_err(|e| format!("get_random_posts_by_group posts prep: {e}"))?;
 
     // Build dynamic params.
-    let mut params_vec: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::with_capacity(tag_ids.len() + 1);
+    let mut params_vec: Vec<Box<dyn rusqlite::types::ToSql>> =
+        Vec::with_capacity(tag_ids.len() + 1);
     params_vec.push(Box::new(limit as i64));
     for tid in &tag_ids {
         params_vec.push(Box::new(*tid));
     }
-    let params_refs: Vec<&dyn rusqlite::types::ToSql> = params_vec.iter().map(|p| p.as_ref()).collect();
+    let params_refs: Vec<&dyn rusqlite::types::ToSql> =
+        params_vec.iter().map(|p| p.as_ref()).collect();
 
     let ids: Vec<i64> = stmt
         .query_map(params_refs.as_slice(), |r| r.get::<_, i64>(0))

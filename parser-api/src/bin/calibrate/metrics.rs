@@ -1,15 +1,15 @@
 //! Metrics + scoring loop. NDCG@k / Recall@k / MRR over per-account ranked
 //! lists. Parallelism via a bounded rayon pool sized from `calibrate_threads`.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use chrono::{DateTime, Utc};
-use rayon::prelude::*;
 use rayon::ThreadPool;
+use rayon::prelude::*;
 
 use e621_account_parser_api::models::cfg;
-use e621_account_parser_api::utils::{diversify_indices, Priors, ScoringContext};
+use e621_account_parser_api::utils::{Priors, ScoringContext, diversify_indices};
 
 use crate::dataset::EvalDataset;
 
@@ -320,11 +320,7 @@ fn ndcg_at_k(ranked: &[(i64, f32, bool)], k: usize) -> f64 {
     for i in 0..n_pos {
         idcg += 1.0 / ((i as f64 + 2.0).log2());
     }
-    if idcg <= 0.0 {
-        0.0
-    } else {
-        dcg / idcg
-    }
+    if idcg <= 0.0 { 0.0 } else { dcg / idcg }
 }
 
 fn recall_at_k(ranked: &[(i64, f32, bool)], k: usize, total_positives: usize) -> f64 {

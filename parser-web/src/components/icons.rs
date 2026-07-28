@@ -1,7 +1,7 @@
 /// Inline SVG icons that replaced Bootstrap Icons.
 /// All use `aria-hidden="true"` and `currentColor` so they inherit the
 /// parent's text colour / theme automatically.
-use yew::{function_component, html, Html};
+use yew::{Html, function_component, html};
 
 /// Inline `<svg>` helper: 16×16, `currentColor`, `aria-hidden`.
 macro_rules! icon_svg {

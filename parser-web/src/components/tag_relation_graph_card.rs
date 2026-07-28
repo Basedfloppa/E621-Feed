@@ -11,7 +11,10 @@ use std::rc::Rc;
 use gloo_timers::callback::Interval;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::Closure;
-use web_sys::{js_sys, MouseEvent as WebMouseEvent, MutationObserver, MutationObserverInit, WheelEvent as WebWheelEvent};
+use web_sys::{
+    MouseEvent as WebMouseEvent, MutationObserver, MutationObserverInit,
+    WheelEvent as WebWheelEvent, js_sys,
+};
 use yew::prelude::*;
 
 use crate::models::{
@@ -195,9 +198,7 @@ impl LayoutState {
             self.step();
         }
     }
-
 }
-
 
 // =================== Persistence helpers ==================================
 
@@ -263,10 +264,17 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
     let payload: UseStateHandle<Option<TagRelationGraphPayload>> = use_state(|| None);
     let loading = use_state(|| false);
     let error: UseStateHandle<Option<String>> = use_state(|| None);
-    let top_n = use_state(|| read_local::<usize>(STORAGE_KEY_TOP_N).unwrap_or(60).clamp(5, 250));
+    let top_n = use_state(|| {
+        read_local::<usize>(STORAGE_KEY_TOP_N)
+            .unwrap_or(60)
+            .clamp(5, 250)
+    });
     let min_cooc = use_state(|| read_local::<i64>(STORAGE_KEY_MIN_COOC).unwrap_or(3).max(1));
-    let edges_per_tag =
-        use_state(|| read_local::<usize>(STORAGE_KEY_EDGES_PER_TAG).unwrap_or(6).clamp(2, 20));
+    let edges_per_tag = use_state(|| {
+        read_local::<usize>(STORAGE_KEY_EDGES_PER_TAG)
+            .unwrap_or(6)
+            .clamp(2, 20)
+    });
     let hover_idx: UseStateHandle<Option<usize>> = use_state(|| None);
     let isolated_community: UseStateHandle<Option<u32>> = use_state(|| None);
 
@@ -543,10 +551,8 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
 
             move || {
                 if let Some((svg, cb)) = handle {
-                    let _ = svg.remove_event_listener_with_callback(
-                        "wheel",
-                        cb.as_ref().unchecked_ref(),
-                    );
+                    let _ = svg
+                        .remove_event_listener_with_callback("wheel", cb.as_ref().unchecked_ref());
                     drop(cb);
                 }
             }
@@ -613,11 +619,8 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
                     // captured at mount and is permanently stale.
                     let pinned_active = layout.borrow().pinned.is_some();
                     if pinned_active {
-                        let (vbx, vby) = client_to_viewbox(
-                            &svg,
-                            e.client_x() as f64,
-                            e.client_y() as f64,
-                        );
+                        let (vbx, vby) =
+                            client_to_viewbox(&svg, e.client_x() as f64, e.client_y() as f64);
                         let v = *view_ref.borrow();
                         let world_x = (vbx - v.tx) / v.scale;
                         let world_y = (vby - v.ty) / v.scale;
@@ -672,17 +675,17 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
                         if p.distance < CLICK_DRAG_THRESHOLD
                             && let (Some(graph), Some(cfg)) =
                                 (payload.as_ref(), read_config_from_head())
-                                && let Some(node) = graph.nodes.get(p.node_idx) {
-                                    let url = format!(
-                                        "{}/posts?tags={}",
-                                        cfg.posts_domain,
-                                        urlencoding::encode(&node.name),
-                                    );
-                                    if let Some(win) = web_sys::window() {
-                                        let _ =
-                                            win.open_with_url_and_target(&url, "_blank");
-                                    }
-                                }
+                            && let Some(node) = graph.nodes.get(p.node_idx)
+                        {
+                            let url = format!(
+                                "{}/posts?tags={}",
+                                cfg.posts_domain,
+                                urlencoding::encode(&node.name),
+                            );
+                            if let Some(win) = web_sys::window() {
+                                let _ = win.open_with_url_and_target(&url, "_blank");
+                            }
+                        }
                         layout.borrow_mut().pinned = None;
                     }
                     if was_panning || *is_dragging {
@@ -695,10 +698,8 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
                 "mousemove",
                 mousemove_cb.as_ref().unchecked_ref(),
             );
-            let _ = window.add_event_listener_with_callback(
-                "mouseup",
-                mouseup_cb.as_ref().unchecked_ref(),
-            );
+            let _ = window
+                .add_event_listener_with_callback("mouseup", mouseup_cb.as_ref().unchecked_ref());
 
             let window_for_cleanup = window;
             Box::new(move || {
@@ -748,22 +749,21 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
     // connected to it. Community-isolation: only nodes/edges in that
     // community render at full opacity. Both are independent; isolation
     // wins if active.
-    let hover_neighbour_set: Option<std::collections::HashSet<usize>> =
-        if let Some(h) = cur_hover {
-            let mut set = std::collections::HashSet::with_capacity(8);
-            set.insert(h);
-            for &(a, b, _) in &l.edges {
-                if a == h {
-                    set.insert(b);
-                }
-                if b == h {
-                    set.insert(a);
-                }
+    let hover_neighbour_set: Option<std::collections::HashSet<usize>> = if let Some(h) = cur_hover {
+        let mut set = std::collections::HashSet::with_capacity(8);
+        set.insert(h);
+        for &(a, b, _) in &l.edges {
+            if a == h {
+                set.insert(b);
             }
-            Some(set)
-        } else {
-            None
-        };
+            if b == h {
+                set.insert(a);
+            }
+        }
+        Some(set)
+    } else {
+        None
+    };
 
     // Out-of-context nodes (other communities while one is isolated, or
     // non-neighbours of a hovered node) stay rendered — they fade to this
@@ -823,11 +823,7 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
             let strength = ((score - l.score_min) / span).clamp(0.0, 1.0);
             let in_hover = cur_hover.map(|h| h == a || h == b).unwrap_or(false);
             let endpoints_in_focus = node_focus_full(a) && node_focus_full(b);
-            let width = if in_hover {
-                2.6
-            } else {
-                0.6 + strength * 2.2
-            };
+            let width = if in_hover { 2.6 } else { 0.6 + strength * 2.2 };
             let opacity = if in_hover {
                 0.95
             } else {
@@ -889,8 +885,7 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
                 let Some(svg) = svg_ref.cast::<web_sys::Element>() else {
                     return;
                 };
-                let (vbx, vby) =
-                    client_to_viewbox(&svg, e.client_x() as f64, e.client_y() as f64);
+                let (vbx, vby) = client_to_viewbox(&svg, e.client_x() as f64, e.client_y() as f64);
                 // Yew Callback — recreated each render — captures the
                 // current `view` snapshot, so `*view_handle` is fresh here.
                 // World-space inverse must use the *current* tx/ty/scale
@@ -1190,9 +1185,8 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
             "translate({:.2} {:.2}) scale({:.4})",
             view_now.tx, view_now.ty, view_now.scale
         );
-        let view_dirty = view_now.tx != 0.0
-            || view_now.ty != 0.0
-            || (view_now.scale - 1.0).abs() > 1e-6;
+        let view_dirty =
+            view_now.tx != 0.0 || view_now.ty != 0.0 || (view_now.scale - 1.0).abs() > 1e-6;
         let svg_style = format!(
             "display: block; width: 100%; height: 100%; touch-action: none; user-select: none; cursor: {};",
             cursor
@@ -1382,8 +1376,9 @@ fn edge_score(
     );
 
     let global_score = if edge.global_lift > 0.0 && edge.global_cooc >= scoring.min_cooc_global {
-        let raw_pmi = ((edge.global_lift as f64).max(1e-6).ln() / (scoring.pmi_scale as f64).max(1e-3))
-            .clamp(0.0, 1.0);
+        let raw_pmi = ((edge.global_lift as f64).max(1e-6).ln()
+            / (scoring.pmi_scale as f64).max(1e-3))
+        .clamp(0.0, 1.0);
         let cooc_ref_log = ((scoring.cooc_ref as f64 + 1.0).ln()).max(1e-3);
         let conf = ((edge.global_cooc.max(0) as f64 + 1.0).ln() / cooc_ref_log).clamp(0.0, 1.0);
         let _ = nc; // n_catalog captured via global_lift; param kept for parity.
@@ -1398,10 +1393,7 @@ fn edge_score(
     (w_g * global_score + w_u * user_score) / sum
 }
 
-fn select_backbone(
-    graph: &TagRelationGraphPayload,
-    k: usize,
-) -> Vec<(usize, usize, usize, f64)> {
+fn select_backbone(graph: &TagRelationGraphPayload, k: usize) -> Vec<(usize, usize, usize, f64)> {
     let n = graph.nodes.len();
     if n == 0 || graph.edges.is_empty() {
         return Vec::new();
@@ -1471,7 +1463,6 @@ fn select_backbone(
     out
 }
 
-
 /// Label Propagation Algorithm: each node iteratively adopts the label of
 /// the neighbour community with the largest summed edge weight. Converges
 /// in <15 iterations for typical tag graphs and produces compact, contiguous
@@ -1536,7 +1527,9 @@ fn label_propagation(
         .enumerate()
         .map(|(i, l)| (*l, i as u32))
         .collect();
-    labels.iter_mut().for_each(|l| *l = *map.get(l).unwrap_or(l));
+    labels
+        .iter_mut()
+        .for_each(|l| *l = *map.get(l).unwrap_or(l));
     labels
 }
 

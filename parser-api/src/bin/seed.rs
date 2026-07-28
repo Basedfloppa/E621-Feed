@@ -61,7 +61,7 @@ async fn main() -> anyhow::Result<()> {
     eprintln!("[seed] probed {} users with favorite_count", probed.len());
 
     let mut sorted = probed;
-    sorted.sort_by(|a, b| b.2.cmp(&a.2));
+    sorted.sort_by_key(|candidate| std::cmp::Reverse(candidate.2));
     sorted.retain(|(uid, _, _)| !already_imported.contains(uid));
     let chosen: Vec<(i32, String, i32)> = sorted.into_iter().take(target).collect();
 

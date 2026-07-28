@@ -1,6 +1,6 @@
 use wasm_bindgen::prelude::*;
-use web_sys::{wasm_bindgen::prelude::Closure, window, StorageEvent};
-use yew::{classes, function_component, html, use_effect_with, use_state, Callback, Html};
+use web_sys::{StorageEvent, wasm_bindgen::prelude::Closure, window};
+use yew::{Callback, Html, classes, function_component, html, use_effect_with, use_state};
 
 /// Available themes and their human-readable labels.
 const THEMES: &[(&str, &str)] = &[

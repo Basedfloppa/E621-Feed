@@ -1,14 +1,14 @@
 use crate::TagCount;
-use wasm_bindgen::prelude::Closure;
 use wasm_bindgen::JsCast;
+use wasm_bindgen::prelude::Closure;
 use web_sys::{
-    js_sys, CanvasRenderingContext2d, HtmlCanvasElement, MutationObserver, MutationObserverInit,
+    CanvasRenderingContext2d, HtmlCanvasElement, MutationObserver, MutationObserverInit, js_sys,
 };
 use yew::{
-    classes, function_component, html, use_effect, use_effect_with, use_state, Callback, Html,
-    NodeRef, Properties,
+    Callback, Html, NodeRef, Properties, classes, function_component, html, use_effect,
+    use_effect_with, use_state,
 };
-use yew::{use_memo, UseStateHandle};
+use yew::{UseStateHandle, use_memo};
 
 #[derive(Properties, PartialEq)]
 pub struct TagChartCardProps {

@@ -14,7 +14,7 @@ const STATUS_POLL_INTERVAL_MS: i32 = 5000;
 struct ModeUi {
     url_mode: &'static str,
     label_idle: &'static str,
-    label_running: &'static str,  // "Scanning" / "Updating"
+    label_running: &'static str, // "Scanning" / "Updating"
     label_retry: &'static str,
     done_msg: &'static str,
     failed_msg: &'static str,
@@ -137,22 +137,20 @@ pub fn reanalyze_button(props: &ReanalyzeButtonProps) -> Html {
 
             wasm_bindgen_futures::spawn_local(async move {
                 match api_post(&url).send().await {
-                    Ok(resp) if resp.ok() => {
-                        match resp.json::<ProcessJobState>().await {
-                            Ok(s) => {
-                                job_status.set(Some(s));
-                            }
-                            Err(e) => {
-                                job_status.set(Some(build_failed_state(
-                                    account_id,
-                                    &format!("Bad /process response: {e}"),
-                                )));
-                                in_flight.set(false);
-                                on_running.emit(false);
-                                on_complete.emit(Err(format!("Bad /process response: {e}")));
-                            }
+                    Ok(resp) if resp.ok() => match resp.json::<ProcessJobState>().await {
+                        Ok(s) => {
+                            job_status.set(Some(s));
                         }
-                    }
+                        Err(e) => {
+                            job_status.set(Some(build_failed_state(
+                                account_id,
+                                &format!("Bad /process response: {e}"),
+                            )));
+                            in_flight.set(false);
+                            on_running.emit(false);
+                            on_complete.emit(Err(format!("Bad /process response: {e}")));
+                        }
+                    },
                     Ok(resp) => {
                         let status = resp.status();
                         let text = resp.text().await.unwrap_or_default();
@@ -267,27 +265,21 @@ pub fn reanalyze_button(props: &ReanalyzeButtonProps) -> Html {
                                         }
                                         Err(e) => {
                                             web_sys::console::warn_1(
-                                                &format!(
-                                                    "{log_prefix} status parse error: {e}"
-                                                )
-                                                .into(),
+                                                &format!("{log_prefix} status parse error: {e}")
+                                                    .into(),
                                             );
                                         }
                                     }
                                 }
                                 Ok(resp) => {
                                     web_sys::console::warn_1(
-                                        &format!(
-                                            "{log_prefix} status HTTP {}",
-                                            resp.status()
-                                        )
-                                        .into(),
+                                        &format!("{log_prefix} status HTTP {}", resp.status())
+                                            .into(),
                                     );
                                 }
                                 Err(e) => {
                                     web_sys::console::warn_1(
-                                        &format!("{log_prefix} status network error: {e}")
-                                            .into(),
+                                        &format!("{log_prefix} status network error: {e}").into(),
                                     );
                                 }
                             }
@@ -346,9 +338,7 @@ pub fn reanalyze_button(props: &ReanalyzeButtonProps) -> Html {
     let progress_pct = job_status
         .as_ref()
         .filter(|s| s.pages_total > 0 && matches!(s.phase, ProcessJobPhase::Running))
-        .map(|s| {
-            (s.pages_done as f32 / s.pages_total as f32 * 100.0).clamp(0.0, 100.0)
-        });
+        .map(|s| (s.pages_done as f32 / s.pages_total as f32 * 100.0).clamp(0.0, 100.0));
 
     let class_running = "btn btn-outline btn-warning btn-sm";
     let class_failed = "btn btn-outline btn-error btn-sm";

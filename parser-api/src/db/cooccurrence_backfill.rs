@@ -3,7 +3,7 @@
 //! that predate V9. Spawned at server start and exits when nothing's left
 //! to do; see [`super::cooccurrence`] for the live-update path.
 
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 
 use super::cooccurrence::set_account_tag_cooccurrence;
 use super::open_db;

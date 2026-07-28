@@ -88,13 +88,13 @@ cargo install --locked cargo-audit
 
 ### Pre-commit hook
 
-There is no CI on this repo. The pre-commit hook in [`.githooks/`](.githooks/) runs `cargo audit --deny warnings` against `parser-api/` before any commit that touches it. Activate once per clone:
+There is no CI on this repo. For each affected Rust crate, the pre-commit hook in [`.githooks/`](.githooks/) runs `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, and `cargo test` (serially, because API integration tests share SQLite). When a crate's `Cargo.toml`, `Cargo.lock`, or audit configuration changes, it also runs `cargo audit --deny warnings` for that lockfile. See [CONTRIBUTING.md](CONTRIBUTING.md) for the full local quality-gate workflow. Activate once per clone:
 
 ```bash
 git config core.hooksPath .githooks
 ```
 
-If a new RUSTSEC advisory blocks a commit, fix the dependency (`cargo update -p <crate>`) or — if it's a transitive warning you can't fix today — add it to `parser-api/.cargo/audit.toml` with a one-line justification. Use `git commit --no-verify` only for emergencies.
+If a new RUSTSEC advisory blocks a commit, fix the dependency (`cargo update -p <crate>`) or — if it is a transitive warning you cannot fix today — add an explicitly justified ignore to the affected crate's audit configuration. Use `git commit --no-verify` only for emergencies.
 
 ---
 

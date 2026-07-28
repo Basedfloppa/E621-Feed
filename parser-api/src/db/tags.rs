@@ -164,11 +164,15 @@ pub fn save_posts_tags_batch(
             // Build the reverse map incrementally as we discover new tags.
             for &tid in &post_tag_ids {
                 if !tag_id_to_meta.contains_key(&tid)
-                    && let Some(((name, group), _)) = tag_id_cache.iter().find(|&(_, &v)| v == tid) {
-                        tag_id_to_meta.insert(tid, (name.clone(), *group));
-                    }
+                    && let Some(((name, group), _)) = tag_id_cache.iter().find(|&(_, &v)| v == tid)
+                {
+                    tag_id_to_meta.insert(tid, (name.clone(), *group));
+                }
             }
-            if account_id.is_some() && track_cooccurrence && has_multi_tags {
+            if let Some(account_id) = account_id
+                && track_cooccurrence
+                && has_multi_tags
+            {
                 // Build the per-post meta map from our global reverse map.
                 let id_to_meta: std::collections::HashMap<i64, (String, String)> = post_tag_ids
                     .iter()
@@ -180,7 +184,7 @@ pub fn save_posts_tags_batch(
                     .collect();
                 super::cooccurrence::upsert_account_cooccurrence_pairs(
                     tx,
-                    account_id.unwrap(),
+                    account_id,
                     &post_tag_ids,
                     &id_to_meta,
                 )?;
@@ -314,9 +318,10 @@ pub fn get_tag_counts(account_id: i32) -> Result<Vec<TagCount>, String> {
     // within a 30-second window, e.g. infinite-scroll pagination).
     if let Ok(cache) = TAG_COUNTS_CACHE.lock()
         && let Some(entry) = cache.get(&account_id)
-            && entry.inserted_at.elapsed() < TAG_COUNTS_CACHE_TTL {
-                return Ok(entry.counts.clone());
-            }
+        && entry.inserted_at.elapsed() < TAG_COUNTS_CACHE_TTL
+    {
+        return Ok(entry.counts.clone());
+    }
 
     let conn = open_db()?;
 
@@ -385,7 +390,8 @@ pub fn save_tag_relations(table: &str, entries: &[impl TagRelationEntry]) -> Res
          VALUES (?1, ?2, ?3, ?4, ?5)"
     );
     super::with_write_tx(|tx| {
-        let mut stmt = tx.prepare_cached(&sql)
+        let mut stmt = tx
+            .prepare_cached(&sql)
             .map_err(|e| format!("prep {table} upsert: {e}"))?;
         for entry in entries {
             stmt.execute(params![
@@ -395,7 +401,13 @@ pub fn save_tag_relations(table: &str, entries: &[impl TagRelationEntry]) -> Res
                 entry.created_at().unwrap_or(""),
                 entry.updated_at().unwrap_or(""),
             ])
-            .map_err(|e| format!("insert {table} {} -> {}: {e}", entry.antecedent_name(), entry.consequent_name()))?;
+            .map_err(|e| {
+                format!(
+                    "insert {table} {} -> {}: {e}",
+                    entry.antecedent_name(),
+                    entry.consequent_name()
+                )
+            })?;
         }
         Ok(())
     })
@@ -411,19 +423,39 @@ pub trait TagRelationEntry {
 }
 
 impl TagRelationEntry for TagAlias {
-    fn antecedent_name(&self) -> &str { &self.antecedent_name }
-    fn consequent_name(&self) -> &str { &self.consequent_name }
-    fn status(&self) -> &str { &self.status }
-    fn created_at(&self) -> Option<&str> { self.created_at.as_deref() }
-    fn updated_at(&self) -> Option<&str> { self.updated_at.as_deref() }
+    fn antecedent_name(&self) -> &str {
+        &self.antecedent_name
+    }
+    fn consequent_name(&self) -> &str {
+        &self.consequent_name
+    }
+    fn status(&self) -> &str {
+        &self.status
+    }
+    fn created_at(&self) -> Option<&str> {
+        self.created_at.as_deref()
+    }
+    fn updated_at(&self) -> Option<&str> {
+        self.updated_at.as_deref()
+    }
 }
 
 impl TagRelationEntry for TagImplication {
-    fn antecedent_name(&self) -> &str { &self.antecedent_name }
-    fn consequent_name(&self) -> &str { &self.consequent_name }
-    fn status(&self) -> &str { &self.status }
-    fn created_at(&self) -> Option<&str> { self.created_at.as_deref() }
-    fn updated_at(&self) -> Option<&str> { self.updated_at.as_deref() }
+    fn antecedent_name(&self) -> &str {
+        &self.antecedent_name
+    }
+    fn consequent_name(&self) -> &str {
+        &self.consequent_name
+    }
+    fn status(&self) -> &str {
+        &self.status
+    }
+    fn created_at(&self) -> Option<&str> {
+        self.created_at.as_deref()
+    }
+    fn updated_at(&self) -> Option<&str> {
+        self.updated_at.as_deref()
+    }
 }
 
 // Convenience wrappers
@@ -448,9 +480,7 @@ pub fn get_alias_consequent(tag: &str) -> Result<Option<String>, String> {
              LIMIT 1",
         )
         .map_err(|e| format!("prep get_alias_consequent: {e}"))?;
-    let result: Option<String> = stmt
-        .query_row(params![tag], |row| row.get(0))
-        .ok();
+    let result: Option<String> = stmt.query_row(params![tag], |row| row.get(0)).ok();
     Ok(result)
 }
 
@@ -500,7 +530,9 @@ pub fn get_implications_batch(tags: &[String]) -> Result<HashMap<String, Vec<Str
         return Ok(HashMap::new());
     }
     let conn = open_db()?;
-    let placeholders: Vec<String> = tags.iter().enumerate()
+    let placeholders: Vec<String> = tags
+        .iter()
+        .enumerate()
         .map(|(i, _)| format!("?{}", i + 1))
         .collect();
     let sql = format!(
@@ -509,18 +541,16 @@ pub fn get_implications_batch(tags: &[String]) -> Result<HashMap<String, Vec<Str
          ORDER BY antecedent_name, consequent_name",
         placeholders.join(", ")
     );
-    let mut stmt = conn.prepare(&sql)
+    let mut stmt = conn
+        .prepare(&sql)
         .map_err(|e| format!("prep get_implications_batch: {e}"))?;
-    let params_refs: Vec<&dyn rusqlite::ToSql> = tags.iter()
-        .map(|t| t as &dyn rusqlite::ToSql)
-        .collect();
-    let rows = stmt.query_map(params_refs.as_slice(), |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, String>(1)?,
-        ))
-    })
-    .map_err(|e| format!("query get_implications_batch: {e}"))?;
+    let params_refs: Vec<&dyn rusqlite::ToSql> =
+        tags.iter().map(|t| t as &dyn rusqlite::ToSql).collect();
+    let rows = stmt
+        .query_map(params_refs.as_slice(), |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(|e| format!("query get_implications_batch: {e}"))?;
 
     let mut result: HashMap<String, Vec<String>> = HashMap::new();
     for row in rows {
@@ -616,15 +646,10 @@ pub fn load_tag_relation_caches() -> Result<(), String> {
     if let Ok(mut i) = IMPLICATIONS_CACHE.lock() {
         *i = implications;
     }
-    info!("[tag_relation_cache] loaded: {} aliases, {} implicators",
-        {
-            
-            ALIASES_CACHE.lock().map(|c| c.len()).unwrap_or(0)
-        },
-        {
-            
-            IMPLICATIONS_CACHE.lock().map(|c| c.len()).unwrap_or(0)
-        }
+    info!(
+        "[tag_relation_cache] loaded: {} aliases, {} implicators",
+        { ALIASES_CACHE.lock().map(|c| c.len()).unwrap_or(0) },
+        { IMPLICATIONS_CACHE.lock().map(|c| c.len()).unwrap_or(0) }
     );
     Ok(())
 }
@@ -654,7 +679,9 @@ pub fn get_alias_consequent_cached(tag: &str) -> Result<Option<String>, String> 
 }
 
 /// Batch fetch implications from cache (lazy-loads if needed).
-pub fn get_implications_batch_cached(tags: &[String]) -> Result<HashMap<String, Vec<String>>, String> {
+pub fn get_implications_batch_cached(
+    tags: &[String],
+) -> Result<HashMap<String, Vec<String>>, String> {
     if tags.is_empty() {
         return Ok(HashMap::new());
     }
@@ -665,9 +692,10 @@ pub fn get_implications_batch_cached(tags: &[String]) -> Result<HashMap<String, 
         let mut result = HashMap::with_capacity(tags.len());
         for tag in tags {
             if let Some(impls) = cache.get(tag)
-                && !impls.is_empty() {
-                    result.insert(tag.clone(), impls.clone());
-                }
+                && !impls.is_empty()
+            {
+                result.insert(tag.clone(), impls.clone());
+            }
         }
         return Ok(result);
     }
@@ -681,8 +709,7 @@ use std::time::Duration;
 /// Count rows in a tag relation table.
 pub fn count_tag_relation(table: &str) -> Result<i64, String> {
     let conn = open_db()?;
-    conn
-        .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
+    conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
         .map_err(|e| format!("count {table}: {e}"))
 }
 
@@ -717,57 +744,90 @@ async fn run_full_import() -> Result<(), String> {
     info!("[tag_relation_import] starting tag_aliases sync…");
     let alias_count = count_tag_relation("tag_aliases").unwrap_or(0);
     if alias_count < 1000 {
-        info!("[tag_relation_import] tag_aliases: {} rows (partial/fresh), starting full sync", alias_count);
+        info!(
+            "[tag_relation_import] tag_aliases: {} rows (partial/fresh), starting full sync",
+            alias_count
+        );
         let mut page = 1;
         loop {
-            let entries = api::fetch_tag_relations::<crate::models::TagAlias>("tag_aliases.json", page).await?;
-            if entries.is_empty() { break; }
+            let entries =
+                api::fetch_tag_relations::<crate::models::TagAlias>("tag_aliases.json", page)
+                    .await?;
+            if entries.is_empty() {
+                break;
+            }
             save_tag_aliases(&entries)?;
-            info!("[tag_relation_import] tag_aliases page {page}: {} entries", entries.len());
+            info!(
+                "[tag_relation_import] tag_aliases page {page}: {} entries",
+                entries.len()
+            );
             page += 1;
-            if page > 500 { break; }
+            if page > 500 {
+                break;
+            }
         }
         info!("[tag_relation_import] tag_aliases full import complete");
         if let Err(e) = load_tag_relation_caches() {
             warn!("[tag_relation_import] cache preload failed: {e}");
         }
     } else {
-        let entries = api::fetch_tag_relations::<crate::models::TagAlias>("tag_aliases.json", 1).await?;
+        let entries =
+            api::fetch_tag_relations::<crate::models::TagAlias>("tag_aliases.json", 1).await?;
         if !entries.is_empty() {
             save_tag_aliases(&entries)?;
             clear_tag_relation_caches();
         }
-        info!("[tag_relation_import] tag_aliases incremental check: {} entries synced", entries.len());
+        info!(
+            "[tag_relation_import] tag_aliases incremental check: {} entries synced",
+            entries.len()
+        );
     }
 
     // ── tag_implications ─────────────────────────────────────────
     info!("[tag_relation_import] starting tag_implications sync…");
     let impl_count = count_tag_relation("tag_implications").unwrap_or(0);
     if impl_count < 10000 {
-        info!("[tag_relation_import] tag_implications: {} rows (partial/fresh), starting full sync", impl_count);
+        info!(
+            "[tag_relation_import] tag_implications: {} rows (partial/fresh), starting full sync",
+            impl_count
+        );
         let mut page = 1;
         loop {
-            let entries = api::fetch_tag_relations::<crate::models::TagImplication>("tag_implications.json", page).await?;
-            if entries.is_empty() { break; }
+            let entries = api::fetch_tag_relations::<crate::models::TagImplication>(
+                "tag_implications.json",
+                page,
+            )
+            .await?;
+            if entries.is_empty() {
+                break;
+            }
             save_tag_implications(&entries)?;
-            info!("[tag_relation_import] tag_implications page {page}: {} entries", entries.len());
+            info!(
+                "[tag_relation_import] tag_implications page {page}: {} entries",
+                entries.len()
+            );
             page += 1;
-            if page > 500 { break; }
+            if page > 500 {
+                break;
+            }
         }
         info!("[tag_relation_import] tag_implications full import complete");
         if let Err(e) = load_tag_relation_caches() {
             warn!("[tag_relation_import] cache preload failed: {e}");
         }
     } else {
-        let entries = api::fetch_tag_relations::<crate::models::TagImplication>("tag_implications.json", 1).await?;
+        let entries =
+            api::fetch_tag_relations::<crate::models::TagImplication>("tag_implications.json", 1)
+                .await?;
         if !entries.is_empty() {
             save_tag_implications(&entries)?;
             clear_tag_relation_caches();
         }
-        info!("[tag_relation_import] tag_implications incremental check: {} entries synced", entries.len());
+        info!(
+            "[tag_relation_import] tag_implications incremental check: {} entries synced",
+            entries.len()
+        );
     }
 
     Ok(())
 }
-
-

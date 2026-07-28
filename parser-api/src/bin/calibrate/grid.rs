@@ -5,9 +5,9 @@ use chrono::Utc;
 
 use e621_account_parser_api::models::cfg;
 
-use crate::cache::{score_with_cache, M_ALL, ScoreCache};
+use crate::cache::{M_ALL, ScoreCache, score_with_cache};
 use crate::dataset::EvalDataset;
-use crate::knobs::{KnobSpec, CATEGORICAL_KNOBS, PAIRED_KNOBS, PASS_SCALES};
+use crate::knobs::{CATEGORICAL_KNOBS, KnobSpec, PAIRED_KNOBS, PASS_SCALES};
 use crate::log::{print_diff, write_grid_log};
 use crate::metrics::print_metrics;
 use crate::options::GridOptions;
@@ -115,7 +115,8 @@ pub(crate) fn run_grid_with_dataset(
                 let mut consecutive_misses = 0u8;
                 for &raw_delta in k.probes {
                     if consecutive_misses >= 2 {
-                        let remaining = k.probes.len() - (k.probes.iter().position(|&d| d == raw_delta).unwrap_or(0));
+                        let remaining = k.probes.len()
+                            - (k.probes.iter().position(|&d| d == raw_delta).unwrap_or(0));
                         skipped_early += remaining;
                         if opts.verbose {
                             eprintln!(
@@ -207,7 +208,10 @@ pub(crate) fn run_grid_with_dataset(
 
     // Paired sweep over known-correlated knobs. Two knobs together → union mask.
     if opts.run_paired || opts.pairs_only {
-        eprintln!("\n[grid] paired sweep over {} known-correlated pairs", PAIRED_KNOBS.len());
+        eprintln!(
+            "\n[grid] paired sweep over {} known-correlated pairs",
+            PAIRED_KNOBS.len()
+        );
         let pair_scale = if opts.pairs_only { 1.0 } else { 0.5 };
         for &(name_a, name_b) in PAIRED_KNOBS {
             let (Some(ka), Some(kb)) = (
@@ -216,8 +220,16 @@ pub(crate) fn run_grid_with_dataset(
             ) else {
                 continue;
             };
-            let da = ka.probes.iter().map(|v| v.abs()).fold(f32::INFINITY, f32::min);
-            let db = kb.probes.iter().map(|v| v.abs()).fold(f32::INFINITY, f32::min);
+            let da = ka
+                .probes
+                .iter()
+                .map(|v| v.abs())
+                .fold(f32::INFINITY, f32::min);
+            let db = kb
+                .probes
+                .iter()
+                .map(|v| v.abs())
+                .fold(f32::INFINITY, f32::min);
             let pair_mask = ka.invalidates | kb.invalidates;
             for (sa, sb) in [(1.0, 1.0), (1.0, -1.0), (-1.0, 1.0), (-1.0, -1.0)] {
                 let mut trial = best.clone();

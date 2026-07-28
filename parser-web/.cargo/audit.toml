@@ -1,0 +1,12 @@
+[advisories]
+ignore = [
+  # bincode 1.3.3 is an unmaintained transitive dependency of
+  # gloo-worker → gloo → Yew 0.23. No fixed replacement is available
+  # without a Yew ecosystem upgrade; this app does not deserialize
+  # attacker-controlled bincode payloads.
+  "RUSTSEC-2025-0141",
+
+  # proc-macro-error 1.0.4 is an unmaintained build-time-only dependency of
+  # yew-macro → Yew 0.23. It is never included in the shipped WASM bundle.
+  "RUSTSEC-2024-0370",
+]

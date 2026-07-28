@@ -1,7 +1,7 @@
 use crate::components::{IconGithub, IconPerson, IconQuestion, ThemeToggle};
+use crate::models::{AttachTo, Button, Step, read_config_from_head, start_tour};
 use yew::{Callback, Html, MouseEvent, classes, function_component, html, use_effect_with};
 use yew_router::prelude::use_location;
-use crate::models::{read_config_from_head, start_tour, AttachTo, Button, Step};
 
 fn should_run_tour() -> bool {
     let win = match web_sys::window() {
@@ -21,9 +21,10 @@ fn should_run_tour() -> bool {
 
 fn mark_tour_finished() {
     if let Some(win) = web_sys::window()
-        && let Ok(Some(storage)) = win.local_storage() {
-            let _ = storage.set_item("finished_tour", "true");
-        }
+        && let Ok(Some(storage)) = win.local_storage()
+    {
+        let _ = storage.set_item("finished_tour", "true");
+    }
 }
 
 #[function_component(Header)]

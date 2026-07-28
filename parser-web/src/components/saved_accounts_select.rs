@@ -48,17 +48,19 @@ pub fn saved_accounts_select(props: &SavedAccountsProps) -> Html {
                                         // Restore persisted selection
                                         if found_user.is_none()
                                             && let Some(win) = web_sys::window()
-                                                && let Ok(Some(storage)) = win.local_storage()
-                                                && let Ok(Some(saved_id)) = storage.get_item("selected_account_id")
-                                                && let Ok(id) = saved_id.parse::<i64>()
-                                                && let Some(acc) = accounts.iter().find(|a| a.id == id) {
-                                                    found_user.set(Some(UserInfo {
-                                                        id: acc.id,
-                                                        name: acc.name.clone(),
-                                                        blacklist: acc.blacklist.clone(),
-                                                    }));
-                                                    user_query.set(acc.name.clone());
-                                                }
+                                            && let Ok(Some(storage)) = win.local_storage()
+                                            && let Ok(Some(saved_id)) =
+                                                storage.get_item("selected_account_id")
+                                            && let Ok(id) = saved_id.parse::<i64>()
+                                            && let Some(acc) = accounts.iter().find(|a| a.id == id)
+                                        {
+                                            found_user.set(Some(UserInfo {
+                                                id: acc.id,
+                                                name: acc.name.clone(),
+                                                blacklist: acc.blacklist.clone(),
+                                            }));
+                                            user_query.set(acc.name.clone());
+                                        }
                                     }
                                     Err(_) => saved_accounts.set(Vec::new()),
                                 }

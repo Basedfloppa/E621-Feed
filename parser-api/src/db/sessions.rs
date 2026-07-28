@@ -4,7 +4,7 @@
 //! Sessions: create/update/touch/prune for feed continuation.
 
 use chrono::Utc;
-use rusqlite::{params, OptionalExtension};
+use rusqlite::{OptionalExtension, params};
 use std::collections::HashSet;
 
 use crate::db::{open_db, with_write_tx};

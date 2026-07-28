@@ -84,8 +84,10 @@ pub fn prune_buckets() -> (usize, usize) {
     let before = map.len();
     let oversized = map.len() > MAX_BUCKETS;
     if oversized {
-        let mut entries: Vec<(String, Instant)> =
-            map.iter().map(|(k, v)| (k.clone(), v.last_refill)).collect();
+        let mut entries: Vec<(String, Instant)> = map
+            .iter()
+            .map(|(k, v)| (k.clone(), v.last_refill))
+            .collect();
         entries.sort_by_key(|(_, t)| *t);
         for (k, _) in entries.into_iter().take(map.len() / 2) {
             map.remove(&k);
@@ -111,8 +113,10 @@ fn maybe_gc(map: &mut HashMap<String, Bucket>, now: Instant) {
 
     if oversized {
         // Drop the half refilled longest ago.
-        let mut entries: Vec<(String, Instant)> =
-            map.iter().map(|(k, v)| (k.clone(), v.last_refill)).collect();
+        let mut entries: Vec<(String, Instant)> = map
+            .iter()
+            .map(|(k, v)| (k.clone(), v.last_refill))
+            .collect();
         entries.sort_by_key(|(_, t)| *t);
         for (k, _) in entries.into_iter().take(map.len() / 2) {
             map.remove(&k);
@@ -129,12 +133,13 @@ fn maybe_gc(map: &mut HashMap<String, Bucket>, now: Instant) {
 /// behind nginx; falls back to the socket peer.
 pub fn client_ip(req: &Request<'_>) -> String {
     if let Some(xff) = req.headers().get_one("x-forwarded-for")
-        && let Some(first) = xff.split(',').next() {
-            let trimmed = first.trim();
-            if !trimmed.is_empty() {
-                return trimmed.to_string();
-            }
+        && let Some(first) = xff.split(',').next()
+    {
+        let trimmed = first.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
         }
+    }
     req.client_ip()
         .map(|ip| ip.to_string())
         .unwrap_or_else(|| "unknown".to_string())
@@ -185,4 +190,3 @@ mod tests {
         assert!(check(key, 1, 3).is_err());
     }
 }
-

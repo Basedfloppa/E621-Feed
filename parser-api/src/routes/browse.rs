@@ -10,7 +10,8 @@ use rocket_okapi::openapi;
 
 use crate::db_blocking;
 use e621_account_parser_api::{
-    api, audit, auth::OwnerToken,
+    api, audit,
+    auth::OwnerToken,
     db::{get_account_by_id, save_posts, upsert_catalog_posts},
     errors::ApiError,
     models::Post,
@@ -46,8 +47,8 @@ fn spawn_browse_persist(
             e621_account_parser_api::db::save_posts_tags_batch(
                 &posts,
                 &std::collections::HashSet::new(),
-                false,  // track_cooccurrence: false
-                None,   // account_id: none — no account-level cooccurrence
+                false, // track_cooccurrence: false
+                None,  // account_id: none — no account-level cooccurrence
             )
             .map_err(|e| format!("Failed to save tags: {e}"))?;
 
@@ -63,7 +64,8 @@ fn spawn_browse_persist(
                     .field("account_id", account_id)
                     .field("count", n)
                     .emit();
-                e621_account_parser_api::metrics::METRICS.browse_views_total
+                e621_account_parser_api::metrics::METRICS
+                    .browse_views_total
                     .with_label_values(&[source])
                     .inc();
             }
