@@ -20,7 +20,7 @@
 use std::collections::HashSet;
 use std::sync::{OnceLock, RwLock};
 
-use rocket::http::{Cookie, SameSite, Status};
+use rocket::http::{Cookie, Method, SameSite, Status};
 use rocket::request::{FromRequest, Outcome, Request};
 use rocket::time::Duration;
 use rocket_okapi::r#gen::OpenApiGenerator;
@@ -62,6 +62,34 @@ pub fn revoke(token: &str) -> Result<(), String> {
         .map_err(|e| format!("revocation set lock poisoned: {e}"))?;
     guard.insert(token.to_string());
     Ok(())
+}
+
+fn csrf_origin_is_allowed(req: &Request<'_>) -> bool {
+    if matches!(req.method(), Method::Get | Method::Head | Method::Options) {
+        return true;
+    }
+
+    let Some(origin) = req.headers().get_one("Origin") else {
+        // CLI/API clients are useful in local development; production browser
+        // requests include Origin for unsafe methods and must prove same-origin.
+        return cfg!(debug_assertions);
+    };
+
+    if cfg!(debug_assertions) {
+        return matches!(
+            origin,
+            "http://localhost:8000"
+                | "http://127.0.0.1:8000"
+                | "http://localhost:8080"
+                | "http://127.0.0.1:8080"
+        );
+    }
+
+    let origin_host = origin
+        .strip_prefix("https://")
+        .or_else(|| origin.strip_prefix("http://"))
+        .and_then(|value| value.split('/').next());
+    origin_host.is_some_and(|origin_host| req.host().is_some_and(|host| origin_host == host))
 }
 
 fn is_revoked(token: &str) -> bool {
@@ -126,6 +154,13 @@ impl<'r> FromRequest<'r> for OwnerToken {
             // Drop the bad cookie so the next request gets a clean 401.
             req.cookies().add(build_owner_cookie_clear());
             return Outcome::Error((Status::BadRequest, e));
+        }
+
+        if !csrf_origin_is_allowed(req) {
+            return Outcome::Error((
+                Status::Forbidden,
+                ApiError::Forbidden("cross-origin state-changing request rejected".into()),
+            ));
         }
 
         if is_revoked(&token) {

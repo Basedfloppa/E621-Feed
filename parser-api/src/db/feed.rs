@@ -115,6 +115,46 @@ pub fn record_feed_interaction(
 /// Batch version of `record_feed_interaction`. Processes up to 100
 /// interactions in a single write transaction. Ownership is verified
 /// per distinct account_id (cheaper than per-interaction).
+/// Clear the interaction-derived recommendation state for one account owned by
+/// this device. Favorites, blacklist, profile, and account links are retained.
+pub fn clear_feed_interactions(owner_token: &str, account_id: i32) -> Result<usize, String> {
+    super::with_write_tx(|tx| {
+        let linked: bool = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM account_device_links WHERE owner_token = ?1 AND account_id = ?2)",
+                params![owner_token, account_id],
+                |row| row.get(0),
+            )
+            .map_err(|e| format!("Failed to validate interaction-clear owner link: {e}"))?;
+        if !linked {
+            return Err("Account is not linked to this device token".to_string());
+        }
+
+        let deleted = tx
+            .execute(
+                "DELETE FROM feed_interactions WHERE account_id = ?1",
+                params![account_id],
+            )
+            .map_err(|e| format!("Failed to clear feed interactions: {e}"))?;
+        tx.execute(
+            "DELETE FROM account_tag_feedback WHERE account_id = ?1",
+            params![account_id],
+        )
+        .map_err(|e| format!("Failed to clear tag feedback: {e}"))?;
+        tx.execute(
+            "DELETE FROM feed_session_posts WHERE session_id IN (SELECT session_id FROM feed_sessions WHERE account_id = ?1)",
+            params![account_id],
+        )
+        .map_err(|e| format!("Failed to clear feed-session posts: {e}"))?;
+        tx.execute(
+            "DELETE FROM feed_sessions WHERE account_id = ?1",
+            params![account_id],
+        )
+        .map_err(|e| format!("Failed to clear feed sessions: {e}"))?;
+        Ok(deleted)
+    })
+}
+
 pub fn record_feed_interactions_batch(
     owner_token: &str,
     interactions: &[FeedInteractionRequest],

@@ -287,6 +287,7 @@ async fn rocket() -> _ {
         process_status,
         routes::feed::log_feed_interaction,
         routes::feed::log_feed_interaction_batch,
+        routes::feed::clear_account_interactions,
         routes::account::list_accounts,
         routes::account::get_account_tag_counts,
         routes::account::get_account_profile,

@@ -16,8 +16,8 @@ use e621_account_parser_api::utils::{
 use e621_account_parser_api::{
     api, audit,
     db::{
-        self, collect_local_candidate_ids, find_similar_post_ids, get_account_by_id,
-        get_account_preference_profile, get_owned_post_ids, get_post_by_id,
+        self, clear_feed_interactions, collect_local_candidate_ids, find_similar_post_ids,
+        get_account_by_id, get_account_preference_profile, get_owned_post_ids, get_post_by_id,
         get_recently_seen_post_ids, get_tag_counts, hydrate_posts_by_ids, record_feed_interaction,
         record_feed_interactions_batch, upsert_catalog_posts,
     },
@@ -62,6 +62,23 @@ pub(crate) async fn log_feed_interaction(
         .with_label_values(&[&event_str])
         .inc();
     Ok(())
+}
+
+#[openapi(tag = "Recommendations")]
+#[delete("/account/<account_id>/interaction")]
+pub(crate) async fn clear_account_interactions(
+    account_id: i32,
+    owner: OwnerToken,
+) -> Result<Json<usize>, ApiError> {
+    validation::validate_account_id(account_id)?;
+    let owner_token = owner.0;
+    ratelimit::check(&format!("interaction_clear:owner:{owner_token}"), 3, 3)?;
+    let deleted = db_blocking(move || clear_feed_interactions(&owner_token, account_id)).await?;
+    audit::event("feed.interactions_cleared")
+        .field("account_id", account_id)
+        .field("deleted", deleted)
+        .emit();
+    Ok(Json(deleted))
 }
 
 #[openapi(tag = "Recommendations")]

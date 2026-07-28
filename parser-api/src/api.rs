@@ -7,7 +7,10 @@ use tokio::sync::Mutex;
 use tokio::time::{Instant, sleep, timeout};
 use urlencoding::encode;
 
-use crate::models::{Post, TruncatedAccount, UserApiResponse, UserSearchResult, cfg};
+use crate::{
+    models::{Post, TruncatedAccount, UserApiResponse, UserSearchResult, cfg},
+    ratelimit,
+};
 
 /// Global rate gate. Outbound sends share one token-bucket budget so
 /// prefetchers and live fetches don't each enforce `rps_delay_ms`
@@ -196,6 +199,11 @@ async fn fetch_authed_text(
         debug!("e621 cache hit: {url}");
         return Ok(body);
     }
+
+    // A single server-wide budget protects the shared admin key even when
+    // many owners or prefetch workers issue distinct e621 requests.
+    ratelimit::check("e621:admin-key", 240, 20)
+        .map_err(|_| "global e621 admin-key request limit exceeded".to_string())?;
 
     let client = get_client();
     let resp = send_with_retry(

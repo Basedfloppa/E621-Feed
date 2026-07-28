@@ -36,6 +36,14 @@ A self-hosted alternative to e621's built-in feed: imports your favourites, buil
   rating, media, popularity, interaction, tag-relation, uploader, exclusivity,
   novelty) and MMR diversification
 - Recommendation score breakdowns in the feed UI
+- A post-card recommendation menu: **Not interested** hides the post and
+  records a negative tag-feedback signal; it closes when the pointer leaves it
+  or the user clicks elsewhere
+- Account owners can clear all interaction-derived recommendation state through
+  `DELETE /api/account/<id>/interaction` without deleting favourites, blacklist,
+  preferred tags, or the account itself
+- Authenticated state-changing requests enforce same-origin CSRF validation;
+  outbound e621 requests share a server-wide admin-key rate limit
 - Daily digest with stratified sampling (top picks, trending, exploration,
   wildcard, recent)
 - Session-based cross-page dedup for infinite scroll

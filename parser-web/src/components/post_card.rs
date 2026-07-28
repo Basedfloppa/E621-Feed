@@ -2,8 +2,10 @@ use std::rc::Rc;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
 use wasm_bindgen_futures::spawn_local;
-use web_sys::{Element, ResizeObserver, ResizeObserverEntry, window};
+use web_sys::{Element, Node, ResizeObserver, ResizeObserverEntry, window};
 use yew::prelude::*;
+
+type OutsideMenuListener = (web_sys::Document, Closure<dyn FnMut(web_sys::MouseEvent)>);
 
 use crate::components::shared_observer;
 use crate::models::*;
@@ -47,6 +49,7 @@ pub fn post_card(props: &PostCardProps) -> Html {
 
     let root_ref = use_node_ref();
     let video_ref = use_node_ref();
+    let negative_menu_ref = use_node_ref();
     let impression_logged = use_state(|| false);
     let hidden = use_state(|| false);
     let card_width = use_state(|| 0.0f64);
@@ -67,6 +70,43 @@ pub fn post_card(props: &PostCardProps) -> Html {
         )>,
         _,
     >(|| None);
+
+    // Close the negative-signal menu when a pointer action lands outside it.
+    // `details` supplies the keyboard-friendly open/close behavior; this only
+    // adds the expected popover dismissal behavior.
+    {
+        let negative_menu_ref = negative_menu_ref.clone();
+        use_effect(move || {
+            let mut listener: Option<OutsideMenuListener> = None;
+            if let Some(document) = window().and_then(|window| window.document()) {
+                let callback = Closure::wrap(Box::new(move |event: web_sys::MouseEvent| {
+                    let Some(menu) = negative_menu_ref.cast::<Element>() else {
+                        return;
+                    };
+                    let target = event
+                        .target()
+                        .and_then(|target| target.dyn_into::<Node>().ok());
+                    let menu_node: Node = menu.clone().unchecked_into();
+                    if target.is_none_or(|target| !menu_node.contains(Some(&target))) {
+                        let _ = menu.remove_attribute("open");
+                    }
+                }) as Box<dyn FnMut(_)>);
+                let _ = document.add_event_listener_with_callback(
+                    "mousedown",
+                    callback.as_ref().unchecked_ref(),
+                );
+                listener = Some((document, callback));
+            }
+            move || {
+                if let Some((document, callback)) = listener {
+                    let _ = document.remove_event_listener_with_callback(
+                        "mousedown",
+                        callback.as_ref().unchecked_ref(),
+                    );
+                }
+            }
+        });
+    }
 
     // Force muted on video elements after mount — Yew's HTML attribute
     // may not set the DOM property early enough to prevent audio on autoplay.
@@ -575,21 +615,40 @@ pub fn post_card(props: &PostCardProps) -> Html {
                     </span>
                 }
 
-                <button
-                    type="button"
-                    class={classes!(
-                        "post-card-hide-btn", "btn", "btn-sm", "btn-neutral", "btn-circle",
-                        "absolute", "top-0", "left-1/2",
-                        "-translate-x-1/2", "mt-2"
-                    )}
+                <details
+                    ref={negative_menu_ref.clone()}
+                    class="dropdown dropdown-bottom absolute top-0 left-1/2 -translate-x-1/2 mt-2"
                     style="z-index: 2;"
-                    onmousedown={Callback::from(|e: MouseEvent| e.stop_propagation())}
-                    onclick={on_hide}
-                    title="Not interested"
-                    aria-label={format!("Hide post {}", post.id)}
                 >
-                    { "×" }
-                </button>
+                    <summary
+                        class="post-card-hide-btn btn btn-sm btn-neutral btn-circle list-none"
+                        onmousedown={Callback::from(|e: MouseEvent| e.stop_propagation())}
+                        title="Recommendation controls"
+                        aria-label={format!("Recommendation controls for post {}", post.id)}
+                    >
+                        { "×" }
+                    </summary>
+                    <ul
+                        class="dropdown-content menu rounded-box bg-base-100 shadow w-52 mt-1 p-2"
+                        onmouseleave={{
+                            let negative_menu_ref = negative_menu_ref.clone();
+                            Callback::from(move |_event: MouseEvent| {
+                                if let Some(menu) = negative_menu_ref.cast::<Element>() {
+                                    let _ = menu.remove_attribute("open");
+                                }
+                            })
+                        }}
+                    >
+                        <li>
+                            <button type="button" onclick={on_hide}>
+                                <span>{ "Not interested" }</span>
+                            </button>
+                        </li>
+                        <li class="menu-title text-xs normal-case whitespace-normal">
+                            <span>{ "Hide this post and reduce the score of its matching tags in future recommendations." }</span>
+                        </li>
+                    </ul>
+                </details>
 
                 if props.show_affinity {
                     <span

@@ -158,6 +158,12 @@ user graph entirely for diversity even when `diversity_semantic_blend > 0`.
 
 ## Feedback decay + meta interaction
 
+Selecting **Not interested** from a post card's × recommendation menu hides the
+post and records a `hide` interaction. The interaction increments negative
+feedback for each tag on that post; future `interaction_fit` scores therefore
+reduce similar candidates rather than adding a permanent blacklist rule. The
+menu closes when the pointer leaves it or the user clicks outside it.
+
 Feedback counts are decayed eagerly at `/process` time. Between refreshes, a
 supplementary decay factor is applied per-tag in `interaction_fit` based on
 `profile_refreshed_at` and `feedback_decay_half_life_days` — the longer since
