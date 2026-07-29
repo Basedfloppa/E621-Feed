@@ -506,7 +506,12 @@ async fn run_incremental_fetch(
 
 #[cfg(test)]
 mod tests {
-    use super::{ProcessMode, resolve_process_mode};
+    use std::collections::HashSet;
+
+    use super::{ProcessMode, resolve_process_mode, strip_blacklisted_tags};
+    use crate::models::{Files, Flags, Has, Post, Rating, Relationships, Stats, Tags};
+
+    // ── ProcessMode ──────────────────────────────────────────────────
 
     #[test]
     fn process_mode_parses_documented_values_and_aliases() {
@@ -549,5 +554,178 @@ mod tests {
             resolve_process_mode(ProcessMode::Auto, 100, 101),
             ProcessMode::Incremental
         );
+    }
+
+    // ── strip_blacklisted_tags ───────────────────────────────────────
+
+    fn post_with_tags(artist: &[&str], general: &[&str]) -> Post {
+        Post {
+            id: 1,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            change_seq: 0.0,
+            files: Files::default(),
+            uploader_id: 0,
+            uploader_name: None,
+            approver_id: None,
+            stats: Stats::default(),
+            flags: Flags::default(),
+            has: Has::default(),
+            relationships: Relationships::default(),
+            pools: vec![],
+            rating: Rating::S,
+            locked_tags: vec![],
+            sources: vec![],
+            description: None,
+            tags: Tags {
+                artist: artist.iter().map(|s| s.to_string()).collect(),
+                character: vec![],
+                copyright: vec![],
+                species: vec![],
+                general: general.iter().map(|s| s.to_string()).collect(),
+                lore: vec![],
+                meta: vec![],
+                invalid: vec![],
+                contributor: vec![],
+            },
+        }
+    }
+
+    #[test]
+    fn strip_blacklisted_empty_blacklist_preserves_all() {
+        let blacklist = HashSet::new();
+        let post = post_with_tags(&["skeb"], &["fluffy", "canine"]);
+        let result = strip_blacklisted_tags(post, &blacklist);
+        assert_eq!(result.tags.artist, vec!["skeb"]);
+        assert_eq!(result.tags.general, vec!["fluffy", "canine"]);
+    }
+
+    #[test]
+    fn strip_blacklisted_removes_matching_tags() {
+        let mut blacklist = HashSet::new();
+        blacklist.insert("fluffy".to_string());
+        let post = post_with_tags(&["skeb"], &["fluffy", "canine"]);
+        let result = strip_blacklisted_tags(post, &blacklist);
+        assert_eq!(
+            result.tags.artist,
+            vec!["skeb"],
+            "artist should be untouched"
+        );
+        assert_eq!(
+            result.tags.general,
+            vec!["canine"],
+            "fluffy should be stripped"
+        );
+    }
+
+    #[test]
+    fn strip_blacklisted_case_insensitive_tag() {
+        // Production always lowercases the blacklist at the call site;
+        // the filter lowercases each tag and checks against the
+        // (already-lowercase) blacklist.
+        let mut blacklist = HashSet::new();
+        blacklist.insert("fluffy".to_string());
+        let post = post_with_tags(&[], &["Fluffy", "Canine"]);
+        let result = strip_blacklisted_tags(post, &blacklist);
+        assert_eq!(
+            result.tags.general,
+            vec!["Canine"],
+            "tag 'Fluffy' lowercased to 'fluffy' matches blacklist 'fluffy'"
+        );
+    }
+
+    #[test]
+    fn strip_blacklisted_trims_whitespace() {
+        let mut blacklist = HashSet::new();
+        blacklist.insert("fluffy".to_string());
+        let post = Post {
+            tags: Tags {
+                general: vec!["  fluffy  ".to_string()],
+                ..Default::default()
+            },
+            ..post_with_tags(&[], &[])
+        };
+        let result = strip_blacklisted_tags(post, &blacklist);
+        assert!(
+            result.tags.general.is_empty(),
+            "whitespace-padded '  fluffy  ' should match blacklist 'fluffy'"
+        );
+    }
+
+    #[test]
+    fn strip_blacklisted_all_tags_filtered() {
+        let mut blacklist = HashSet::new();
+        blacklist.insert("bad".to_string());
+        let post = Post {
+            tags: Tags {
+                artist: vec!["bad".to_string()],
+                character: vec!["bad".to_string()],
+                copyright: vec!["bad".to_string()],
+                species: vec!["bad".to_string()],
+                general: vec!["bad".to_string()],
+                lore: vec!["bad".to_string()],
+                meta: vec!["bad".to_string()],
+                invalid: vec!["bad".to_string()],
+                contributor: vec!["bad".to_string()],
+            },
+            ..post_with_tags(&[], &[])
+        };
+        let result = strip_blacklisted_tags(post, &blacklist);
+        // All groups except `invalid` and `contributor` are filtered
+        assert!(result.tags.artist.is_empty());
+        assert!(result.tags.character.is_empty());
+        assert!(result.tags.copyright.is_empty());
+        assert!(result.tags.species.is_empty());
+        assert!(result.tags.general.is_empty());
+        assert!(result.tags.lore.is_empty());
+        assert!(result.tags.meta.is_empty());
+        // invalid and contributor are NOT in the filter list → preserved
+        assert_eq!(result.tags.invalid, vec!["bad"]);
+        assert_eq!(result.tags.contributor, vec!["bad"]);
+    }
+
+    #[test]
+    fn strip_blacklisted_tag_with_whitespace() {
+        let mut blacklist = HashSet::new();
+        blacklist.insert("fluffy".to_string());
+        let post = Post {
+            tags: Tags {
+                general: vec!["  fluffy  ".to_string()],
+                ..Default::default()
+            },
+            ..post_with_tags(&[], &[])
+        };
+        let result = strip_blacklisted_tags(post, &blacklist);
+        assert!(
+            result.tags.general.is_empty(),
+            "whitespace-padded '  fluffy  ' should be trimmed then match"
+        );
+    }
+
+    #[test]
+    fn strip_blacklisted_multiple_blacklisted_in_one_group() {
+        let mut blacklist = HashSet::new();
+        blacklist.insert("fluffy".to_string());
+        blacklist.insert("canine".to_string());
+        let post = post_with_tags(&[], &["fluffy", "canine", "keep"]);
+        let result = strip_blacklisted_tags(post, &blacklist);
+        assert_eq!(result.tags.general, vec!["keep"]);
+    }
+
+    #[test]
+    fn strip_blacklisted_blacklist_across_groups() {
+        let mut blacklist = HashSet::new();
+        blacklist.insert("skeb".to_string());
+        let post = Post {
+            tags: Tags {
+                artist: vec!["skeb".to_string()],
+                general: vec!["skeb".to_string()],
+                ..Default::default()
+            },
+            ..post_with_tags(&[], &[])
+        };
+        let result = strip_blacklisted_tags(post, &blacklist);
+        assert!(result.tags.artist.is_empty(), "skeb filtered from artist");
+        assert!(result.tags.general.is_empty(), "skeb filtered from general");
     }
 }

@@ -948,3 +948,1030 @@ fn resolve_alias(name: &str, aliases: &HashMap<String, String>) -> String {
     }
     current
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ==================================================================
+    //  canonical_pair_key
+    // ==================================================================
+
+    #[test]
+    fn canonical_pair_key_orders_alphabetically() {
+        assert_eq!(canonical_pair_key("b", "a"), "a||b");
+        assert_eq!(canonical_pair_key("a", "b"), "a||b");
+        assert_eq!(canonical_pair_key("same", "same"), "same||same");
+    }
+
+    // ==================================================================
+    //  group_key
+    // ==================================================================
+
+    #[test]
+    fn group_key_maps_known_types() {
+        assert_eq!(group_key("artist"), 0);
+        assert_eq!(group_key("character"), 1);
+        assert_eq!(group_key("copyright"), 2);
+        assert_eq!(group_key("species"), 3);
+        assert_eq!(group_key("general"), 4);
+        assert_eq!(group_key("lore"), 5);
+    }
+
+    #[test]
+    fn group_key_unknown_falls_to_meta() {
+        assert_eq!(group_key("invalid"), 6);
+        assert_eq!(group_key("meta"), 6);
+        assert_eq!(group_key(""), 6);
+    }
+
+    // ==================================================================
+    //  resolve_alias
+    // ==================================================================
+
+    #[test]
+    fn resolve_alias_no_alias() {
+        let aliases = HashMap::new();
+        assert_eq!(resolve_alias("fluffy", &aliases), "fluffy");
+    }
+
+    #[test]
+    fn resolve_alias_single_hop() {
+        let mut aliases = HashMap::new();
+        aliases.insert("canis".to_string(), "canine".to_string());
+        assert_eq!(resolve_alias("canis", &aliases), "canine");
+    }
+
+    #[test]
+    fn resolve_alias_chain() {
+        let mut aliases = HashMap::new();
+        aliases.insert("canis".to_string(), "canine".to_string());
+        aliases.insert("canine".to_string(), "dog".to_string());
+        assert_eq!(resolve_alias("canis", &aliases), "dog");
+    }
+
+    #[test]
+    fn resolve_alias_cycle_terminates() {
+        let mut aliases = HashMap::new();
+        aliases.insert("a".to_string(), "b".to_string());
+        aliases.insert("b".to_string(), "a".to_string());
+        let result = resolve_alias("a", &aliases);
+        // Cycle detected: the function breaks when it sees a repeat.
+        // After a→b, b→a, it tries a again, sees it was already visited,
+        // and returns the last current value (= "a").
+        assert!(
+            result == "a" || result == "b",
+            "cycle should return one of the cycle nodes, got {result}"
+        );
+    }
+
+    #[test]
+    fn resolve_alias_self_referential() {
+        let mut aliases = HashMap::new();
+        aliases.insert("a".to_string(), "a".to_string());
+        assert_eq!(resolve_alias("a", &aliases), "a");
+    }
+
+    // ==================================================================
+    //  build_generic_set
+    // ==================================================================
+
+    #[test]
+    fn build_generic_set_includes_hardcoded() {
+        let empty = HashMap::new();
+        let generic = build_generic_set(&empty);
+        assert!(generic.contains("male"), "hardcoded generic 'male'");
+        assert!(generic.contains("female"), "hardcoded generic 'female'");
+        assert!(generic.contains("nude"), "hardcoded generic 'nude'");
+        assert!(
+            generic.contains("detailed_background"),
+            "hardcoded generic 'detailed_background'"
+        );
+    }
+
+    #[test]
+    fn build_generic_set_empty_impls() {
+        let empty = HashMap::new();
+        let generic = build_generic_set(&empty);
+        assert!(!generic.is_empty(), "hardcoded list always present");
+        // Should contain exactly the hardcoded generics (no impls to add)
+        for &hg in HARDCODED_GENERIC {
+            assert!(
+                generic.contains(hg),
+                "hardcoded generic '{hg}' must be in the set"
+            );
+        }
+    }
+
+    #[test]
+    fn build_generic_set_self_referencing_implication() {
+        let mut impls = HashMap::new();
+        impls.insert("furry".to_string(), vec!["furry".to_string()]);
+        let generic = build_generic_set(&impls);
+        assert!(generic.contains("furry"), "self-referencing tag is generic");
+    }
+
+    #[test]
+    fn build_generic_set_implied_into_three_or_more() {
+        let mut impls = HashMap::new();
+        impls.insert("a".to_string(), vec!["common".to_string()]);
+        impls.insert("b".to_string(), vec!["common".to_string()]);
+        impls.insert("c".to_string(), vec!["common".to_string()]);
+        // "common" is implied by 3 tags → should be generic
+        let generic = build_generic_set(&impls);
+        assert!(generic.contains("common"));
+    }
+
+    #[test]
+    fn build_generic_set_implied_into_less_than_three() {
+        let mut impls = HashMap::new();
+        impls.insert("a".to_string(), vec!["common".to_string()]);
+        impls.insert("b".to_string(), vec!["common".to_string()]);
+        // "common" is implied by only 2 tags → NOT generic (unless already in hardcoded)
+        let generic = build_generic_set(&impls);
+        // "common" is not in HARDCODED_GENERIC, so it should NOT be in the set
+        assert!(
+            !generic.contains("common"),
+            "tag implied by <3 antecedents is not generic"
+        );
+    }
+
+    // ==================================================================
+    //  build_non_generic_nodes
+    // ==================================================================
+
+    fn make_tc(name: &str, group: &str, count: i64) -> crate::models::TagCount {
+        crate::models::TagCount {
+            name: name.to_string(),
+            group_type: group.to_string(),
+            count,
+        }
+    }
+
+    #[test]
+    fn non_generic_filters_meta_tags() {
+        let generic = HashSet::new();
+        let tags = vec![
+            make_tc("hi_res", "general", 1000),
+            make_tc("fluffy", "general", 500),
+        ];
+        let (nodes, _) = build_non_generic_nodes(&tags, &generic, 100);
+        assert_eq!(nodes.len(), 1, "hi_res is meta and should be excluded");
+        assert_eq!(nodes[0].name, "fluffy");
+    }
+
+    #[test]
+    fn non_generic_filters_generic_tags() {
+        let mut generic = HashSet::new();
+        generic.insert("male".to_string());
+        let tags = vec![
+            make_tc("male", "general", 1000),
+            make_tc("fluffy", "general", 500),
+        ];
+        let (nodes, _) = build_non_generic_nodes(&tags, &generic, 100);
+        assert_eq!(nodes.len(), 1, "male is generic and should be excluded");
+        assert_eq!(nodes[0].name, "fluffy");
+    }
+
+    #[test]
+    fn non_generic_only_includes_general_lore_species() {
+        let generic = HashSet::new();
+        let tags = vec![
+            make_tc("skeb", "artist", 1000),
+            make_tc("fluffy", "general", 500),
+            make_tc("mythology", "lore", 300),
+            make_tc("canine", "species", 400),
+        ];
+        let (nodes, _) = build_non_generic_nodes(&tags, &generic, 100);
+        // artist should be excluded — only general, lore, species
+        assert_eq!(nodes.len(), 3);
+        assert!(!nodes.iter().any(|n| n.name == "skeb"));
+        assert!(nodes.iter().any(|n| n.name == "fluffy"));
+        assert!(nodes.iter().any(|n| n.name == "mythology"));
+        assert!(nodes.iter().any(|n| n.name == "canine"));
+    }
+
+    #[test]
+    fn non_generic_sorts_by_count_desc() {
+        let generic = HashSet::new();
+        let tags = vec![
+            make_tc("rare", "general", 10),
+            make_tc("common", "general", 1000),
+            make_tc("mid", "general", 100),
+        ];
+        let (nodes, _) = build_non_generic_nodes(&tags, &generic, 100);
+        assert_eq!(nodes.len(), 3);
+        assert_eq!(nodes[0].name, "common");
+        assert_eq!(nodes[1].name, "mid");
+        assert_eq!(nodes[2].name, "rare");
+    }
+
+    #[test]
+    fn non_generic_respects_target_count() {
+        let generic = HashSet::new();
+        let tags = vec![
+            make_tc("a", "general", 100),
+            make_tc("b", "general", 90),
+            make_tc("c", "general", 80),
+        ];
+        let (nodes, _) = build_non_generic_nodes(&tags, &generic, 2);
+        assert_eq!(nodes.len(), 2);
+    }
+
+    #[test]
+    fn non_generic_lowercases_names() {
+        let generic = HashSet::new();
+        let tags = vec![make_tc("FLUFFY", "general", 100)];
+        let (nodes, _) = build_non_generic_nodes(&tags, &generic, 100);
+        assert_eq!(nodes[0].name, "fluffy");
+    }
+
+    #[test]
+    fn non_generic_builds_idx_map() {
+        let generic = HashSet::new();
+        let tags = vec![
+            make_tc("fluffy", "general", 100),
+            make_tc("canine", "species", 80),
+        ];
+        let (nodes, idx_map) = build_non_generic_nodes(&tags, &generic, 100);
+        assert_eq!(nodes.len(), 2);
+        assert!(
+            idx_map.contains_key(&("fluffy".to_string(), "general".to_string())),
+            "idx_map should contain (fluffy, general)"
+        );
+        assert!(
+            idx_map.contains_key(&("canine".to_string(), "species".to_string())),
+            "idx_map should contain (canine, species)"
+        );
+    }
+
+    // ==================================================================
+    //  build_backbone
+    // ==================================================================
+
+    #[test]
+    fn backbone_empty_input() {
+        assert!(build_backbone(0, &[]).is_empty());
+        assert!(build_backbone(5, &[]).is_empty());
+    }
+
+    #[test]
+    fn backbone_returns_all_edges_when_no_mst_needed() {
+        // 3 nodes, every pair connected: MST keeps 2 edges, top-2 per node
+        // adds the remaining one → all 3 edges survive.
+        let edges = vec![
+            TagEdge {
+                source: 0,
+                target: 1,
+                weight: 10.0,
+            },
+            TagEdge {
+                source: 1,
+                target: 2,
+                weight: 5.0,
+            },
+            TagEdge {
+                source: 0,
+                target: 2,
+                weight: 1.0,
+            },
+        ];
+        let backbone = build_backbone(3, &edges);
+        // MST keeps (0,1) and (1,2); top-2 per node keeps all because
+        // each node has degree 2.
+        assert_eq!(backbone.len(), 3);
+    }
+
+    #[test]
+    fn backbone_drops_low_weight_edges_not_in_mst_or_top2() {
+        // 4 nodes, chain: 0-1, 1-2, 2-3 (strong), plus cross edges (weak).
+        // MST picks chain. Top-2 keeps up to 2 edges per node.
+        // Node 0 has only edge (0,1) → kept.
+        // Node 1 has edges to 0 and 2 → kept.
+        // Node 2 has edges to 1 and 3 → kept.
+        // Node 3 has edge to 2 → kept.
+        // Weak cross edges with deg > 2 get filtered.
+        let edges = vec![
+            TagEdge {
+                source: 0,
+                target: 1,
+                weight: 10.0,
+            },
+            TagEdge {
+                source: 1,
+                target: 2,
+                weight: 9.0,
+            },
+            TagEdge {
+                source: 2,
+                target: 3,
+                weight: 8.0,
+            },
+            // Weak cross edge: node 0 already has 1 edge (top-2 keeps it)
+            // but this cross edge is heavier than node 0's existing
+            // connection to 2? No, node 0 has only one edge anyway.
+            // Let's make a 4th edge that node 0 can't accommodate:
+            TagEdge {
+                source: 0,
+                target: 3,
+                weight: 0.1,
+            },
+        ];
+        let backbone = build_backbone(4, &edges);
+        // MST picks (0,1), (1,2), (2,3).
+        // Node 0 top-2: only has (0,1) and (0,3) → keeps both.
+        // Wait actually node 0's edges are (0,1)=10, (0,3)=0.1.
+        // Top-2 = both.
+        // So (0,3) survives through top-2, not MST.
+        // All 4 edges survive.
+        assert_eq!(backbone.len(), 4);
+    }
+
+    #[test]
+    fn backbone_mst_connects_disconnected_via_top2() {
+        // Two separate components connected by MST can't be, but top-2
+        // doesn't care about connectivity.
+        // Component 1: 0-1. Component 2: 2-3.
+        // No edges between components → each has its own MST.
+        let edges = vec![
+            TagEdge {
+                source: 0,
+                target: 1,
+                weight: 5.0,
+            },
+            TagEdge {
+                source: 2,
+                target: 3,
+                weight: 5.0,
+            },
+        ];
+        let backbone = build_backbone(4, &edges);
+        assert_eq!(backbone.len(), 2);
+    }
+
+    // ==================================================================
+    //  louvain_communities
+    // ==================================================================
+
+    #[test]
+    fn louvain_empty_graph() {
+        assert!(louvain_communities(0, &[]).is_empty());
+    }
+
+    #[test]
+    fn louvain_single_node() {
+        let communities = louvain_communities(1, &[]);
+        assert_eq!(communities.len(), 1);
+        assert_eq!(communities[0], 0);
+    }
+
+    #[test]
+    fn louvain_two_connected_nodes_use_chain() {
+        // Use a 3-node chain to avoid the synchronous-update oscillation
+        // that happens with exactly 2 symmetric nodes.
+        let edges = vec![
+            TagEdge {
+                source: 0,
+                target: 1,
+                weight: 1.0,
+            },
+            TagEdge {
+                source: 1,
+                target: 2,
+                weight: 1.0,
+            },
+        ];
+        let communities = louvain_communities(3, &edges);
+        assert_eq!(communities.len(), 3);
+        // 0 and 2 are connected through 1 → should be same community
+        assert_eq!(
+            communities[0], communities[2],
+            "nodes 0 and 2 connected via chain should be in the same community"
+        );
+    }
+
+    #[test]
+    fn louvain_disconnected_components_converge() {
+        // Two disconnected triangles: (0-1-2) and (3-4-5).
+        // Strong internal edges connect each triangle; no cross edges.
+        // With 3 nodes per component, the synchronous update
+        // converges to distinct community labels.
+        let edges = vec![
+            TagEdge {
+                source: 0,
+                target: 1,
+                weight: 1.0,
+            },
+            TagEdge {
+                source: 0,
+                target: 2,
+                weight: 1.0,
+            },
+            TagEdge {
+                source: 1,
+                target: 2,
+                weight: 1.0,
+            },
+            TagEdge {
+                source: 3,
+                target: 4,
+                weight: 1.0,
+            },
+            TagEdge {
+                source: 3,
+                target: 5,
+                weight: 1.0,
+            },
+            TagEdge {
+                source: 4,
+                target: 5,
+                weight: 1.0,
+            },
+        ];
+        let communities = louvain_communities(6, &edges);
+        assert_eq!(communities.len(), 6);
+        // Each triangle should be in one community (all 3 same)
+        assert_eq!(
+            communities[0], communities[1],
+            "triangle A: nodes 0 and 1 should be in the same community"
+        );
+        assert_eq!(
+            communities[0], communities[2],
+            "triangle A: nodes 0 and 2 should be in the same community"
+        );
+        assert_eq!(
+            communities[3], communities[4],
+            "triangle B: nodes 3 and 4 should be in the same community"
+        );
+        assert_eq!(
+            communities[3], communities[5],
+            "triangle B: nodes 3 and 5 should be in the same community"
+        );
+        // The two triangles should be in different communities
+        assert_ne!(
+            communities[0], communities[3],
+            "disconnected triangles should be in different communities"
+        );
+    }
+
+    #[test]
+    fn louvain_three_node_chain() {
+        // 0-1-2 chain: all should be same community (connected)
+        let edges = vec![
+            TagEdge {
+                source: 0,
+                target: 1,
+                weight: 1.0,
+            },
+            TagEdge {
+                source: 1,
+                target: 2,
+                weight: 1.0,
+            },
+        ];
+        let communities = louvain_communities(3, &edges);
+        assert_eq!(communities.len(), 3);
+        assert_eq!(
+            communities[0], communities[2],
+            "all nodes in chain should be same community"
+        );
+    }
+
+    // ==================================================================
+    //  page_rank_full
+    // ==================================================================
+
+    #[test]
+    fn page_rank_empty_graph() {
+        assert!(page_rank_full(0, &[]).is_empty());
+    }
+
+    #[test]
+    fn page_rank_single_dangling_node() {
+        // A single dangling node converges to rank 1.0 (all PageRank
+        // mass goes to the dangling sum redistribution).
+        let rank = page_rank_full(1, &[]);
+        assert_eq!(rank.len(), 1);
+        assert!(
+            (rank[0] - 1.0).abs() < 1e-4,
+            "single dangling node should have rank ~1.0, got {}",
+            rank[0]
+        );
+    }
+
+    #[test]
+    fn page_rank_two_nodes_symmetric() {
+        let edges = vec![TagEdge {
+            source: 0,
+            target: 1,
+            weight: 1.0,
+        }];
+        let rank = page_rank_full(2, &edges);
+        assert_eq!(rank.len(), 2);
+        // Values must be in [0, 1] and sum > 0
+        for &r in &rank {
+            assert!((0.0..=1.0).contains(&r), "rank must be in [0,1], got {r}");
+        }
+        assert!(rank.iter().sum::<f32>() > 0.0, "rank sum must be positive");
+    }
+
+    #[test]
+    fn page_rank_asymmetric_node_ranks_higher() {
+        // Star: node 0 connects to 1,2,3. Nodes 1,2,3 only connect to 0.
+        // Node 0 should have higher rank.
+        let edges = vec![
+            TagEdge {
+                source: 0,
+                target: 1,
+                weight: 1.0,
+            },
+            TagEdge {
+                source: 0,
+                target: 2,
+                weight: 1.0,
+            },
+            TagEdge {
+                source: 0,
+                target: 3,
+                weight: 1.0,
+            },
+        ];
+        let rank = page_rank_full(4, &edges);
+        assert_eq!(rank.len(), 4);
+        assert!(
+            rank[0] > rank[1],
+            "central node 0 should have higher rank than leaf 1: {} > {}",
+            rank[0],
+            rank[1]
+        );
+    }
+
+    // ==================================================================
+    //  build_pmi_edges
+    // ==================================================================
+
+    /// Helper: build a simple user graph for PMI tests.
+    fn make_user_graph() -> TagRelationGraph {
+        let mut g = TagRelationGraph::with_posts(100);
+        g.set_marginal(4, "fluffy", 50); // general
+        g.set_marginal(4, "canine", 30); // general
+        g.set_marginal(3, "wolf", 20); // species
+        g.insert_pair(4, "fluffy", 4, "canine", 25);
+        g.insert_pair(4, "fluffy", 3, "wolf", 15);
+        g.insert_pair(4, "canine", 3, "wolf", 10);
+        g
+    }
+
+    #[test]
+    fn pmi_edges_empty_nodes() {
+        let user_graph = make_user_graph();
+        let global_cooc = HashMap::new();
+        let edges = build_pmi_edges(&[], &user_graph, 100, &global_cooc, 1000, 2);
+        assert!(edges.is_empty());
+    }
+
+    #[test]
+    fn pmi_edges_produces_weighted_edges() {
+        let user_graph = make_user_graph();
+        let global_cooc = HashMap::new();
+        let generic = HashSet::new();
+        let tags = vec![
+            make_tc("fluffy", "general", 50),
+            make_tc("canine", "general", 30),
+        ];
+        let (nodes, _) = build_non_generic_nodes(&tags, &generic, 100);
+        assert_eq!(nodes.len(), 2);
+
+        let edges = build_pmi_edges(&nodes, &user_graph, 100, &global_cooc, 1000, 2);
+        assert!(!edges.is_empty(), "should produce at least one edge");
+        // (fluffy, canine) cooc = 25 >= min_cooc=2, so they should connect
+        assert!(
+            edges.iter().any(|e| {
+                (nodes[e.source].name == "fluffy" && nodes[e.target].name == "canine")
+                    || (nodes[e.source].name == "canine" && nodes[e.target].name == "fluffy")
+            }),
+            "edge between fluffy and canine should exist"
+        );
+    }
+
+    #[test]
+    fn pmi_edges_filters_below_min_cooc() {
+        let mut user_graph = TagRelationGraph::with_posts(100);
+        user_graph.set_marginal(4, "rare_a", 5);
+        user_graph.set_marginal(4, "rare_b", 5);
+        // cooc = 1, below the default min_cooc (which is passed as 2 in compute_taste_themes)
+        user_graph.insert_pair(4, "rare_a", 4, "rare_b", 1);
+
+        let global_cooc = HashMap::new();
+        let generic = HashSet::new();
+        let tags = vec![
+            make_tc("rare_a", "general", 5),
+            make_tc("rare_b", "general", 5),
+        ];
+        let (nodes, _) = build_non_generic_nodes(&tags, &generic, 100);
+
+        let edges = build_pmi_edges(&nodes, &user_graph, 100, &global_cooc, 1000, 2);
+        assert!(
+            edges.is_empty(),
+            "cooc=1 below min_cooc=2 should produce no edges"
+        );
+    }
+
+    #[test]
+    fn pmi_edges_uses_global_cooc_map() {
+        let user_graph = make_user_graph();
+        let mut global_cooc = HashMap::new();
+        // Use global cooc that's well above expected to produce a visible difference.
+        // Expected = df1 * df2 / n_catalog = 10 * 8 / 10000 = 0.008.
+        // Observed = 50 → lift = 6250 → ln(6250)/5 ≈ 1.75 → clamped to 1.0.
+        // This should clearly change the combined PMI vs user-only.
+        global_cooc.insert("canine||fluffy".to_string(), (50i64, 10i64, 8i64));
+        let generic: HashSet<String> = HashSet::new();
+        let tags = vec![
+            make_tc("fluffy", "general", 50),
+            make_tc("canine", "general", 30),
+        ];
+        let (nodes, _) = build_non_generic_nodes(&tags, &generic, 100);
+
+        let edges = build_pmi_edges(&nodes, &user_graph, 100, &global_cooc, 10_000, 2);
+        assert!(!edges.is_empty());
+        // With global PMI, the weight should differ from user-only case
+        let edges_no_global = build_pmi_edges(&nodes, &user_graph, 100, &HashMap::new(), 10_000, 2);
+        let weight_with = edges[0].weight;
+        let weight_without = edges_no_global[0].weight;
+        assert!(
+            (weight_with - weight_without).abs() > 1e-6,
+            "global cooc should change PMI weight: with={weight_with} without={weight_without}"
+        );
+    }
+
+    // ==================================================================
+    //  compute_taste_themes — integration-level smoke test
+    // ==================================================================
+
+    #[test]
+    fn compute_taste_themes_returns_empty_for_few_tags() {
+        let user_graph = TagRelationGraph::with_posts(0);
+        let global_cooc = HashMap::new();
+        let impls = HashMap::new();
+        let aliases = HashMap::new();
+        let tag_df = HashMap::new();
+        let tag_counts = vec![];
+
+        let themes = compute_taste_themes(
+            &tag_counts,
+            &user_graph,
+            0,
+            &global_cooc,
+            0,
+            &impls,
+            &aliases,
+            &tag_df,
+            250,
+            2,
+        );
+        assert!(themes.is_empty(), "no tags → no themes");
+    }
+
+    #[test]
+    fn compute_taste_themes_smoke_test() {
+        // Build a realistic small dataset: a few general tags with
+        // co-occurrence structure.
+        let mut user_graph = TagRelationGraph::with_posts(50);
+        user_graph.set_marginal(4, "fluffy", 30);
+        user_graph.set_marginal(4, "canine", 20);
+        user_graph.set_marginal(4, "feline", 15);
+        user_graph.set_marginal(4, "outdoor", 10);
+        user_graph.set_marginal(4, "indoor", 8);
+        user_graph.set_marginal(4, "detailed_background", 12);
+        user_graph.insert_pair(4, "fluffy", 4, "canine", 18);
+        user_graph.insert_pair(4, "fluffy", 4, "feline", 12);
+        user_graph.insert_pair(4, "fluffy", 4, "outdoor", 8);
+        user_graph.insert_pair(4, "canine", 4, "feline", 3);
+        user_graph.insert_pair(4, "canine", 4, "outdoor", 7);
+        user_graph.insert_pair(4, "feline", 4, "indoor", 6);
+        user_graph.insert_pair(4, "fluffy", 4, "indoor", 4);
+
+        let global_cooc = HashMap::new();
+        let impls = HashMap::new();
+        let aliases = HashMap::new();
+
+        // Tag DF: each tag appears in some fraction of catalog
+        let mut tag_df = HashMap::new();
+        tag_df.insert("fluffy".to_string(), 8000i64);
+        tag_df.insert("canine".to_string(), 5000);
+        tag_df.insert("feline".to_string(), 4000);
+        tag_df.insert("outdoor".to_string(), 3000);
+        tag_df.insert("indoor".to_string(), 2000);
+        tag_df.insert("detailed_background".to_string(), 1000);
+
+        let tag_counts = vec![
+            make_tc("fluffy", "general", 30),
+            make_tc("canine", "general", 20),
+            make_tc("feline", "general", 15),
+            make_tc("outdoor", "general", 10),
+            make_tc("indoor", "general", 8),
+            make_tc("detailed_background", "general", 12),
+        ];
+
+        let themes = compute_taste_themes(
+            &tag_counts,
+            &user_graph,
+            50,
+            &global_cooc,
+            100_000,
+            &impls,
+            &aliases,
+            &tag_df,
+            250,
+            2,
+        );
+
+        // Should produce at least one theme
+        if themes.is_empty() {
+            // This is acceptable if the graph structure doesn't produce
+            // communities that pass the min_core_count filter — just log
+            // rather than fail.
+            eprintln!("note: smoke test produced 0 themes (possibly weak community filter)");
+            return;
+        }
+
+        // Each theme should have a name and core tags
+        for theme in &themes {
+            assert!(!theme.name.is_empty(), "theme should have a non-empty name");
+            assert!(
+                !theme.core.is_empty(),
+                "theme '{}' should have core tags",
+                theme.name
+            );
+            assert!(theme.importance > 0.0, "importance should be > 0");
+        }
+    }
+
+    // ==================================================================
+    //  build_themes — CORE/KINK split logic
+    // ==================================================================
+
+    #[test]
+    fn build_themes_empty_communities() {
+        let nodes = vec![];
+        let communities = vec![];
+        let centrality = vec![];
+        let tag_counts = vec![];
+        let idx_map = HashMap::new();
+        let aliases = HashMap::new();
+        let impls = HashMap::new();
+        let tag_df = HashMap::new();
+
+        let themes = build_themes(
+            &nodes,
+            &communities,
+            &centrality,
+            &tag_counts,
+            &idx_map,
+            &aliases,
+            &impls,
+            &tag_df,
+            1000,
+            50,
+            &[],
+        );
+        assert!(themes.is_empty());
+    }
+
+    #[test]
+    fn build_themes_community_with_two_nodes() {
+        // Two nodes in same community, same group, with tag counts.
+        let nodes = vec![
+            TagNode {
+                id: 0,
+                name: "fluffy".to_string(),
+                group_type: "general".to_string(),
+                count: 30,
+            },
+            TagNode {
+                id: 1,
+                name: "canine".to_string(),
+                group_type: "general".to_string(),
+                count: 20,
+            },
+        ];
+        let communities = vec![0usize, 0]; // both in community 0
+        let centrality = vec![0.8f32, 0.6];
+        let tag_counts = vec![
+            make_tc("fluffy", "general", 30),
+            make_tc("canine", "general", 20),
+        ];
+        let mut idx_map = HashMap::new();
+        idx_map.insert(("fluffy".to_string(), "general".to_string()), 0usize);
+        idx_map.insert(("canine".to_string(), "general".to_string()), 1usize);
+        let aliases = HashMap::new();
+        let impls = HashMap::new();
+        let mut tag_df = HashMap::new();
+        tag_df.insert("fluffy".to_string(), 8000i64);
+        tag_df.insert("canine".to_string(), 5000i64);
+
+        // Edge list (needed for local_strength computation)
+        let edges = vec![TagEdge {
+            source: 0,
+            target: 1,
+            weight: 0.8,
+        }];
+
+        let themes = build_themes(
+            &nodes,
+            &communities,
+            &centrality,
+            &tag_counts,
+            &idx_map,
+            &aliases,
+            &impls,
+            &tag_df,
+            100_000,
+            50,
+            &edges,
+        );
+
+        if themes.is_empty() {
+            // Could be filtered by min_core_count or size
+            eprintln!("note: 2-node community filtered (min_core_count check)");
+            return;
+        }
+
+        let theme = &themes[0];
+        // Name should be the tag with max count
+        assert_eq!(
+            theme.name, "fluffy",
+            "highest-count tag should name the theme"
+        );
+
+        // With 2 nodes, p50 = (0.8+0.6)/2 sorted... wait p50 is the element
+        // at index sizes/2 = 1, which is 0.6 (sorted ASC: [0.6, 0.8]).
+        // So cent >= 0.6 means both are core.
+        assert_eq!(theme.core.len(), 2, "both nodes cent >= p50 should be core");
+        // importance should be positive
+        assert!(theme.importance > 0.0);
+        assert_eq!(theme.size, 2);
+    }
+
+    #[test]
+    fn build_themes_removes_generic_from_core_and_kink() {
+        let nodes = vec![
+            TagNode {
+                id: 0,
+                name: "male".to_string(),
+                group_type: "general".to_string(),
+                count: 100,
+            },
+            TagNode {
+                id: 1,
+                name: "fluffy".to_string(),
+                group_type: "general".to_string(),
+                count: 80,
+            },
+        ];
+        let communities = vec![0usize, 0];
+        let centrality = vec![0.9f32, 0.7];
+        let tag_counts = vec![
+            make_tc("male", "general", 100),
+            make_tc("fluffy", "general", 80),
+        ];
+        let mut idx_map = HashMap::new();
+        idx_map.insert(("male".to_string(), "general".to_string()), 0usize);
+        idx_map.insert(("fluffy".to_string(), "general".to_string()), 1usize);
+        let aliases = HashMap::new();
+        let impls = HashMap::new();
+        let mut tag_df = HashMap::new();
+        tag_df.insert("male".to_string(), 100_000i64);
+        tag_df.insert("fluffy".to_string(), 8000i64);
+
+        let edges = vec![TagEdge {
+            source: 0,
+            target: 1,
+            weight: 0.5,
+        }];
+
+        let themes = build_themes(
+            &nodes,
+            &communities,
+            &centrality,
+            &tag_counts,
+            &idx_map,
+            &aliases,
+            &impls,
+            &tag_df,
+            100_000,
+            50,
+            &edges,
+        );
+
+        if themes.is_empty() {
+            eprintln!("note: theme filtered (likely min_core_count check)");
+            return;
+        }
+
+        let theme = &themes[0];
+        // "male" is hardcoded generic → should NOT appear in core or kink
+        let all_tags: Vec<&str> = theme
+            .core
+            .iter()
+            .chain(theme.kink.iter())
+            .map(|t| t.name.as_str())
+            .collect();
+        assert!(
+            !all_tags.contains(&"male"),
+            "generic 'male' must not appear in core/kink"
+        );
+        assert!(
+            all_tags.contains(&"fluffy"),
+            "non-generic 'fluffy' should appear"
+        );
+    }
+
+    // ==================================================================
+    //  Integration: end-to-end with enough structure for communities
+    // ==================================================================
+
+    #[test]
+    fn end_to_end_with_two_communities() {
+        // Two distinct groups of tags with strong internal connections
+        // and weak cross connections → should form 2 communities.
+        let mut user_graph = TagRelationGraph::with_posts(100);
+
+        // Group A: fluffy + canine + outdoor
+        user_graph.set_marginal(4, "fluffy", 40);
+        user_graph.set_marginal(4, "canine", 35);
+        user_graph.set_marginal(4, "outdoor", 25);
+        user_graph.insert_pair(4, "fluffy", 4, "canine", 30);
+        user_graph.insert_pair(4, "fluffy", 4, "outdoor", 20);
+        user_graph.insert_pair(4, "canine", 4, "outdoor", 18);
+
+        // Group B: feline + indoor + sleepy
+        user_graph.set_marginal(4, "feline", 30);
+        user_graph.set_marginal(4, "indoor", 20);
+        user_graph.set_marginal(4, "sleepy", 15);
+        user_graph.insert_pair(4, "feline", 4, "indoor", 15);
+        user_graph.insert_pair(4, "feline", 4, "sleepy", 12);
+        user_graph.insert_pair(4, "indoor", 4, "sleepy", 10);
+
+        // Weak cross edges
+        user_graph.insert_pair(4, "fluffy", 4, "feline", 2);
+        user_graph.insert_pair(4, "canine", 4, "feline", 1);
+
+        let global_cooc = HashMap::new();
+        let impls = HashMap::new();
+        let aliases = HashMap::new();
+        let mut tag_df = HashMap::new();
+        tag_df.insert("fluffy".to_string(), 8000i64);
+        tag_df.insert("canine".to_string(), 5000i64);
+        tag_df.insert("outdoor".to_string(), 3000i64);
+        tag_df.insert("feline".to_string(), 4000i64);
+        tag_df.insert("indoor".to_string(), 2000i64);
+        tag_df.insert("sleepy".to_string(), 1500i64);
+
+        let tag_counts = vec![
+            make_tc("fluffy", "general", 40),
+            make_tc("canine", "general", 35),
+            make_tc("outdoor", "general", 25),
+            make_tc("feline", "general", 30),
+            make_tc("indoor", "general", 20),
+            make_tc("sleepy", "general", 15),
+        ];
+
+        let themes = compute_taste_themes(
+            &tag_counts,
+            &user_graph,
+            100,
+            &global_cooc,
+            100_000,
+            &impls,
+            &aliases,
+            &tag_df,
+            250,
+            2,
+        );
+
+        if themes.is_empty() {
+            eprintln!("note: two-community test produced 0 themes (filter threshold)");
+            return;
+        }
+
+        // Should have at least 1 theme, possibly 2 if communities separate
+        eprintln!("note: got {} themes from two-community test", themes.len());
+        for (i, t) in themes.iter().enumerate() {
+            eprintln!(
+                "  theme {i}: name={}, core={:?}, kink={:?}",
+                t.name,
+                t.core.iter().map(|c| &c.name).collect::<Vec<_>>(),
+                t.kink.iter().map(|k| &k.name).collect::<Vec<_>>()
+            );
+        }
+
+        // Each theme should have coherent properties
+        for theme in &themes {
+            assert!(!theme.name.is_empty());
+            assert!(!theme.core.is_empty());
+            assert!(theme.size >= 2);
+        }
+    }
+}

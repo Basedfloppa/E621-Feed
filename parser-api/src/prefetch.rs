@@ -18,6 +18,12 @@ use crate::api;
 use crate::db;
 use crate::models::cfg;
 
+// ── LCG constants for deterministic weighted sampling ─────────────────
+
+/// Linear Congruential Generator constants (same as glibc's TYPE_0).
+const LCG_A: u64 = 6364136223846793005;
+const LCG_C: u64 = 1442695040888963407;
+
 static PREFETCH_CONSECUTIVE_FAILS: AtomicU32 = AtomicU32::new(0);
 
 pub fn spawn_prefetch_workers() {
@@ -206,47 +212,10 @@ pub fn pick_prefetch_targets() -> Result<Vec<PrefetchQueries>, String> {
     // Recency-weighted sampling: assign each candidate a weight proportional
     // to how recently it was active. Pick up to 5 distinct targets.
     let mut targets: Vec<PrefetchQueries> = Vec::new();
-    let rng_state = (Utc::now().timestamp() % 1_000_000) as u64;
-    let lcg_a: u64 = 6364136223846793005;
-    let lcg_c: u64 = 1442695040888963407;
-
-    // Score each candidate by recency (lower row position = more recent).
-    // Use exponential weighting: top candidate gets weight ~2× bottom.
+    let rng_seed = (Utc::now().timestamp() % 1_000_000) as u64;
     let n = rows.len();
-    let mut weighted_idx = Vec::with_capacity(n);
-    for (i, _) in rows.iter().enumerate() {
-        let recency = 1.0 - (i as f64) / (n as f64 + 1.0);
-        let weight = 1.0 + recency; // range [1, 2]
-        weighted_idx.push((i, weight));
-    }
-
-    // Weighted reservoir sampling to pick up to 5 targets.
-    let pick_count = 5.min(n);
     let mut picked = vec![false; n];
-    for _ in 0..pick_count {
-        let total_weight: f64 = weighted_idx
-            .iter()
-            .filter(|(idx, _)| !picked[*idx])
-            .map(|(_, w)| w)
-            .sum();
-        if total_weight <= 0.0 {
-            break;
-        }
-
-        let mut r = (rng_state.wrapping_mul(lcg_a).wrapping_add(lcg_c) >> 33) as f64;
-        r = r / (u64::MAX as f64) * total_weight;
-
-        let mut accumulated = 0.0f64;
-        for &(idx, weight) in &weighted_idx {
-            if !picked[idx] {
-                accumulated += weight;
-                if accumulated >= r {
-                    picked[idx] = true;
-                    break;
-                }
-            }
-        }
-    }
+    weighted_recency_pick(n, 5.min(n), rng_seed, &mut picked);
 
     for (i, (account_id, blacklist)) in rows.into_iter().enumerate() {
         if !picked[i] {
@@ -295,4 +264,171 @@ pub fn pick_prefetch_targets() -> Result<Vec<PrefetchQueries>, String> {
     }
 
     Ok(targets)
+}
+
+/// Weighted reservoir sampling for prefetch target selection.
+///
+/// Picks up to `pick_count` distinct indices from `0..n` using recency
+/// weights (earlier positions have higher weight). Uses a deterministic
+/// LCG seeded with `rng_seed`. Mutates `picked` in place — indices that
+/// are already `true` are skipped and remain untouched.
+///
+/// Separated into its own function so the sampling logic is independently
+/// testable without a database connection.
+pub fn weighted_recency_pick(n: usize, pick_count: usize, rng_seed: u64, picked: &mut [bool]) {
+    if n == 0 || pick_count == 0 {
+        return;
+    }
+    let pick_count = pick_count.min(n);
+
+    // Build weights: recency decreases linearly with position.
+    // Top candidate (i=0) gets weight ≈ 2.0, bottom ≈ 1.0.
+    let mut state = rng_seed;
+    for _ in 0..pick_count {
+        // Compute total weight of remaining (not-yet-picked) items.
+        let total_weight: f64 = picked[..n]
+            .iter()
+            .enumerate()
+            .filter(|(_, is_picked)| !**is_picked)
+            .map(|(i, _)| {
+                let recency = 1.0 - (i as f64) / (n as f64 + 1.0);
+                1.0 + recency
+            })
+            .sum();
+        if total_weight <= 0.0 {
+            break;
+        }
+
+        // LCG step
+        state = state.wrapping_mul(LCG_A).wrapping_add(LCG_C);
+        let r = (state >> 33) as f64 / (u64::MAX as f64) * total_weight;
+
+        let mut accumulated = 0.0f64;
+        for (i, picked_i) in picked[..n].iter_mut().enumerate() {
+            if *picked_i {
+                continue;
+            }
+            let recency = 1.0 - (i as f64) / (n as f64 + 1.0);
+            accumulated += 1.0 + recency;
+            if accumulated >= r {
+                *picked_i = true;
+                break;
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::weighted_recency_pick;
+
+    // ── weighted_recency_pick ────────────────────────────────────────
+
+    #[test]
+    fn weighted_pick_empty_n() {
+        let mut picked = vec![];
+        weighted_recency_pick(0, 5, 42, &mut picked);
+        assert!(picked.is_empty());
+    }
+
+    #[test]
+    fn weighted_pick_zero_pick_count() {
+        let mut picked = vec![false; 10];
+        weighted_recency_pick(10, 0, 42, &mut picked);
+        assert!(picked.iter().all(|&p| !p), "no picks when pick_count=0");
+    }
+
+    #[test]
+    fn weighted_pick_single_item() {
+        let mut picked = vec![false; 1];
+        weighted_recency_pick(1, 5, 42, &mut picked);
+        assert_eq!(picked, vec![true], "one item must be picked");
+    }
+
+    #[test]
+    fn weighted_pick_picks_exactly_k_items() {
+        let mut picked = vec![false; 20];
+        weighted_recency_pick(20, 5, 12345, &mut picked);
+        assert_eq!(
+            picked.iter().filter(|&&p| p).count(),
+            5,
+            "should pick exactly 5 items from 20"
+        );
+    }
+
+    #[test]
+    fn weighted_pick_when_k_equals_n_picks_all() {
+        let mut picked = vec![false; 3];
+        weighted_recency_pick(3, 3, 999, &mut picked);
+        assert_eq!(
+            picked.iter().filter(|&&p| p).count(),
+            3,
+            "all items picked when k == n"
+        );
+    }
+
+    #[test]
+    fn weighted_pick_deterministic_same_seed() {
+        let mut picked_a = vec![false; 10];
+        let mut picked_b = vec![false; 10];
+        weighted_recency_pick(10, 4, 777, &mut picked_a);
+        weighted_recency_pick(10, 4, 777, &mut picked_b);
+        assert_eq!(picked_a, picked_b, "same seed must produce same picks");
+    }
+
+    #[test]
+    fn weighted_pick_large_n_no_panics() {
+        // Stress test: with a large pool, different seeds should not
+        // cause panics or out-of-bounds access regardless of n/k ratio.
+        for seed in 0..20 {
+            let mut picked = vec![false; 100];
+            weighted_recency_pick(100, 10, seed, &mut picked);
+            assert_eq!(
+                picked.iter().filter(|&&p| p).count(),
+                10,
+                "picked exactly 10 from 100 for seed={seed}"
+            );
+            assert_eq!(picked.len(), 100, "length unchanged");
+        }
+    }
+
+    #[test]
+    fn weighted_pick_earlier_items_more_likely() {
+        // Run many trials with small n so statistics are measurable.
+        // With n=3, k=1, the first item (i=0) has higher weight and
+        // should be picked more often than the last (i=2).
+        let mut first_count = 0usize;
+        let mut last_count = 0usize;
+        let trials = 500;
+        for seed in 0..trials {
+            let mut picked = vec![false; 3];
+            weighted_recency_pick(3, 1, seed as u64, &mut picked);
+            if picked[0] {
+                first_count += 1;
+            }
+            if picked[2] {
+                last_count += 1;
+            }
+        }
+        assert!(
+            first_count > last_count,
+            "earlier (higher-weight) items should be picked more often: \
+             first={first_count}, last={last_count}"
+        );
+    }
+
+    #[test]
+    fn weighted_pick_respects_existing_true() {
+        // If some positions are already picked, the function must
+        // skip them and not toggle them back to false.
+        let mut picked = vec![false; 10];
+        picked[3] = true; // already picked
+        weighted_recency_pick(10, 3, 42, &mut picked);
+        assert!(picked[3], "position 3 must remain true");
+        let total = picked.iter().filter(|&&p| p).count();
+        assert!(
+            (3..=4).contains(&total),
+            "should pick 3 new items + 1 existing = 3 or 4: got {total}"
+        );
+    }
 }
