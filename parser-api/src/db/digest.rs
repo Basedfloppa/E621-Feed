@@ -29,22 +29,25 @@ fn ids_to_scored(ids: &[i64]) -> Result<Vec<ScoredPost>, String> {
         .collect())
 }
 
-/// Trending posts from the last `days` days, ordered by `score_total DESC`.
+/// Trending posts from the last `days` days, randomised for variety.
+/// Pulls from a wide pool (6× limit) and a longer window so the digest
+/// isn't stuck on the same week's worth of posts.
 pub fn get_trending_posts(days: i64, limit: usize) -> Result<Vec<ScoredPost>, String> {
     let conn = open_db()?;
     let cutoff = (Utc::now() - chrono::Duration::days(days)).to_rfc3339();
     let mut stmt = conn
-        .prepare("SELECT id FROM posts WHERE created_at >= ?1 ORDER BY score_total DESC LIMIT ?2")
+        .prepare("SELECT id FROM posts WHERE created_at >= ?1 ORDER BY RANDOM() LIMIT ?2")
         .map_err(|e| format!("get_trending_posts prep: {e}"))?;
     let ids: Vec<i64> = stmt
-        .query_map(params![cutoff, limit as i64], |r| r.get::<_, i64>(0))
+        .query_map(params![cutoff, (limit * 6) as i64], |r| r.get::<_, i64>(0))
         .map_err(|e| format!("get_trending_posts query: {e}"))?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| format!("get_trending_posts collect: {e}"))?;
     ids_to_scored(&ids)
 }
 
-/// Popular posts created since `since`, ordered by `score_total DESC`.
+/// Popular posts created since `since`, randomised.
+/// Window widened from 2→7 days and pull pool from 3×→6× to get more variety.
 pub fn get_popular_posts_since(
     since: DateTime<Utc>,
     limit: usize,
@@ -52,13 +55,31 @@ pub fn get_popular_posts_since(
     let conn = open_db()?;
     let since_str = since.to_rfc3339();
     let mut stmt = conn
-        .prepare("SELECT id FROM posts WHERE created_at >= ?1 ORDER BY score_total DESC LIMIT ?2")
+        .prepare("SELECT id FROM posts WHERE created_at >= ?1 ORDER BY RANDOM() LIMIT ?2")
         .map_err(|e| format!("get_popular_posts_since prep: {e}"))?;
     let ids: Vec<i64> = stmt
-        .query_map(params![since_str, limit as i64], |r| r.get::<_, i64>(0))
+        .query_map(params![since_str, (limit * 6) as i64], |r| {
+            r.get::<_, i64>(0)
+        })
         .map_err(|e| format!("get_popular_posts_since query: {e}"))?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| format!("get_popular_posts_since collect: {e}"))?;
+    ids_to_scored(&ids)
+}
+
+/// Random old posts (created before `older_than_days`), to guarantee fresh
+/// blood even when trending/popular pools are stale.
+pub fn get_old_random_posts(older_than_days: i64, limit: usize) -> Result<Vec<ScoredPost>, String> {
+    let conn = open_db()?;
+    let cutoff = (Utc::now() - chrono::Duration::days(older_than_days)).to_rfc3339();
+    let mut stmt = conn
+        .prepare("SELECT id FROM posts WHERE created_at <= ?1 ORDER BY RANDOM() LIMIT ?2")
+        .map_err(|e| format!("get_old_random_posts prep: {e}"))?;
+    let ids: Vec<i64> = stmt
+        .query_map(params![cutoff, limit as i64], |r| r.get::<_, i64>(0))
+        .map_err(|e| format!("get_old_random_posts query: {e}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("get_old_random_posts collect: {e}"))?;
     ids_to_scored(&ids)
 }
 

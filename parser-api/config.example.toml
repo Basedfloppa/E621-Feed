@@ -211,7 +211,7 @@ diversity_user_pmi_weight = 1.0  # amplify user-graph PMI over global in MMR (1.
 # --- Runtime / worker tuning ------------------------------------------------
 [runtime]
 local_candidate_limit = 400             # local-catalog candidates per /recommendations page
-dedup_lookback_days = 14                # hide posts seen within this window
+dedup_lookback_days = 14                # short-term dedup window for live e621 posts
 process_fetch_concurrency = 4           # parallel pages during /process import
 drop_cooc_batch_size = 50000            # batched DELETE chunk for per-account cooc wipe at /process start
 idf_rebuild_cooldown_secs = 15

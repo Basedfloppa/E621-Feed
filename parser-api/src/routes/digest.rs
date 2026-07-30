@@ -1,8 +1,32 @@
 //! Daily digest route — a lightweight, personalised (or generic) page of
-//! up to 20 posts, stratified across score tiers.  Active users get the
-//! full scoring pipeline; infrequent users get a cheap trending/random mix.
+//! up to 20 posts, stratified across randomised tiers.
 //!
-//! `GET /digest/<account_id>?<full>`
+//! Active users get the full scoring pipeline; infrequent users get a cheap
+//! trending/random mix.
+//!
+//! `GET /digest/<account_id>?<full>&<exclude_saved>`
+//!
+//! ## Freshness guarantees (v6+)
+//!
+//! - **TTL reduced** to 6 h (was 24 h) — the cache is a coarse cap, not a
+//!   "same all day" guarantee.
+//! - **Every stratum randomises** its selection — top-3 are picked from
+//!   top-6, trending is a random subset, etc.
+//! - **`get_trending_posts`** uses `ORDER BY RANDOM()` over a 30-day window
+//!   (was 7 days) with a 6× pool.
+//! - **`get_popular_posts_since`** uses a 7-day window (was 2 days).
+//! - **Fresh-blood layer** (`get_old_random_posts`): 8 random posts older
+//!   than 14 days that the user hasn't seen in feed_interactions. Guarantees
+//!   new faces even when the user's favourite-tag pool is exhausted.
+//! - **Seen-post dedup**: the digest filters out any post shown in the feed
+//!   within the last 7 days via `get_digest_seen_ids`.
+//!
+//! ## Personalised vs generic dispatch
+//!
+//! The route calls `update_visit_tracker` (fire-and-forget) and checks
+//! `get_visit_stats`. Users with `visit_streak >= 2` or `avg_gap_days <= 3`
+//! get the personalised pipeline; everyone else gets the generic mix.
+//! Pass `?full=true` to force the personalised pipeline.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{LazyLock, Mutex};
@@ -37,7 +61,20 @@ struct CachedDigest {
 static DIGEST_CACHE: LazyLock<Mutex<HashMap<String, CachedDigest>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
-const DIGEST_TTL_SECS: u64 = 86400; // 24 hours
+const DIGEST_TTL_SECS: u64 = 21600; // 6 hours — shorter TTL + randomness in stratified_sample means the digest changes more noticeably day-to-day
+
+/// Get digest seen-post IDs from feed_interactions for the last 7 days.
+/// This prevents the digest from showing posts the user already saw in
+/// their feed recently.
+fn get_digest_seen_ids(account_id: i32) -> HashSet<i64> {
+    match db::get_recently_seen_post_ids(account_id, 7) {
+        Ok(ids) => ids,
+        Err(e) => {
+            warn!("digest: failed to load seen post IDs: {e}");
+            HashSet::new()
+        }
+    }
+}
 
 fn cache_get(key: &str) -> Option<Vec<ScoredPost>> {
     let map = DIGEST_CACHE.lock().expect("digest cache poisoned");
@@ -65,18 +102,22 @@ fn cache_set(key: String, posts: Vec<ScoredPost>) {
 // ---------------------------------------------------------------------------
 
 /// Sample up to 20 posts from a scored list using stratified strategy:
-///   top-3  best picks,
-///   4-8    semi-random from upper-mid,
-///   9-12   trending,
-///   13-15  exploration (low similarity),
-///   16-18  wildcard by group,
-///   19-20  recent-added + popular-new.
+///   top-3    best picks,
+///   4-8      semi-random from upper-mid,
+///   9-12     trending (random subset),
+///   13-16    fresh blood — random old/unseen posts,
+///   17-18    wildcard by group,
+///   19-20    popular-new + recent-added.
+///
+/// Each stratum randomises its selection so the digest changes noticeably
+/// from day to day even when the underlying scored pool is similar.
 fn stratified_sample(
     scored: &[ScoredPost],
     trending: Vec<ScoredPost>,
     wildcards: Vec<ScoredPost>,
     recent_added: Vec<ScoredPost>,
     popular_new: Vec<ScoredPost>,
+    fresh_blood: Vec<ScoredPost>,
     rng: &mut impl rand::Rng,
 ) -> Vec<ScoredPost> {
     let mut digest = Vec::with_capacity(20);
@@ -94,41 +135,69 @@ fn stratified_sample(
         }
     };
 
-    // 1. Top-3 best picks
-    for sp in scored.iter().take(3) {
-        try_add(sp.clone(), 20);
+    // 1. Top-3 best picks (randomize which of the top-6 make it)
+    let top_n = scored.len().min(6);
+    for sp in scored[..top_n].choose_multiple(rng, 3).cloned() {
+        try_add(sp, 20);
     }
 
-    // 2. Semi-random from middle third of scored list
-    if scored.len() > 6 {
+    // 2. Semi-random from middle third of scored list (pick 5 instead of 4)
+    if scored.len() > 8 {
         let mid_start = scored.len() / 3;
         let mid_end = (scored.len() * 2 / 3).min(scored.len());
         if mid_end > mid_start {
             let slice = &scored[mid_start..mid_end];
-            for sp in slice.choose_multiple(rng, 4).cloned() {
+            for sp in slice.choose_multiple(rng, 5).cloned() {
                 try_add(sp, 20);
             }
         }
     }
 
-    // 3. Trending
-    for sp in trending.into_iter().take(4) {
-        try_add(sp, 20);
+    // 3. Trending — pick a random subset of trending posts
+    let trending_count = trending.len().min(4);
+    if !trending.is_empty() {
+        for sp in trending.choose_multiple(rng, trending_count).cloned() {
+            try_add(sp, 20);
+        }
     }
 
-    // 4. Exploration: low-similarity posts
-    for sp in scored.iter().skip(3).rev() {
-        try_add(sp.clone(), 20);
+    // 4. Fresh blood: random old/unseen posts — guarantees new faces even
+    //    when the scored pool hasn't changed. This replaced the old
+    //    "exploration from bottom half" stratum.
+    if !fresh_blood.is_empty() {
+        let blood_count = fresh_blood.len().min(4);
+        for sp in fresh_blood.choose_multiple(rng, blood_count).cloned() {
+            try_add(sp, 20);
+        }
     }
 
     // 5. Wildcards
-    for sp in wildcards.into_iter().take(3) {
-        try_add(sp, 20);
+    if !wildcards.is_empty() {
+        for sp in wildcards.choose_multiple(rng, 2).cloned() {
+            try_add(sp, 20);
+        }
     }
 
     // 6. Recent added + popular new
-    for sp in recent_added.into_iter().chain(popular_new).take(2) {
-        try_add(sp, 20);
+    let extras: Vec<&ScoredPost> = recent_added.iter().chain(popular_new.iter()).collect();
+    if !extras.is_empty() {
+        for sp in extras.choose_multiple(rng, 2) {
+            try_add((*sp).clone(), 20);
+        }
+    }
+
+    // If we still have room, fill with random from the full scored list.
+    // Count remaining BEFORE calling try_add (borrow conflict otherwise).
+    if digest.len() < 20 && scored.len() > 3 {
+        let still_needed = 20 - digest.len();
+        for sp in scored[3..].choose_multiple(rng, still_needed).cloned() {
+            if digest.len() >= 20 {
+                break;
+            }
+            if seen.insert(sp.post.id) {
+                digest.push(sp);
+            }
+        }
     }
 
     digest
@@ -209,41 +278,42 @@ async fn build_personalized_digest(
         posts
     };
 
-    if local_posts.is_empty() {
-        return Ok(Vec::new());
-    }
-
     // Score all candidates in parallel (rayon).
-    use rayon::prelude::*;
-    let cached: Vec<CachedPostFeatures> = local_posts
-        .par_iter()
-        .map(|post| {
-            CachedPostFeatures::from_post_with_user(
-                post,
-                &idf,
-                &global_relation,
-                Some(&user_relation),
-            )
-        })
-        .collect();
+    let scored: Vec<ScoredPost> = if local_posts.is_empty() {
+        Vec::new()
+    } else {
+        use rayon::prelude::*;
+        let cached: Vec<CachedPostFeatures> = local_posts
+            .par_iter()
+            .map(|post| {
+                CachedPostFeatures::from_post_with_user(
+                    post,
+                    &idf,
+                    &global_relation,
+                    Some(&user_relation),
+                )
+            })
+            .collect();
 
-    let mut scored: Vec<ScoredPost> = local_posts
-        .into_par_iter()
-        .zip(cached.into_par_iter())
-        .map(|(post, cf)| {
-            let (s, breakdown, _) = ctx.score_cached_with_metrics(&cf);
-            ScoredPost {
-                post,
-                score: s,
-                breakdown: Some(breakdown),
-            }
-        })
-        .collect();
-    scored.sort_by(|a, b| {
-        b.score
-            .partial_cmp(&a.score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+        let mut s: Vec<ScoredPost> = local_posts
+            .into_par_iter()
+            .zip(cached.into_par_iter())
+            .map(|(post, cf)| {
+                let (score, breakdown, _) = ctx.score_cached_with_metrics(&cf);
+                ScoredPost {
+                    post,
+                    score,
+                    breakdown: Some(breakdown),
+                }
+            })
+            .collect();
+        s.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        s
+    };
 
     let filter_owned = |list: Vec<ScoredPost>| -> Vec<ScoredPost> {
         if drop_owned {
@@ -277,17 +347,29 @@ async fn build_personalized_digest(
             .collect()
     };
 
+    // Load seen IDs so digest avoids posts the user just saw in feed.
+    let seen_ids = get_digest_seen_ids(account_id);
+    let filter_seen = |list: Vec<ScoredPost>| -> Vec<ScoredPost> {
+        if seen_ids.is_empty() {
+            return list;
+        }
+        list.into_iter()
+            .filter(|sp| !seen_ids.contains(&sp.post.id))
+            .collect()
+    };
+
     // Build supporting lists for stratification, now with full scoring.
     let mut rng = rand::thread_rng();
+    // Trending: 30-day window instead of 7, wider pool
     let trending = {
-        let raw = db::get_trending_posts(7, 6).unwrap_or_default();
+        let raw = db::get_trending_posts(30, 6).unwrap_or_default();
         let posts: Vec<Post> = raw.into_iter().map(|sp| sp.post).collect();
-        filter_owned(score_batch(posts))
+        filter_seen(filter_owned(score_batch(posts)))
     };
     let wildcards = {
         let raw = db::get_random_posts_by_group(account_id, 5).unwrap_or_default();
         let posts: Vec<Post> = raw.into_iter().map(|sp| sp.post).collect();
-        filter_owned(score_batch(posts))
+        filter_seen(filter_owned(score_batch(posts)))
     };
     // "Recent added" surfaces the user's own posts on purpose, so skip it
     // entirely when the user asked to hide saved items.
@@ -300,14 +382,23 @@ async fn build_personalized_digest(
             Vec::new()
         } else {
             let posts = db::hydrate_posts_by_ids(&ids).unwrap_or_default();
-            score_batch(posts)
+            filter_seen(score_batch(posts))
         }
     };
+    // Popular new: 7-day window instead of 2
     let popular_new = {
-        let raw = db::get_popular_posts_since(Utc::now() - chrono::Duration::days(2), 3)
+        let raw = db::get_popular_posts_since(Utc::now() - chrono::Duration::days(7), 3)
             .unwrap_or_default();
         let posts: Vec<Post> = raw.into_iter().map(|sp| sp.post).collect();
-        filter_owned(score_batch(posts))
+        filter_seen(filter_owned(score_batch(posts)))
+    };
+    // Fresh blood: random old posts (older than 14 days) that the user hasn't
+    // seen yet. Guarantees new faces even when the user's favourite-tag pool
+    // is small and has been exhausted.
+    let fresh_blood = {
+        let raw = db::get_old_random_posts(14, 8).unwrap_or_default();
+        let posts: Vec<Post> = raw.into_iter().map(|sp| sp.post).collect();
+        filter_seen(filter_owned(score_batch(posts)))
     };
 
     let digest = stratified_sample(
@@ -316,6 +407,7 @@ async fn build_personalized_digest(
         wildcards,
         recent_added,
         popular_new,
+        fresh_blood,
         &mut rng,
     );
 
@@ -333,7 +425,8 @@ async fn build_personalized_digest(
     Ok(digest)
 }
 
-/// Generic (non-personalised) digest — trending + popular + random.
+/// Generic (non-personalised) digest — trending + popular + random + fresh.
+/// Uses the same widened windows and randomness as the personalised path.
 /// Scores posts using global defaults so breakdown is always available.
 async fn build_generic_digest(
     account_id: i32,
@@ -342,14 +435,20 @@ async fn build_generic_digest(
     use rayon::prelude::*;
 
     let mut rng = rand::thread_rng();
-    let trending = db::get_trending_posts(7, 10).unwrap_or_default();
+    // V6: widened windows matching personalised path
+    let trending = db::get_trending_posts(30, 10).unwrap_or_default();
     let popular_new =
-        db::get_popular_posts_since(Utc::now() - chrono::Duration::days(2), 5).unwrap_or_default();
+        db::get_popular_posts_since(Utc::now() - chrono::Duration::days(7), 5).unwrap_or_default();
+    let fresh_blood = db::get_old_random_posts(14, 8).unwrap_or_default();
     let random = db::get_random_posts(5).unwrap_or_default();
+
+    // Seen-post dedup via feed_interactions (7 days).
+    let seen_ids = get_digest_seen_ids(account_id);
 
     let mut all_posts: Vec<ScoredPost> = Vec::with_capacity(20);
     all_posts.extend(trending);
     all_posts.extend(popular_new);
+    all_posts.extend(fresh_blood);
     all_posts.extend(random);
 
     if exclude_saved {
@@ -357,6 +456,9 @@ async fn build_generic_digest(
         if !owned.is_empty() {
             all_posts.retain(|sp| !owned.contains(&sp.post.id));
         }
+    }
+    if !seen_ids.is_empty() {
+        all_posts.retain(|sp| !seen_ids.contains(&sp.post.id));
     }
 
     all_posts.shuffle(&mut rng);

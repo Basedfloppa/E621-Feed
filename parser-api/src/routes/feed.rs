@@ -44,9 +44,10 @@ use e621_account_parser_api::{
     api, audit,
     db::{
         self, clear_feed_interactions, collect_local_candidate_ids, find_similar_post_ids,
-        get_account_by_id, get_account_preference_profile, get_owned_post_ids, get_post_by_id,
-        get_recently_seen_post_ids, get_tag_counts, hydrate_posts_by_ids, record_feed_interaction,
-        record_feed_interactions_batch, remove_feed_interaction, upsert_catalog_posts,
+        get_account_by_id, get_account_preference_profile, get_long_term_seen_post_ids,
+        get_owned_post_ids, get_post_by_id, get_recently_seen_post_ids, get_tag_counts,
+        hydrate_posts_by_ids, record_feed_interaction, record_feed_interactions_batch,
+        remove_feed_interaction, upsert_catalog_posts,
     },
     errors::ApiError,
     models::{
@@ -301,6 +302,21 @@ pub(crate) async fn get_recommendations(
 /// Fetches e621 posts, hydrates local candidates, scores, thresholds, and
 /// diversifies — returning posts already sorted by adjusted (MMR) score.
 ///
+/// ## Dedup strategy (v6+)
+/// - **Live posts** from e621: deduped against a short window (14 days via
+///   `get_recently_seen_post_ids`).
+/// - **Local candidates** (old cached posts): deduped against a **union** of
+///   the short window **and** a long window (60 days via
+///   `get_long_term_seen_post_ids`). This prevents the same old posts from
+///   reappearing across weeks.
+/// - **Owned posts** (user's favourites) are always excluded.
+///
+/// ## Randomisation (v6+)
+/// `collect_local_candidate_ids` now uses `ORDER BY RANDOM()` (see
+/// `db/feed.rs`) — the same top-N tags produce different candidates on every
+/// call, distributing impressions across the long tail instead of always
+/// promoting the highest-scored posts.
+///
 /// The caller is responsible for:
 /// - Score breakdown logging (caller-specific diagnostic)
 /// - Pipeline metrics and audit (caller-specific)
@@ -441,9 +457,16 @@ async fn build_recommendations_shared(
 
     // Hydrate locals (skip owned/seen/already-in-live).
     let live_ids: HashSet<i64> = live_posts.iter().map(|p| p.id).collect();
+    // Load long-term seen IDs for old-post dedup (local candidates).
+    // While live posts from e621 stay deduped against the short window,
+    // local candidates (which can be months old) get a longer dedup horizon
+    // so the same old post doesn't reappear across weeks.
+    let long_term_seen = get_long_term_seen_post_ids(account_id, 60)
+        .map_err(|e| format!("Failed to load long-term seen post ids: {e}"))?;
+    let local_dedup: HashSet<i64> = seen_ids.union(&long_term_seen).copied().collect();
     let local_to_hydrate: Vec<i64> = local_candidate_ids
         .into_iter()
-        .filter(|id| !live_ids.contains(id) && !owned_ids.contains(id) && !seen_ids.contains(id))
+        .filter(|id| !live_ids.contains(id) && !owned_ids.contains(id) && !local_dedup.contains(id))
         .collect();
     let local_posts = if local_to_hydrate.is_empty() {
         Vec::new()

@@ -1,5 +1,5 @@
 use chrono::Utc;
-use rusqlite::{Connection, params};
+use rusqlite::{params, Connection};
 use std::collections::{HashMap, HashSet};
 
 use crate::models::{FeedInteractionRequest, FeedInteractionType};
@@ -355,6 +355,33 @@ pub fn get_recently_seen_post_ids(account_id: i32, days: i64) -> Result<HashSet<
         .map_err(|e| format!("collect get_recently_seen_post_ids: {e}"))
 }
 
+/// Long-term seen post IDs (up to `long_days` back). Used in addition to
+/// `get_recently_seen_post_ids` for OLD posts (local candidates) so that
+/// even posts shown weeks ago are excluded from the "mix-in" pool.
+/// Fresh live posts from e621 still use the short window.
+pub fn get_long_term_seen_post_ids(
+    account_id: i32,
+    long_days: i64,
+) -> Result<HashSet<i64>, String> {
+    let conn = open_db()?;
+    let cutoff = (Utc::now() - chrono::Duration::days(long_days.max(1))).to_rfc3339();
+    let mut stmt = conn
+        .prepare(
+            "
+            SELECT DISTINCT post_id FROM feed_interactions
+            WHERE account_id = ?1
+              AND event_type IN ('qualified_impression', 'hide', 'open')
+              AND created_at >= ?2
+            ",
+        )
+        .map_err(|e| format!("prep get_long_term_seen_post_ids: {e}"))?;
+    let rows = stmt
+        .query_map(params![account_id, cutoff], |r| r.get::<_, i64>(0))
+        .map_err(|e| format!("query get_long_term_seen_post_ids: {e}"))?;
+    rows.collect::<Result<HashSet<_>, _>>()
+        .map_err(|e| format!("collect get_long_term_seen_post_ids: {e}"))
+}
+
 /// Posts already in the user's favourites — they don't belong in a "discover"
 /// feed because the user has already curated them.
 pub fn get_owned_post_ids(account_id: i32) -> Result<HashSet<i64>, String> {
@@ -370,7 +397,8 @@ pub fn get_owned_post_ids(account_id: i32) -> Result<HashSet<i64>, String> {
 }
 
 /// Posts authored by the user's top-N favourite tags within `group_type`,
-/// ranked by e621 score.
+/// randomized instead of ranked — pulls from a wider pool and shuffles
+/// so the same best posts don't dominate every feed request.
 fn local_candidates_for_top_tags(
     conn: &Connection,
     account_id: i32,
@@ -396,7 +424,7 @@ fn local_candidates_for_top_tags(
               AND t.name IN (SELECT tag_name FROM top_tags)
               AND p.is_deleted = 0
               AND p.preview_url IS NOT NULL
-            ORDER BY p.score_total DESC
+            ORDER BY RANDOM()
             LIMIT ?4
             ",
         )
@@ -411,6 +439,8 @@ fn local_candidates_for_top_tags(
 }
 
 /// Recent posts above the user's own popularity baseline (avg_fav_count).
+/// Randomized instead of ranked — picks from a wider pool to reduce
+/// repetition of the same popular posts across requests.
 fn local_candidates_recent_popular(
     conn: &Connection,
     account_id: i32,
@@ -432,7 +462,7 @@ fn local_candidates_recent_popular(
               AND p.is_deleted = 0
               AND p.preview_url IS NOT NULL
               AND p.fav_count >= COALESCE((SELECT thresh FROM baseline), 1.0)
-            ORDER BY p.score_total DESC
+            ORDER BY RANDOM()
             LIMIT ?3
             ",
         )
@@ -446,20 +476,37 @@ fn local_candidates_recent_popular(
 
 /// Three SQL streams (top-artist, top-character, recent-popular) unioned and
 /// capped at `limit`. Caller dedups against seen/owned in memory.
+///
+/// ## Randomisation (v6+)
+/// Each stream uses `ORDER BY RANDOM()` instead of `ORDER BY score_total DESC`
+/// so the same best posts don't dominate every feed request.
+/// - Artist/character: pulls from the user's top 20 tags (was 10/12).
+/// - Recent-popular: looks back 60 days instead of 30.
+/// - Pool size per stream: `(limit / 3 * 2).max(100)` (was `(limit / 3).max(50)`).
 pub fn collect_local_candidate_ids(account_id: i32, limit: i64) -> Result<Vec<i64>, String> {
     let conn = open_db()?;
-    let per_stream = (limit / 3).max(50);
+    // Use a larger multiplier per stream so each source contributes a diverse
+    // set. The ORDER BY RANDOM() inside each query ensures different posts
+    // appear every time. Combined with the HashSet dedup this gives us a
+    // varied pool that still respects the user's taste.
+    let per_stream = (limit / 3 * 2).max(100);
+    let cap_per_stream = (limit as usize / 3 + 1).max(20);
 
     let mut out: HashSet<i64> = HashSet::with_capacity(limit as usize);
     for ids in [
-        local_candidates_for_top_tags(&conn, account_id, "artist", 10, per_stream)?,
-        local_candidates_for_top_tags(&conn, account_id, "character", 12, per_stream)?,
-        local_candidates_recent_popular(&conn, account_id, 30, per_stream)?,
+        // Pull from more tags (20 instead of 10/12) and randomize the results
+        local_candidates_for_top_tags(&conn, account_id, "artist", 20, per_stream)?,
+        local_candidates_for_top_tags(&conn, account_id, "character", 20, per_stream)?,
+        // Look back 60 days instead of 30 for a bigger pool of recent-popular posts
+        local_candidates_recent_popular(&conn, account_id, 60, per_stream)?,
     ] {
         for id in ids {
+            if out.len() >= cap_per_stream {
+                break;
+            }
             out.insert(id);
             if out.len() as i64 >= limit {
-                break;
+                return Ok(out.into_iter().collect());
             }
         }
     }
