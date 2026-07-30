@@ -1687,7 +1687,7 @@ async fn prefetch_target_selection_respects_cooldown() {
         .unwrap();
     }
 
-    let targets = e621_account_parser_api::prefetch::pick_prefetch_targets().unwrap();
+    let targets = e621_account_parser_api::prefetch::pick_prefetch_targets(48, 5, 0).unwrap();
     assert!(
         targets.iter().any(|target| target.account_id == account_id),
         "the production selector must choose the active account"
@@ -1699,7 +1699,7 @@ async fn prefetch_target_selection_respects_cooldown() {
         rusqlite::params![chrono::Utc::now().to_rfc3339(), account_id],
     )
     .unwrap();
-    let targets = e621_account_parser_api::prefetch::pick_prefetch_targets().unwrap();
+    let targets = e621_account_parser_api::prefetch::pick_prefetch_targets(48, 5, 0).unwrap();
     assert!(
         !targets.iter().any(|target| target.account_id == account_id),
         "the production selector must honor cooldown"

@@ -169,10 +169,20 @@ pub struct RuntimeConfig {
     pub prefetch_include_recent_popular: bool,
     /// Per-user prefetch cooldown: only refetch an account's top tags if
     /// that account hasn't been prefetched within this many seconds. Default
-    /// 3600 (1 h). Prevents the worker from hammering the same artist/
+    /// 86400 (24 h). Prevents the worker from hammering the same artist/
     /// character every tick.
     #[serde(default = "default_prefetch_cooldown_secs")]
     pub prefetch_cooldown_secs: u64,
+    /// Accounts with a feed interaction within this many hours are served
+    /// by the **hot** prefetch worker (short interval). Accounts outside
+    /// this window but still within `prefetch_active_window_days` are
+    /// served by the **cold** worker (long interval). Default 48 h.
+    #[serde(default = "default_prefetch_hot_window_hours")]
+    pub prefetch_hot_window_hours: u64,
+    /// Interval for the cold prefetch worker (dormant accounts). Default
+    /// 900 s = 15 min. The hot worker uses `prefetch_interval_secs`.
+    #[serde(default = "default_prefetch_cold_interval_secs")]
+    pub prefetch_cold_interval_secs: u64,
 
     /// Cadence for the unified cache-validator background worker. Walks
     /// every in-process cache (e621 outbound TTL cache, /process job
@@ -225,6 +235,8 @@ impl Default for RuntimeConfig {
             prefetch_tags_per_group: default_prefetch_tags_per_group(),
             prefetch_include_recent_popular: default_prefetch_include_recent_popular(),
             prefetch_cooldown_secs: default_prefetch_cooldown_secs(),
+            prefetch_hot_window_hours: default_prefetch_hot_window_hours(),
+            prefetch_cold_interval_secs: default_prefetch_cold_interval_secs(),
             cache_validate_interval_secs: default_cache_validate_interval_secs(),
             cache_idle_eviction_secs: default_cache_idle_eviction_secs(),
             tag_alias_import_interval_secs: default_tag_alias_import_interval_secs(),
@@ -317,6 +329,12 @@ fn default_prefetch_include_recent_popular() -> bool {
 }
 fn default_prefetch_cooldown_secs() -> u64 {
     86400
+}
+fn default_prefetch_hot_window_hours() -> u64 {
+    48
+}
+fn default_prefetch_cold_interval_secs() -> u64 {
+    900
 }
 fn default_cache_validate_interval_secs() -> u64 {
     300 // 5 min
@@ -1151,6 +1169,8 @@ max_retries = 1
         // Prefetch defaults: broad catalog + recent popular (P1 fix).
         assert_eq!(rt.prefetch_tags_per_group, 10);
         assert!(rt.prefetch_include_recent_popular);
+        assert_eq!(rt.prefetch_hot_window_hours, 48);
+        assert_eq!(rt.prefetch_cold_interval_secs, 900);
         assert_eq!(rt.cache_validate_interval_secs, 300);
         assert_eq!(rt.cache_idle_eviction_secs, 1800);
     }

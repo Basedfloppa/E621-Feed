@@ -227,7 +227,9 @@ prefetch_breaker_threshold = 3          # open circuit breaker after N consecuti
 prefetch_breaker_pause_secs = 600       # how long to pause when the breaker is open (10m)
 prefetch_tags_per_group = 10            # how many top tags per group to fetch (1 = narrow, 5-10 = broad catalog)
 prefetch_include_recent_popular = true  # also fetch order:fav_count posts for each top tag
-prefetch_cooldown_secs = 86400           # skip an account if it was prefetched within this many seconds
+prefetch_cooldown_secs = 86400          # skip an account if it was prefetched within this many seconds
+prefetch_hot_window_hours = 48          # hot worker: accounts active within this window
+prefetch_cold_interval_secs = 900       # cold worker interval (hot worker uses prefetch_interval_secs)
 cache_validate_interval_secs = 300      # 5 min — cleans TTL-expired entries + checks idle-eviction for all caches
 # Idle-eviction clears Rust's in-memory data structures, but glibc's
 # default malloc does not necessarily return freed pages to the kernel.

@@ -27,10 +27,39 @@ const LCG_C: u64 = 1442695040888963407;
 static PREFETCH_CONSECUTIVE_FAILS: AtomicU32 = AtomicU32::new(0);
 
 pub fn spawn_prefetch_workers() {
-    rocket::tokio::spawn(prefetch_loop());
+    let hot_window = cfg().runtime.prefetch_hot_window_hours;
+    // Hot worker: active accounts, short interval.
+    rocket::tokio::spawn(prefetch_loop(
+        "hot",
+        |r| r.prefetch_interval_secs.max(10),
+        move |_| hot_window,
+        hot_window,
+        3,
+        0, // no exclusion (hot window = itself)
+    ));
+    // Cold worker: dormant accounts, long interval.
+    let cold_window = cfg().runtime.prefetch_active_window_days as u64 * 24;
+    rocket::tokio::spawn(prefetch_loop(
+        "cold",
+        |r| r.prefetch_cold_interval_secs.max(30),
+        move |_| cold_window,
+        cold_window,
+        2,
+        hot_window, // exclude accounts in the hot window
+    ));
 }
 
-async fn prefetch_loop() {
+async fn prefetch_loop<F1, F2>(
+    name: &'static str,
+    interval_fn: F1,
+    _window_fn: F2,
+    window_hours: u64,
+    max_targets: usize,
+    exclude_window_hours: u64,
+) where
+    F1: Fn(&crate::models::RuntimeConfig) -> u64,
+    F2: Fn(&crate::models::RuntimeConfig) -> u64,
+{
     // Initial delay so we don't compete with startup work (migrations,
     // tag-cooccurrence backfill).
     rocket::tokio::time::sleep(Duration::from_secs(60)).await;
@@ -43,19 +72,21 @@ async fn prefetch_loop() {
         if threshold > 0 && fails >= threshold {
             let pause = runtime.prefetch_breaker_pause_secs.max(60);
             warn!(
-                "[catalog-prefetch] circuit breaker open after {fails} consecutive failures \
+                "[catalog-prefetch:{name}] circuit breaker open after {fails} consecutive failures \
                  (threshold {threshold}); pausing {pause}s before resuming"
             );
             rocket::tokio::time::sleep(Duration::from_secs(pause)).await;
             PREFETCH_CONSECUTIVE_FAILS.store(0, Ordering::Relaxed);
-            info!("[catalog-prefetch] circuit breaker reset, resuming");
+            info!("[catalog-prefetch:{name}] circuit breaker reset, resuming");
             continue;
         }
 
-        if let Err(e) = run_prefetch_tick().await {
-            warn!("[catalog-prefetch] tick failed: {e}");
+        if let Err(e) =
+            run_prefetch_tick(name, window_hours, max_targets, exclude_window_hours).await
+        {
+            warn!("[catalog-prefetch:{name}] tick failed: {e}");
         }
-        let secs = runtime.prefetch_interval_secs.max(10);
+        let secs = interval_fn(&runtime);
         rocket::tokio::time::sleep(Duration::from_secs(secs)).await;
     }
 }
@@ -72,10 +103,17 @@ pub struct PrefetchQueries {
     recent_popular: Vec<String>,
 }
 
-async fn run_prefetch_tick() -> Result<(), String> {
-    let targets = rocket::tokio::task::spawn_blocking(pick_prefetch_targets)
-        .await
-        .map_err(|e| format!("pick targets panicked: {e}"))??;
+async fn run_prefetch_tick(
+    name: &str,
+    window_hours: u64,
+    max_targets: usize,
+    exclude_window_hours: u64,
+) -> Result<(), String> {
+    let targets = rocket::tokio::task::spawn_blocking(move || {
+        pick_prefetch_targets(window_hours, max_targets, exclude_window_hours)
+    })
+    .await
+    .map_err(|e| format!("pick targets panicked: {e}"))??;
 
     if targets.is_empty() {
         return Ok(());
@@ -116,7 +154,7 @@ async fn run_prefetch_tick() -> Result<(), String> {
                     .map_err(|e| format!("persist join: {e}"))?;
                     if let Err(e) = res {
                         warn!(
-                            "[catalog-prefetch] persist failed for account={} q={q}: {e}",
+                            "[catalog-prefetch:{name}] persist failed for account={} q={q}: {e}",
                             target.account_id
                         );
                     }
@@ -126,7 +164,7 @@ async fn run_prefetch_tick() -> Result<(), String> {
                     // Count this failure and bail out of the rest of the tick.
                     let n = PREFETCH_CONSECUTIVE_FAILS.fetch_add(1, Ordering::Relaxed) + 1;
                     warn!(
-                        "[catalog-prefetch] e621 fetch failed for account={} q={q} \
+                        "[catalog-prefetch:{name}] e621 fetch failed for account={} q={q} \
                          (consecutive_fails={n}): {e}",
                         target.account_id
                     );
@@ -161,44 +199,83 @@ async fn run_prefetch_tick() -> Result<(), String> {
 
 /// Pick multiple prefetch targets using a recency-weighted random selection.
 ///
-/// Returns up to 5 targets with recent feed interaction. Accounts that were
-/// prefetched more recently than `cooldown_secs` are excluded. Selection is
-/// weighted by recency: the most recently active accounts are ~2× more likely
-/// to be picked than accounts at the edge of the active window.
-/// Select the next local prefetch targets. Public for deterministic
-/// integration tests; the scheduled workers are its production caller.
-pub fn pick_prefetch_targets() -> Result<Vec<PrefetchQueries>, String> {
+/// Pick multiple prefetch targets using a recency-weighted random selection.
+///
+/// `window_hours` — only accounts with a feed interaction within this many
+/// hours are considered (e.g. 48 h for hot, `14 * 24` h for cold).
+///
+/// `max_targets` — how many accounts to pick (3 for hot, 2 for cold).
+///
+/// `exclude_window_hours` — if > 0, accounts with ANY interaction within
+/// this many hours are EXCLUDED from the candidate set (used by the cold
+/// worker to avoid picking accounts the hot worker already covers). Pass 0
+/// when no exclusion is needed.
+///
+/// Accounts that were prefetched more recently than `prefetch_cooldown_secs`
+/// are excluded. Selection is weighted by recency: the most recently active
+/// accounts are ~2× more likely to be picked.
+///
+/// Public for deterministic integration tests; the scheduled workers are
+/// its production caller.
+pub fn pick_prefetch_targets(
+    window_hours: u64,
+    max_targets: usize,
+    exclude_window_hours: u64,
+) -> Result<Vec<PrefetchQueries>, String> {
     let conn = crate::db::open_db_for_prefetch()?;
     let runtime = cfg().runtime.clone();
-    let window_days = runtime.prefetch_active_window_days.max(1);
     let cooldown_secs = runtime.prefetch_cooldown_secs;
     let n_tags = (runtime.prefetch_tags_per_group.max(1)) as i32;
     let include_recent = runtime.prefetch_include_recent_popular;
 
-    let cutoff = (Utc::now() - chrono::Duration::days(window_days)).to_rfc3339();
+    let cutoff = (Utc::now() - chrono::Duration::hours(window_hours.max(1) as i64)).to_rfc3339();
     let cooldown_cutoff = Utc::now().timestamp().saturating_sub(cooldown_secs as i64);
+    let hot_cutoff = if exclude_window_hours > 0 {
+        Some((Utc::now() - chrono::Duration::hours(exclude_window_hours as i64)).to_rfc3339())
+    } else {
+        None
+    };
 
-    // Pick a bounded recent candidate set. Rotation happens in the weighted
-    // sampling below; a SQL OFFSET could exceed the small candidate set and
-    // incorrectly turn an active account list into an empty tick.
-    let seed_offset = 0;
+    // Build the SQL dynamically. Parameter numbering:
+    //   ?1 = cutoff (interaction window)
+    //   ?2 = cooldown_cutoff
+    //   ?3 = hot_cutoff (only when exclude_window_hours > 0)
+    // LIMIT and OFFSET are hardcoded in the SQL string.
+    let mut params_vec: Vec<Box<dyn rusqlite::types::ToSql>> =
+        vec![Box::new(cutoff), Box::new(cooldown_cutoff)];
+    let mut sql = String::from(
+        "SELECT a.id, COALESCE(NULLIF(a.blacklisted_tags, \"\"), \"\")
+         FROM accounts a
+         WHERE EXISTS (
+             SELECT 1 FROM feed_interactions fi
+             WHERE fi.account_id = a.id AND fi.created_at >= ?1
+         )
+           AND (a.last_prefetched_at = \"\"
+                OR (julianday(\"now\") - julianday(a.last_prefetched_at)) * 86400.0 >= ?2
+           )",
+    );
+
+    if let Some(ref hc) = hot_cutoff {
+        sql.push_str(
+            "\n           AND NOT EXISTS (
+                SELECT 1 FROM feed_interactions fi2
+                WHERE fi2.account_id = a.id AND fi2.created_at >= ?3
+            )",
+        );
+        params_vec.push(Box::new(hc.clone()));
+    }
+
+    // Hardcode LIMIT/OFFSET in the SQL itself to avoid tracking
+    // which ?N number to use for the dynamic clause.
+    sql.push_str("\n         ORDER BY a.id ASC\n         LIMIT 20 OFFSET 0");
+
     let mut stmt = conn
-        .prepare(
-            "SELECT a.id, COALESCE(NULLIF(a.blacklisted_tags, ''), '')
-             FROM accounts a
-             WHERE EXISTS (
-                 SELECT 1 FROM feed_interactions fi
-                 WHERE fi.account_id = a.id AND fi.created_at >= ?1
-             )
-               AND (a.last_prefetched_at = ''
-                    OR (julianday('now') - julianday(a.last_prefetched_at)) * 86400.0 >= ?2
-               )
-             ORDER BY a.id ASC
-             LIMIT ?3 OFFSET ?4",
-        )
+        .prepare(&sql)
         .map_err(|e| format!("pick targets prepare: {e}"))?;
+    let params_refs: Vec<&dyn rusqlite::types::ToSql> =
+        params_vec.iter().map(|p| p.as_ref()).collect();
     let rows: Vec<(i32, String)> = stmt
-        .query_map(params![cutoff, cooldown_cutoff, 20, seed_offset], |r| {
+        .query_map(params_refs.as_slice(), |r| {
             Ok((r.get::<_, i32>(0)?, r.get::<_, String>(1)?))
         })
         .map_err(|e| format!("pick targets query: {e}"))?
@@ -209,13 +286,11 @@ pub fn pick_prefetch_targets() -> Result<Vec<PrefetchQueries>, String> {
         return Ok(Vec::new());
     }
 
-    // Recency-weighted sampling: assign each candidate a weight proportional
-    // to how recently it was active. Pick up to 5 distinct targets.
     let mut targets: Vec<PrefetchQueries> = Vec::new();
     let rng_seed = (Utc::now().timestamp() % 1_000_000) as u64;
     let n = rows.len();
     let mut picked = vec![false; n];
-    weighted_recency_pick(n, 5.min(n), rng_seed, &mut picked);
+    weighted_recency_pick(n, max_targets.min(n), rng_seed, &mut picked);
 
     for (i, (account_id, blacklist)) in rows.into_iter().enumerate() {
         if !picked[i] {
@@ -244,10 +319,10 @@ pub fn pick_prefetch_targets() -> Result<Vec<PrefetchQueries>, String> {
         let mut recent_popular = Vec::new();
         if include_recent {
             for tag in &artist_queries {
-                recent_popular.push(format!("{tag} order:fav_count"));
+                recent_popular.push(format!("{} order:fav_count", tag));
             }
             for tag in &character_queries {
-                recent_popular.push(format!("{tag} order:fav_count"));
+                recent_popular.push(format!("{} order:fav_count", tag));
             }
         }
 
