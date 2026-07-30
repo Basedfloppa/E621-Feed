@@ -63,8 +63,27 @@ impl ApiError {
     }
 }
 
+/// Map `rusqlite::Error` directly to the appropriate `ApiError` variant.
+///
+/// * `QueryReturnedNoRows` → `NotFound`
+/// * Everything else → `Internal` (including `MultipleRowsReturned`)
+impl From<rusqlite::Error> for ApiError {
+    fn from(e: rusqlite::Error) -> Self {
+        match e {
+            rusqlite::Error::QueryReturnedNoRows => {
+                ApiError::NotFound("No matching row found".into())
+            }
+            other => ApiError::Internal(format!("Database error: {other}")),
+        }
+    }
+}
+
 impl From<String> for ApiError {
-    /// Promote "no row found" rusqlite errors to 404; anything else stays 500.
+    /// Promote common "not found" patterns to 404; anything else stays 500.
+    ///
+    /// This is a fallback for code that formats errors as strings rather than
+    /// propagating typed errors. New code should prefer `From<rusqlite::Error>`
+    /// or explicit `ApiError::NotFound` / `ApiError::Internal` constructors.
     fn from(s: String) -> Self {
         let l = s.to_ascii_lowercase();
         if l.contains("no account found") || l.contains("query returned no rows") {
@@ -153,5 +172,19 @@ mod tests {
     fn message_returns_inner_text() {
         assert_eq!(ApiError::BadRequest("nope".to_string()).message(), "nope");
         assert_eq!(ApiError::Internal("kaboom".to_string()).message(), "kaboom");
+    }
+
+    #[test]
+    fn from_rusqlite_maps_query_returned_no_rows_to_not_found() {
+        assert!(matches!(
+            ApiError::from(rusqlite::Error::QueryReturnedNoRows),
+            ApiError::NotFound(_)
+        ));
+    }
+
+    #[test]
+    fn from_rusqlite_maps_other_to_internal() {
+        let invalid = rusqlite::Error::SqliteSingleThreadedMode;
+        assert!(matches!(ApiError::from(invalid), ApiError::Internal(_)));
     }
 }

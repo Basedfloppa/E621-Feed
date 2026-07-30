@@ -196,7 +196,7 @@ async fn fetch_authed_text(
     let max_entries = cfg.e621_cache_max_entries;
 
     if !bypass_cache && let Some(body) = api_cache_get(&url, ttl) {
-        debug!("e621 cache hit: {url}");
+        debug!("[E621] cache hit: {url}");
         return Ok(body);
     }
 
@@ -223,13 +223,14 @@ async fn fetch_authed_text(
     if !status.is_success() {
         // Don't cache Cloudflare/rate-limit pages — would pin an outage past recovery.
         let preview = body_preview(&body);
+        warn!("[E621] returned {status} for {url}: {preview}");
         return Err(format!("returned {status}: {preview}"));
     }
 
     if !bypass_cache {
         api_cache_put(&url, body.clone(), ttl, max_entries);
     } else {
-        debug!("e621 cache bypassed (prefetch): {url}");
+        debug!("[E621] cache bypassed (prefetch): {url}");
     }
     Ok(body)
 }
@@ -382,7 +383,7 @@ async fn send_with_retry(builder: reqwest::RequestBuilder) -> Result<Response, S
 
     for attempt in 0..=cfg.max_retries {
         debug!(
-            "HTTP attempt {}/{}: {} (rps_delay={}ms)",
+            "[E621] HTTP attempt {}/{}: {} (rps_delay={}ms)",
             attempt + 1,
             cfg.max_retries + 1,
             url_for_logs,
@@ -414,7 +415,7 @@ async fn send_with_retry(builder: reqwest::RequestBuilder) -> Result<Response, S
                 let elapsed = attempt_start.elapsed();
                 if attempt < cfg.max_retries {
                     warn!(
-                        "Request hard-timeout after {:.2}s (budget {:?}) on attempt {}/{} for {}. Retrying in {:?}",
+                        "[E621] Request hard-timeout after {:.2}s (budget {:?}) on attempt {}/{} for {}. Retrying in {:?}",
                         elapsed.as_secs_f64(),
                         attempt_budget,
                         attempt + 1,
@@ -427,7 +428,7 @@ async fn send_with_retry(builder: reqwest::RequestBuilder) -> Result<Response, S
                     continue;
                 }
                 error!(
-                    "Request hard-timeout after {:.2}s on final attempt {} for {}",
+                    "[E621] Request hard-timeout after {:.2}s on final attempt {} for {}",
                     elapsed.as_secs_f64(),
                     cfg.max_retries + 1,
                     url_for_logs
@@ -449,7 +450,7 @@ async fn send_with_retry(builder: reqwest::RequestBuilder) -> Result<Response, S
                 {
                     let diag = diag_headers(&resp);
                     warn!(
-                        "Request got {} ({:.2}s) for {}.{} Backing off for {:?} (attempt {}/{})",
+                        "[E621] Request got {} ({:.2}s) for {}.{} Backing off for {:?} (attempt {}/{})",
                         status,
                         elapsed.as_secs_f64(),
                         url_for_logs,
@@ -474,7 +475,7 @@ async fn send_with_retry(builder: reqwest::RequestBuilder) -> Result<Response, S
                     );
                 } else {
                     warn!(
-                        "Request completed with non-retryable status {} ({:.2}s) for {}.{}",
+                        "[E621] Request completed with non-retryable status {} ({:.2}s) for {}.{}",
                         status,
                         elapsed.as_secs_f64(),
                         url_for_logs,
@@ -488,7 +489,7 @@ async fn send_with_retry(builder: reqwest::RequestBuilder) -> Result<Response, S
                 let kind = err_kind(&e);
                 if attempt < cfg.max_retries {
                     warn!(
-                        "Request error [{kind}] on attempt {}/{} ({:.2}s) for {}: {}. Retrying in {:?}",
+                        "[E621] Request error [{kind}] on attempt {}/{} ({:.2}s) for {}: {}. Retrying in {:?}",
                         attempt + 1,
                         cfg.max_retries + 1,
                         elapsed.as_secs_f64(),
@@ -501,7 +502,7 @@ async fn send_with_retry(builder: reqwest::RequestBuilder) -> Result<Response, S
                     continue;
                 }
                 error!(
-                    "Request failed after {} attempts (final attempt {:.2}s) [{kind}] for {}: {}",
+                    "[E621] Request failed after {} attempts (final attempt {:.2}s) [{kind}] for {}: {}",
                     cfg.max_retries + 1,
                     elapsed.as_secs_f64(),
                     url_for_logs,
@@ -512,7 +513,7 @@ async fn send_with_retry(builder: reqwest::RequestBuilder) -> Result<Response, S
         };
     }
 
-    error!("send_with_retry exhausted attempts but reached unreachable branch");
+    error!("[E621] send_with_retry exhausted attempts but reached unreachable branch");
     Err("unreachable".into())
 }
 

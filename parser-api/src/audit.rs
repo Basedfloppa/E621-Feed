@@ -152,6 +152,7 @@ impl Event {
 /// **Auth / sessions**
 /// * `session.bootstrap` — `minted` (true/false)
 /// * `session.cleared`   — (no fields; cookie was wiped)
+/// * `token.revoked`    — `account_id`, `reason`
 pub fn event(kind: &'static str) -> Event {
     Event::new(kind)
 }

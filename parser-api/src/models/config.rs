@@ -926,8 +926,20 @@ pub fn file_mtime(p: &Path) -> std::io::Result<SystemTime> {
 }
 
 pub static CONFIG: LazyLock<ArcSwap<Config>> = LazyLock::new(|| {
-    let p = default_path().expect("config path");
-    let cfg = load_config(&p).expect("initial config");
+    let p = match default_path() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("FATAL: {e:#}");
+            std::process::exit(1);
+        }
+    };
+    let cfg = match load_config(&p) {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            eprintln!("FATAL: failed to load config from {}: {e:#}", p.display());
+            std::process::exit(1);
+        }
+    };
     ArcSwap::from_pointee(cfg)
 });
 

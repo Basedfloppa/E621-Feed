@@ -375,6 +375,10 @@ pub(crate) async fn delete_account(account_id: i32, owner: OwnerToken) -> Result
             "No account found for this device token".into(),
         ));
     }
+    e621_account_parser_api::audit::event("token.revoked")
+        .field("account_id", account_id)
+        .field("reason", "device_unlink")
+        .emit();
     e621_account_parser_api::audit::event("account.deleted")
         .field("account_id", account_id)
         .field("removed_links", removed)

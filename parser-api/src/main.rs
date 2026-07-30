@@ -218,7 +218,8 @@ async fn session_clear(cookies: &CookieJar<'_>) -> Result<Json<serde_json::Value
     if let Some(c) = cookies.get(auth::OWNER_TOKEN_COOKIE) {
         let token = c.value().to_string();
         if validation::validate_owner_token(&token).is_ok() {
-            db_blocking(move || auth::revoke(&token))
+            let token_for_revoke = token.clone();
+            db_blocking(move || auth::revoke(&token_for_revoke))
                 .await
                 .map_err(|e| {
                     warn!("session revoke failed: {e}");
