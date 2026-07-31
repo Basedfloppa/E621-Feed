@@ -484,6 +484,7 @@ pub fn digest_page() -> Html {
         *show_desc,
         *show_metadata,
         *show_breakdown,
+        false,
     );
 
     html! {

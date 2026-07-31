@@ -79,6 +79,7 @@ pub fn favorites_page() -> Html {
     let show_desc = use_state(|| true);
     let show_metadata = use_state(|| false);
     let show_breakdown = use_state(|| false);
+    let show_detailed_breakdown = use_state(|| false);
 
     html! {
         <div class="m-4 gap-2">
@@ -154,6 +155,7 @@ pub fn favorites_page() -> Html {
                     show_desc={show_desc}
                     show_metadata={show_metadata}
                     show_breakdown={show_breakdown}
+                    show_detailed_breakdown={show_detailed_breakdown}
                     empty_message={"Select an account to see your favourites."}
                 />
             } else {

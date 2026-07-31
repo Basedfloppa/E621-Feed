@@ -154,6 +154,8 @@ pub fn search_page() -> Html {
     let show_desc = use_state(|| stored_bool("search_show_desc", true));
     let show_metadata = use_state(|| stored_bool("search_show_metadata", false));
     let show_breakdown = use_state(|| stored_bool("search_show_breakdown", false));
+    let show_detailed_breakdown =
+        use_state(|| stored_bool("search_show_detailed_breakdown", false));
 
     macro_rules! persist_bool {
         ($state:expr, $key:expr) => {{
@@ -294,6 +296,7 @@ pub fn search_page() -> Html {
                     show_desc={show_desc}
                     show_metadata={show_metadata}
                     show_breakdown={show_breakdown}
+                    show_detailed_breakdown={show_detailed_breakdown}
                     empty_message={"No posts matched this query."}
                 />
             } else {

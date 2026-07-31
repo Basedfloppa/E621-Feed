@@ -7,6 +7,7 @@ pub mod post_card;
 pub mod post_grid;
 pub mod reanalyze_button;
 pub mod saved_accounts_select;
+pub mod scoring_breakdown;
 pub mod shared_observer;
 pub mod tag_chart_card;
 pub mod tag_relation_graph_card;

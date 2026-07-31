@@ -103,6 +103,7 @@ pub fn render_post_grid(
     show_desc: bool,
     show_metadata: bool,
     show_breakdown: bool,
+    show_detailed_breakdown: bool,
 ) -> Html {
     if posts.is_empty() {
         return html! {};
@@ -158,6 +159,7 @@ pub fn render_post_grid(
                             show_desc={show_desc}
                             show_metadata={show_metadata}
                             show_breakdown={show_breakdown}
+                            show_detailed_breakdown={show_detailed_breakdown}
                         />
                     }) }
                 </div>
@@ -182,6 +184,7 @@ pub struct PostGridProps {
     pub show_desc: UseStateHandle<bool>,
     pub show_metadata: UseStateHandle<bool>,
     pub show_breakdown: UseStateHandle<bool>,
+    pub show_detailed_breakdown: UseStateHandle<bool>,
     /// Optional per-page percentage of the lowest scored results to omit.
     #[prop_or_default]
     pub score_cutoff_pct: Option<f32>,
@@ -408,6 +411,7 @@ pub fn post_grid(props: &PostGridProps) -> Html {
                                 *props.show_desc,
                                 *props.show_metadata,
                                 *props.show_breakdown,
+                                *props.show_detailed_breakdown,
                             ) }
                             <div ref={scroll_sentinel} class="h-4"></div>
                             {

@@ -34,6 +34,8 @@ pub struct PostCardProps {
     pub show_metadata: bool,
     #[prop_or_default]
     pub show_breakdown: bool,
+    #[prop_or_default]
+    pub show_detailed_breakdown: bool,
     /// Show the rating badge (S/Q/E with colour) on the post card.
     #[prop_or(true)]
     pub show_rating: bool,
@@ -608,75 +610,12 @@ pub fn post_card(props: &PostCardProps) -> Html {
     let footer_content: Option<Html> = {
         let mut parts: Vec<Html> = Vec::new();
         if let Some(bd) = props.breakdown.as_ref().filter(|_| props.show_breakdown) {
-            let chs: [(&str, &str, f32); 12] = [
-                (
-                    "Tag",
-                    "Cosine similarity between this post's tags and your favourites (TF-IDF weighted).",
-                    bd.tag_similarity,
-                ),
-                (
-                    "Quality",
-                    "How this post's score, favourites and comments compare to the typical post you like.",
-                    bd.quality_fit,
-                ),
-                (
-                    "Recent",
-                    "How close this post's age is to the ages you usually engage with.",
-                    bd.recency_fit,
-                ),
-                (
-                    "Rating",
-                    "Match between this post's rating (S/Q/E) and the rating mix of your favourites.",
-                    bd.rating_fit,
-                ),
-                (
-                    "Media",
-                    "Match between this post's media type (image / gif / video) and your usual preference.",
-                    bd.media_fit,
-                ),
-                (
-                    "Popular",
-                    "How this post's favourite count and duration compare to the norm in your profile.",
-                    bd.popularity_fit,
-                ),
-                (
-                    "Interact",
-                    "Signal from your recent feed behaviour on this post's tags — impressions, opens, and hides.",
-                    bd.interaction_fit,
-                ),
-                (
-                    "Relation",
-                    "How coherently this post's tags relate to each other — globally (PMI lift) and inside your own favourites (pair co-occurrence).",
-                    bd.tag_relation_fit,
-                ),
-                (
-                    "Uploader",
-                    "How this post's uploader compares to the uploaders you tend to favourite.",
-                    bd.uploader_fit,
-                ),
-                (
-                    "Exclusive",
-                    "How rare or unusual this post's tag combination is within your profile — favours distinctive picks.",
-                    bd.exclusivity_fit,
-                ),
-                (
-                    "Novel",
-                    "How fresh or unfamiliar this post's tags are compared to what you've seen recently.",
-                    bd.novelty_fit,
-                ),
-                (
-                    "Discover",
-                    "How much this post's uploader is a new or unfamiliar artist whose tags match your taste — favours serendipity.",
-                    bd.artist_discovery_fit,
-                ),
-            ];
             parts.push(html! {
-                <div class="p-2 flex flex-wrap justify-center gap-1" aria-label="Score breakdown">
-                    { for chs.iter().map(|&(label, title, val)| html! {
-                        <span class="badge badge-ghost truncate max-w-full" title={title}>
-                            { format!("{} {:.2}", label, val) }
-                        </span>
-                    }) }
+                <div class="p-2">
+                    <crate::components::scoring_breakdown::ScoringBreakdown
+                        breakdown={bd.clone()}
+                        detailed={props.show_detailed_breakdown}
+                    />
                 </div>
             });
         }

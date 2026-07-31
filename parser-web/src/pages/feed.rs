@@ -113,6 +113,13 @@ pub fn feed_page() -> Html {
             .and_then(|v| v.parse::<bool>().ok())
             .unwrap_or(false)
     });
+    let show_detailed_breakdown = use_state(|| {
+        window()
+            .and_then(|w| w.local_storage().ok().flatten())
+            .and_then(|s| s.get_item("show_score_detailed").ok().flatten())
+            .and_then(|v| v.parse::<bool>().ok())
+            .unwrap_or(false)
+    });
     // Per-page bottom-cutoff in percent (0..=95). 0 = show everything,
     // 30 = drop the bottom 30% of each fetched page by raw score, 95 =
     // keep only the top 5%. Decoupled from the model's raw `score` so
@@ -204,6 +211,15 @@ pub fn feed_page() -> Html {
             }
             || ()
         });
+        {
+            let a = *show_detailed_breakdown;
+            use_effect_with(a, move |a| {
+                if let Some(store) = window().and_then(|w| w.local_storage().ok().flatten()) {
+                    let _ = store.set_item("show_score_detailed", &a.to_string());
+                }
+                || ()
+            });
+        }
     }
 
     {
@@ -585,6 +601,7 @@ pub fn feed_page() -> Html {
         *show_desc,
         *show_metadata,
         *show_breakdown,
+        *show_detailed_breakdown,
     );
 
     html! {
@@ -861,6 +878,18 @@ pub fn feed_page() -> Html {
                                     onchange={{
                                         let show_breakdown = show_breakdown.clone();
                                         Callback::from(move |_: Event| show_breakdown.set(!*show_breakdown))
+                                    }}
+                                />
+                            </label>
+                            <label class="label cursor-pointer py-1">
+                                <span class="text-base-content">{"Detailed"}</span>
+                                <input
+                                    type="checkbox"
+                                    class="toggle toggle-sm"
+                                    checked={*show_detailed_breakdown}
+                                    onchange={{
+                                        let show_detailed_breakdown = show_detailed_breakdown.clone();
+                                        Callback::from(move |_: Event| show_detailed_breakdown.set(!*show_detailed_breakdown))
                                     }}
                                 />
                             </label>
