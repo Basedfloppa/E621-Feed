@@ -109,7 +109,6 @@ pub(crate) async fn get_account_name(
         ApiError::NotFound(format!("No account found for '{name_owned}'"))
     })?;
     let (id, resolved_name) = match response {
-        UserApiResponse::FullCurrentUser(u) => (u.id, u.name),
         UserApiResponse::FullUser(u) => (u.id, u.name),
     };
     Ok(Json(TruncatedAccount {
@@ -147,7 +146,6 @@ pub(crate) async fn get_account_id(
         ApiError::NotFound(format!("No account found for ID {id}"))
     })?;
     let (resolved_id, resolved_name) = match response {
-        UserApiResponse::FullCurrentUser(u) => (u.id, u.name),
         UserApiResponse::FullUser(u) => (u.id, u.name),
     };
     Ok(Json(TruncatedAccount {
@@ -192,7 +190,6 @@ pub(crate) async fn create_account(
         }
     };
     let (resolved_id, resolved_name) = match resolved {
-        UserApiResponse::FullCurrentUser(u) => (u.id, u.name),
         UserApiResponse::FullUser(u) => (u.id, u.name),
     };
     if resolved_id != acc.id || !resolved_name.eq_ignore_ascii_case(acc.name.trim()) {

@@ -167,8 +167,7 @@ fn fake_post_json(id: i64, artist: &[&str], general: &[&str]) -> serde_json::Val
 }
 
 fn fake_user_json(id: i32, favorite_count: i32) -> serde_json::Value {
-    // Match `FullUser` shape — fields the parser doesn't read get
-    // placeholder values that satisfy the deserialiser.
+    // Match `E621User` shape — current e621 API format as of 2025-07.
     serde_json::json!({
         "id": id,
         "created_at": "2020-01-01T00:00:00.000-08:00",
@@ -193,9 +192,13 @@ fn fake_user_json(id: i32, favorite_count: i32) -> serde_json::Value {
         "positive_feedback_count": 0,
         "neutral_feedback_count": 0,
         "negative_feedback_count": 0,
-        "upload_limit": 10,
         "profile_about": "",
         "profile_artinfo": "",
+        "is_verified": false,
+        "has_cropped_avatar": false,
+        "upload_slots": 10,
+        "upload_karma": 0,
+        "upload_karma_free": false,
     })
 }
 

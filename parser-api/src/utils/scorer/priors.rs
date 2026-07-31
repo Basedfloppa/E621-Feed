@@ -246,6 +246,18 @@ pub struct Priors {
     #[serde(default = "default_novelty_use_feedback")]
     pub novelty_use_feedback: bool,
 
+    // ---- Class K: artist discovery channel ----
+    /// Mix weight for the artist discovery channel. 0 = disabled.
+    #[serde(default = "default_mix_artist_discovery")]
+    pub mix_artist_discovery: f32,
+    /// Cold-start: how many artist tags from a new artist are needed before
+    /// 50% confidence that the recommendation signal is meaningful.
+    #[serde(default = "default_artist_discovery_n0")]
+    pub artist_discovery_n0: f32,
+    /// Bonus multiplier for artists the user has never seen before.
+    #[serde(default = "default_artist_discovery_novelty_bonus")]
+    pub artist_discovery_novelty_bonus: f32,
+
     // ---- Class J: diversity semantic similarity ----
     /// Blend between Jaccard and PMI-based semantic similarity in MMR.
     /// 0.0 = pure Jaccard (legacy behaviour).
@@ -463,4 +475,15 @@ fn default_diversity_semantic_max_tags() -> usize {
 }
 fn default_diversity_user_pmi_weight() -> f32 {
     1.0
+}
+
+// ---- Class K defaults ----
+fn default_mix_artist_discovery() -> f32 {
+    0.0
+}
+fn default_artist_discovery_n0() -> f32 {
+    3.0
+}
+fn default_artist_discovery_novelty_bonus() -> f32 {
+    0.2
 }

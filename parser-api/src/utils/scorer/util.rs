@@ -155,6 +155,7 @@ pub(super) struct MixWeights {
     pub uploader: f32,
     pub exclusivity: f32,
     pub novelty: f32,
+    pub artist_discovery: f32,
 }
 
 impl MixWeights {
@@ -169,7 +170,8 @@ impl MixWeights {
             + p.mix_tag_relation.max(0.0)
             + p.mix_uploader.max(0.0)
             + p.mix_exclusivity.max(0.0)
-            + p.mix_novelty.max(0.0);
+            + p.mix_novelty.max(0.0)
+            + p.mix_artist_discovery.max(0.0);
         if sum <= 0.0 {
             return Self::default();
         }
@@ -185,6 +187,7 @@ impl MixWeights {
             uploader: p.mix_uploader.max(0.0) / sum,
             exclusivity: p.mix_exclusivity.max(0.0) / sum,
             novelty: p.mix_novelty.max(0.0) / sum,
+            artist_discovery: p.mix_artist_discovery.max(0.0) / sum,
         }
     }
 }

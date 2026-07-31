@@ -8,7 +8,7 @@ which directions are trustworthy see [calibration.md](calibration.md);
 for the math see
 [`parser-api/src/utils/scorer/`](../parser-api/src/utils/scorer/).
 
-The final score is a weighted blend of **11 scoring channels**:
+The final score is a weighted blend of **12 scoring channels**:
 
 | Channel | Mix weight | What it measures |
 |---|---|---|
@@ -23,6 +23,7 @@ The final score is a weighted blend of **11 scoring channels**:
 | `uploader` | `mix_uploader` | Uploader quality (avg score, avg fav count vs user's profile) |
 | `exclusivity` | `mix_exclusivity` | Tag exclusivity — rare tag combinations get a boost |
 | `novelty` | `mix_novelty` | Tag novelty — tags the user hasn't seen before get a boost |
+| `artist_discovery` | `mix_artist_discovery` | Artist discovery — posts from new (unknown) artists with content matching the user's profile get a boost |
 
 ## IDF / frequency shaping
 
@@ -52,6 +53,7 @@ The final score is a weighted blend of **11 scoring channels**:
 |`mix_tag_relation`|tag co-occurrence graph ignored|tag pairs that cluster together (globally or in favourites) lift scores more|
 |`mix_exclusivity`|exclusivity channel disabled|rare tag combinations boost the final score|
 |`mix_novelty`|novelty channel disabled|unseen-before tags boost the final score|
+|`mix_artist_discovery`|artist discovery channel disabled|posts from new artists matching the user's profile boost the final score|
 
 ## Quality channel internals
 
@@ -274,6 +276,34 @@ for users who want broader discovery beyond their established tag profile.
 |`mix_novelty`|novelty channel disabled|unseen-before tags boost the final score (default 0)|
 |`novelty_n0`|fewer impressions needed to consider a tag "known"|more impressions required before a tag is familiar (default 3)|
 |`novelty_use_feedback`|`false`: only check favourites for novelty|`true` (default): also check feed_interaction impression counts|
+
+## Artist discovery channel (v5.12)
+
+Recommends posts from **artists the user hasn't engaged with yet**, whose
+content (non-artist tags) matches the user's preference profile. The channel
+checks whether a post's artist tags are new to the user (not present in their
+favourites) and, if so, measures how well the remaining tags (character,
+copyright, general, species, lore, meta) match the user's profile via IDF-weighted
+cosine similarity.
+
+The score is a product of three factors:
+
+1. **Profile similarity** — cosine similarity between the user's tag vector and
+the post's non-artist tag vector (IDF-weighted, excluding blacklisted tags).
+2. **New-artist confidence** — `new_artist_count / (new_artist_count + n0)`.
+Higher when multiple new artists appear on the same post.
+3. **Novelty bonus** — `1.0 + bonus × (1.0 − confidence)`. Gives a small boost
+when confidence is low (few new artists), encouraging serendipitous discoveries
+of solo new artists.
+
+Default mix weight is 0 (disabled). Enable with a small non-zero value
+(e.g. 0.02–0.08) to calibrate alongside other channels.
+
+|Variable|Lower →|Higher →|
+|---|---|---|
+|`mix_artist_discovery`|artist discovery disabled|posts from new artists matching user's taste get a boost (default 0)|
+|`artist_discovery_n0`|fewer new artists needed to reach 50% confidence|more evidence needed before boosting discovery posts (default 3)|
+|`artist_discovery_novelty_bonus`|no bonus for low-confidence discoveries|stronger serendipity boost when few new artists are on the post (default 0.2)|
 
 ## Exploration bonus
 

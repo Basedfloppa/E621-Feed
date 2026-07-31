@@ -752,6 +752,7 @@ pub(crate) async fn get_similar_posts(
                 uploader_fit: 0.0,
                 exclusivity_fit: 0.0,
                 novelty_fit: 0.0,
+                artist_discovery_fit: 0.0,
             };
             ScoredPost {
                 post,

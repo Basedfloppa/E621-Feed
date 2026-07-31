@@ -59,14 +59,14 @@ quality_a = 0.50
 quality_b = 0.20
 quality_log_bias = -3.0
 
-mix_sim = 0.72
-mix_quality = 0.02
-mix_recency = 0.02
-mix_rating = 0.04
-mix_media = 0.05
-mix_popularity = 0.02
-mix_interaction = 0.10
-mix_tag_relation = 0.08
+mix_sim = 0.603
+mix_quality = 0.017
+mix_recency = 0.017
+mix_rating = 0.034
+mix_media = 0.042
+mix_popularity = 0.017
+mix_interaction = 0.084
+mix_tag_relation = 0.067
 # Uploader quality channel (v5.10): weight of uploader_fit in the final blend.
 # 0 = disabled. Uploaders ≠ artists — they are the users who uploaded the post
 # (often re-uploading others' art).
@@ -90,6 +90,13 @@ exclusivity_cross_group_weight = 0.5 # cross-group cooc weight; >1 = rare multi-
 mix_novelty = 0.02
 novelty_n0 = 3.0   # impressions needed for 50% confidence tag is "not novel"
 # novelty_use_feedback = true  # false = only check favourites, not impression counts
+
+# Artist discovery channel (v5.12): recommends posts from artists the user
+# hasn't engaged with yet, whose non-artist tags match the user's profile.
+# 0 = disabled. Set to a small non-zero value (e.g. 0.02) to enable calibration.
+mix_artist_discovery = 0.03
+artist_discovery_n0 = 3.0            # new artists needed for 50% confidence
+artist_discovery_novelty_bonus = 0.2 # serendipity boost for low-confidence discoveries
 
 # IDF / frequency shaping
 df_floor = 0.40           # v5.8: time_causal grid confirms 0.40 (v5.7's 0.20 was post_id-noise)

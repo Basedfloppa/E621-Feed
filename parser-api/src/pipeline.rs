@@ -161,7 +161,6 @@ pub async fn run_process_with_mode(
             .await?;
     let user = api::get_account(&account).await?;
     let favcount = match user {
-        UserApiResponse::FullCurrentUser(u) => u.favorite_count,
         UserApiResponse::FullUser(u) => u.favorite_count,
     };
     let pages = (favcount / cfg.posts_limit) + (if favcount % cfg.posts_limit > 0 { 1 } else { 0 });

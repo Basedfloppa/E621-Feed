@@ -199,6 +199,8 @@ pub struct ScoreBreakdown {
     pub exclusivity_fit: f32,
     #[serde(default)]
     pub novelty_fit: f32,
+    #[serde(default)]
+    pub artist_discovery_fit: f32,
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq)]

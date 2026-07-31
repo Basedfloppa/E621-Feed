@@ -150,7 +150,6 @@ async fn probe_favorite_counts(ids: &[i32]) -> Vec<(i32, String, i32)> {
     for (i, uid) in ids.iter().enumerate() {
         match api::get_user_by_id(*uid).await {
             Ok(UserApiResponse::FullUser(u)) => out.push((u.id, u.name, u.favorite_count)),
-            Ok(UserApiResponse::FullCurrentUser(u)) => out.push((u.id, u.name, u.favorite_count)),
             Err(e) => {
                 if i % 100 == 0 {
                     eprintln!("[seed]   probe {uid} failed: {e}");
@@ -186,7 +185,6 @@ async fn import_user(uid: i32, name: &str) -> anyhow::Result<usize> {
         .await
         .map_err(|e| anyhow::anyhow!("get user: {e}"))?;
     let favcount = match user {
-        UserApiResponse::FullCurrentUser(u) => u.favorite_count,
         UserApiResponse::FullUser(u) => u.favorite_count,
     };
     if favcount <= 0 {

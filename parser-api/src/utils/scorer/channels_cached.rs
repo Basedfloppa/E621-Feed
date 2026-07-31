@@ -582,6 +582,100 @@ impl<'a> ScoringContext<'a> {
         1.0 - sigmoid(avg_cooc / scale - min_cooc)
     }
 
+    /// Cached counterpart of `artist_discovery_fit`. Uses pre-resolved
+    /// cached tags to skip `normalize_tag` and IDF lookups.
+    pub fn artist_discovery_fit_cached(&self, post: &CachedPostFeatures) -> f32 {
+        let p = &self.priors;
+        if p.mix_artist_discovery <= 0.0 {
+            return 0.0;
+        }
+
+        // Collect artist tags from the cached features.
+        let artist_tags: Vec<_> = post
+            .tags
+            .iter()
+            .filter(|ct| ct.group == Group::Artist as u8)
+            .collect();
+
+        // Early exit: no artist tags → no discovery signal.
+        if artist_tags.is_empty() {
+            return 0.0;
+        }
+
+        let known_artists = &self.user[Group::Artist as usize];
+        let mut new_artist_count: u32 = 0;
+        for ct in &post.tags {
+            if ct.group != Group::Artist as u8 {
+                continue;
+            }
+            if !known_artists.contains_key(ct.lc.as_str()) {
+                new_artist_count += 1;
+            }
+        }
+
+        if new_artist_count == 0 {
+            return 0.0;
+        }
+
+        // Compute tag_similarity excluding artist tags.
+        let lambda = p.idf_lambda;
+        let alpha = p.idf_alpha;
+        let lambda_meta = if p.idf_lambda_meta.is_nan() {
+            lambda
+        } else {
+            p.idf_lambda_meta
+        };
+        let df_floor = p.df_floor;
+        let idf_max = p.idf_max;
+        let rsj = p.idf_rsj_smoothing;
+
+        let mut dot = 0.0f32;
+        let mut p_norm_sq = 0.0f32;
+
+        for ct in &post.tags {
+            let g_idx = ct.group as usize;
+            // Skip artist tags and meta.
+            if ct.group == Group::Artist as u8 || ct.group == Group::Meta as u8 {
+                continue;
+            }
+            let g = self.group_wts[g_idx];
+            if g <= 0.0 {
+                continue;
+            }
+            if self.blacklisted_tags.contains(ct.lc.as_str()) {
+                continue;
+            }
+            let lam = if ct.group == Group::Meta as u8 {
+                lambda_meta
+            } else {
+                lambda
+            };
+            let idf_w = self
+                .idf
+                .idf_tempered_from_df(ct.df_raw, df_floor, idf_max, rsj, lam, alpha);
+            let pw = g * idf_w;
+            p_norm_sq += pw * pw;
+            if let Some(&uw) = self.user[g_idx].get(ct.lc.as_str()) {
+                dot += uw * pw;
+            }
+        }
+
+        let profile_sim = if self.u_norm <= 0.0 || p_norm_sq <= 0.0 {
+            0.0
+        } else {
+            (dot / (self.u_norm * p_norm_sq.sqrt())).clamp(0.0, 1.0)
+        };
+
+        // Confidence from number of new artists.
+        let n0 = p.artist_discovery_n0.max(0.5);
+        let conf = (new_artist_count as f32) / (new_artist_count as f32 + n0);
+
+        // Novelty bonus: the more new artists, the more we boost.
+        let bonus = 1.0 + p.artist_discovery_novelty_bonus * (1.0 - conf);
+
+        (profile_sim * conf * bonus).clamp(0.0, 1.0)
+    }
+
     /// Cached counterpart of `novelty_fit`. Uses pre-resolved `ct.lc` to
     /// skip `normalize_tag`. Checks against `self.user` and `self.feedback`
     /// HashMaps (same data as the uncached path).
@@ -751,6 +845,9 @@ mod tests {
             diversity_semantic_max_tags: 10,
             diversity_user_pmi_weight: 1.0,
             exclusivity_cross_group_weight: 0.5,
+            mix_artist_discovery: 0.0,
+            artist_discovery_n0: 3.0,
+            artist_discovery_novelty_bonus: 0.2,
         }
     }
 
@@ -1155,5 +1252,90 @@ mod tests {
         let cached = cache_post(&post, &idf, &global);
         let c = ctx.quality_fit_cached(&cached);
         assert!(close(c, 0.745), "expected ~0.745 got {c}");
+    }
+
+    // ==================================================================
+    //  artist_discovery_fit_cached
+    // ==================================================================
+
+    #[test]
+    fn artist_discovery_fit_cached_disabled_by_default() {
+        let priors = default_priors();
+        let idf = build_idf();
+        let global = build_global_graph();
+        let user_graph = build_user_graph();
+        let profile = default_profile();
+        let counts = default_tag_counts();
+        let ctx = ScoringContext::new(&counts, &priors, &idf, &profile, &global, &user_graph);
+        let mut tags = make_empty_tags();
+        tags.artist.push("unknown_artist".to_string());
+        let post = make_post(tags);
+        let cached = cache_post(&post, &idf, &global);
+        let score = ctx.artist_discovery_fit_cached(&cached);
+        assert!(close(score, 0.0), "expected 0.0 got {score}");
+    }
+
+    #[test]
+    fn artist_discovery_fit_cached_new_artist() {
+        let mut priors = default_priors();
+        priors.mix_artist_discovery = 1.0;
+        let idf = build_idf();
+        let global = build_global_graph();
+        let user_graph = build_user_graph();
+        let profile = default_profile();
+        let counts = default_tag_counts();
+        let ctx = ScoringContext::new(&counts, &priors, &idf, &profile, &global, &user_graph);
+        let mut tags = make_empty_tags();
+        tags.artist.push("new_artist".to_string());
+        tags.character.push("cat".to_string());
+        tags.general.push("furry".to_string());
+        let post = make_post(tags);
+        let cached = cache_post(&post, &idf, &global);
+        let score = ctx.artist_discovery_fit_cached(&cached);
+        assert!(
+            score > 0.0,
+            "expected positive score for new artist, got {score}"
+        );
+    }
+
+    #[test]
+    fn artist_discovery_fit_cached_known_artist_zero() {
+        let mut priors = default_priors();
+        priors.mix_artist_discovery = 1.0;
+        let idf = build_idf();
+        let global = build_global_graph();
+        let user_graph = build_user_graph();
+        let profile = default_profile();
+        let counts = default_tag_counts();
+        let ctx = ScoringContext::new(&counts, &priors, &idf, &profile, &global, &user_graph);
+        let mut tags = make_empty_tags();
+        tags.artist.push("skeb".to_string());
+        tags.character.push("cat".to_string());
+        let post = make_post(tags);
+        let cached = cache_post(&post, &idf, &global);
+        let score = ctx.artist_discovery_fit_cached(&cached);
+        assert!(
+            close(score, 0.0),
+            "expected 0.0 for known artist, got {score}"
+        );
+    }
+
+    #[test]
+    fn artist_discovery_fit_cached_no_artist_tags() {
+        let mut priors = default_priors();
+        priors.mix_artist_discovery = 1.0;
+        let idf = build_idf();
+        let global = build_global_graph();
+        let user_graph = build_user_graph();
+        let profile = default_profile();
+        let counts = default_tag_counts();
+        let ctx = ScoringContext::new(&counts, &priors, &idf, &profile, &global, &user_graph);
+        let post = make_post(make_empty_tags());
+        let cached = cache_post(&post, &idf, &global);
+        let score = ctx.artist_discovery_fit_cached(&cached);
+        assert!(
+            close(score, 0.0),
+            "expected 0.0 for no artist tags, got {score}"
+        );
     }
 }

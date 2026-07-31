@@ -195,6 +195,102 @@ pub(crate) async fn search_scored_posts(
     Ok(Json(scored))
 }
 
+/// Fetch trending posts, scored against the account's preference profile.
+/// Returns a ranked list of scored posts from the `order:hot` e621 feed,
+/// filtered by personal affinity — "Trending for You".
+#[openapi(tag = "Browse")]
+#[get("/browse/trending_scored/<account_id>?<page>&<affinity_threshold>")]
+pub(crate) async fn get_trending_scored(
+    account_id: i32,
+    page: Option<i32>,
+    affinity_threshold: Option<f32>,
+    owner: OwnerToken,
+) -> Result<Json<Vec<ScoredPost>>, ApiError> {
+    validation::validate_account_id(account_id)?;
+    let affinity_threshold = validation::validate_affinity_threshold(affinity_threshold)?;
+    let owner_token = owner.0;
+
+    // Verify ownership and load profile data in parallel.
+    let (account, tags, profile) = rocket::tokio::join!(
+        db_blocking(move || get_account_by_id(&owner_token, account_id).map_err(|e| e.to_string())),
+        db_blocking(move || get_tag_counts(account_id).map_err(|e| e.to_string())),
+        db_blocking(move || get_account_preference_profile(account_id).map_err(|e| e.to_string())),
+    );
+    let account = account?;
+    let tags = tags?;
+    let profile = profile?;
+
+    let relation_tags = tags.clone();
+    let user_relation = db_blocking(move || {
+        e621_account_parser_api::db::load_account_tag_relation(account_id, &relation_tags)
+            .map_err(|e| e.to_string())
+    })
+    .await?;
+
+    // Fetch trending posts from e621.
+    let posts = api::get_posts_by_tags(&account.blacklist, "order:hot", page)
+        .await
+        .map_err(ApiError::Internal)?;
+
+    // Fire-and-forget persist to catalog (same as get_trending).
+    spawn_browse_persist(posts.clone(), "trending", account_id, false);
+
+    // Score against the account profile.
+    let idf = current_idf();
+    let global_relation = current_global_relation();
+    let mut priors = cfg().priors.clone();
+    priors.now = Utc::now();
+    let ctx = ScoringContext::new(
+        &tags,
+        &priors,
+        &idf,
+        &profile,
+        &global_relation,
+        &user_relation,
+    );
+
+    let mut scored: Vec<ScoredPost> = posts
+        .into_iter()
+        .map(|post| {
+            let features = CachedPostFeatures::from_post_with_user(
+                &post,
+                &idf,
+                &global_relation,
+                Some(&user_relation),
+            );
+            let (score, breakdown, _) = ctx.score_cached_with_metrics(&features);
+            ScoredPost {
+                post,
+                score,
+                breakdown: Some(breakdown),
+            }
+        })
+        .collect();
+
+    // Apply affinity threshold if provided.
+    if let Some(threshold) = affinity_threshold {
+        scored.retain(|sp| sp.score >= threshold);
+    }
+
+    // Sort by score descending.
+    scored.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    audit::event("browse.trending_scored")
+        .field("account_id", account_id)
+        .field("returned", scored.len())
+        .emit();
+    e621_account_parser_api::metrics::METRICS
+        .browse_views_total
+        .with_label_values(&["trending_scored"])
+        .inc();
+
+    Ok(Json(scored))
+}
+
 /// Fetch trending posts (sorted by hotness on e621).
 #[openapi(tag = "Browse")]
 #[get("/browse/trending/<account_id>?<page>")]

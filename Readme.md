@@ -2,7 +2,7 @@
 
 A self-hosted personalised feed engine for e621: import favourites, build
 per-account preference profiles, and serve scored + diversified
-recommendations via an 11-channel ensemble model. Includes offline
+recommendations via a 12-channel ensemble model. Includes offline
 calibration tooling (grid search over ~80 scoring knobs) and a
 WASM/Yew frontend with an interactive tag-relation graph.
 
@@ -32,9 +32,9 @@ A self-hosted alternative to e621's built-in feed: imports your favourites, buil
   incremental updates
 - Power-user feed controls: relative per-page cutoff presets plus persistent
   Auto/3/2/1-column layouts
-- Personalised feed with 11-channel scoring (tag similarity, quality, recency,
+- Personalised feed with 12-channel scoring (tag similarity, quality, recency,
   rating, media, popularity, interaction, tag-relation, uploader, exclusivity,
-  novelty) and MMR diversification
+  novelty, artist-discovery) and MMR diversification
 - Recommendation score breakdowns in the feed UI
 - Server-proxied `/search` page for e621 tag queries, alias suggestions, and
   optional per-account result scoring with Wide/Balanced/Strict cutoffs

@@ -608,7 +608,7 @@ pub fn post_card(props: &PostCardProps) -> Html {
     let footer_content: Option<Html> = {
         let mut parts: Vec<Html> = Vec::new();
         if let Some(bd) = props.breakdown.as_ref().filter(|_| props.show_breakdown) {
-            let chs: [(&str, &str, f32); 11] = [
+            let chs: [(&str, &str, f32); 12] = [
                 (
                     "Tag",
                     "Cosine similarity between this post's tags and your favourites (TF-IDF weighted).",
@@ -663,6 +663,11 @@ pub fn post_card(props: &PostCardProps) -> Html {
                     "Novel",
                     "How fresh or unfamiliar this post's tags are compared to what you've seen recently.",
                     bd.novelty_fit,
+                ),
+                (
+                    "Discover",
+                    "How much this post's uploader is a new or unfamiliar artist whose tags match your taste — favours serendipity.",
+                    bd.artist_discovery_fit,
                 ),
             ];
             parts.push(html! {

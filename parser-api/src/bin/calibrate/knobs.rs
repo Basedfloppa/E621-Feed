@@ -19,8 +19,8 @@
 use e621_account_parser_api::utils::Priors;
 
 use crate::cache::{
-    M_CONFIDENCE_DERIVED, M_DISCRETE, M_EXCLUSIVITY, M_GROUP_W, M_INTERACTION, M_NONE, M_NOVELTY,
-    M_RATIO_EXP, M_RECENCY, M_SIM, M_TAG_RELATION, M_UPLOADER,
+    M_ARTIST_DISCOVERY, M_CONFIDENCE_DERIVED, M_DISCRETE, M_EXCLUSIVITY, M_GROUP_W, M_INTERACTION,
+    M_NONE, M_NOVELTY, M_RATIO_EXP, M_RECENCY, M_SIM, M_TAG_RELATION, M_UPLOADER,
 };
 
 /// One tunable parameter for the grid search. `apply` mutates the trial
@@ -78,6 +78,8 @@ pub(crate) const PAIRED_KNOBS: &[(&str, &str)] = &[
     // v5.12: exclusivity cross-group + user-graph diversity
     ("mix_exclusivity", "exclusivity_cross_group_weight"),
     ("diversity_semantic_blend", "diversity_user_pmi_weight"),
+    // v5.13: artist discovery — mix weight + confidence
+    ("mix_artist_discovery", "artist_discovery_n0"),
 ];
 
 /// Per-pass scale on probe-deltas. Lets coarse direction emerge quickly
@@ -197,6 +199,14 @@ pub(crate) const GRID_KNOBS: &[KnobSpec] = &[
     KnobSpec {
         name: "mix_novelty",
         apply: |p, v| p.mix_novelty = (p.mix_novelty + v).max(0.0),
+        probes: PROBES_MIX,
+        invalidates: M_NONE,
+        diversify_only: false,
+    },
+    // -- Artist discovery knob (only mix weight here — other priors below) --
+    KnobSpec {
+        name: "mix_artist_discovery",
+        apply: |p, v| p.mix_artist_discovery = (p.mix_artist_discovery + v).max(0.0),
         probes: PROBES_MIX,
         invalidates: M_NONE,
         diversify_only: false,
@@ -404,6 +414,24 @@ pub(crate) const GRID_KNOBS: &[KnobSpec] = &[
         apply: |p, v| p.novelty_n0 = (p.novelty_n0 + v).max(1.0),
         probes: PROBES_COLDSTART,
         invalidates: M_NOVELTY,
+        diversify_only: false,
+    },
+    // -- Artist discovery n0 (v5.13) --
+    KnobSpec {
+        name: "artist_discovery_n0",
+        apply: |p, v| p.artist_discovery_n0 = (p.artist_discovery_n0 + v).max(1.0),
+        probes: PROBES_COLDSTART,
+        invalidates: M_ARTIST_DISCOVERY,
+        diversify_only: false,
+    },
+    KnobSpec {
+        name: "artist_discovery_novelty_bonus",
+        apply: |p, v| {
+            p.artist_discovery_novelty_bonus =
+                (p.artist_discovery_novelty_bonus + v).clamp(0.0, 1.0)
+        },
+        probes: PROBES_SMALL_FRACTION,
+        invalidates: M_ARTIST_DISCOVERY,
         diversify_only: false,
     },
     // -- Discrete preference (2) + cold-start (1) --
@@ -867,6 +895,13 @@ pub(crate) const MIX_ONLY_KNOBS: &[KnobSpec] = &[
     KnobSpec {
         name: "mix_novelty",
         apply: |p, v| p.mix_novelty = (p.mix_novelty + v).max(0.0),
+        probes: PROBES_MIX,
+        invalidates: M_NONE,
+        diversify_only: false,
+    },
+    KnobSpec {
+        name: "mix_artist_discovery",
+        apply: |p, v| p.mix_artist_discovery = (p.mix_artist_discovery + v).max(0.0),
         probes: PROBES_MIX,
         invalidates: M_NONE,
         diversify_only: false,

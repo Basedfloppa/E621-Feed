@@ -299,6 +299,9 @@ pub struct ScoreBreakdown {
     /// Tag novelty channel (0 when disabled). Added in v5.11.
     #[serde(default)]
     pub novelty_fit: f32,
+    /// Artist discovery channel (0 when disabled). Added in v5.12.
+    #[serde(default)]
+    pub artist_discovery_fit: f32,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema, Clone)]

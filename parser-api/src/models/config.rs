@@ -814,6 +814,17 @@ fn merge_priors(base: &mut Priors, overrides: &Priors) {
         base.novelty_use_feedback = overrides.novelty_use_feedback;
     }
 
+    // --- artist discovery channel ---
+    if overrides.mix_artist_discovery != 0.0 {
+        base.mix_artist_discovery = overrides.mix_artist_discovery;
+    }
+    if overrides.artist_discovery_n0 != 3.0 {
+        base.artist_discovery_n0 = overrides.artist_discovery_n0;
+    }
+    if overrides.artist_discovery_novelty_bonus != 0.2 {
+        base.artist_discovery_novelty_bonus = overrides.artist_discovery_novelty_bonus;
+    }
+
     // --- algorithmic shape ---
     if overrides.score_temperature != 0.0 {
         base.score_temperature = overrides.score_temperature;
@@ -1104,6 +1115,9 @@ diversity_w_general    = 0.08
             diversity_semantic_max_tags: 10,
             diversity_user_pmi_weight: 1.0,
             exclusivity_cross_group_weight: 0.5,
+            mix_artist_discovery: 0.0,
+            artist_discovery_n0: 3.0,
+            artist_discovery_novelty_bonus: 0.2,
         }
     }
 

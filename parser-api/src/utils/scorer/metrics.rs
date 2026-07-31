@@ -23,6 +23,7 @@ pub struct ChannelTiming {
     pub uploader_fit: u64,
     pub exclusivity_fit: u64,
     pub novelty_fit: u64,
+    pub artist_discovery_fit: u64,
     pub final_blend: u64,
 }
 
@@ -49,6 +50,7 @@ impl ScoringMetrics {
         self.channel.uploader_fit += t.uploader_fit;
         self.channel.exclusivity_fit += t.exclusivity_fit;
         self.channel.novelty_fit += t.novelty_fit;
+        self.channel.artist_discovery_fit += t.artist_discovery_fit;
         self.channel.final_blend += t.final_blend;
         self.count += 1;
     }
@@ -76,6 +78,7 @@ impl ScoringMetrics {
             ("uploader_fit", c.uploader_fit),
             ("exclusivity_fit", c.exclusivity_fit),
             ("novelty_fit", c.novelty_fit),
+            ("artist_discovery_fit", c.artist_discovery_fit),
             ("final_blend", c.final_blend),
         ];
         let total_all: u64 = rows.iter().map(|(_, ns)| ns).sum();
@@ -240,6 +243,7 @@ impl<'a> super::context::ScoringContext<'a> {
         let (uploader, u_ns) = timed_channel!(self, uploader_fit_cached, features);
         let (exclusivity, exc_ns) = timed_channel!(self, exclusivity_fit_cached, features);
         let (novelty, nov_ns) = timed_channel!(self, novelty_fit_cached, features);
+        let (artist_discovery, ad_ns) = timed_channel!(self, artist_discovery_fit_cached, features);
 
         let blend_start = Instant::now();
         let score = self.final_blend(
@@ -254,6 +258,7 @@ impl<'a> super::context::ScoringContext<'a> {
             uploader,
             exclusivity,
             novelty,
+            artist_discovery,
             veto,
         );
         let blend_ns = blend_start.elapsed().as_nanos() as u64;
@@ -270,6 +275,7 @@ impl<'a> super::context::ScoringContext<'a> {
             uploader_fit: uploader,
             exclusivity_fit: exclusivity,
             novelty_fit: novelty,
+            artist_discovery_fit: artist_discovery,
         };
 
         let timing = ChannelTiming {
@@ -284,6 +290,7 @@ impl<'a> super::context::ScoringContext<'a> {
             uploader_fit: u_ns,
             exclusivity_fit: exc_ns,
             novelty_fit: nov_ns,
+            artist_discovery_fit: ad_ns,
             final_blend: blend_ns,
         };
 

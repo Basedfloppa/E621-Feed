@@ -67,14 +67,61 @@ pub fn trending_page() -> Html {
     let backend_url = read_config_from_head()
         .map(|cfg| cfg.backend_domain)
         .unwrap_or_default();
+
+    // Score toggle — persisted in localStorage like grid type.
+    let enable_scoring = use_state(|| {
+        web_sys::window()
+            .and_then(|w| w.local_storage().ok().flatten())
+            .and_then(|s| s.get_item("trending_enable_scoring").ok().flatten())
+            .map(|v| v == "true")
+            .unwrap_or(false)
+    });
+    // Persist scoring toggle
+    {
+        let val = *enable_scoring;
+        use_effect_with(val, move |v| {
+            if let Some(s) = web_sys::window().and_then(|w| w.local_storage().ok().flatten()) {
+                let _ = s.set_item("trending_enable_scoring", if *v { "true" } else { "false" });
+            }
+            || ()
+        });
+    }
+
     let fetch_url = selected_user
         .as_ref()
-        .map(|u| format!("{}/browse/trending/{}", backend_url, u.id))
+        .map(|u| {
+            if *enable_scoring {
+                format!("{}/browse/trending_scored/{}", backend_url, u.id)
+            } else {
+                format!("{}/browse/trending/{}", backend_url, u.id)
+            }
+        })
         .unwrap_or_default();
+
+    // Per-page cutoff: 0 = show everything, 30 = balanced, 60 = strict.
+    // Only active when scoring is enabled.
+    let cutoff_pct = use_state(|| {
+        web_sys::window()
+            .and_then(|w| w.local_storage().ok().flatten())
+            .and_then(|s| s.get_item("trending_cutoff_pct").ok().flatten())
+            .and_then(|v| v.parse::<f32>().ok())
+            .filter(|v| *v >= 0.0 && *v <= 95.0)
+            .unwrap_or(30.0)
+    });
+    // Persist cutoff
+    {
+        let val = *cutoff_pct;
+        use_effect_with(val, move |a| {
+            if let Some(s) = web_sys::window().and_then(|w| w.local_storage().ok().flatten()) {
+                let _ = s.set_item("trending_cutoff_pct", &a.to_string());
+            }
+            || ()
+        });
+    }
 
     // Display settings.
     let show_rating = use_state(|| true);
-    let show_affinity = use_state(|| false);
+    let show_affinity = use_state(|| true);
     let show_score = use_state(|| true);
     let show_post_number = use_state(|| true);
     let show_desc = use_state(|| true);
@@ -122,6 +169,44 @@ pub fn trending_page() -> Html {
                         </div>
                     </details>
                 </div>
+                if *enable_scoring {
+                    <div class="feed-affinity-col">
+                        <label class="mb-1 block text-xs text-base-content/70">
+                            { "Per-page cutoff" }
+                        </label>
+                        <div class="join join-sm" role="group" aria-label="Cutoff preset">
+                            {
+                                [
+                                    ("Wide", 0.0f32),
+                                    ("Balanced", 30.0f32),
+                                    ("Strict", 60.0f32),
+                                ].iter().map(|(label, value)| {
+                                    let val = *value;
+                                    let active = (*cutoff_pct - val).abs() < 0.5;
+                                    let cutoff_pct = cutoff_pct.clone();
+                                    html! {
+                                        <button
+                                            type="button"
+                                            class={classes!("btn", "btn-outline", "btn-sm", if active { Some("btn-active") } else { None })}
+                                            aria-pressed={active.to_string()}
+                                            onclick={Callback::from(move |_| cutoff_pct.set(val))}
+                                        >
+                                            { *label }
+                                        </button>
+                                    }
+                                }).collect::<Html>()
+                            }
+                        </div>
+                    </div>
+                }
+                <div class="feed-grid-col">
+                    <span class="block text-xs text-base-content/70 mb-1">{ "Scoring" }</span>
+                    <label class="flex items-center gap-2 cursor-pointer">
+                        <input type="checkbox" class="toggle toggle-sm" checked={*enable_scoring}
+                            onchange={{let s=enable_scoring.clone(); Callback::from(move |_: Event| s.set(!*s))}} />
+                        <span class="text-sm">{ if *enable_scoring { "On" } else { "Off" } }</span>
+                    </label>
+                </div>
                 <div class="feed-grid-col">
                     <span class="block text-xs text-base-content/70 mb-1">{ "Grid" }</span>
                     <div class="join" role="group" aria-label="Grid type">
@@ -145,7 +230,8 @@ pub fn trending_page() -> Html {
                 <PostGrid
                     grid_class={(*grid).grid_class().to_string()}
                     fetch_url={fetch_url.clone()}
-                    scored=false
+                    scored={*enable_scoring}
+                    score_cutoff_pct={if *enable_scoring { Some(*cutoff_pct) } else { None }}
                     backend_url={backend_url.clone()}
                     account_id={selected_user.as_ref().map(|u| u.id as i32).unwrap_or_default()}
                     show_rating={show_rating}

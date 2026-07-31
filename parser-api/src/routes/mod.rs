@@ -29,6 +29,7 @@ pub fn integration_test_routes() -> Vec<rocket::Route> {
         feed::get_recommendations,
         digest::get_daily_digest,
         browse::get_trending,
+        browse::get_trending_scored,
         browse::get_favorites,
     ]
 }

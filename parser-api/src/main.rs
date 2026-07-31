@@ -368,6 +368,7 @@ async fn rocket() -> _ {
         routes::feed::get_similar_posts,
         routes::digest::get_daily_digest,
         routes::browse::get_trending,
+        routes::browse::get_trending_scored,
         routes::browse::get_favorites,
         routes::browse::search_posts,
         routes::browse::search_scored_posts,

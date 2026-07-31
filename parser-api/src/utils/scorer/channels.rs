@@ -681,6 +681,118 @@ impl<'a> ScoringContext<'a> {
         1.0 - sigmoid(avg_cooc / scale - min_cooc)
     }
 
+    /// Artist discovery channel: recommends posts from artists the user has
+    /// NOT yet engaged with, but whose non-artist tags match the user's
+    /// preference profile.
+    ///
+    /// Strategy:
+    /// 1. Check if the post has any artist tags the user hasn't seen.
+    /// 2. If at least one artist is unknown (not in `self.user[Artist]`),
+    ///    measure how well the post's non-artist tags match the user's taste
+    ///    profile via `tag_similarity` minus the artist contribution.
+    /// 3. The score is proportional to the profile similarity, boosted by
+    ///    `artist_discovery_novelty_bonus` for each new artist on the post.
+    /// 4. Confidence increases with the number of new artists on the post.
+    ///
+    /// Returns 0 when the post has no artist tags or all artists are known.
+    pub fn artist_discovery_fit(&self, post: &Post) -> f32 {
+        let p = &self.priors;
+        if p.mix_artist_discovery <= 0.0 {
+            return 0.0;
+        }
+
+        // Early exit: no artist tags → no discovery signal.
+        if post.tags.artist.is_empty() {
+            return 0.0;
+        }
+
+        // Determine how many artist tags are new (unknown to user).
+        let known_artists = &self.user[Group::Artist as usize];
+        let mut new_artist_count: u32 = 0;
+        for artist in &post.tags.artist {
+            if artist.is_empty() {
+                continue;
+            }
+            let tlc = normalize_tag(artist);
+            if !known_artists.contains_key(tlc.as_ref()) {
+                new_artist_count += 1;
+            }
+        }
+
+        // All artists known or none → nothing to discover.
+        if new_artist_count == 0 {
+            return 0.0;
+        }
+
+        // Compute tag_similarity excluding artist tags so we measure
+        // content affinity independent of the artist identity.
+        let lambda = p.idf_lambda;
+        let alpha = p.idf_alpha;
+        let lambda_meta = if p.idf_lambda_meta.is_nan() {
+            lambda
+        } else {
+            p.idf_lambda_meta
+        };
+        let df_floor = p.df_floor;
+        let idf_max = p.idf_max;
+        let rsj = p.idf_rsj_smoothing;
+
+        let mut dot = 0.0f32;
+        let mut p_norm_sq = 0.0f32;
+
+        for (group, tags) in [
+            (Group::Character, &post.tags.character),
+            (Group::Copyright, &post.tags.copyright),
+            (Group::General, &post.tags.general),
+            (Group::Lore, &post.tags.lore),
+            (Group::Meta, &post.tags.meta),
+            (Group::Species, &post.tags.species),
+        ] {
+            let g = self.group_wts[group as usize];
+            if g <= 0.0 {
+                continue;
+            }
+            let lam = if matches!(group, Group::Meta) {
+                lambda_meta
+            } else {
+                lambda
+            };
+            let user_map = &self.user[group as usize];
+            for t in tags {
+                if t.is_empty() {
+                    continue;
+                }
+                let tlc = normalize_tag(t);
+                if self.blacklisted_tags.contains(tlc.as_ref()) {
+                    continue;
+                }
+                let idf_w = self
+                    .idf
+                    .idf_tempered(&tlc, df_floor, idf_max, rsj, lam, alpha);
+                let pw = g * idf_w;
+                p_norm_sq += pw * pw;
+                if let Some(&uw) = user_map.get(tlc.as_ref()) {
+                    dot += uw * pw;
+                }
+            }
+        }
+
+        let profile_sim = if self.u_norm <= 0.0 || p_norm_sq <= 0.0 {
+            0.0
+        } else {
+            (dot / (self.u_norm * p_norm_sq.sqrt())).clamp(0.0, 1.0)
+        };
+
+        // Confidence from number of new artists.
+        let n0 = p.artist_discovery_n0.max(0.5);
+        let conf = (new_artist_count as f32) / (new_artist_count as f32 + n0);
+
+        // Novelty bonus: the more new artists, the more we boost.
+        let bonus = 1.0 + p.artist_discovery_novelty_bonus * (1.0 - conf);
+
+        (profile_sim * conf * bonus).clamp(0.0, 1.0)
+    }
+
     /// Tag novelty channel: posts containing tags the user has rarely or
     /// never seen get a boost. For each tag on the post, checks:
     ///
@@ -1047,6 +1159,9 @@ mod tests {
             diversity_semantic_max_tags: 10,
             diversity_user_pmi_weight: 1.0,
             exclusivity_cross_group_weight: 0.5,
+            mix_artist_discovery: 0.0,
+            artist_discovery_n0: 3.0,
+            artist_discovery_novelty_bonus: 0.2,
         }
     }
 
@@ -1870,6 +1985,144 @@ mod tests {
         assert!(
             close(score, 0.4911),
             "expected ~0.4911 with veto, got {score}"
+        );
+    }
+
+    // ==================================================================
+    //  artist_discovery_fit
+    // ==================================================================
+
+    #[test]
+    fn artist_discovery_fit_disabled_by_default() {
+        // mix_artist_discovery=0 → returns 0 regardless of post content.
+        setup!(ctx);
+        let mut tags = make_empty_tags();
+        tags.artist.push("unknown_artist".to_string());
+        let post = make_post(tags, 100, 10, Rating::S);
+        let score = ctx.artist_discovery_fit(&post);
+        assert!(close(score, 0.0), "expected 0.0 got {score}");
+    }
+
+    #[test]
+    fn artist_discovery_fit_returns_zero_for_known_artist() {
+        let mut priors = default_priors();
+        priors.mix_artist_discovery = 1.0;
+        let idf = build_idf();
+        let global_graph = build_global_graph();
+        let user_graph = build_user_graph();
+        let profile = default_profile();
+        let counts = default_tag_counts(); // includes "skeb" in artist counts
+        let ctx = ScoringContext::new(&counts, &priors, &idf, &profile, &global_graph, &user_graph);
+
+        // Post from a known artist ("skeb") with matching tags.
+        let mut tags = make_empty_tags();
+        tags.artist.push("skeb".to_string());
+        tags.character.push("cat".to_string());
+        let post = make_post(tags, 100, 10, Rating::S);
+        let score = ctx.artist_discovery_fit(&post);
+        assert!(
+            close(score, 0.0),
+            "expected 0.0 for known artist, got {score}"
+        );
+    }
+
+    #[test]
+    fn artist_discovery_fit_new_artist_with_matching_tags() {
+        let mut priors = default_priors();
+        priors.mix_artist_discovery = 1.0;
+        let idf = build_idf();
+        let global_graph = build_global_graph();
+        let user_graph = build_user_graph();
+        let profile = default_profile();
+        let counts = default_tag_counts(); // known: skeb, cat, dog, etc.
+        let ctx = ScoringContext::new(&counts, &priors, &idf, &profile, &global_graph, &user_graph);
+
+        // Post from an unknown artist, but with matching character/general tags.
+        let mut tags = make_empty_tags();
+        tags.artist.push("new_artist".to_string());
+        tags.character.push("cat".to_string()); // user likes cat
+        tags.general.push("furry".to_string()); // user has furry in counts
+        let post = make_post(tags, 100, 10, Rating::S);
+        let score = ctx.artist_discovery_fit(&post);
+        assert!(
+            score > 0.0,
+            "expected positive score for discovery, got {score}"
+        );
+        // With cat+furry matching, n0=3, 1 new artist → conf = 1/(1+3) = 0.25
+        // profile sim should be > 0, bonus = 1.0 + 0.2*(1-0.25) = 1.15
+        // Expected: ~0.25 * profile_sim * 1.15
+        assert!(
+            score > 0.0 && score < 1.0,
+            "expected 0 < score < 1, got {score}"
+        );
+    }
+
+    #[test]
+    fn artist_discovery_fit_new_artist_no_overlap_returns_low() {
+        let mut priors = default_priors();
+        priors.mix_artist_discovery = 1.0;
+        let idf = build_idf();
+        let global_graph = build_global_graph();
+        let user_graph = build_user_graph();
+        let profile = default_profile();
+        let counts = default_tag_counts();
+        let ctx = ScoringContext::new(&counts, &priors, &idf, &profile, &global_graph, &user_graph);
+
+        // Post from unknown artist with no tags matching user preferences.
+        let mut tags = make_empty_tags();
+        tags.artist.push("unknown".to_string());
+        tags.general.push("completely_new_tag".to_string());
+        let post = make_post(tags, 100, 10, Rating::S);
+        let score = ctx.artist_discovery_fit(&post);
+        // profile_sim should be 0 (no overlapping tags) → score = 0
+        assert!(
+            close(score, 0.0),
+            "expected 0.0 for no overlap, got {score}"
+        );
+    }
+
+    #[test]
+    fn artist_discovery_fit_empty_artist_tags() {
+        let mut priors = default_priors();
+        priors.mix_artist_discovery = 1.0;
+        let idf = build_idf();
+        let global_graph = build_global_graph();
+        let user_graph = build_user_graph();
+        let profile = default_profile();
+        let counts = default_tag_counts();
+        let ctx = ScoringContext::new(&counts, &priors, &idf, &profile, &global_graph, &user_graph);
+
+        // Post with no artist tags → no discovery signal.
+        let tags = make_empty_tags();
+        let post = make_post(tags, 100, 10, Rating::S);
+        let score = ctx.artist_discovery_fit(&post);
+        assert!(close(score, 0.0), "expected 0.0 for no artist, got {score}");
+    }
+
+    #[test]
+    fn artist_discovery_fit_multiple_new_artists_gets_boost() {
+        let mut priors = default_priors();
+        priors.mix_artist_discovery = 1.0;
+        priors.artist_discovery_n0 = 1.0; // lower N0 so confidence grows faster
+        let idf = build_idf();
+        let global_graph = build_global_graph();
+        let user_graph = build_user_graph();
+        let profile = default_profile();
+        let counts = default_tag_counts();
+        let ctx = ScoringContext::new(&counts, &priors, &idf, &profile, &global_graph, &user_graph);
+
+        // Two new artists with matching tags.
+        let mut tags = make_empty_tags();
+        tags.artist.push("new_artist_a".to_string());
+        tags.artist.push("new_artist_b".to_string());
+        tags.character.push("cat".to_string());
+        let post = make_post(tags, 100, 10, Rating::S);
+        let score = ctx.artist_discovery_fit(&post);
+        // conf = 2/(2+1) = 0.667, bonus = 1.0 + 0.2*(1-0.667) = 1.067
+        // Should be higher than single new artist case
+        assert!(
+            score > 0.0,
+            "expected positive score for 2 new artists, got {score}"
         );
     }
 
