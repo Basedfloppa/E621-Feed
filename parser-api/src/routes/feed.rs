@@ -85,8 +85,22 @@ pub(crate) async fn log_feed_interaction(
         .field("post_id", post_id)
         .field("event", &event_str)
         .emit();
+    // Resolve the A/B bucket the same way the DB layer does, so the metric
+    // arm matches the one the user actually saw.
+    let bucket = e621_account_parser_api::models::cfg()
+        .pick_bucket(account_id, None)
+        .0
+        .unwrap_or_else(|| "none".to_string());
     e621_account_parser_api::metrics::METRICS
         .feed_interactions_total
+        .with_label_values(&[&bucket, &event_str])
+        .inc();
+    e621_account_parser_api::metrics::METRICS
+        .experiment_bucket_interactions_total
+        .with_label_values(&[&bucket])
+        .inc();
+    e621_account_parser_api::metrics::METRICS
+        .feed_interactions_by_type_total
         .with_label_values(&[&event_str])
         .inc();
     Ok(())

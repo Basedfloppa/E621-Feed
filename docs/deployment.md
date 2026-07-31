@@ -155,7 +155,10 @@ No external dependencies — uses the pure-Rust `prometheus` crate.
 | `e621_digest_views_total` | Counter | `account_id` | Daily digest views (cache hit + fresh) |
 | `e621_browse_views_total` | Counter | `source` (`trending` / `favorites`) | Browse page views |
 | `e621_process_runs_total` | Counter | `status` (`started` / `success` / `failed`) | /process pipeline runs |
-| `e621_feed_interactions_total` | Counter | `type` (`open` / `hide` / `impression`) | Per-post feed interactions |
+| `e621_feed_interactions_total` | Counter | `bucket`, `type` (`qualified_impression` / `open` / `like` / `strong_like` / `hide`) | Per-post feed interactions, split by A/B arm |
+| `e621_feed_interactions_by_type_total` | Counter | `type` | Per-post feed interactions by type (legacy, no bucket split) |
+| `e621_experiment_bucket_accounts` | Gauge | `bucket` (`control` / `exploration` / …) | Current number of accounts per A/B arm |
+| `e621_experiment_bucket_interactions_total` | Counter | `bucket` | Total feed interactions per A/B arm since server start |
 
 ### Quick check
 
@@ -218,7 +221,44 @@ The dashboard includes panels for:
 | Process Success Rate + Runs | Gauge + Time series | `e621_process_runs_total` |
 | Catalog Growth | Time series | `e621_catalog_posts_total` |
 | Feed Interactions | Time series (stacked) | `e621_feed_interactions_total` by type |
+| A/B — Accounts per Bucket | Stat | `e621_experiment_bucket_accounts` |
+| A/B — Interactions per Bucket (24h) | Stat | `e621_experiment_bucket_interactions_total` |
+| A/B — Engagement Rate | Time series | `e621_feed_interactions_total` (positive / impression, by bucket) |
+| A/B — Hide Rate | Time series | `e621_feed_interactions_total` (hide / impression, by bucket) |
+| A/B — Interactions by Type & Bucket | Time series (stacked) | `e621_feed_interactions_total` by bucket + type |
 | Top-10 Accounts per Feature | Bar gauges | Per-account aggregation |
+
+### A/B experiment tracking
+
+Accounts are deterministically assigned to an experiment arm (bucket) by
+hashing their account id against the configured `[buckets.*]` tables in
+`config.toml` (e.g. `control` with the default priors, `exploration` with
+altered mix weights). The assignment is stable per account, visible on the
+`/settings` page, and every recorded feed interaction is tagged with the
+arm the user actually saw.
+
+To compare which arm produces a *better* feed, build PromQL ratios per
+bucket. **Engagement rate** (positive actions per impression — higher is
+better):
+
+```promql
+sum(rate(e621_feed_interactions_total{type=~"open|like|strong_like"}[5m])) by (bucket)
+/
+clamp_min(sum(rate(e621_feed_interactions_total{type="qualified_impression"}[5m])) by (bucket), 0.001)
+```
+
+**Hide rate** (misses per impression — lower is better):
+
+```promql
+sum(rate(e621_feed_interactions_total{type="hide"}[5m])) by (bucket)
+/
+clamp_min(sum(rate(e621_feed_interactions_total{type="qualified_impression"}[5m])) by (bucket), 0.001)
+```
+
+Wait until both arms have accumulated enough interactions (at least a few
+hundred impressions each) before concluding one arm wins — small samples
+are noisy. `e621_experiment_bucket_interactions_total` and
+`e621_experiment_bucket_accounts` show how much data each arm has.
 
 Create a new dashboard in Grafana using the `e621-feed` Prometheus data
 source. Useful panels:

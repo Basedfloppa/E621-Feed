@@ -21,14 +21,6 @@ impl FavGrid {
             _ => Self::Auto,
         }
     }
-    fn to_storage(self) -> &'static str {
-        match self {
-            Self::Auto => "auto",
-            Self::Three => "3",
-            Self::Two => "2",
-            Self::One => "1",
-        }
-    }
     fn grid_class(self) -> &'static str {
         match self {
             Self::Auto => {
@@ -41,27 +33,34 @@ impl FavGrid {
     }
 }
 
+/// Read a display setting from unified settings_show_* key, falling back
+/// to an old per-page key for backward compatibility.
+pub fn read_display_setting(suffix: &str, old: &str, default: bool) -> bool {
+    let new_key = format!("settings_show_{}", suffix);
+    let storage = || web_sys::window().and_then(|w| w.local_storage().ok().flatten());
+    storage()
+        .and_then(|s| s.get_item(&new_key).ok().flatten())
+        .or_else(|| storage().and_then(|s| s.get_item(old).ok().flatten()))
+        .and_then(|v| v.parse::<bool>().ok())
+        .unwrap_or(default)
+}
+
 /// Favorites page — shows the selected user's favourited posts from e621.
 #[function_component(FavoritesPage)]
 pub fn favorites_page() -> Html {
+    let _settings_tick = use_settings_tick();
     let selected_user = use_state(|| Option::<UserInfo>::None);
     let is_loading = use_state(|| false);
-    let grid = use_state(|| {
+    let grid = {
+        let storage = || web_sys::window().and_then(|w| w.local_storage().ok().flatten());
         FavGrid::from_storage(
-            web_sys::window()
-                .and_then(|w| w.local_storage().ok().flatten())
-                .and_then(|s| s.get_item("favorites_grid_type").ok().flatten()),
+            storage()
+                .and_then(|s| s.get_item("settings_grid_type").ok().flatten())
+                .or_else(|| {
+                    storage().and_then(|s| s.get_item("favorites_grid_type").ok().flatten())
+                }),
         )
-    });
-    {
-        let g = *grid;
-        use_effect_with(g, move |g| {
-            if let Some(s) = web_sys::window().and_then(|w| w.local_storage().ok().flatten()) {
-                let _ = s.set_item("favorites_grid_type", g.to_storage());
-            }
-            || ()
-        });
-    }
+    };
     // Compute fetch URL and card context from the same backend configuration.
     let backend_url = read_config_from_head()
         .map(|cfg| cfg.backend_domain)
@@ -72,14 +71,18 @@ pub fn favorites_page() -> Html {
         .unwrap_or_default();
 
     // Display settings
-    let show_rating = use_state(|| true);
-    let show_affinity = use_state(|| false);
-    let show_score = use_state(|| true);
-    let show_post_number = use_state(|| true);
-    let show_desc = use_state(|| true);
-    let show_metadata = use_state(|| false);
-    let show_breakdown = use_state(|| false);
-    let show_detailed_breakdown = use_state(|| false);
+    let show_rating = read_display_setting("rating", "favorites_show_rating", true);
+    let show_affinity = read_display_setting("affinity", "favorites_show_affinity", false);
+    let show_score = read_display_setting("score", "favorites_show_score", true);
+    let show_post_number = read_display_setting("post_number", "favorites_show_post_number", true);
+    let show_desc = read_display_setting("desc", "favorites_show_desc", true);
+    let show_metadata = read_display_setting("metadata", "favorites_show_metadata", false);
+    let show_breakdown = read_display_setting("breakdown", "favorites_show_breakdown", false);
+    let show_detailed_breakdown = read_display_setting(
+        "show_detailed_breakdown",
+        "favorites_show_detailed_breakdown",
+        false,
+    );
 
     html! {
         <div class="m-4 gap-2">
@@ -91,59 +94,11 @@ pub fn favorites_page() -> Html {
                         is_loading={is_loading.clone()}
                     />
                 </div>
-                <div>
-                    <details class="dropdown dropdown-end">
-                        <summary class="btn btn-outline"><IconSliders />{ " Display" }</summary>
-                        <div class="menu dropdown-content p-3 shadow bg-base-100 rounded-box w-72 z-50" style="min-width:260px;">
-                            <span class="text-xs text-base-content/70 block mb-1">{ "Badges" }</span>
-                            <label class="label cursor-pointer py-1"><span class="text-base-content">{"Rating badge"}</span>
-                                <input type="checkbox" class="toggle toggle-sm" checked={*show_rating}
-                                    onchange={{let s=show_rating.clone(); Callback::from(move |_: Event| s.set(!*s))}} /></label>
-                            <label class="label cursor-pointer py-1"><span class="text-base-content">{"Affinity score"}</span>
-                                <input type="checkbox" class="toggle toggle-sm" checked={*show_affinity}
-                                    onchange={{let s=show_affinity.clone(); Callback::from(move |_: Event| s.set(!*s))}} /></label>
-                            <label class="label cursor-pointer py-1"><span class="text-base-content">{"Post score"}</span>
-                                <input type="checkbox" class="toggle toggle-sm" checked={*show_score}
-                                    onchange={{let s=show_score.clone(); Callback::from(move |_: Event| s.set(!*s))}} /></label>
-                            <label class="label cursor-pointer py-1"><span class="text-base-content">{"Post number"}</span>
-                                <input type="checkbox" class="toggle toggle-sm" checked={*show_post_number}
-                                    onchange={{let s=show_post_number.clone(); Callback::from(move |_: Event| s.set(!*s))}} /></label>
-                            <div class="divider my-1"></div>
-                            <span class="text-xs text-base-content/70 block mb-1">{ "Cards" }</span>
-                            <label class="label cursor-pointer py-1"><span class="text-base-content">{"Post text / tags"}</span>
-                                <input type="checkbox" class="toggle toggle-sm" checked={*show_desc}
-                                    onchange={{let s=show_desc.clone(); Callback::from(move |_: Event| s.set(!*s))}} /></label>
-                            <label class="label cursor-pointer py-1"><span class="text-base-content">{"File metadata"}</span>
-                                <input type="checkbox" class="toggle toggle-sm" checked={*show_metadata}
-                                    onchange={{let s=show_metadata.clone(); Callback::from(move |_: Event| s.set(!*s))}} /></label>
-                            <label class="label cursor-pointer py-1"><span class="text-base-content">{"Score breakdown"}</span>
-                                <input type="checkbox" class="toggle toggle-sm" checked={*show_breakdown}
-                                    onchange={{let s=show_breakdown.clone(); Callback::from(move |_: Event| s.set(!*s))}} /></label>
-                        </div>
-                    </details>
-                </div>
-                <div class="feed-grid-col">
-                    <span class="block text-xs text-base-content/70 mb-1">{ "Grid" }</span>
-                    <div class="join" role="group" aria-label="Grid type">
-                        <button type="button" class={classes!("btn", "btn-outline", "btn-sm", if *grid == FavGrid::Auto { "btn-active" } else { "" })}
-                            aria-label="Auto grid" title="Auto grid"
-                            onclick={{let g=grid.clone(); Callback::from(move |_| g.set(FavGrid::Auto))}}><IconWater /></button>
-                        <button type="button" class={classes!("btn", "btn-outline", "btn-sm", if *grid == FavGrid::Three { "btn-active" } else { "" })}
-                            aria-label="Three columns" title="Three columns"
-                            onclick={{let g=grid.clone(); Callback::from(move |_| g.set(FavGrid::Three))}}><IconGrid3x3 /></button>
-                        <button type="button" class={classes!("btn", "btn-outline", "btn-sm", if *grid == FavGrid::Two { "btn-active" } else { "" })}
-                            aria-label="Two columns" title="Two columns"
-                            onclick={{let g=grid.clone(); Callback::from(move |_| g.set(FavGrid::Two))}}><IconGridFill /></button>
-                        <button type="button" class={classes!("btn", "btn-outline", "btn-sm", if *grid == FavGrid::One { "btn-active" } else { "" })}
-                            aria-label="Single column" title="Single column"
-                            onclick={{let g=grid.clone(); Callback::from(move |_| g.set(FavGrid::One))}}><IconSquareFill /></button>
-                    </div>
-                </div>
             </div>
 
             if selected_user.is_some() && !fetch_url.is_empty() {
                 <PostGrid
-                    grid_class={(*grid).grid_class().to_string()}
+                    grid_class={grid.grid_class().to_string()}
                     fetch_url={fetch_url.clone()}
                     scored=false
                     backend_url={backend_url.clone()}

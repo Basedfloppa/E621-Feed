@@ -97,11 +97,12 @@ fn spawn_browse_persist(
 /// Proxy a user-supplied e621 tag query through the server. The browser never
 /// contacts e621 directly, and the selected account's blacklist still applies.
 #[openapi(tag = "Browse")]
-#[get("/browse/search/<account_id>?<query>&<page>")]
+#[get("/browse/search/<account_id>?<query>&<page>&<limit>")]
 pub(crate) async fn search_posts(
     account_id: i32,
     query: &str,
     page: Option<i32>,
+    limit: Option<i32>,
     owner: OwnerToken,
 ) -> Result<Json<Vec<Post>>, ApiError> {
     validation::validate_account_id(account_id)?;
@@ -115,7 +116,7 @@ pub(crate) async fn search_posts(
     let account =
         db_blocking(move || get_account_by_id(&owner_token, account_id).map_err(|e| e.to_string()))
             .await?;
-    let posts = api::get_posts_by_tags(&account.blacklist, query, page)
+    let posts = api::get_posts_by_tags(&account.blacklist, query, page, limit)
         .await
         .map_err(ApiError::Internal)?;
     spawn_browse_persist(posts.clone(), "search", account_id, false);
@@ -124,11 +125,12 @@ pub(crate) async fn search_posts(
 
 /// Search and score the resulting posts against the selected account's profile.
 #[openapi(tag = "Browse")]
-#[get("/browse/search_scored/<account_id>?<query>&<page>")]
+#[get("/browse/search_scored/<account_id>?<query>&<page>&<limit>")]
 pub(crate) async fn search_scored_posts(
     account_id: i32,
     query: &str,
     page: Option<i32>,
+    limit: Option<i32>,
     owner: OwnerToken,
 ) -> Result<Json<Vec<ScoredPost>>, ApiError> {
     validation::validate_account_id(account_id)?;
@@ -153,7 +155,7 @@ pub(crate) async fn search_scored_posts(
             .map_err(|e| e.to_string())
     })
     .await?;
-    let posts = api::get_posts_by_tags(&account.blacklist, query, page)
+    let posts = api::get_posts_by_tags(&account.blacklist, query, page, limit)
         .await
         .map_err(ApiError::Internal)?;
     spawn_browse_persist(posts.clone(), "search", account_id, false);
@@ -228,7 +230,7 @@ pub(crate) async fn get_trending_scored(
     .await?;
 
     // Fetch trending posts from e621.
-    let posts = api::get_posts_by_tags(&account.blacklist, "order:hot", page)
+    let posts = api::get_posts_by_tags(&account.blacklist, "order:hot", page, None)
         .await
         .map_err(ApiError::Internal)?;
 
@@ -311,7 +313,7 @@ pub(crate) async fn get_trending(
 
     let blacklist_tags = &account.blacklist;
 
-    let posts = api::get_posts_by_tags(blacklist_tags, "order:hot", page)
+    let posts = api::get_posts_by_tags(blacklist_tags, "order:hot", page, None)
         .await
         .map_err(ApiError::Internal)?;
 
@@ -342,7 +344,7 @@ pub(crate) async fn get_favorites(
     let blacklist_tags = &account.blacklist;
     let query = format!("fav:{}", account.name);
 
-    let posts = api::get_posts_by_tags(blacklist_tags, &query, page)
+    let posts = api::get_posts_by_tags(blacklist_tags, &query, page, None)
         .await
         .map_err(ApiError::Internal)?;
 

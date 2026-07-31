@@ -132,7 +132,7 @@ async fn run_prefetch_tick(
         }
 
         for q in &queries {
-            match api::get_posts_by_tags(&target.blacklist, q, Some(1)).await {
+            match api::get_posts_by_tags(&target.blacklist, q, Some(1), None).await {
                 Ok(posts) if !posts.is_empty() => {
                     // Successful fetch — reset the breaker.
                     PREFETCH_CONSECUTIVE_FAILS.store(0, Ordering::Relaxed);

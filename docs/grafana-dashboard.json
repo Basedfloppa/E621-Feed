@@ -1,9 +1,9 @@
 {
   "__inputs": [],
   "__requires": [],
-  "title": "E621 Feed — Usage Analytics",
-  "description": "Usage metrics for E621 Feed: active users, feature popularity, process health, catalog growth. Source: e621-feed /api/metrics",
-  "tags": ["e621-feed", "prometheus"],
+  "title": "E621 Feed \u2014 Usage Analytics",
+  "description": "Usage metrics for E621 Feed: active users, feature popularity, process health, catalog growth, and A/B experiment comparison (control vs exploration). Source: e621-feed /api/metrics",
+  "tags": ["e621-feed", "prometheus", "ab-testing"],
   "timezone": "browser",
   "editable": true,
   "refresh": "30s",
@@ -12,7 +12,12 @@
       "title": "Daily Active Users (DAU)",
       "description": "Unique accounts that viewed feed, digest, or browse in the last 24h",
       "type": "stat",
-      "gridPos": { "h": 6, "w": 4, "x": 0, "y": 0 },
+      "gridPos": {
+        "h": 6,
+        "w": 4,
+        "x": 0,
+        "y": 0
+      },
       "targets": [
         {
           "expr": "count(sum by(account_id)(rate(e621_feed_views_total[24h]) or rate(e621_digest_views_total[24h]) or rate(e621_browse_views_total[24h])) > 0)",
@@ -21,8 +26,25 @@
       ],
       "fieldConfig": {
         "defaults": {
-          "color": { "mode": "thresholds" },
-          "thresholds": { "steps": [ { "color": "red", "value": 0 }, { "color": "yellow", "value": 1 }, { "color": "green", "value": 5 } ] },
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "steps": [
+              {
+                "color": "red",
+                "value": 0
+              },
+              {
+                "color": "yellow",
+                "value": 1
+              },
+              {
+                "color": "green",
+                "value": 5
+              }
+            ]
+          },
           "unit": "none"
         }
       }
@@ -30,40 +52,108 @@
     {
       "title": "Total Accounts",
       "type": "stat",
-      "gridPos": { "h": 6, "w": 4, "x": 4, "y": 0 },
+      "gridPos": {
+        "h": 6,
+        "w": 4,
+        "x": 4,
+        "y": 0
+      },
       "targets": [
-        { "expr": "e621_accounts_total", "legendFormat": "Accounts" }
+        {
+          "expr": "e621_accounts_total",
+          "legendFormat": "Accounts"
+        }
       ],
       "fieldConfig": {
-        "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "steps": [ { "color": "purple", "value": 0 } ] }, "unit": "none" }
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "steps": [
+              {
+                "color": "purple",
+                "value": 0
+              }
+            ]
+          },
+          "unit": "none"
+        }
       }
     },
     {
       "title": "Accounts Created (24h)",
       "type": "stat",
-      "gridPos": { "h": 6, "w": 4, "x": 8, "y": 0 },
+      "gridPos": {
+        "h": 6,
+        "w": 4,
+        "x": 8,
+        "y": 0
+      },
       "targets": [
-        { "expr": "sum(rate(e621_accounts_created_total[24h]))", "legendFormat": "Created" }
+        {
+          "expr": "sum(rate(e621_accounts_created_total[24h]))",
+          "legendFormat": "Created"
+        }
       ],
       "fieldConfig": {
-        "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "steps": [ { "color": "green", "value": 0 } ] }, "unit": "none" }
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              }
+            ]
+          },
+          "unit": "none"
+        }
       }
     },
     {
       "title": "Total Posts in Catalog",
       "type": "stat",
-      "gridPos": { "h": 6, "w": 4, "x": 12, "y": 0 },
+      "gridPos": {
+        "h": 6,
+        "w": 4,
+        "x": 12,
+        "y": 0
+      },
       "targets": [
-        { "expr": "e621_catalog_posts_total", "legendFormat": "Posts" }
+        {
+          "expr": "e621_catalog_posts_total",
+          "legendFormat": "Posts"
+        }
       ],
       "fieldConfig": {
-        "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "steps": [ { "color": "blue", "value": 0 } ] }, "unit": "none" }
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "steps": [
+              {
+                "color": "blue",
+                "value": 0
+              }
+            ]
+          },
+          "unit": "none"
+        }
       }
     },
     {
       "title": "Active Users (7d)",
       "type": "stat",
-      "gridPos": { "h": 6, "w": 4, "x": 16, "y": 0 },
+      "gridPos": {
+        "h": 6,
+        "w": 4,
+        "x": 16,
+        "y": 0
+      },
       "targets": [
         {
           "expr": "count(sum by(account_id)(rate(e621_feed_views_total[7d]) or rate(e621_digest_views_total[7d]) or rate(e621_browse_views_total[7d])) > 0)",
@@ -71,13 +161,39 @@
         }
       ],
       "fieldConfig": {
-        "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "steps": [ { "color": "red", "value": 0 }, { "color": "yellow", "value": 1 }, { "color": "green", "value": 10 } ] }, "unit": "none" }
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "steps": [
+              {
+                "color": "red",
+                "value": 0
+              },
+              {
+                "color": "yellow",
+                "value": 1
+              },
+              {
+                "color": "green",
+                "value": 10
+              }
+            ]
+          },
+          "unit": "none"
+        }
       }
     },
     {
       "title": "Active Users (30d)",
       "type": "stat",
-      "gridPos": { "h": 6, "w": 4, "x": 20, "y": 0 },
+      "gridPos": {
+        "h": 6,
+        "w": 4,
+        "x": 20,
+        "y": 0
+      },
       "targets": [
         {
           "expr": "count(sum by(account_id)(rate(e621_feed_views_total[30d]) or rate(e621_digest_views_total[30d]) or rate(e621_browse_views_total[30d])) > 0)",
@@ -85,23 +201,64 @@
         }
       ],
       "fieldConfig": {
-        "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "steps": [ { "color": "red", "value": 0 }, { "color": "yellow", "value": 5 }, { "color": "green", "value": 15 } ] }, "unit": "none" }
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "steps": [
+              {
+                "color": "red",
+                "value": 0
+              },
+              {
+                "color": "yellow",
+                "value": 5
+              },
+              {
+                "color": "green",
+                "value": 15
+              }
+            ]
+          },
+          "unit": "none"
+        }
       }
     },
-
     {
-      "title": "Feature Usage — Last 7 Days",
+      "title": "Feature Usage \u2014 Last 7 Days",
       "description": "Requests per page type, rate per hour",
       "type": "timeseries",
-      "gridPos": { "h": 10, "w": 12, "x": 0, "y": 6 },
+      "gridPos": {
+        "h": 10,
+        "w": 12,
+        "x": 0,
+        "y": 6
+      },
       "targets": [
-        { "expr": "sum(rate(e621_feed_views_total[5m]))", "legendFormat": "Feed" },
-        { "expr": "sum(rate(e621_digest_views_total[5m]))", "legendFormat": "Digest" },
-        { "expr": "sum(rate(e621_browse_views_total[5m]))", "legendFormat": "Browse" }
+        {
+          "expr": "sum(rate(e621_feed_views_total[5m]))",
+          "legendFormat": "Feed"
+        },
+        {
+          "expr": "sum(rate(e621_digest_views_total[5m]))",
+          "legendFormat": "Digest"
+        },
+        {
+          "expr": "sum(rate(e621_browse_views_total[5m]))",
+          "legendFormat": "Browse"
+        }
       ],
       "fieldConfig": {
         "defaults": {
-          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 15, "stacking": { "mode": "none" } },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 15,
+            "stacking": {
+              "mode": "none"
+            }
+          },
           "unit": "req/s"
         }
       }
@@ -109,24 +266,43 @@
     {
       "title": "Browse Breakdown (trending vs favorites)",
       "type": "timeseries",
-      "gridPos": { "h": 10, "w": 12, "x": 12, "y": 6 },
+      "gridPos": {
+        "h": 10,
+        "w": 12,
+        "x": 12,
+        "y": 6
+      },
       "targets": [
-        { "expr": "sum(rate(e621_browse_views_total{source=\"trending\"}[5m]))", "legendFormat": "Trending" },
-        { "expr": "sum(rate(e621_browse_views_total{source=\"favorites\"}[5m]))", "legendFormat": "Favorites" }
+        {
+          "expr": "sum(rate(e621_browse_views_total{source=\"trending\"}[5m]))",
+          "legendFormat": "Trending"
+        },
+        {
+          "expr": "sum(rate(e621_browse_views_total{source=\"favorites\"}[5m]))",
+          "legendFormat": "Favorites"
+        }
       ],
       "fieldConfig": {
         "defaults": {
-          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 15 },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 15
+          },
           "unit": "req/s"
         }
       }
     },
-
     {
-      "title": "/process Pipeline — Success Rate (7d)",
+      "title": "/process Pipeline \u2014 Success Rate (7d)",
       "description": "Ratio of successful runs to total started",
       "type": "gauge",
-      "gridPos": { "h": 8, "w": 6, "x": 0, "y": 16 },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 0,
+        "y": 16
+      },
       "targets": [
         {
           "expr": "sum(rate(e621_process_runs_total{status=\"success\"}[7d])) / (sum(rate(e621_process_runs_total{status=\"started\"}[7d])) or vector(1)) * 100",
@@ -138,22 +314,59 @@
           "unit": "percent",
           "min": 0,
           "max": 100,
-          "thresholds": { "steps": [ { "color": "red", "value": 0 }, { "color": "orange", "value": 50 }, { "color": "yellow", "value": 80 }, { "color": "green", "value": 95 } ] }
+          "thresholds": {
+            "steps": [
+              {
+                "color": "red",
+                "value": 0
+              },
+              {
+                "color": "orange",
+                "value": 50
+              },
+              {
+                "color": "yellow",
+                "value": 80
+              },
+              {
+                "color": "green",
+                "value": 95
+              }
+            ]
+          }
         }
       }
     },
     {
       "title": "/process Pipeline Runs (24h)",
       "type": "timeseries",
-      "gridPos": { "h": 8, "w": 6, "x": 6, "y": 16 },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 6,
+        "y": 16
+      },
       "targets": [
-        { "expr": "sum(rate(e621_process_runs_total{status=\"started\"}[5m]))", "legendFormat": "Started" },
-        { "expr": "sum(rate(e621_process_runs_total{status=\"success\"}[5m]))", "legendFormat": "Success" },
-        { "expr": "sum(rate(e621_process_runs_total{status=\"failed\"}[5m]))", "legendFormat": "Failed" }
+        {
+          "expr": "sum(rate(e621_process_runs_total{status=\"started\"}[5m]))",
+          "legendFormat": "Started"
+        },
+        {
+          "expr": "sum(rate(e621_process_runs_total{status=\"success\"}[5m]))",
+          "legendFormat": "Success"
+        },
+        {
+          "expr": "sum(rate(e621_process_runs_total{status=\"failed\"}[5m]))",
+          "legendFormat": "Failed"
+        }
       ],
       "fieldConfig": {
         "defaults": {
-          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 10 },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10
+          },
           "unit": "req/s"
         }
       }
@@ -162,33 +375,68 @@
       "title": "Catalog Growth",
       "type": "timeseries",
       "description": "Total posts in the local catalog over time",
-      "gridPos": { "h": 8, "w": 6, "x": 12, "y": 16 },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 12,
+        "y": 16
+      },
       "targets": [
-        { "expr": "e621_catalog_posts_total", "legendFormat": "Catalog size" }
+        {
+          "expr": "e621_catalog_posts_total",
+          "legendFormat": "Catalog size"
+        }
       ],
       "fieldConfig": {
-        "defaults": { "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 20 }, "unit": "none" }
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 20
+          },
+          "unit": "none"
+        }
       }
     },
     {
       "title": "Feed Interactions (24h)",
       "type": "timeseries",
-      "gridPos": { "h": 8, "w": 6, "x": 18, "y": 16 },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 18,
+        "y": 16
+      },
       "targets": [
-        { "expr": "sum(rate(e621_feed_interactions_total[5m])) by (type)", "legendFormat": "{{ type }}" }
+        {
+          "expr": "sum(rate(e621_feed_interactions_total[5m])) by (type)",
+          "legendFormat": "{{ type }}"
+        }
       ],
       "fieldConfig": {
         "defaults": {
-          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 10, "stacking": { "mode": "normal" } },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "stacking": {
+              "mode": "normal"
+            }
+          },
           "unit": "req/s"
         }
-      }
+      },
+      "description": "Feed interaction rate by event type (all buckets combined)"
     },
-
     {
       "title": "Top Accounts by Feed Views (24h)",
       "type": "bargauge",
-      "gridPos": { "h": 9, "w": 8, "x": 0, "y": 24 },
+      "gridPos": {
+        "h": 9,
+        "w": 8,
+        "x": 0,
+        "y": 24
+      },
       "targets": [
         {
           "expr": "topk(10, sum by(account_id)(rate(e621_feed_views_total[24h])))",
@@ -198,14 +446,26 @@
       "fieldConfig": {
         "defaults": {
           "unit": "none",
-          "thresholds": { "steps": [ { "color": "blue", "value": 0 } ] }
+          "thresholds": {
+            "steps": [
+              {
+                "color": "blue",
+                "value": 0
+              }
+            ]
+          }
         }
       }
     },
     {
       "title": "Top Accounts by Digest Views (24h)",
       "type": "bargauge",
-      "gridPos": { "h": 9, "w": 8, "x": 8, "y": 24 },
+      "gridPos": {
+        "h": 9,
+        "w": 8,
+        "x": 8,
+        "y": 24
+      },
       "targets": [
         {
           "expr": "topk(10, sum by(account_id)(rate(e621_digest_views_total[24h])))",
@@ -215,14 +475,26 @@
       "fieldConfig": {
         "defaults": {
           "unit": "none",
-          "thresholds": { "steps": [ { "color": "green", "value": 0 } ] }
+          "thresholds": {
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              }
+            ]
+          }
         }
       }
     },
     {
       "title": "Top Accounts by Browse Views (24h)",
       "type": "bargauge",
-      "gridPos": { "h": 9, "w": 8, "x": 16, "y": 24 },
+      "gridPos": {
+        "h": 9,
+        "w": 8,
+        "x": 16,
+        "y": 24
+      },
       "targets": [
         {
           "expr": "topk(10, sum by(account_id)(rate(e621_browse_views_total[24h])))",
@@ -232,11 +504,154 @@
       "fieldConfig": {
         "defaults": {
           "unit": "none",
-          "thresholds": { "steps": [ { "color": "purple", "value": 0 } ] }
+          "thresholds": {
+            "steps": [
+              {
+                "color": "purple",
+                "value": 0
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "title": "A/B \u2014 Accounts per Bucket",
+      "description": "Current account count in each experiment arm (gauge from accounts table)",
+      "type": "stat",
+      "gridPos": {
+        "h": 5,
+        "w": 4,
+        "x": 0,
+        "y": 33
+      },
+      "targets": [
+        {
+          "expr": "e621_experiment_bucket_accounts",
+          "legendFormat": "{{ bucket }}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "unit": "none"
+        }
+      }
+    },
+    {
+      "title": "A/B \u2014 Interactions per Bucket (24h)",
+      "description": "Feed interactions per arm (24h window)",
+      "type": "stat",
+      "gridPos": {
+        "h": 5,
+        "w": 4,
+        "x": 4,
+        "y": 33
+      },
+      "targets": [
+        {
+          "expr": "increase(e621_experiment_bucket_interactions_total[24h])",
+          "legendFormat": "{{ bucket }}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "unit": "none"
+        }
+      }
+    },
+    {
+      "title": "A/B \u2014 Engagement Rate",
+      "description": "Positive actions (open/like/strong_like) per impression per arm. Higher = better recommendations.",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 5,
+        "w": 16,
+        "x": 8,
+        "y": 33
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(e621_feed_interactions_total{type=~\"open|like|strong_like\"}[5m])) by (bucket) / clamp_min(sum(rate(e621_feed_interactions_total{type=\"qualified_impression\"}[5m])) by (bucket), 0.001)",
+          "legendFormat": "{{ bucket }}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 15
+          },
+          "unit": "short",
+          "min": 0
+        }
+      }
+    },
+    {
+      "title": "A/B \u2014 Hide Rate",
+      "description": "Hides per impression per arm. Lower = fewer misses.",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 10,
+        "w": 12,
+        "x": 0,
+        "y": 38
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(e621_feed_interactions_total{type=\"hide\"}[5m])) by (bucket) / clamp_min(sum(rate(e621_feed_interactions_total{type=\"qualified_impression\"}[5m])) by (bucket), 0.001)",
+          "legendFormat": "{{ bucket }}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 15
+          },
+          "unit": "short",
+          "min": 0
+        }
+      }
+    },
+    {
+      "title": "A/B \u2014 Interactions by Type & Bucket",
+      "description": "Raw interaction rates split by arm and event type",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 10,
+        "w": 12,
+        "x": 12,
+        "y": 38
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(e621_feed_interactions_total[5m])) by (bucket, type)",
+          "legendFormat": "{{ bucket }} / {{ type }}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "stacking": {
+              "mode": "normal"
+            }
+          },
+          "unit": "req/s"
         }
       }
     }
   ],
   "schemaVersion": 39,
-  "version": 1
+  "version": 2
 }

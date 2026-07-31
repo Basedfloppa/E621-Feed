@@ -97,6 +97,33 @@ pub struct PreferredTagPayload {
     pub preferred_tags: Vec<PreferredTag>,
 }
 
+/// Consolidated feed/recommendation settings for an account.
+/// Returned by `GET /account/<id>/feed_settings`.
+#[derive(Debug, Serialize, Deserialize, Clone, JsonSchema)]
+#[serde(crate = "rocket::serde")]
+pub struct AccountFeedSettings {
+    /// The effective blacklist text (device-specific with global fallback).
+    #[serde(default)]
+    pub blacklist: Option<String>,
+    /// Per-account preferred tags for scoring.
+    #[serde(default)]
+    pub preferred_tags: Vec<PreferredTag>,
+    /// A/B experiment bucket assignment (read-only after creation).
+    pub experiment_bucket: Option<String>,
+}
+
+/// Partial update payload for `PATCH /account/<id>/feed_settings`.
+/// Every field is optional — only present fields are updated.
+#[derive(Debug, Deserialize, Clone, JsonSchema)]
+#[serde(crate = "rocket::serde")]
+pub struct AccountFeedSettingsPatch {
+    /// Replace the device-scoped blacklist. `None` = no change;
+    /// `Some("")` = reset to server-side default at write time.
+    pub blacklist: Option<String>,
+    /// Replace the full preferred-tags list. `None` = no change.
+    pub preferred_tags: Option<Vec<PreferredTag>>,
+}
+
 #[derive(Debug, Deserialize, Clone)]
 pub struct UserSearchResult {
     pub id: i32,
@@ -107,4 +134,44 @@ pub struct UserSearchResult {
     pub post_upload_count: i32,
     #[serde(default)]
     pub is_banned: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The /settings page expects the exact snake_case wire format the
+    /// backend emits (no camelCase aliases). Lock it in so a rename can't
+    /// silently break the frontend again.
+    #[test]
+    fn account_feed_settings_uses_snake_case_wire_format() {
+        let body = r#"{
+            "blacklist": "gore\nyoung",
+            "preferred_tags": [
+                {"tag": "wolf", "group": "general", "weight": 2.0},
+                {"tag": "canine", "group": "species", "weight": 1.5}
+            ],
+            "experiment_bucket": "B"
+        }"#;
+        let settings: AccountFeedSettings =
+            serde_json::from_str(body).expect("GET body must parse with snake_case field names");
+        assert_eq!(settings.blacklist.as_deref(), Some("gore\nyoung"));
+        assert_eq!(settings.preferred_tags.len(), 2);
+        assert_eq!(settings.preferred_tags[0].tag, "wolf");
+        assert_eq!(settings.preferred_tags[0].weight, 2.0);
+        assert_eq!(settings.experiment_bucket.as_deref(), Some("B"));
+
+        // PATCH body arrives with snake_case field names; absent fields -> None.
+        let patch: AccountFeedSettingsPatch = serde_json::from_str(
+            r#"{"blacklist":"gore","preferred_tags":[{"tag":"wolf","group":"general","weight":2.0}]}"#,
+        )
+        .expect("PATCH body must parse with snake_case field names");
+        assert_eq!(patch.blacklist.as_deref(), Some("gore"));
+        assert_eq!(patch.preferred_tags.as_ref().map(Vec::len), Some(1));
+
+        // Partial update: absent fields deserialize as None.
+        let empty: AccountFeedSettingsPatch =
+            serde_json::from_str(r#"{"blacklist": null}"#).expect("partial PATCH parses");
+        assert!(empty.preferred_tags.is_none());
+    }
 }

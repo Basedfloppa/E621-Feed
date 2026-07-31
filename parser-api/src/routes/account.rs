@@ -16,14 +16,15 @@ use e621_account_parser_api::auth::OwnerToken;
 use e621_account_parser_api::{
     api,
     db::{
-        self, get_account_by_id, get_account_by_name, get_account_preference_profile,
-        get_account_tag_relation_graph, get_accounts_for_owner, get_tag_counts, set_account,
-        update_device_blacklist,
+        self, get_account_by_id, get_account_by_name, get_account_feed_settings,
+        get_account_preference_profile, get_account_tag_relation_graph, get_accounts_for_owner,
+        get_tag_counts, set_account, set_preferred_tags, update_device_blacklist,
     },
     errors::ApiError,
     models::{
-        AccountPreferenceProfile, BlacklistPayload, DeviceScopedAccount, PreferredTagPayload,
-        TagCount, TagRelationScoring, TruncatedAccount, UserApiResponse, cfg,
+        AccountFeedSettings, AccountFeedSettingsPatch, AccountPreferenceProfile, BlacklistPayload,
+        DeviceScopedAccount, PreferredTagPayload, TagCount, TagRelationScoring, TruncatedAccount,
+        UserApiResponse, cfg,
     },
     ratelimit::{self, ClientIp},
     validation,
@@ -221,6 +222,15 @@ pub(crate) async fn create_account(
     e621_account_parser_api::metrics::METRICS
         .accounts_total
         .inc();
+    // Track A/B bucket distribution of newly created accounts.
+    let bucket = e621_account_parser_api::models::cfg()
+        .pick_bucket(acc_id_for_audit, None)
+        .0
+        .unwrap_or_else(|| "none".to_string());
+    e621_account_parser_api::metrics::METRICS
+        .experiment_bucket_accounts
+        .with_label_values(&[&bucket])
+        .inc();
     Ok(Json(result))
 }
 
@@ -386,6 +396,15 @@ pub(crate) async fn delete_account(account_id: i32, owner: OwnerToken) -> Result
     e621_account_parser_api::metrics::METRICS
         .accounts_total
         .dec();
+    // Track A/B bucket distribution of deleted accounts.
+    let bucket = e621_account_parser_api::models::cfg()
+        .pick_bucket(account_id, None)
+        .0
+        .unwrap_or_else(|| "none".to_string());
+    e621_account_parser_api::metrics::METRICS
+        .experiment_bucket_accounts
+        .with_label_values(&[&bucket])
+        .dec();
     Ok(())
 }
 
@@ -469,4 +488,103 @@ pub(crate) async fn set_account_preferred_tags(
     Ok(Json(PreferredTagPayload {
         preferred_tags: tags,
     }))
+}
+
+/// Consolidated read of all per-account feed/recommendation settings.
+/// Returns blacklist, preferred tags, and experiment bucket in one call.
+#[openapi(tag = "Accounts")]
+#[get("/account/<account_id>/feed_settings")]
+pub(crate) async fn get_feed_settings(
+    account_id: i32,
+    owner: OwnerToken,
+) -> Result<Json<AccountFeedSettings>, ApiError> {
+    validation::validate_account_id(account_id)?;
+    let owner_token = owner.0;
+    ratelimit::check(&format!("read:owner:{owner_token}"), 240, 60)?;
+    let settings = db_blocking(move || {
+        get_account_feed_settings(&owner_token, account_id).map_err(|e| {
+            let m = format!("Failed to get feed settings: {e}");
+            error!("{m}");
+            m
+        })
+    })
+    .await?;
+
+    // The account may not have a persisted bucket (NULL = not bucketed yet).
+    // Match the recommendations endpoint: hash the account into a configured
+    // bucket on the fly so the UI shows the effective bucket.
+    let effective_bucket = settings.experiment_bucket.clone().or_else(|| {
+        let (name, _) = cfg().pick_bucket(account_id, None);
+        name
+    });
+    let mut settings = settings;
+    settings.experiment_bucket = effective_bucket;
+    Ok(Json(settings))
+}
+
+/// Partial update of per-account feed settings. Accepts `{ blacklist, preferred_tags }`
+/// — only present fields are updated. Returns the full current settings after the update.
+#[openapi(tag = "Accounts")]
+#[patch("/account/<account_id>/feed_settings", data = "<payload>")]
+pub(crate) async fn patch_feed_settings(
+    account_id: i32,
+    owner: OwnerToken,
+    payload: Json<AccountFeedSettingsPatch>,
+) -> Result<Json<AccountFeedSettings>, ApiError> {
+    validation::validate_account_id(account_id)?;
+    let owner_token = owner.0;
+    let patch = payload.into_inner();
+
+    // Apply partial updates in order.
+    if let Some(blacklist) = &patch.blacklist {
+        let normalized = if blacklist.is_empty() {
+            String::new()
+        } else {
+            validation::normalize_blacklist(blacklist)
+        };
+        let token = owner_token.clone();
+        db_blocking(move || {
+            update_device_blacklist(&token, account_id, &normalized).map_err(|e| {
+                let m = format!("Failed to update blacklist from feed_settings: {e}");
+                error!("{m}");
+                m
+            })
+        })
+        .await?;
+        // Blacklist change invalidates e621 API cache.
+        api::clear_api_cache();
+    }
+
+    if let Some(preferred_tags) = &patch.preferred_tags {
+        let token = owner_token.clone();
+        let tags = preferred_tags.clone();
+        db_blocking(move || {
+            set_preferred_tags(&token, account_id, &tags).map_err(|e| {
+                let m = format!("Failed to update preferred tags from feed_settings: {e}");
+                error!("{m}");
+                m
+            })
+        })
+        .await?;
+    }
+
+    // Return the full current state.
+    let settings = db_blocking(move || {
+        get_account_feed_settings(&owner_token, account_id).map_err(|e| {
+            let m = format!("Failed to get feed settings after update: {e}");
+            error!("{m}");
+            m
+        })
+    })
+    .await?;
+
+    // Same effective-bucket resolution as GET: when the account has no
+    // persisted bucket, hash into a configured bucket on the fly.
+    let effective_bucket = settings.experiment_bucket.clone().or_else(|| {
+        let (name, _) = cfg().pick_bucket(account_id, None);
+        name
+    });
+    let mut settings = settings;
+    settings.experiment_bucket = effective_bucket;
+    Ok(Json(settings))
 }

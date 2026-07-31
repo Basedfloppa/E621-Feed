@@ -676,6 +676,7 @@ pub async fn get_posts_by_tags(
     blacklist_tags: &str,
     tags_query: &str,
     page: Option<i32>,
+    limit: Option<i32>,
 ) -> Result<Vec<Post>, String> {
     let blacklist = if blacklist_tags.trim().is_empty() {
         String::new()
@@ -695,10 +696,11 @@ pub async fn get_posts_by_tags(
         format!("{tags_query} {blacklist}")
     };
     let cfg = cfg();
+    let limit = limit.unwrap_or(cfg.posts_limit).clamp(1, 320);
     let url = build_url(
         "posts.json",
         &[
-            ("limit", cfg.posts_limit.to_string()),
+            ("limit", limit.to_string()),
             ("page", page.unwrap_or(1).to_string()),
             ("tags", combined),
             ("v2", true.to_string()),

@@ -44,14 +44,6 @@ impl GridType {
             _ => GridType::Auto,
         }
     }
-    fn to_storage(self) -> &'static str {
-        match self {
-            GridType::Auto => "auto",
-            GridType::Three => "3",
-            GridType::Two => "2",
-            GridType::One => "1",
-        }
-    }
     fn grid_class(self) -> &'static str {
         match self {
             GridType::Auto => {
@@ -74,8 +66,21 @@ impl GridType {
     }
 }
 
+/// Read a display setting from unified settings_show_* key, falling back
+/// to an old per-page key for backward compatibility.
+pub fn read_display_setting(suffix: &str, old: &str, default: bool) -> bool {
+    let new_key = format!("settings_show_{}", suffix);
+    let storage = || window().and_then(|w| w.local_storage().ok().flatten());
+    storage()
+        .and_then(|s| s.get_item(&new_key).ok().flatten())
+        .or_else(|| storage().and_then(|s| s.get_item(old).ok().flatten()))
+        .and_then(|v| v.parse::<bool>().ok())
+        .unwrap_or(default)
+}
+
 #[function_component(FeedPage)]
 pub fn feed_page() -> Html {
+    let _settings_tick = use_settings_tick();
     let posts = use_state(Vec::<ScoredPost>::new);
     let page = use_state(|| 1usize);
     let is_loading = use_state(|| false);
@@ -92,84 +97,38 @@ pub fn feed_page() -> Html {
             (js_sys::Math::random() * 1_000_000_000.0) as u64
         )
     });
-    let show_desc = use_state(|| {
-        window()
-            .and_then(|w| w.local_storage().ok().flatten())
-            .and_then(|s| s.get_item("hide_post_desc").ok().flatten())
-            .and_then(|v| v.parse::<bool>().ok())
-            .unwrap_or(false)
-    });
-    let show_metadata = use_state(|| {
-        window()
-            .and_then(|w| w.local_storage().ok().flatten())
-            .and_then(|s| s.get_item("show_file_metadata").ok().flatten())
-            .and_then(|v| v.parse::<bool>().ok())
-            .unwrap_or(false)
-    });
-    let show_breakdown = use_state(|| {
-        window()
-            .and_then(|w| w.local_storage().ok().flatten())
-            .and_then(|s| s.get_item("show_score_breakdown").ok().flatten())
-            .and_then(|v| v.parse::<bool>().ok())
-            .unwrap_or(false)
-    });
-    let show_detailed_breakdown = use_state(|| {
-        window()
-            .and_then(|w| w.local_storage().ok().flatten())
-            .and_then(|s| s.get_item("show_score_detailed").ok().flatten())
-            .and_then(|v| v.parse::<bool>().ok())
-            .unwrap_or(false)
-    });
+    let show_desc = read_display_setting("desc", "hide_post_desc", false);
+    let show_metadata = read_display_setting("metadata", "show_file_metadata", false);
+    let show_breakdown = read_display_setting("breakdown", "show_score_breakdown", false);
+    let show_detailed_breakdown =
+        read_display_setting("detailed_breakdown", "show_score_detailed", false);
     // Per-page bottom-cutoff in percent (0..=95). 0 = show everything,
     // 30 = drop the bottom 30% of each fetched page by raw score, 95 =
     // keep only the top 5%. Decoupled from the model's raw `score` so
     // future scoring changes don't shift what the slider means.
     let cutoff_pct = use_state(|| {
-        window()
-            .and_then(|w| w.local_storage().ok().flatten())
-            .and_then(|s| s.get_item("page_cutoff_pct").ok().flatten())
+        let storage = || window().and_then(|w| w.local_storage().ok().flatten());
+        storage()
+            .and_then(|s| s.get_item("settings_score_cutoff_pct").ok().flatten())
+            .or_else(|| storage().and_then(|s| s.get_item("page_cutoff_pct").ok().flatten()))
             .and_then(|v| v.parse::<f32>().ok())
             .unwrap_or(0.0)
             .clamp(0.0, 95.0)
     });
-    let grid = use_state(|| {
-        let stored = window()
-            .and_then(|w| w.local_storage().ok().flatten())
-            .and_then(|s| s.get_item("feed_grid_type").ok().flatten());
+    let grid = {
+        let storage = || window().and_then(|w| w.local_storage().ok().flatten());
+        let stored = storage()
+            .and_then(|s| s.get_item("settings_grid_type").ok().flatten())
+            .or_else(|| storage().and_then(|s| s.get_item("feed_grid_type").ok().flatten()));
         GridType::from_storage(stored)
-    });
+    };
 
-    // Badge visibility toggles — each defaults to enabled (true) and
-    // persists to localStorage under `feed_show_*` keys so the user's
-    // preference survives reloads.
-    let show_rating = use_state(|| {
-        window()
-            .and_then(|w| w.local_storage().ok().flatten())
-            .and_then(|s| s.get_item("feed_show_rating").ok().flatten())
-            .and_then(|v| v.parse::<bool>().ok())
-            .unwrap_or(true)
-    });
-    let show_affinity = use_state(|| {
-        window()
-            .and_then(|w| w.local_storage().ok().flatten())
-            .and_then(|s| s.get_item("feed_show_affinity").ok().flatten())
-            .and_then(|v| v.parse::<bool>().ok())
-            .unwrap_or(true)
-    });
-    let show_score = use_state(|| {
-        window()
-            .and_then(|w| w.local_storage().ok().flatten())
-            .and_then(|s| s.get_item("feed_show_score").ok().flatten())
-            .and_then(|v| v.parse::<bool>().ok())
-            .unwrap_or(true)
-    });
-    let show_post_number = use_state(|| {
-        window()
-            .and_then(|w| w.local_storage().ok().flatten())
-            .and_then(|s| s.get_item("feed_show_post_number").ok().flatten())
-            .and_then(|v| v.parse::<bool>().ok())
-            .unwrap_or(true)
-    });
+    // Badge visibility toggles — read from unified settings_show_* keys,
+    // falling back to the legacy `feed_show_*` keys.
+    let show_rating = read_display_setting("rating", "feed_show_rating", true);
+    let show_affinity = read_display_setting("affinity", "feed_show_affinity", true);
+    let show_score = read_display_setting("score", "feed_show_score", true);
+    let show_post_number = read_display_setting("post_number", "feed_show_post_number", true);
 
     // Exploration epsilon — ε-greedy exploration bonus.
     // 0.0 = pure exploitation (Focused), 0.5 = max exploration (Discovery).
@@ -184,81 +143,14 @@ pub fn feed_page() -> Html {
     });
 
     {
-        let show_desc = show_desc.clone();
-        use_effect_with(*show_desc, move |a: &bool| {
-            if let Some(store) = window().and_then(|w| w.local_storage().ok().flatten()) {
-                let _ = store.set_item("hide_post_desc", &a.to_string());
-            }
-            || ()
-        });
-    }
-
-    {
-        let show_metadata = show_metadata.clone();
-        use_effect_with(*show_metadata, move |a: &bool| {
-            if let Some(store) = window().and_then(|w| w.local_storage().ok().flatten()) {
-                let _ = store.set_item("show_file_metadata", &a.to_string());
-            }
-            || ()
-        });
-    }
-
-    {
-        let show_breakdown = show_breakdown.clone();
-        use_effect_with(*show_breakdown, move |a: &bool| {
-            if let Some(store) = window().and_then(|w| w.local_storage().ok().flatten()) {
-                let _ = store.set_item("show_score_breakdown", &a.to_string());
-            }
-            || ()
-        });
-        {
-            let a = *show_detailed_breakdown;
-            use_effect_with(a, move |a| {
-                if let Some(store) = window().and_then(|w| w.local_storage().ok().flatten()) {
-                    let _ = store.set_item("show_score_detailed", &a.to_string());
-                }
-                || ()
-            });
-        }
-    }
-
-    {
         let cutoff_pct = cutoff_pct.clone();
         use_effect_with(*cutoff_pct, move |a: &f32| {
             if let Some(store) = window().and_then(|w| w.local_storage().ok().flatten()) {
-                let _ = store.set_item("page_cutoff_pct", &a.to_string());
+                let _ = store.set_item("settings_score_cutoff_pct", &a.to_string());
             }
             || ()
         });
     }
-
-    {
-        let grid = grid.clone();
-        use_effect_with(*grid, move |g: &GridType| {
-            if let Some(store) = window().and_then(|w| w.local_storage().ok().flatten()) {
-                let _ = store.set_item("feed_grid_type", g.to_storage());
-            }
-            || ()
-        });
-    }
-
-    // Persist badge visibility toggles.
-    macro_rules! persist_bool {
-        ($s:expr, $key:expr) => {{
-            let s = $s.clone();
-            let key = $key;
-            use_effect_with(*s, move |a: &bool| {
-                if let Some(store) = window().and_then(|w| w.local_storage().ok().flatten()) {
-                    let _ = store.set_item(key, &a.to_string());
-                }
-                || ()
-            });
-        }};
-    }
-    persist_bool!(show_rating, "feed_show_rating");
-    persist_bool!(show_affinity, "feed_show_affinity");
-    persist_bool!(show_score, "feed_show_score");
-    persist_bool!(show_post_number, "feed_show_post_number");
 
     {
         let exploration_epsilon = exploration_epsilon.clone();
@@ -585,7 +477,7 @@ pub fn feed_page() -> Html {
         .as_ref()
         .map(|u| u.id as i32)
         .unwrap_or_default();
-    let card_grid_class = (*grid).grid_class();
+    let card_grid_class = grid.grid_class();
     let card_session_id = (*session_id).clone();
     let feed_cards = render_post_grid(
         &posts,
@@ -594,14 +486,14 @@ pub fn feed_page() -> Html {
         card_account_id,
         &card_session_id,
         1,
-        *show_rating,
-        *show_affinity,
-        *show_score,
-        *show_post_number,
-        *show_desc,
-        *show_metadata,
-        *show_breakdown,
-        *show_detailed_breakdown,
+        show_rating,
+        show_affinity,
+        show_score,
+        show_post_number,
+        show_desc,
+        show_metadata,
+        show_breakdown,
+        show_detailed_breakdown,
     );
 
     html! {
@@ -616,61 +508,6 @@ pub fn feed_page() -> Html {
             </div>
 
             <div class="flex flex-wrap gap-3 items-center feed-toolbar">
-                <div class="feed-affinity-col" id="feed-affinity">
-                    <label for="feed-affinity-input" class="mb-1 block">
-                        <span class="text-base-content">{"Per-page cutoff"}
-                        <span class="text-xs text-base-content/70 ms-1">
-                            { "(% of worst posts to drop)" }
-                        </span></span>
-                    </label>
-                    <div class="flex items-center gap-2">
-                        <input
-                            id="feed-affinity-input"
-                            type="number"
-                            class="input input-bordered"
-                            style="max-width: 8rem"
-                            value={cutoff_pct.to_string()}
-                            step="5"
-                            min="0"
-                            max="95"
-                            oninput={{
-                                let cutoff_pct = cutoff_pct.clone();
-                                Callback::from(move |e: InputEvent| {
-                                    if let Some(target) = e.target()
-                                        && let Ok(input) = target.dyn_into::<HtmlInputElement>()
-                                            && let Ok(v) = input.value().parse::<f32>() {
-                                                cutoff_pct.set(v.clamp(0.0, 95.0));
-                                            }
-                                })
-                            }}
-                        />
-                        <div class="join join-sm" role="group" aria-label="Cutoff preset">
-                            {
-                                [
-                                    ("Wide", 0.0f32, "Show every post on the page — good for discovery."),
-                                    ("Balanced", 30.0f32, "Drop the weakest 30% per page — recommended starting point."),
-                                    ("Strict", 60.0f32, "Drop the weakest 60% per page — keep only the top matches."),
-                                ].iter().map(|(label, value, tip)| {
-                                    let val = *value;
-                                    let active = (*cutoff_pct - val).abs() < 0.5;
-                                    let cutoff_pct = cutoff_pct.clone();
-                                    html! {
-                                        <button
-                                            type="button"
-                                            class={classes!("btn", "btn-outline", if active { Some("btn-active") } else { None })}
-                                            title={ *tip }
-                                            aria-pressed={active.to_string()}
-                                            onclick={Callback::from(move |_| cutoff_pct.set(val))}
-                                        >
-                                            { *label }
-                                        </button>
-                                    }
-                                }).collect::<Html>()
-                            }
-                        </div>
-                    </div>
-                </div>
-
                 <div class="feed-exploration-col" id="feed-exploration">
                     <label for="feed-exploration-input" class="mb-1 block">
                         <span class="text-base-content">{"Exploration"}
@@ -726,177 +563,6 @@ pub fn feed_page() -> Html {
                     </div>
                 </div>
 
-                <div class="feed-grid-col" id="feed-grid">
-                    <span class="block">{"Grid type"}</span>
-                    <div class="join" role="group" aria-label="Grid type">
-                        <button
-                            type="button"
-                            class={classes!("btn", "btn-outline", if *grid == GridType::Auto { "btn-active" } else { "" })}
-                            aria-pressed={(*grid == GridType::Auto).to_string()}
-                            aria-label="Auto grid (responsive)"
-                            title="Auto grid (responsive)"
-                            onclick={{
-                                let grid = grid.clone();
-                                Callback::from(move |_| grid.set(GridType::Auto))
-                            }}
-                        >
-                            <IconWater />
-                        </button>
-
-                        <button
-                            type="button"
-                            class={classes!("btn", "btn-outline", if *grid == GridType::Three { "btn-active" } else { "" })}
-                            aria-pressed={(*grid == GridType::Three).to_string()}
-                            aria-label="Three-column grid"
-                            title="Three-column grid"
-                            onclick={{
-                                let grid = grid.clone();
-                                Callback::from(move |_| grid.set(GridType::Three))
-                            }}
-                        >
-                            <IconGrid3x3 />
-                        </button>
-
-                        <button
-                            type="button"
-                            class={classes!("btn", "btn-outline", if *grid == GridType::Two { "btn-active" } else { "" })}
-                            aria-pressed={(*grid == GridType::Two).to_string()}
-                            aria-label="Two-column grid"
-                            title="Two-column grid"
-                            onclick={{
-                                let grid = grid.clone();
-                                Callback::from(move |_| grid.set(GridType::Two))
-                            }}
-                        >
-                            <IconGridFill />
-                        </button>
-
-                        <button
-                            type="button"
-                            class={classes!("btn", "btn-outline", if *grid == GridType::One { "btn-active" } else { "" })}
-                            aria-pressed={(*grid == GridType::One).to_string()}
-                            aria-label="Single-column list"
-                            title="Single-column list"
-                            onclick={{
-                                let grid = grid.clone();
-                                Callback::from(move |_| grid.set(GridType::One))
-                            }}
-                        >
-                            <IconSquareFill />
-                        </button>
-                    </div>
-                </div>
-
-                <div class="self-end">
-                    <details class="dropdown dropdown-end">
-                        <summary class="btn btn-outline">
-                            <IconSliders />
-                            {" Display"}
-                        </summary>
-                        <div class="menu dropdown-content p-3 shadow bg-base-100 rounded-box w-72 z-50" style="min-width: 260px;">
-                            <span class="text-xs text-base-content/70 block mb-1">{ "Badges" }</span>
-                            <label class="label cursor-pointer py-1">
-                                <span class="text-base-content">{"Rating badge"}</span>
-                                <input
-                                    type="checkbox"
-                                    class="toggle toggle-sm"
-                                    checked={*show_rating}
-                                    onchange={{
-                                        let show_rating = show_rating.clone();
-                                        Callback::from(move |_: Event| show_rating.set(!*show_rating))
-                                    }}
-                                />
-                            </label>
-                            <label class="label cursor-pointer py-1">
-                                <span class="text-base-content">{"Affinity score"}</span>
-                                <input
-                                    type="checkbox"
-                                    class="toggle toggle-sm"
-                                    checked={*show_affinity}
-                                    onchange={{
-                                        let show_affinity = show_affinity.clone();
-                                        Callback::from(move |_: Event| show_affinity.set(!*show_affinity))
-                                    }}
-                                />
-                            </label>
-                            <label class="label cursor-pointer py-1">
-                                <span class="text-base-content">{"Post score"}</span>
-                                <input
-                                    type="checkbox"
-                                    class="toggle toggle-sm"
-                                    checked={*show_score}
-                                    onchange={{
-                                        let show_score = show_score.clone();
-                                        Callback::from(move |_: Event| show_score.set(!*show_score))
-                                    }}
-                                />
-                            </label>
-                            <label class="label cursor-pointer py-1">
-                                <span class="text-base-content">{"Post number"}</span>
-                                <input
-                                    type="checkbox"
-                                    class="toggle toggle-sm"
-                                    checked={*show_post_number}
-                                    onchange={{
-                                        let show_post_number = show_post_number.clone();
-                                        Callback::from(move |_: Event| show_post_number.set(!*show_post_number))
-                                    }}
-                                />
-                            </label>
-                            <div class="divider my-1"></div>
-                            <span class="text-xs text-base-content/70 block mb-1">{ "Cards" }</span>
-                            <label class="label cursor-pointer py-1">
-                                <span class="text-base-content">{"Post text / tags"}</span>
-                                <input
-                                    type="checkbox"
-                                    class="toggle toggle-sm"
-                                    checked={*show_desc}
-                                    onchange={{
-                                        let show_desc = show_desc.clone();
-                                        Callback::from(move |_: Event| show_desc.set(!*show_desc))
-                                    }}
-                                />
-                            </label>
-                            <label class="label cursor-pointer py-1">
-                                <span class="text-base-content">{"File metadata"}</span>
-                                <input
-                                    type="checkbox"
-                                    class="toggle toggle-sm"
-                                    checked={*show_metadata}
-                                    onchange={{
-                                        let show_metadata = show_metadata.clone();
-                                        Callback::from(move |_: Event| show_metadata.set(!*show_metadata))
-                                    }}
-                                />
-                            </label>
-                            <label class="label cursor-pointer py-1">
-                                <span class="text-base-content">{"Score breakdown"}</span>
-                                <input
-                                    type="checkbox"
-                                    class="toggle toggle-sm"
-                                    checked={*show_breakdown}
-                                    onchange={{
-                                        let show_breakdown = show_breakdown.clone();
-                                        Callback::from(move |_: Event| show_breakdown.set(!*show_breakdown))
-                                    }}
-                                />
-                            </label>
-                            <label class="label cursor-pointer py-1">
-                                <span class="text-base-content">{"Detailed"}</span>
-                                <input
-                                    type="checkbox"
-                                    class="toggle toggle-sm"
-                                    checked={*show_detailed_breakdown}
-                                    onchange={{
-                                        let show_detailed_breakdown = show_detailed_breakdown.clone();
-                                        Callback::from(move |_: Event| show_detailed_breakdown.set(!*show_detailed_breakdown))
-                                    }}
-                                />
-                            </label>
-                        </div>
-                    </details>
-
-            </div>
         </div>
 
             <div class="fixed bottom-0 left-1/2 -translate-x-1/2 w-full flex justify-between z-1 feed-statusbar">
@@ -973,7 +639,7 @@ pub fn feed_page() -> Html {
 
             {
                 if *is_loading && posts.is_empty() {
-                    let count = (*grid).skeleton_count();
+                    let count = grid.skeleton_count();
                     let skeleton_card = |_| html! {
                         <div class="card bg-base-100 shadow-sm">
                             <div class="skeleton w-full" style="aspect-ratio: 1 / 1; border-radius: 0;"></div>

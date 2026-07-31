@@ -1,6 +1,10 @@
-use crate::components::{IconGithub, IconPerson, IconQuestion, ThemeToggle};
+use crate::components::{
+    IconGithub, IconPerson, IconQuestion, IconSliders, QuickSettingsModal, ThemeToggle,
+};
 use crate::models::{AttachTo, Button, Step, read_config_from_head, start_tour};
-use yew::{Callback, Html, MouseEvent, classes, function_component, html, use_effect_with};
+use yew::{
+    Callback, Html, MouseEvent, classes, function_component, html, use_effect_with, use_state,
+};
 use yew_router::prelude::use_location;
 
 fn should_run_tour() -> bool {
@@ -231,6 +235,15 @@ pub fn header() -> Html {
     });
 
     let account_active = is_active("/account");
+    let quick_settings_open = use_state(|| false);
+    let open_quick_settings = {
+        let quick_settings_open = quick_settings_open.clone();
+        Callback::from(move |_| quick_settings_open.set(true))
+    };
+    let close_quick_settings = {
+        let quick_settings_open = quick_settings_open.clone();
+        Callback::from(move |_| quick_settings_open.set(false))
+    };
 
     html! {
         <div class="drawer">
@@ -286,6 +299,15 @@ pub fn header() -> Html {
                         </div>
                     </div>
                     <div class="navbar-end gap-1">
+                        <button
+                            type="button"
+                            class="btn btn-ghost btn-sm"
+                            aria-label="Quick settings"
+                            title="Quick settings"
+                            onclick={open_quick_settings}
+                        >
+                            <IconSliders />
+                        </button>
                         <a
                             class={classes!("btn", "btn-ghost", "btn-sm", account_active.then_some("btn-active"))}
                             aria-label="Account settings"
@@ -317,6 +339,7 @@ pub fn header() -> Html {
                     </div>
                 </nav>
             </div>
+            <QuickSettingsModal open={*quick_settings_open} on_close={close_quick_settings} />
             <div class="drawer-side z-50">
                 <label for="header-drawer" aria-label="close sidebar" class="drawer-overlay"></label>
                 <ul class="menu p-4 w-80 min-h-full bg-base-200">
@@ -367,6 +390,14 @@ pub fn header() -> Html {
                             href="/favorites"
                         >
                             {"Favorites"}
+                        </a>
+                    </li>
+                    <li>
+                        <a
+                            class={classes!("text-base-content", is_active("/settings").then_some("menu-active"))}
+                            href="/settings"
+                        >
+                            {"Settings"}
                         </a>
                     </li>
                     <li>

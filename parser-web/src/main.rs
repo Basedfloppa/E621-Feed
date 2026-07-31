@@ -22,6 +22,8 @@ pub enum Route {
     Search,
     #[at("/favorites")]
     Favorites,
+    #[at("/settings")]
+    Settings,
     #[at("/digest")]
     Digest,
     #[not_found]
@@ -37,6 +39,7 @@ fn switch(routes: Route) -> Html {
         Route::Trending => html! { <TrendingPage />},
         Route::Search => html! { <SearchPage />},
         Route::Favorites => html! { <FavoritesPage />},
+        Route::Settings => html! { <SettingsPage />},
         Route::Digest => html! { <DigestPage />},
         Route::NotFound => html! { <h1>{ "404" }</h1> },
     }

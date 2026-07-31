@@ -1,7 +1,7 @@
 use chrono::{NaiveDate, Utc};
 use rusqlite::params;
 
-use crate::models::{PreferredTag, TruncatedAccount, cfg};
+use crate::models::{AccountFeedSettings, PreferredTag, TruncatedAccount, cfg};
 
 use super::open_db;
 
@@ -419,6 +419,95 @@ pub fn get_account_experiment_bucket(account_id: i32) -> Result<Option<String>, 
     })
 }
 
+/// Read consolidated feed settings for an account. Verifies device
+/// ownership, then reads blacklist (device-specific with global fallback),
+/// preferred tags, and experiment bucket in a single read transaction.
+pub fn get_account_feed_settings(
+    owner_token: &str,
+    account_id: i32,
+) -> Result<AccountFeedSettings, String> {
+    let mut conn = open_db()?;
+
+    // Single read transaction so the three reads see one consistent snapshot.
+    let tx = conn
+        .transaction()
+        .map_err(|e| format!("Failed to begin read transaction: {e}"))?;
+
+    // Verify device ownership first.
+    tx.query_row(
+        "SELECT 1 FROM account_device_links WHERE owner_token = ?1 AND account_id = ?2",
+        params![owner_token, account_id],
+        |_| Ok(()),
+    )
+    .map_err(|e| match e {
+        rusqlite::Error::QueryReturnedNoRows => {
+            "No account found for this device token".to_string()
+        }
+        other => format!("Failed to verify account access: {other}"),
+    })?;
+
+    // 1) Blacklist: device-specific with global fallback.
+    let blacklist: String = tx
+        .query_row(
+            r#"
+            SELECT COALESCE(NULLIF(adl.blacklisted_tags, ''), a.blacklisted_tags, '')
+            FROM accounts a
+            INNER JOIN account_device_links adl ON adl.account_id = a.id
+            WHERE a.id = ?1 AND adl.owner_token = ?2
+            "#,
+            params![account_id, owner_token],
+            |r| r.get(0),
+        )
+        .map_err(|e| format!("Failed to read blacklist: {e}"))?;
+    let blacklist = if blacklist.is_empty() {
+        None
+    } else {
+        Some(blacklist)
+    };
+
+    // 2) Preferred tags.
+    let mut stmt = tx
+        .prepare(
+            "SELECT tag_name, group_type, weight
+             FROM account_preferred_tags
+             WHERE account_id = ?1
+             ORDER BY rowid",
+        )
+        .map_err(|e| format!("Failed to prepare preferred_tags query: {e}"))?;
+    let preferred_tags: Vec<PreferredTag> = stmt
+        .query_map(params![account_id], |r| {
+            Ok(PreferredTag {
+                tag: r.get(0)?,
+                group: r.get(1)?,
+                weight: r.get(2)?,
+            })
+        })
+        .map_err(|e| format!("Failed to query preferred_tags: {e}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("Failed to collect preferred_tags: {e}"))?;
+    drop(stmt);
+
+    // 3) Experiment bucket.
+    let experiment_bucket: Option<String> = tx
+        .query_row(
+            "SELECT experiment_bucket FROM accounts WHERE id = ?1",
+            params![account_id],
+            |r| r.get(0),
+        )
+        .ok()
+        .flatten();
+
+    let settings = AccountFeedSettings {
+        blacklist,
+        preferred_tags,
+        experiment_bucket,
+    };
+
+    tx.commit()
+        .map_err(|e| format!("Failed to commit read transaction: {e}"))?;
+    Ok(settings)
+}
+
 /// Replace the full preferred-tags list for an account. Verifies device
 /// ownership, deletes existing rows, then bulk-inserts the new list.
 /// Max 50 tags — caller should validate before calling.
@@ -461,4 +550,27 @@ pub fn set_preferred_tags(
 
         Ok(())
     })
+}
+
+/// Count accounts per A/B bucket. Buckets come from `cfg().buckets`; an
+/// account falls into `pick_bucket(id, None)`. Used to seed the
+/// `e621_experiment_bucket_accounts` gauge at startup.
+pub fn count_accounts_by_bucket() -> Result<std::collections::HashMap<String, u64>, String> {
+    use std::collections::HashMap;
+    let conn = open_db()?;
+    let mut stmt = conn
+        .prepare("SELECT id FROM accounts")
+        .map_err(|e| format!("Failed to prepare account count query: {e}"))?;
+    let ids = stmt
+        .query_map([], |row| row.get::<_, i64>(0))
+        .map_err(|e| format!("Failed to query account ids: {e}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("Failed to collect account ids: {e}"))?;
+    let mut counts: HashMap<String, u64> = HashMap::new();
+    for id in ids {
+        let (bucket, _) = crate::models::cfg().pick_bucket(id as i32, None);
+        let key = bucket.unwrap_or_else(|| "none".to_string());
+        *counts.entry(key).or_insert(0) += 1;
+    }
+    Ok(counts)
 }

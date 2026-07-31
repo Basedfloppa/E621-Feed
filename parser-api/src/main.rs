@@ -363,6 +363,8 @@ async fn rocket() -> _ {
         routes::account::get_account_preferred_tags,
         routes::account::set_account_preferred_tags,
         routes::account::get_account_experiment_bucket,
+        routes::account::get_feed_settings,
+        routes::account::patch_feed_settings,
         routes::feed::get_recommendations,
         routes::feed::get_recommendations_continue,
         routes::feed::get_similar_posts,
@@ -445,6 +447,20 @@ async fn rocket() -> _ {
     e621_account_parser_api::cache_pruner::spawn_cache_pruner();
     e621_account_parser_api::media_hydrator::spawn_media_hydrator();
     e621_account_parser_api::db::spawn_tag_relation_importer();
+
+    // Seed the A/B bucket distribution gauge from the current account table.
+    // Runs on a detached task so it doesn't hold non-Send values across await.
+    rocket::tokio::spawn(async move {
+        let result = db_blocking(e621_account_parser_api::db::count_accounts_by_bucket).await;
+        if let Ok(counts) = result {
+            for (bucket, count) in counts {
+                e621_account_parser_api::metrics::METRICS
+                    .experiment_bucket_accounts
+                    .with_label_values(&[&bucket])
+                    .set(count as i64);
+            }
+        }
+    });
 
     attach_cors(r)
 }

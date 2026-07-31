@@ -176,15 +176,24 @@ pub struct PostGridProps {
     /// Whether the response is `Vec<ScoredPost>` (true) or `Vec<Post>` (false).
     /// When false, posts get a score of 0.0 and no breakdown.
     pub scored: bool,
-    /// Display toggles
-    pub show_rating: UseStateHandle<bool>,
-    pub show_affinity: UseStateHandle<bool>,
-    pub show_score: UseStateHandle<bool>,
-    pub show_post_number: UseStateHandle<bool>,
-    pub show_desc: UseStateHandle<bool>,
-    pub show_metadata: UseStateHandle<bool>,
-    pub show_breakdown: UseStateHandle<bool>,
-    pub show_detailed_breakdown: UseStateHandle<bool>,
+    /// Display toggles — plain bool, wired from parent state via deref
+    /// so the grid re-renders when the parent re-renders.
+    #[prop_or(true)]
+    pub show_rating: bool,
+    #[prop_or(false)]
+    pub show_affinity: bool,
+    #[prop_or(true)]
+    pub show_score: bool,
+    #[prop_or(true)]
+    pub show_post_number: bool,
+    #[prop_or(true)]
+    pub show_desc: bool,
+    #[prop_or(false)]
+    pub show_metadata: bool,
+    #[prop_or(false)]
+    pub show_breakdown: bool,
+    #[prop_or(false)]
+    pub show_detailed_breakdown: bool,
     /// Optional per-page percentage of the lowest scored results to omit.
     #[prop_or_default]
     pub score_cutoff_pct: Option<f32>,
@@ -404,14 +413,14 @@ pub fn post_grid(props: &PostGridProps) -> Html {
                                 props.account_id,
                                 &session_id,
                                 0,
-                                *props.show_rating,
-                                *props.show_affinity,
-                                *props.show_score,
-                                *props.show_post_number,
-                                *props.show_desc,
-                                *props.show_metadata,
-                                *props.show_breakdown,
-                                *props.show_detailed_breakdown,
+                                props.show_rating,
+                                props.show_affinity,
+                                props.show_score,
+                                props.show_post_number,
+                                props.show_desc,
+                                props.show_metadata,
+                                props.show_breakdown,
+                                props.show_detailed_breakdown,
                             ) }
                             <div ref={scroll_sentinel} class="h-4"></div>
                             {
