@@ -22,7 +22,6 @@ use rocket::request::Request;
 use rocket::response::status;
 use rocket::serde::json::{Json, serde_json};
 use rocket::shield::{Policy, Shield};
-use rusqlite::Result;
 use schemars::JsonSchema;
 use serde::Serialize;
 
@@ -326,8 +325,9 @@ fn attach_cors(rocket: rocket::Rocket<rocket::Build>) -> rocket::Rocket<rocket::
     rocket
 }
 
-#[launch]
-async fn rocket() -> _ {
+/// Build and configure the Rocket instance.
+async fn build_rocket() -> rocket::Rocket<rocket::Build> {
+    info!("Starting server...");
     let path = default_path().unwrap();
     // Startup config load: failure here means defaults are used, which
     // can subtly change behaviour (e621 base URL, blacklist, etc.).
@@ -463,6 +463,44 @@ async fn rocket() -> _ {
     });
 
     attach_cors(r)
+}
+
+#[rocket::main]
+async fn main() {
+    let rocket = build_rocket().await;
+
+    // Ignite first to get a `Rocket<Ignite>` which has the `.shutdown()` handle.
+    let rocket = rocket.ignite().await.expect("Rocket ignition failed");
+
+    // Spawn a signal watcher that triggers Rocket's built-in graceful
+    // shutdown on SIGTERM (Unix) in addition to the default Ctrl+C (SIGINT).
+    // Rocket drains in-flight requests before exiting.
+    #[cfg(unix)]
+    {
+        use rocket::tokio::select;
+        use rocket::tokio::signal::unix::{SignalKind, signal};
+        use rocket::tokio::spawn;
+
+        let handle = rocket.shutdown();
+        spawn(async move {
+            let mut sigterm = signal(SignalKind::terminate()).expect("Failed to register SIGTERM");
+            let mut sigint = signal(SignalKind::interrupt()).expect("Failed to register SIGINT");
+            select! {
+                _ = sigterm.recv() => {
+                    info!("Received SIGTERM — starting graceful shutdown");
+                }
+                _ = sigint.recv() => {
+                    info!("Received SIGINT — starting graceful shutdown");
+                }
+            }
+            info!("Shutdown signal received, draining in-flight requests...");
+            handle.notify();
+        });
+    }
+
+    info!("Server started");
+    let _ = rocket.launch().await;
+    info!("Shutdown complete");
 }
 
 #[cfg(test)]

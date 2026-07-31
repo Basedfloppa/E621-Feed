@@ -63,164 +63,206 @@ pub fn header() -> Html {
         let domain = read_config_from_head()
             .map(|c| c.posts_domain)
             .unwrap_or_else(|| "https://e621.net".to_string());
-        let steps = vec![
-                Step {
-                    id: "welcome".into(),
-                    title: Some("Welcome 👋".into()),
-                    text: "It seems like you are new here. Would you like to get the website tour?".into(),
-                    route: Some("/".into()),
-                    attach_to: None,
-                    buttons: Some(vec![
-                        Button { text: "Yes".into(), action: "next".into(), classes: None },
-                        Button { text: "Skip".into(), action: "cancel".into(), classes: None },
-                    ]),
-                    wait_timeout: Some(8000),
-                    must_be_visible: Some(true),
-                },
-                Step {
-                    id: "account-page".into(),
-                    title: Some("Account page.".into()),
-                    text: "Your account data lives here.".into(),
-                    route: Some("/account".into()),
-                    attach_to: Some(AttachTo { element: "#account-page".into(), on: "bottom".into() }),
-                    buttons: Some(vec![
-                        Button { text: "Next".into(), action: "next".into(), classes: None },
-                        Button { text: "Back".into(), action: "back".into(), classes: None },
-                    ]),
-                    wait_timeout: Some(8000),
-                    must_be_visible: Some(true),
-                },
-                Step {
-                    id: "account-id".into(),
-                    title: Some("Account ID.".into()),
-                    text: format!("This is your account ID field — you can find it in the URL when opening your profile: {domain}/users/[your-id-here]"),
-                    route: Some("/account".into()),
-                    attach_to: Some(AttachTo { element: "#account-id".into(), on: "bottom".into() }),
-                    buttons: Some(vec![
-                        Button { text: "Next".into(), action: "next".into(), classes: None },
-                        Button { text: "Back".into(), action: "back".into(), classes: None },
-                    ]),
-                    wait_timeout: Some(8000),
-                    must_be_visible: Some(true),
-                },
-                Step {
-                    id: "account-username".into(),
-                    title: Some("Account username.".into()),
-                    text: "This is a field for your account username.".into(),
-                    route: Some("/account".into()),
-                    attach_to: Some(AttachTo { element: "#account-name".into(), on: "bottom".into() }),
-                    buttons: Some(vec![
-                        Button { text: "Next".into(), action: "next".into(), classes: None },
-                        Button { text: "Back".into(), action: "back".into(), classes: None },
-                    ]),
-                    wait_timeout: Some(8000),
-                    must_be_visible: Some(true),
-                },
-                Step {
-                    id: "account-blacklist".into(),
-                    title: Some("Account blacklist.".into()),
-                    text: format!("This is a field for your account blacklist. Leave it empty to use the default blacklist, or copy your own from {domain}."),
-                    route: Some("/account".into()),
-                    attach_to: Some(AttachTo { element: "#account-blacklist".into(), on: "bottom".into() }),
-                    buttons: Some(vec![
-                        Button { text: "Next".into(), action: "next".into(), classes: None },
-                        Button { text: "Back".into(), action: "back".into(), classes: None },
-                    ]),
-                    wait_timeout: Some(8000),
-                    must_be_visible: Some(true),
-                },
-                Step {
-                    id: "home-account".into(),
-                    title: Some("Pick your account.".into()),
-                    text: "Once you've added your account, you can pick it from the selectors.".into(),
-                    route: Some("/".into()),
-                    attach_to: Some(AttachTo { element: "#home-account".into(), on: "bottom".into() }),
-                    buttons: Some(vec![
-                        Button { text: "Next".into(), action: "next".into(), classes: None },
-                        Button { text: "Back".into(), action: "back".into(), classes: None },
-                    ]),
-                    wait_timeout: Some(8000),
-                    must_be_visible: Some(true),
-                },
-                Step {
-                    id: "home-analyzer".into(),
-                    title: Some("Build your taste profile.".into()),
-                    text: "Run a full analysis the first time. It requests every expected favourites page, replaces the stored favourite links, and rebuilds the tag profile, including reconciliation of favourites you removed on e621.".into(),
-                    route: Some("/".into()),
-                    attach_to: Some(AttachTo { element: "#home-account".into(), on: "bottom".into() }),
-                    buttons: Some(vec![
-                        Button { text: "Next".into(), action: "next".into(), classes: None },
-                        Button { text: "Back".into(), action: "back".into(), classes: None },
-                    ]),
-                    wait_timeout: Some(8000),
-                    must_be_visible: Some(true),
-                },
-                Step {
-                    id: "home-updates".into(),
-                    title: Some("Keep it fresh without a full rebuild.".into()),
-                    text: "For routine refreshes, use Update favourites: it fetches only newer favourites and skips the expensive teardown, saving substantial time on large accounts. Incremental updates cannot detect favourites you removed on e621, so run Full re-analysis when you need deletions reconciled.".into(),
-                    route: Some("/".into()),
-                    attach_to: None,
-                    buttons: Some(vec![
-                        Button { text: "Next".into(), action: "next".into(), classes: None },
-                        Button { text: "Back".into(), action: "back".into(), classes: None },
-                    ]),
-                    wait_timeout: Some(8000),
-                    must_be_visible: Some(true),
-                },
-                Step {
-                    id: "feed-account".into(),
-                    title: Some("Feed account.".into()),
-                    text: "Once tag analysis finishes, head to the feed page and pick your account from the selector.".into(),
-                    route: Some("/feed".into()),
-                    attach_to: Some(AttachTo { element: "#feed-account".into(), on: "bottom".into() }),
-                    buttons: Some(vec![
-                        Button { text: "Next".into(), action: "next".into(), classes: None },
-                        Button { text: "Back".into(), action: "back".into(), classes: None },
-                    ]),
-                    wait_timeout: Some(8000),
-                    must_be_visible: Some(true),
-                },
-                Step {
-                    id: "feed-affinity".into(),
-                    title: Some("Control each page's cutoff.".into()),
-                    text: "This power-user control drops the weakest percentage from each scored page: Wide keeps everything, Balanced drops the bottom 30%, and Strict drops the bottom 60%. It is a relative display filter, not an absolute affinity threshold, and your choice is saved in this browser.".into(),
-                    route: Some("/feed".into()),
-                    attach_to: Some(AttachTo { element: "#feed-affinity".into(), on: "bottom".into() }),
-                    buttons: Some(vec![
-                        Button { text: "Next".into(), action: "next".into(), classes: None },
-                        Button { text: "Back".into(), action: "back".into(), classes: None },
-                    ]),
-                    wait_timeout: Some(8000),
-                    must_be_visible: Some(true),
-                },
-                Step {
-                    id: "feed-grid".into(),
-                    title: Some("Choose your feed density.".into()),
-                    text: "Use Auto for a responsive grid, or lock the feed to three, two, or one column. This changes layout only — not recommendation scores — and is saved in this browser.".into(),
-                    route: Some("/feed".into()),
-                    attach_to: Some(AttachTo { element: "#feed-grid".into(), on: "bottom".into() }),
-                    buttons: Some(vec![
-                        Button { text: "Next".into(), action: "next".into(), classes: None },
-                        Button { text: "Back".into(), action: "back".into(), classes: None },
-                    ]),
-                    wait_timeout: Some(8000),
-                    must_be_visible: Some(true),
-                },
-                Step {
-                    id: "final".into(),
-                    title: Some("Finally.".into()),
-                    text: "And that's it — hope you'll have a good time using the site!".into(),
-                    route: Some("/".into()),
-                    attach_to: None,
-                    buttons: Some(vec![
-                        Button { text: "Finish".into(), action: "cancel".into(), classes: None },
-                        Button { text: "Back".into(), action: "back".into(), classes: None },
-                    ]),
-                    wait_timeout: Some(8000),
-                    must_be_visible: Some(true),
-                },
-            ];
+        // ── Tour steps ────────────────────────────────────────────
+        // Each step has: id, title, text, route (navigates there),
+        // attach_to (element selector + position), buttons.
+        // Add/remove steps here; the JS in tour.js handles navigation
+        // and element waiting automatically.
+        let steps: Vec<Step> = vec![
+            Step {
+                id: "welcome".into(),
+                title: Some("Welcome 👋".into()),
+                text: "It looks like you are new here. Would you like a quick tour of the app?".into(),
+                route: Some("/".into()),
+                attach_to: None,
+                buttons: Some(vec![
+                    Button { text: "Yes".into(), action: "next".into(), classes: None },
+                    Button { text: "Skip".into(), action: "cancel".into(), classes: None },
+                ]),
+                wait_timeout: Some(8000),
+                must_be_visible: Some(true),
+            },
+            // ── Navigation ────────────────────────────────────────
+            Step {
+                id: "nav-tabs".into(),
+                title: Some("Navigation tabs".into()),
+                text: "Use these tabs to switch between For You (feed), Trending, Search, Favorites, and Digest. The active tab is highlighted.".into(),
+                route: Some("/feed".into()),
+                attach_to: Some(AttachTo { element: "#header".into(), on: "bottom".into() }),
+                buttons: Some(vec![
+                    Button { text: "Next".into(), action: "next".into(), classes: None },
+                    Button { text: "Back".into(), action: "back".into(), classes: None },
+                ]),
+                wait_timeout: Some(8000),
+                must_be_visible: Some(true),
+            },
+            // ── Feed / For You ────────────────────────────────────
+            Step {
+                id: "feed-account".into(),
+                title: Some("Select your account on Feed".into()),
+                text: "Pick your account from the dropdown here to get personalized recommendations.".into(),
+                route: Some("/feed".into()),
+                attach_to: Some(AttachTo { element: "#feed-account".into(), on: "bottom".into() }),
+                buttons: Some(vec![
+                    Button { text: "Next".into(), action: "next".into(), classes: None },
+                    Button { text: "Back".into(), action: "back".into(), classes: None },
+                ]),
+                wait_timeout: Some(8000),
+                must_be_visible: Some(true),
+            },
+            Step {
+                id: "feed-controls".into(),
+                title: Some("Feed controls".into()),
+                text: "Above the grid you will find score cutoff (Wide/Balanced/Strict), exploration mode (Balanced/Discovery/Focused), grid density, and badge visibility toggles. All settings are saved in your browser.".into(),
+                route: Some("/feed".into()),
+                attach_to: Some(AttachTo { element: "#feed-account".into(), on: "bottom".into() }),
+                buttons: Some(vec![
+                    Button { text: "Next".into(), action: "next".into(), classes: None },
+                    Button { text: "Back".into(), action: "back".into(), classes: None },
+                ]),
+                wait_timeout: Some(8000),
+                must_be_visible: Some(true),
+            },
+            // ── Trending ──────────────────────────────────────────
+            Step {
+                id: "trending".into(),
+                title: Some("Trending page".into()),
+                text: "Global trending posts. With an account selected, you also get a Scored view sorted to your taste profile.".into(),
+                route: Some("/trending".into()),
+                attach_to: None,
+                buttons: Some(vec![
+                    Button { text: "Next".into(), action: "next".into(), classes: None },
+                    Button { text: "Back".into(), action: "back".into(), classes: None },
+                ]),
+                wait_timeout: Some(8000),
+                must_be_visible: Some(true),
+            },
+            // ── Search ────────────────────────────────────────────
+            Step {
+                id: "search".into(),
+                title: Some("Search & tag autocomplete".into()),
+                text: "Search posts by tags. Type a query and get autocomplete suggestions from e621. Results can be viewed raw or scored to your profile.".into(),
+                route: Some("/search".into()),
+                attach_to: None,
+                buttons: Some(vec![
+                    Button { text: "Next".into(), action: "next".into(), classes: None },
+                    Button { text: "Back".into(), action: "back".into(), classes: None },
+                ]),
+                wait_timeout: Some(8000),
+                must_be_visible: Some(true),
+            },
+            // ── Favorites ─────────────────────────────────────────
+            Step {
+                id: "favorites".into(),
+                title: Some("Favorites browser".into()),
+                text: "Browse your synced favorites from e621. Scored to your taste profile.".into(),
+                route: Some("/favorites".into()),
+                attach_to: None,
+                buttons: Some(vec![
+                    Button { text: "Next".into(), action: "next".into(), classes: None },
+                    Button { text: "Back".into(), action: "back".into(), classes: None },
+                ]),
+                wait_timeout: Some(8000),
+                must_be_visible: Some(true),
+            },
+            // ── Digest ────────────────────────────────────────────
+            Step {
+                id: "digest".into(),
+                title: Some("Daily digest".into()),
+                text: "A compact daily summary of top picks based on your taste profile.".into(),
+                route: Some("/digest".into()),
+                attach_to: None,
+                buttons: Some(vec![
+                    Button { text: "Next".into(), action: "next".into(), classes: None },
+                    Button { text: "Back".into(), action: "back".into(), classes: None },
+                ]),
+                wait_timeout: Some(8000),
+                must_be_visible: Some(true),
+            },
+            // ── Settings ──────────────────────────────────────────
+            Step {
+                id: "settings".into(),
+                title: Some("Settings & quick panel".into()),
+                text: "The gear icon in the header opens quick settings (display, filters). The full Settings page has more options like scoring channel weights and A/B experiment mode.".into(),
+                route: Some("/settings".into()),
+                attach_to: Some(AttachTo { element: "#settings-page".into(), on: "bottom".into() }),
+                buttons: Some(vec![
+                    Button { text: "Next".into(), action: "next".into(), classes: None },
+                    Button { text: "Back".into(), action: "back".into(), classes: None },
+                ]),
+                wait_timeout: Some(8000),
+                must_be_visible: Some(true),
+            },
+            // ── Account ───────────────────────────────────────────
+            Step {
+                id: "account-page".into(),
+                title: Some("Account setup".into()),
+                text: "Add your e621 account here. You will need your account ID and username. Blacklist tags can also be set per-account.".into(),
+                route: Some("/account".into()),
+                attach_to: Some(AttachTo { element: "#account-page".into(), on: "bottom".into() }),
+                buttons: Some(vec![
+                    Button { text: "Next".into(), action: "next".into(), classes: None },
+                    Button { text: "Back".into(), action: "back".into(), classes: None },
+                ]),
+                wait_timeout: Some(8000),
+                must_be_visible: Some(true),
+            },
+            Step {
+                id: "account-blacklist".into(),
+                title: Some("Account blacklist".into()),
+                text: format!("Set per-account blacklist tags here. Leave empty to use the server default. You can copy your e621 blacklist from {domain}/users/[your-id]."),
+                route: Some("/account".into()),
+                attach_to: Some(AttachTo { element: "#account-blacklist".into(), on: "bottom".into() }),
+                buttons: Some(vec![
+                    Button { text: "Next".into(), action: "next".into(), classes: None },
+                    Button { text: "Back".into(), action: "back".into(), classes: None },
+                ]),
+                wait_timeout: Some(8000),
+                must_be_visible: Some(true),
+            },
+            // ── Home / Processing ─────────────────────────────────
+            Step {
+                id: "home-processing".into(),
+                title: Some("Build your taste profile".into()),
+                text: "On the Home page, select your account and run a Full re-analysis to build your taste profile. The first run fetches all your favorites and builds scoring data. Use Update favourites for routine refreshes.".into(),
+                route: Some("/".into()),
+                attach_to: Some(AttachTo { element: "#home-account".into(), on: "bottom".into() }),
+                buttons: Some(vec![
+                    Button { text: "Next".into(), action: "next".into(), classes: None },
+                    Button { text: "Back".into(), action: "back".into(), classes: None },
+                ]),
+                wait_timeout: Some(8000),
+                must_be_visible: Some(true),
+            },
+            // ── Taste Profile ─────────────────────────────────────
+            Step {
+                id: "taste-profile".into(),
+                title: Some("Your taste profile".into()),
+                text: "After processing, view your taste profile on the Home page. It shows your favourite tags, artists, characters, and theme clusters discovered from your library.".into(),
+                route: Some("/".into()),
+                attach_to: None,
+                buttons: Some(vec![
+                    Button { text: "Next".into(), action: "next".into(), classes: None },
+                    Button { text: "Back".into(), action: "back".into(), classes: None },
+                ]),
+                wait_timeout: Some(8000),
+                must_be_visible: Some(true),
+            },
+            // ── Final ─────────────────────────────────────────────
+            Step {
+                id: "final".into(),
+                title: Some("You are all set 🎉".into()),
+                text: "That covers the main features. Explore the pages, tweak your settings, and enjoy your personalized feed!".into(),
+                route: Some("/".into()),
+                attach_to: None,
+                buttons: Some(vec![
+                    Button { text: "Finish".into(), action: "cancel".into(), classes: None },
+                    Button { text: "Back".into(), action: "back".into(), classes: None },
+                ]),
+                wait_timeout: Some(8000),
+                must_be_visible: Some(true),
+            },
+        ];
         start_tour(steps);
     });
 
