@@ -8,7 +8,8 @@ use web_sys::{Request, RequestMode, Response, window};
 use yew::prelude::*;
 
 use crate::components::{
-    IconArrowClockwise, IconSliders, SavedAccountsSelect, render_post_grid, use_settings_tick,
+    IconArrowClockwise, IconSliders, SavedAccountsSelect, render_post_grid,
+    render_post_grid_skeleton, use_settings_tick,
 };
 use crate::models::*;
 use crate::pages::UserInfo;
@@ -492,12 +493,10 @@ pub fn digest_page() -> Html {
 
             { process_banner }
 
-            if *is_loading {
-                <div class="flex justify-center my-5">
-                    <div class="loading loading-spinner loading-lg" role="status">
-                        <span class="sr-only">{ "Loading..." }</span>
-                    </div>
-                </div>
+            {
+                if *is_loading && posts.is_empty() {
+                    render_post_grid_skeleton(grid.grid_class())
+                } else { html!{} }
             }
 
             if !*is_loading && !process_is_running && posts.is_empty() && error.is_none() {

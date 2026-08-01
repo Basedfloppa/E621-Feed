@@ -44,7 +44,8 @@ impl GridType {
             _ => GridType::Auto,
         }
     }
-    fn grid_class(self) -> &'static str {
+    /// Grid layout class for this grid type.
+    pub fn grid_class(self) -> &'static str {
         match self {
             GridType::Auto => {
                 "grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-3"
@@ -52,16 +53,6 @@ impl GridType {
             GridType::Three => "grid grid-cols-2 sm:grid-cols-3 gap-3",
             GridType::Two => "grid grid-cols-2 gap-3",
             GridType::One => "grid grid-cols-1 gap-3",
-        }
-    }
-
-    /// How many skeleton cards to show for this grid type.
-    pub fn skeleton_count(&self) -> usize {
-        match self {
-            GridType::Auto => 10,
-            GridType::Three => 9,
-            GridType::Two => 8,
-            GridType::One => 4,
         }
     }
 }
@@ -638,22 +629,7 @@ pub fn feed_page() -> Html {
 
             {
                 if *is_loading && posts.is_empty() {
-                    let count = grid.skeleton_count();
-                    let skeleton_card = |_| html! {
-                        <div class="card bg-base-100 shadow-sm">
-                            <div class="skeleton w-full" style="aspect-ratio: 1 / 1; border-radius: 0;"></div>
-                            <div class="card-body gap-2">
-                                <div class="skeleton h-4 w-3/4"></div>
-                                <div class="skeleton h-3 w-1/2"></div>
-                                <div class="skeleton h-3 w-2/3"></div>
-                            </div>
-                        </div>
-                    };
-                    html! {
-                        <div class={card_grid_class.to_string() + " m-3 feed-grid"}>
-                            { for (0..count).map(skeleton_card) }
-                        </div>
-                    }
+                    render_post_grid_skeleton(card_grid_class)
                 } else { html!{} }
             }
         </div>

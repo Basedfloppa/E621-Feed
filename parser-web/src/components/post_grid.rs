@@ -84,6 +84,44 @@ fn current_column_count(grid_class: &str) -> usize {
     result
 }
 
+/// Skeleton placeholder that mirrors the visual shape of a `PostCard`:
+/// media area (4:3 reserve) plus a few text lines. Used while a grid is
+/// loading its first page so the layout doesn't collapse to a spinner.
+#[function_component(SkeletonCard)]
+pub fn skeleton_card() -> Html {
+    html! {
+        <div class="card post-card card-compact overflow-hidden w-full relative border border-base-300 shadow-sm break-inside-avoid mb-3">
+            <div class="skeleton w-full" style="aspect-ratio: 4 / 3; border-radius: 0;"></div>
+            <div class="p-2 space-y-2">
+                <div class="skeleton h-4 w-3/4"></div>
+                <div class="skeleton h-3 w-1/2"></div>
+                <div class="skeleton h-3 w-2/3"></div>
+            </div>
+        </div>
+    }
+}
+
+/// Render a grid of skeleton cards for the given grid layout, matching the
+/// column count the real post grid will use. Call while the first page is
+/// loading so the page height is reserved and the layout stays stable.
+pub fn render_post_grid_skeleton(grid_class: &str) -> Html {
+    let effective_class = if grid_class.is_empty() {
+        "grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-3"
+    } else {
+        grid_class
+    };
+    let num_columns = current_column_count(effective_class).max(1);
+    html! {
+        <div class={format!("{} m-3", effective_class)} style="align-items: start;" aria-hidden="true">
+            { for (0..num_columns).map(|_| html! {
+                <div class="flex flex-col">
+                    { for (0..3).map(|_| html! { <SkeletonCard /> }) }
+                </div>
+            }) }
+        </div>
+    }
+}
+
 /// Render the shared masonry-style post layout used by all post collections.
 #[allow(
     clippy::too_many_arguments,
@@ -384,7 +422,10 @@ pub fn post_grid(props: &PostGridProps) -> Html {
     html! {
         <div>
             {
-                if (*posts).is_empty() && !*is_loading && error.is_none() {
+                if (*posts).is_empty() && *is_loading && error.is_none() {
+                    // First page still loading: skeleton cards instead of a spinner.
+                    html! { render_post_grid_skeleton(grid_class) }
+                } else if (*posts).is_empty() && !*is_loading && error.is_none() {
                     html! { <p class="text-base-content/70 text-center my-8">{ &props.empty_message }</p> }
                 } else {
                     html! {
