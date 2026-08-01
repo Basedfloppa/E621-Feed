@@ -211,6 +211,45 @@ pub struct RuntimeConfig {
     /// on subsequent ticks. 0 disables the worker entirely.
     #[serde(default = "default_tag_alias_import_interval_secs")]
     pub tag_alias_import_interval_secs: u64,
+
+    // ── Adaptive rate gate ────────────────────────────────────────────
+    /// Base delay for live (user-facing) e621 requests, in ms.
+    /// Default 250 (4 RPS).
+    #[serde(default = "default_live_rps_delay_ms")]
+    pub live_rps_delay_ms: u64,
+
+    /// Base delay for prefetch (hot/cold) e621 requests, in ms.
+    /// Default 500 (2 RPS).
+    #[serde(default = "default_prefetch_rps_delay_ms")]
+    pub prefetch_rps_delay_ms: u64,
+
+    /// Base delay for backfill e621 requests, in ms.
+    /// Default 750 (~1.3 RPS).
+    #[serde(default = "default_backfill_rps_delay_ms")]
+    pub backfill_rps_delay_ms: u64,
+
+    /// Backfill worker checks that no live request passed within this
+    /// many ms before sending. If a live request was recently processed,
+    /// the backfill adds extra delay proportional to recency.
+    /// Default 2000 (2 s).
+    #[serde(default = "default_backfill_live_window_ms")]
+    pub backfill_live_window_ms: u64,
+
+    /// Interval for the backfill worker (full retro-post scan).
+    /// Default 21600 (6 h).
+    #[serde(default = "default_backfill_interval_secs")]
+    pub backfill_interval_secs: u64,
+
+    /// Per-account backfill cooldown: don't re-backfill an account's
+    /// tags more often than this many seconds. Default 86400 (24 h).
+    #[serde(default = "default_backfill_cooldown_secs")]
+    pub backfill_cooldown_secs: u64,
+
+    /// Circuit-breaker threshold for the backfill worker. After this
+    /// many consecutive e621 fetch failures, the backfill pauses for
+    /// `prefetch_breaker_pause_secs`. Default 10.
+    #[serde(default = "default_backfill_breaker_threshold")]
+    pub backfill_breaker_threshold: u32,
 }
 
 impl Default for RuntimeConfig {
@@ -240,6 +279,13 @@ impl Default for RuntimeConfig {
             cache_validate_interval_secs: default_cache_validate_interval_secs(),
             cache_idle_eviction_secs: default_cache_idle_eviction_secs(),
             tag_alias_import_interval_secs: default_tag_alias_import_interval_secs(),
+            live_rps_delay_ms: default_live_rps_delay_ms(),
+            prefetch_rps_delay_ms: default_prefetch_rps_delay_ms(),
+            backfill_rps_delay_ms: default_backfill_rps_delay_ms(),
+            backfill_live_window_ms: default_backfill_live_window_ms(),
+            backfill_interval_secs: default_backfill_interval_secs(),
+            backfill_cooldown_secs: default_backfill_cooldown_secs(),
+            backfill_breaker_threshold: default_backfill_breaker_threshold(),
         }
     }
 }
@@ -341,6 +387,28 @@ fn default_cache_validate_interval_secs() -> u64 {
 }
 fn default_cache_idle_eviction_secs() -> u64 {
     1800 // 30 min — idle-evict IDF + tag-relation graph
+}
+
+fn default_live_rps_delay_ms() -> u64 {
+    250
+}
+fn default_prefetch_rps_delay_ms() -> u64 {
+    500
+}
+fn default_backfill_rps_delay_ms() -> u64 {
+    750
+}
+fn default_backfill_live_window_ms() -> u64 {
+    2000
+}
+fn default_backfill_interval_secs() -> u64 {
+    21600 // 6 h
+}
+fn default_backfill_cooldown_secs() -> u64 {
+    86400 // 24 h
+}
+fn default_backfill_breaker_threshold() -> u32 {
+    10
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -877,6 +945,18 @@ pub struct ConfigWatcher {
     pub stop: Arc<AtomicBool>,
     pub handle: Option<JoinHandle<()>>,
 }
+
+impl ConfigWatcher {
+    /// Create a no-op watcher that never triggers. Used as a fallback
+    /// when the real watcher fails to start.
+    pub fn new_noop() -> Self {
+        Self {
+            stop: Arc::new(AtomicBool::new(false)),
+            handle: None,
+        }
+    }
+}
+
 impl Drop for ConfigWatcher {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::SeqCst);

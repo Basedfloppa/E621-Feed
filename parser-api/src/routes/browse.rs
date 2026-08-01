@@ -18,6 +18,7 @@ use e621_account_parser_api::{
         upsert_catalog_posts,
     },
     errors::ApiError,
+    load_monitor::Priority,
     models::{Post, ScoredPost, cfg},
     utils::{CachedPostFeatures, ScoringContext, current_global_relation, current_idf},
     validation,
@@ -116,7 +117,7 @@ pub(crate) async fn search_posts(
     let account =
         db_blocking(move || get_account_by_id(&owner_token, account_id).map_err(|e| e.to_string()))
             .await?;
-    let posts = api::get_posts_by_tags(&account.blacklist, query, page, limit)
+    let posts = api::get_posts_by_tags(&account.blacklist, query, page, limit, Priority::Live)
         .await
         .map_err(ApiError::Internal)?;
     spawn_browse_persist(posts.clone(), "search", account_id, false);
@@ -155,7 +156,7 @@ pub(crate) async fn search_scored_posts(
             .map_err(|e| e.to_string())
     })
     .await?;
-    let posts = api::get_posts_by_tags(&account.blacklist, query, page, limit)
+    let posts = api::get_posts_by_tags(&account.blacklist, query, page, limit, Priority::Live)
         .await
         .map_err(ApiError::Internal)?;
     spawn_browse_persist(posts.clone(), "search", account_id, false);
@@ -230,7 +231,7 @@ pub(crate) async fn get_trending_scored(
     .await?;
 
     // Fetch trending posts from e621.
-    let posts = api::get_posts_by_tags(&account.blacklist, "order:hot", page, None)
+    let posts = api::get_posts_by_tags(&account.blacklist, "order:hot", page, None, Priority::Live)
         .await
         .map_err(ApiError::Internal)?;
 
@@ -313,7 +314,7 @@ pub(crate) async fn get_trending(
 
     let blacklist_tags = &account.blacklist;
 
-    let posts = api::get_posts_by_tags(blacklist_tags, "order:hot", page, None)
+    let posts = api::get_posts_by_tags(blacklist_tags, "order:hot", page, None, Priority::Live)
         .await
         .map_err(ApiError::Internal)?;
 
@@ -344,7 +345,7 @@ pub(crate) async fn get_favorites(
     let blacklist_tags = &account.blacklist;
     let query = format!("fav:{}", account.name);
 
-    let posts = api::get_posts_by_tags(blacklist_tags, &query, page, None)
+    let posts = api::get_posts_by_tags(blacklist_tags, &query, page, None, Priority::Live)
         .await
         .map_err(ApiError::Internal)?;
 

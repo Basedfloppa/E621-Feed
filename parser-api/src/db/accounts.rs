@@ -555,6 +555,77 @@ pub fn set_preferred_tags(
 /// Count accounts per A/B bucket. Buckets come from `cfg().buckets`; an
 /// account falls into `pick_bucket(id, None)`. Used to seed the
 /// `e621_experiment_bucket_accounts` gauge at startup.
+/// Get all preferred tags for an account for backfill purposes.
+/// Returns (tag_name, group_type, weight).
+pub fn get_all_preferred_tags(account_id: i32) -> Result<Vec<(String, String, f64)>, String> {
+    let conn = open_db()?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT tag_name, group_type, weight
+             FROM account_preferred_tags
+             WHERE account_id = ?1
+             ORDER BY rowid",
+        )
+        .map_err(|e| format!("get_all_preferred_tags prepare: {e}"))?;
+    let rows = stmt
+        .query_map(params![account_id], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, f64>(2)?,
+            ))
+        })
+        .map_err(|e| format!("get_all_preferred_tags query: {e}"))?;
+    let mut tags = Vec::new();
+    for row in rows {
+        tags.push(row.map_err(|e| format!("get_all_preferred_tags row: {e}"))?);
+    }
+    Ok(tags)
+}
+
+/// Fetch accounts eligible for backfill: those whose `last_backfilled_at`
+/// is older than `cooldown_secs` seconds (or never backfilled).
+pub fn get_backfill_candidates(
+    cooldown_secs: u64,
+    max_accounts: usize,
+) -> Result<Vec<(i32, String)>, String> {
+    let conn = open_db()?;
+    let threshold = Utc::now().timestamp() - cooldown_secs as i64;
+    let mut stmt = conn
+        .prepare(
+            "SELECT a.id, COALESCE(NULLIF(a.blacklisted_tags, ''), '')
+             FROM accounts a
+             WHERE a.last_backfilled_at IS NULL
+                OR a.last_backfilled_at < ?1
+             ORDER BY a.last_backfilled_at ASC NULLS FIRST
+             LIMIT ?2",
+        )
+        .map_err(|e| format!("get_backfill_candidates prepare: {e}"))?;
+    let rows = stmt
+        .query_map(params![threshold, max_accounts as i64], |r| {
+            Ok((r.get::<_, i32>(0)?, r.get::<_, String>(1)?))
+        })
+        .map_err(|e| format!("get_backfill_candidates query: {e}"))?;
+    let mut accounts = Vec::new();
+    for row in rows {
+        accounts.push(row.map_err(|e| format!("get_backfill_candidates row: {e}"))?);
+    }
+    Ok(accounts)
+}
+
+/// Update `last_backfilled_at` for an account after a successful backfill.
+pub fn mark_account_backfilled(account_id: i32) -> Result<(), String> {
+    let now = Utc::now().timestamp();
+    super::with_write_tx(|tx| {
+        tx.execute(
+            "UPDATE accounts SET last_backfilled_at = ?1 WHERE id = ?2",
+            params![now, account_id],
+        )
+        .map_err(|e| format!("mark_account_backfilled: {e}"))?;
+        Ok(())
+    })
+}
+
 pub fn count_accounts_by_bucket() -> Result<std::collections::HashMap<String, u64>, String> {
     use std::collections::HashMap;
     let conn = open_db()?;

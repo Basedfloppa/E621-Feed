@@ -18,11 +18,13 @@ pub mod cache_pruner;
 pub mod db;
 pub mod errors;
 pub mod jobs;
+pub mod load_monitor;
 pub mod media_hydrator;
 pub mod metrics;
 pub mod models;
 pub mod pipeline;
 pub mod prefetch;
+pub mod prefetch_backfill;
 pub mod ratelimit;
 #[allow(dead_code)] // The binary mounts the full API; integration tests mount a subset.
 pub mod routes;

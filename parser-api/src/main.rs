@@ -339,7 +339,16 @@ async fn build_rocket() -> rocket::Rocket<rocket::Build> {
             .field("error", e)
             .emit_err();
     }
-    let watcher = start_config_watcher(path).unwrap();
+    let watcher = match start_config_watcher(path) {
+        Ok(w) => w,
+        Err(e) => {
+            error!("Failed to start config file watcher: {e:#}");
+            error!(
+                "Server starting without config hot-reload; changes to config.toml will require a restart"
+            );
+            e621_account_parser_api::models::ConfigWatcher::new_noop()
+        }
+    };
 
     let settings = OpenApiSettings::new();
     let (api_routes, spec) = openapi_get_routes_spec![

@@ -30,27 +30,22 @@ default_account_blacklist = [
   "shota",
 ]
 posts_domain = "https://uri.com"
-posts_limit = 160 # 320 is the e621 max
-rps_delay_ms = 250
-max_retries = 2 # 0 = no retries; total attempts = max_retries + 1
-attempt_timeout_secs = 30 # hard tokio::time::timeout per HTTP attempt (defeats CF slow-lane that bypasses reqwest's .timeout)
+posts_limit = 160 # e621 maximum: 320
+rps_delay_ms = 250 # legacy global delay; priority delays are under [runtime]
+max_retries = 2 # 0 disables retries
+attempt_timeout_secs = 30 # hard timeout per HTTP attempt
 
 # HTTP User-Agent sent to e621.
 user_agent = "E621AccountParser/0.1 (+https://github.com/Basedfloppa/E621-Feed; contact: you@example.com)"
 
-# In-memory TTL + idle-eviction cache for outbound GET requests to e621.
-# Hit rate is highest on /recommendations (two devices on the same account,
-# or two accounts with the same default blacklist, dedup into one round-trip).
-# Set ttl=0 to disable; max_entries caps memory under abuse / typos.
-# The cache is also subject to idle-eviction (see `cache_idle_eviction_secs`
-# under [runtime]): after the configured period of user-request inactivity
-# the entire cache is dropped so memory can return to the OS.
+# In-memory TTL cache for outbound GET requests to e621.
+# Set ttl=0 to disable; max_entries limits memory usage.
+# Idle eviction is controlled by `cache_idle_eviction_secs` under [runtime].
 e621_cache_ttl_secs = 600     # 10 minutes
 e621_cache_max_entries = 5000
 
 # --- Scoring priors ---------------------------------------------------------
-# v5.3: the [group_weights] section was retired. Group multipliers now live
-# inline as `group_w_*` priors and are grid-tunable.
+# Scoring priors and per-group multipliers.
 [priors]
 now = "2000-1-01T12:00:00Z" # dummy, replaced with current date at load
 recency_tau_days = 10.0
@@ -67,52 +62,40 @@ mix_media = 0.042
 mix_popularity = 0.017
 mix_interaction = 0.084
 mix_tag_relation = 0.067
-# Uploader quality channel (v5.10): weight of uploader_fit in the final blend.
-# 0 = disabled. Uploaders ≠ artists — they are the users who uploaded the post
-# (often re-uploading others' art).
+# Uploader quality channel. 0 = disabled.
 mix_uploader = 0.05
 uploader_n0 = 5.0          # cold-start: how many posts from an uploader needed for 50% confidence
 uploader_w_avg_score = 0.6 # blend weight for avg_score component in uploader_fit
 uploader_w_avg_fav = 0.4   # blend weight for avg_fav component in uploader_fit
 
-# Tag exclusivity channel (v5.11): ranks posts higher when they contain rare
-# tag combinations. Lower co-occurrence between the post's tags = higher score.
-# 0 = disabled. Set to a small non-zero value (e.g. 0.02) to enable calibration.
+# Tag exclusivity channel. 0 = disabled.
 mix_exclusivity = 0.02
 min_exclusivity_cooc = 2             # pairs with cooc < this get full exclusivity credit
 exclusivity_scale = 0.5              # sigmoid scale; larger = sharper threshold
 exclusivity_max_tags = 15            # top-K tags by group weight in O(T²) loop (0 = no limit)
 exclusivity_cross_group_weight = 0.5 # cross-group cooc weight; >1 = rare multi-group combos score higher
 
-# Tag novelty channel (v5.11): ranks posts higher when they contain tags the
-# user hasn't seen before.
-# 0 = disabled. Set to a small non-zero value (e.g. 0.02) to enable calibration.
+# Tag novelty channel. 0 = disabled.
 mix_novelty = 0.02
 novelty_n0 = 3.0   # impressions needed for 50% confidence tag is "not novel"
 # novelty_use_feedback = true  # false = only check favourites, not impression counts
 
-# Artist discovery channel (v5.12): recommends posts from artists the user
-# hasn't engaged with yet, whose non-artist tags match the user's profile.
-# 0 = disabled. Set to a small non-zero value (e.g. 0.02) to enable calibration.
+# Artist discovery channel. 0 = disabled.
 mix_artist_discovery = 0.03
 artist_discovery_n0 = 3.0            # new artists needed for 50% confidence
 artist_discovery_novelty_bonus = 0.2 # serendipity boost for low-confidence discoveries
 
-# IDF / frequency shaping
-df_floor = 0.40           # v5.8: time_causal grid confirms 0.40 (v5.7's 0.20 was post_id-noise)
-idf_max = 100.0
-idf_lambda = 1.00         # stable across N=915 runs
-idf_alpha = 1.05          # stable
-freq_alpha = 0.95         # v5.8 reverted from v5.7 1.00; time_causal best is 0.95
-bm25_k = 2.25             # v5.8 reverted from v5.7 2.40; time_causal best is 2.25
-one_sided_ratio_exp = 0.5 # exponent in quality/popularity overshoot shape; 0.5 = legacy sqrt
-idf_rsj_smoothing = 0.35  # v5.8 reverted from v5.7 0.25; time_causal best is 0.35
+# IDF and frequency shaping.
+df_floor = 0.40           # minimum document frequency
+idf_max = 100.0           # maximum IDF value
+idf_lambda = 1.00        # global IDF weight
+idf_alpha = 1.05         # IDF shaping exponent
+freq_alpha = 0.95        # frequency shaping exponent
+bm25_k = 2.25            # BM25 saturation parameter
+one_sided_ratio_exp = 0.5 # quality/popularity overshoot exponent
+idf_rsj_smoothing = 0.35  # RSJ smoothing factor
 
-# Per-group multipliers (v5.3 — promoted from the old [group_weights] section)
-# v5.8: copyright/species/general moves rolled back to v5.5 levels —
-# v5.7 took those up/down too aggressively based on post_id-only data;
-# the more honest time_causal grid pulls them back. group_w_general
-# took a half-step from 0.80 to 0.75 toward the time_causal best (0.70).
+# Per-group score multipliers.
 group_w_artist = 2.40
 group_w_character = 2.00
 group_w_copyright = 1.45
@@ -120,48 +103,45 @@ group_w_species = 1.30
 group_w_general = 0.60
 group_w_lore = 0.40
 
-# Cold-start / Bayesian priors (v5.3 — promoted from hardcoded constants)
+# Cold-start and Bayesian priors.
 coldstart_smoothing_boost = 2.0
 interaction_ctr_prior_alpha = 4.0
 
-# Algorithmic shape (v5.3 — Class C, v5.8 — Class F exploration)
+# Algorithmic shape.
 score_temperature = 0.0     # 0 = identity; >0 sigmoid-sharpens the final score
-confidence_steepness = 1.0  # 1 = legacy n/(n+n0); >1 sharpens warm-up
-mmr_redundancy_exp = 1.0    # 1 = legacy linear MMR penalty
+confidence_steepness = 1.0  # 1 = n/(n+n0); >1 sharpens warm-up
+mmr_redundancy_exp = 1.0    # 1 = linear MMR penalty
 tag_sim_jaccard_blend = 0.0 # 0 = pure cosine; small >0 hedges sparse profiles
 # exploration_epsilon   = 0.0  # ε-greedy exploration bonus; 0 = disabled (default)
 
-# Point splits (v5.3 — Class D, v5.8 — Class F hot kernel). Each split
-# tracks its parent knob unless explicitly set to a numeric value (then
-# the split is engaged). NaN = disabled / track parent.
+# Optional point splits. NaN disables a split and follows the parent value.
 # idf_lambda_meta             = 0.40
 # recency_tau_recent          = 4.0
 recency_split_age_days = 30.0
 # tag_relation_pmi_scale_user = 2.0
-# 3-piece recency kernel (Class F): hot τ for posts < recency_split_age_hours
+# Optional hot recency kernel for posts younger than recency_split_age_hours.
 # recency_tau_hot             = 2.0        # NaN (default) = disabled
 recency_split_age_hours = 24.0
 
-# Categorical (v5.3 — Class E)
+# Categorical options.
 tag_relation_pair_aggregator = "mean" # "mean" | "max" | "geomean"
 
-# Quality channel internals (sum to 1.0)
+# Quality channel weights (sum to 1.0).
 quality_w_absolute = 0.55
 quality_w_relative_score = 0.30
 quality_w_relative_comments = 0.15
-# Upvote-ratio weight (Class F): blend `up / (up + down)` into quality.
-# 0 = disabled (legacy behaviour). Default 0.3.
+# Upvote-ratio weight in the quality channel. 0 = disabled.
 quality_c = 0.3
 
-# Popularity channel internals (sum to 1.0)
+# Popularity channel weights (sum to 1.0).
 popularity_w_fav = 0.80
 popularity_w_duration = 0.20
 
-# Recency channel internals (sum to 1.0)
+# Recency channel weights (sum to 1.0).
 recency_w_global = 0.40
 recency_w_personal = 0.60
 
-# Diversity / MMR (v5.8: added copyright + species groups)
+# Diversity and MMR.
 diversity_window = 32
 diversity_w_artist = 0.22
 diversity_w_character = 0.16
@@ -187,72 +167,64 @@ tag_relation_min_cooc = 2
 tag_relation_user_min_cooc = 1
 tag_relation_cooc_ref = 16.0
 tag_relation_user_cooc_ref = 5.0
-tag_relation_max_tags = 20       # Cluster-PMI: top-K tags by group weight. 0 = no limit (legacy O(T²))
+tag_relation_max_tags = 20       # top-K tags by group weight; 0 = no limit
 
 # Feedback decay + meta interaction
 feedback_decay_half_life_days = 90.0
 meta_interaction_weight = 0.3
 
-# Cold-start + diversity caps
+# Cold-start and diversity caps.
 coldstart_n0 = 25.0
 discrete_pref_floor = 0.05
-# v5.10: raised 0.20 → 0.45. The grid converges to 0.45 across all
-# 3 independent runs; the earlier 0.20 UX hedge was a response to
-# "feed jumps" that have since been addressed by the diversity quota
-# (enforce_diversity_quota) and interaction-aware MMR penalty.
-# Offline ΔNDCG@20 remains ≤ 0.003 regardless, so the grid optimum
-# carries the default.
 diversity_max_penalty = 0.45
 diversity_interaction_damp = 0.35
 
-# Diversity semantic similarity (v5.11): blend PMI-based soft tag matching
-# into MMR. 0 = pure Jaccard (legacy). When >0, tags with high pointwise
-# mutual information count as a "soft match" even when the tag name differs.
-# The non-zero affordance below gives the calibration grid room to probe
-# in both directions during `grid with-diversify`.
+# Diversity semantic similarity: blend PMI-based soft tag matching into MMR.
+# 0 = pure Jaccard.
 diversity_semantic_blend = 0.05  # [0-1]; 0 = disabled (pure Jaccard), >0 enables PMI soft-matching
 diversity_pmi_threshold = 0.5    # minimum PMI for a soft match; pairs with PMI above this count as semantically related
 diversity_semantic_max_tags = 10 # top-K tags per group for the O(T²) PMI loop
 diversity_user_pmi_weight = 1.0  # amplify user-graph PMI over global in MMR (1.0 = no boost, >1 = personalized diversity)
 
-# --- Runtime / worker tuning ------------------------------------------------
+# --- Runtime and worker tuning ----------------------------------------------
 [runtime]
-local_candidate_limit = 400             # local-catalog candidates per /recommendations page
-dedup_lookback_days = 14                # short-term dedup window for live e621 posts
+local_candidate_limit = 400             # local candidates per recommendations page
+dedup_lookback_days = 14                # live-post deduplication window
 process_fetch_concurrency = 4           # parallel pages during /process import
-drop_cooc_batch_size = 50000            # batched DELETE chunk for per-account cooc wipe at /process start
+drop_cooc_batch_size = 50000            # co-occurrence DELETE batch size
 idf_rebuild_cooldown_secs = 15
-idf_bump_drift_threshold = 200          # full IDF rebuild after this many incremental bumps
+idf_bump_drift_threshold = 200          # incremental bumps before a full IDF rebuild
 tag_relation_rebuild_cooldown_secs = 15
 prefetch_interval_secs = 180            # background catalog prefetcher cadence
-cleanup_interval_secs = 21600           # 6h — long-tail catalog pruning cadence (prefetch worker)
-catalog_retention_days = 90             # prune posts older than this if no user owns them
-orphan_retention_secs = 3600            # 1h — aggressive orphan-candidate prune (cache-pruner worker)
-jobs_finished_retain_secs = 600         # 10 min — Done/Failed /process job state retained in memory
-prefetch_active_window_days = 14        # only prefetch for accounts active in this window
-prefetch_breaker_threshold = 3          # open circuit breaker after N consecutive e621 failures (0 = disabled)
-prefetch_breaker_pause_secs = 600       # how long to pause when the breaker is open (10m)
-prefetch_tags_per_group = 10            # how many top tags per group to fetch (1 = narrow, 5-10 = broad catalog)
-prefetch_include_recent_popular = true  # also fetch order:fav_count posts for each top tag
-prefetch_cooldown_secs = 86400          # skip an account if it was prefetched within this many seconds
-prefetch_hot_window_hours = 48          # hot worker: accounts active within this window
-prefetch_cold_interval_secs = 900       # cold worker interval (hot worker uses prefetch_interval_secs)
-cache_validate_interval_secs = 300      # 5 min — cleans TTL-expired entries + checks idle-eviction for all caches
-# Idle-eviction clears Rust's in-memory data structures, but glibc's
-# default malloc does not necessarily return freed pages to the kernel.
-# For real RSS reduction after eviction, build with jemalloc:
-#   cargo build --release --features jemalloc
-# Or set at runtime:
-#   MALLOC_CONF=dirty_decay_ms:0 ./e621-account-parser-api
-# Without jemalloc, env vars MALLOC_ARENA_MAX=2 / MALLOC_TRIM_THRESHOLD_=65536
-# reduce glibc waste ~30-50%.
-cache_idle_eviction_secs = 1800 # 30 min — drop API_CACHE + IDF + tag-relation graph if no requests within this window (0 = keep resident)
+cleanup_interval_secs = 21600           # catalog pruning interval
+catalog_retention_days = 90             # retain unowned posts for this many days
+orphan_retention_secs = 3600            # orphan-candidate retention period
+jobs_finished_retain_secs = 600         # in-memory /process job retention
+prefetch_active_window_days = 14        # account activity window
+prefetch_breaker_threshold = 3          # failures before pausing prefetch (0 = disabled)
+prefetch_breaker_pause_secs = 600       # prefetch pause duration
+prefetch_tags_per_group = 10            # top tags per group to fetch
+prefetch_include_recent_popular = true  # also fetch popular posts for each top tag
+prefetch_cooldown_secs = 86400          # per-account prefetch cooldown
+prefetch_hot_window_hours = 48          # hot-worker account activity window
+prefetch_cold_interval_secs = 900       # cold-worker interval
+cache_validate_interval_secs = 300      # interval for cache cleanup
+# Idle eviction for in-memory caches. 0 = disabled.
+cache_idle_eviction_secs = 1800 # cache idle-eviction timeout
+
+live_rps_delay_ms = 250         # live request base delay (ms)
+prefetch_rps_delay_ms = 500     # hot/cold prefetch base delay (ms)
+backfill_rps_delay_ms = 750     # backfill worker base delay (ms)
+backfill_live_window_ms = 2000  # backfill yields to live traffic for this many ms
+backfill_interval_secs = 21600  # backfill worker interval (6 h)
+backfill_cooldown_secs = 86400  # per-account backfill cooldown (24 h)
+backfill_breaker_threshold = 10 # backfill circuit breaker threshold (0 = disabled)
 
 # --- Calibration / seed knobs (see ../docs/calibration.md) ------------------
 [backtest]
 min_favs = 100
 test_fraction = 0.20
-negative_ratio = 10                   # cached RAM ≈ max_accounts × test_count × (1+NEG) × 7 KB (Post + CachedPostFeatures); + ~4 GB globals
+negative_ratio = 10                   # negative samples per positive sample
 top_k_ndcg = 20
 top_k_recall = 50
 max_accounts = 150

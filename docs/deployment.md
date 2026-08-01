@@ -295,6 +295,39 @@ sum(rate(e621_process_runs_total{status="started"}[7d]))
 e621_catalog_posts_total
 ```
 
+## Background workers
+
+The server spawns three background workers that share the e621 API adaptive rate gate:
+
+### Hot / Cold prefetcher
+
+Warms the local catalog by fetching top-artist / top-character posts for
+recently active accounts. The **hot** worker runs every 3 minutes (accounts
+active within 48 hours), the **cold** worker runs every 15 minutes
+(accounts active within 14 days but outside the hot window). Both use
+`Priority::Prefetch` through the adaptive rate gate (base delay 500 ms).
+
+### Backfill worker
+
+Runs every 6 hours (configurable via `backfill_interval_secs`). For each
+account that hasn't been backfilled recently, it iterates over **all**
+preferred tags (not just the top-N) and fetches:
+
+1. **Retro posts** — the last available page (page=9999, oldest posts)
+2. **Fresh posts** — page 1 (newest posts)
+
+Uses `Priority::Backfill` through the adaptive rate gate (base delay
+750 ms). Automatically yields to live user traffic:
+
+- If a live request passed within `backfill_live_window_ms` (default 2s),
+  backfill adds extra delay proportional to recency
+- When `x-ratelimit-remaining` from e621 drops below thresholds, the gate
+  increases delays: 2× at < 200 remaining, 3× at < 100, 5× at < 50
+
+The backfill has its own circuit breaker (`backfill_breaker_threshold`,
+default 10 consecutive failures) separate from the hot/cold prefetcher's
+breaker.
+
 ### Security note
 
 The `/api/metrics` endpoint exposes `account_id` as label values. The

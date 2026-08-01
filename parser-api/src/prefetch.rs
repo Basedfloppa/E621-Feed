@@ -16,7 +16,9 @@ use rusqlite::params;
 
 use crate::api;
 use crate::db;
+use crate::load_monitor::Priority;
 use crate::models::cfg;
+use crate::prefetch_backfill::spawn_backfill_worker;
 
 // ── LCG constants for deterministic weighted sampling ─────────────────
 
@@ -47,6 +49,9 @@ pub fn spawn_prefetch_workers() {
         2,
         hot_window, // exclude accounts in the hot window
     ));
+
+    // Backfill worker: full retro-post scan for all accounts.
+    spawn_backfill_worker();
 }
 
 async fn prefetch_loop<F1, F2>(
@@ -132,7 +137,9 @@ async fn run_prefetch_tick(
         }
 
         for q in &queries {
-            match api::get_posts_by_tags(&target.blacklist, q, Some(1), None).await {
+            match api::get_posts_by_tags(&target.blacklist, q, Some(1), None, Priority::Prefetch)
+                .await
+            {
                 Ok(posts) if !posts.is_empty() => {
                     // Successful fetch — reset the breaker.
                     PREFETCH_CONSECUTIVE_FAILS.store(0, Ordering::Relaxed);

@@ -3,29 +3,17 @@ use rocket::serde::json;
 use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex as StdMutex};
 use std::time::{Duration, Instant as StdInstant};
-use tokio::sync::Mutex;
-use tokio::time::{Instant, sleep, timeout};
+use tokio::time::{sleep, timeout};
 use urlencoding::encode;
 
 use crate::{
+    load_monitor::{AdaptiveGate, E621LoadMonitor, Priority},
     models::{Post, TruncatedAccount, UserApiResponse, UserSearchResult, cfg},
     ratelimit,
 };
 
-/// Global rate gate. Outbound sends share one token-bucket budget so
-/// prefetchers and live fetches don't each enforce `rps_delay_ms`
-/// independently. Held only across the wait, preserving FIFO order.
-static RATE_GATE: LazyLock<Mutex<Instant>> = LazyLock::new(|| Mutex::new(Instant::now()));
-
-async fn rate_gate_wait() {
-    let cfg = cfg();
-    let delay = Duration::from_millis(cfg.rps_delay_ms);
-    let mut next = RATE_GATE.lock().await;
-    let now = Instant::now();
-    if *next > now {
-        sleep(*next - now).await;
-    }
-    *next = Instant::now() + delay;
+async fn rate_gate_wait(priority: Priority) {
+    AdaptiveGate::global().wait(priority).await;
 }
 
 /// In-memory TTL cache for successful GET responses to e621. Dedupes
@@ -186,6 +174,7 @@ async fn fetch_authed_text(
     url: String,
     bypass_cache: bool,
     cache_ttl_secs: u64,
+    priority: Priority,
 ) -> Result<String, String> {
     let cfg = cfg();
     let ttl = Duration::from_secs(if cache_ttl_secs > 0 {
@@ -210,6 +199,7 @@ async fn fetch_authed_text(
         client
             .get(&url)
             .basic_auth(cfg.admin_user.clone(), Some(cfg.admin_api.clone())),
+        priority,
     )
     .await
     .map_err(|e| format!("request failed: {e}"))?;
@@ -278,11 +268,7 @@ static HTTP_CLIENT: LazyLock<Client> = LazyLock::new(|| {
         .pool_max_idle_per_host(8)
         .tcp_keepalive(Some(Duration::from_secs(30)))
         .build()
-        .map_err(|e| {
-            error!("Failed to build client: {e}");
-            format!("Failed to build client: {e}")
-        })
-        .unwrap()
+        .expect("Failed to build shared HTTP client — check TLS/network config")
 });
 
 fn get_client() -> &'static Client {
@@ -374,7 +360,30 @@ fn err_kind(e: &reqwest::Error) -> &'static str {
     }
 }
 
-async fn send_with_retry(builder: reqwest::RequestBuilder) -> Result<Response, String> {
+/// Parse x-ratelimit-remaining header into u32. Returns u32::MAX on
+/// missing/unparseable header (unknown).
+fn parse_ratelimit_remaining(resp: &Response) -> u32 {
+    resp.headers()
+        .get("x-ratelimit-remaining")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<u32>().ok())
+        .unwrap_or(u32::MAX)
+}
+
+/// Parse x-ratelimit-reset header into u64 (Unix seconds). Returns 0 on
+/// missing/unparseable header.
+fn parse_ratelimit_reset(resp: &Response) -> u64 {
+    resp.headers()
+        .get("x-ratelimit-reset")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(0)
+}
+
+async fn send_with_retry(
+    builder: reqwest::RequestBuilder,
+    priority: Priority,
+) -> Result<Response, String> {
     let mut delay: Duration = Duration::from_millis(300);
     let cfg = cfg();
     // Captured once so we can include the URL in error/warning logs
@@ -383,14 +392,13 @@ async fn send_with_retry(builder: reqwest::RequestBuilder) -> Result<Response, S
 
     for attempt in 0..=cfg.max_retries {
         debug!(
-            "[E621] HTTP attempt {}/{}: {} (rps_delay={}ms)",
+            "[E621] HTTP attempt {}/{}: {} (priority={priority:?})",
             attempt + 1,
             cfg.max_retries + 1,
             url_for_logs,
-            cfg.rps_delay_ms
         );
 
-        rate_gate_wait().await;
+        rate_gate_wait(priority).await;
 
         let attempt_start = std::time::Instant::now();
         // Hard ceiling per attempt. `reqwest::ClientBuilder::timeout`
@@ -444,6 +452,16 @@ async fn send_with_retry(builder: reqwest::RequestBuilder) -> Result<Response, S
                 let status = resp.status();
                 let elapsed = attempt_start.elapsed();
                 trace!("HTTP status received: {status}");
+
+                // Feed rate-limit headers back into the monitor.
+                let remaining = parse_ratelimit_remaining(&resp);
+                if remaining != u32::MAX {
+                    E621LoadMonitor::global().observe_remaining(remaining);
+                }
+                let reset_ts = parse_ratelimit_reset(&resp);
+                if reset_ts > 0 {
+                    E621LoadMonitor::global().observe_reset(reset_ts);
+                }
 
                 if (status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error())
                     && attempt < cfg.max_retries
@@ -565,7 +583,7 @@ pub async fn get_favorites(
     );
     debug!("GET (auth) /favorites.json?user_id=…&limit=…&page={page}");
 
-    let body = match fetch_authed_text(url.clone(), false, 0).await {
+    let body = match fetch_authed_text(url.clone(), false, 0, Priority::Live).await {
         Ok(b) => b,
         Err(e) => {
             warn!("favorites request failed: {e}");
@@ -596,7 +614,7 @@ pub async fn get_account(account: &TruncatedAccount) -> Result<UserApiResponse, 
     let cfg = cfg();
     let url = format!("{}/users/{}.json", cfg.posts_domain, account.id);
     debug!("GET (auth) {url}");
-    let body = fetch_authed_text(url, false, 0)
+    let body = fetch_authed_text(url, false, 0, Priority::Live)
         .await
         .map_err(|e| format!("account request {e}"))?;
     let parsed = json::from_str::<UserApiResponse>(&body)
@@ -616,7 +634,7 @@ pub async fn search_users(order: &str, page: i32) -> Result<Vec<UserSearchResult
             ("page", page.to_string()),
         ],
     );
-    let body = fetch_authed_text(url, false, 0)
+    let body = fetch_authed_text(url, false, 0, Priority::Live)
         .await
         .map_err(|e| format!("users search {e}"))?;
     // Endpoint returns either `{ "users": [...] }` or a bare array.
@@ -637,7 +655,7 @@ pub async fn search_users(order: &str, page: i32) -> Result<Vec<UserSearchResult
 pub async fn get_user_by_id(uid: i32) -> Result<UserApiResponse, String> {
     let cfg = cfg();
     let url = format!("{}/users/{}.json", cfg.posts_domain, uid);
-    let body = fetch_authed_text(url, false, 0)
+    let body = fetch_authed_text(url, false, 0, Priority::Live)
         .await
         .map_err(|e| format!("user-by-id {e}"))?;
     json::from_str::<UserApiResponse>(&body).map_err(|e| format!("user-by-id parse failed: {e}"))
@@ -648,7 +666,7 @@ pub async fn get_user_by_id(uid: i32) -> Result<UserApiResponse, String> {
 pub async fn get_user_by_name(name: &str) -> Result<UserApiResponse, String> {
     let cfg = cfg();
     let url = format!("{}/users/{}.json", cfg.posts_domain, encode(name));
-    let body = fetch_authed_text(url, false, 0)
+    let body = fetch_authed_text(url, false, 0, Priority::Live)
         .await
         .map_err(|e| format!("user-by-name {e}"))?;
     json::from_str::<UserApiResponse>(&body).map_err(|e| format!("user-by-name parse failed: {e}"))
@@ -677,6 +695,7 @@ pub async fn get_posts_by_tags(
     tags_query: &str,
     page: Option<i32>,
     limit: Option<i32>,
+    priority: Priority,
 ) -> Result<Vec<Post>, String> {
     let blacklist = if blacklist_tags.trim().is_empty() {
         String::new()
@@ -707,8 +726,8 @@ pub async fn get_posts_by_tags(
             ("mode", "extended".to_string()),
         ],
     );
-    // Bypass cache — prefetch traffic must not pollute user-facing cache.
-    let body = fetch_authed_text(url, true, 0)
+    // Bypass cache — background traffic must not pollute user-facing cache.
+    let body = fetch_authed_text(url, true, 0, priority)
         .await
         .map_err(|e| format!("posts request {e}"))?;
     let posts =
@@ -735,7 +754,7 @@ pub async fn get_posts_by_ids(ids: &[i64]) -> Result<Vec<Post>, String> {
             ("mode", "extended".to_string()),
         ],
     );
-    let body = fetch_authed_text(url, true, 0)
+    let body = fetch_authed_text(url, true, 0, Priority::Prefetch)
         .await
         .map_err(|e| format!("posts by ids request: {e}"))?;
     let posts =
@@ -787,7 +806,7 @@ pub async fn get_posts(account: &TruncatedAccount, page: Option<i32>) -> Result<
         ],
     );
     debug!("GET (auth) {url}");
-    let body = fetch_authed_text(url, false, ttl_secs)
+    let body = fetch_authed_text(url, false, ttl_secs, Priority::Live)
         .await
         .map_err(|e| format!("posts request {e}"))?;
     let posts =
@@ -806,7 +825,7 @@ where
     let limit = crate::models::cfg().posts_limit.to_string();
     let url = build_url(endpoint, &[("limit", limit), ("page", page.to_string())]);
     debug!("GET (auth) /{endpoint} page={page}");
-    let body = fetch_authed_text(url, false, 86400)
+    let body = fetch_authed_text(url, false, 86400, Priority::Live)
         .await
         .map_err(|e| format!("{endpoint} request page {page}: {e}"))?;
     let entries: Vec<T> = rocket::serde::json::from_str(&body)

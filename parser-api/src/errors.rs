@@ -79,18 +79,11 @@ impl From<rusqlite::Error> for ApiError {
 }
 
 impl From<String> for ApiError {
-    /// Promote common "not found" patterns to 404; anything else stays 500.
-    ///
-    /// This is a fallback for code that formats errors as strings rather than
-    /// propagating typed errors. New code should prefer `From<rusqlite::Error>`
-    /// or explicit `ApiError::NotFound` / `ApiError::Internal` constructors.
+    /// All string errors become `Internal` (500). Code that needs a typed
+    /// 404 should use `ApiError::NotFound(…)` directly or propagate a
+    /// `rusqlite::Error::QueryReturnedNoRows` through `From<rusqlite::Error>`.
     fn from(s: String) -> Self {
-        let l = s.to_ascii_lowercase();
-        if l.contains("no account found") || l.contains("query returned no rows") {
-            ApiError::NotFound(s)
-        } else {
-            ApiError::Internal(s)
-        }
+        ApiError::Internal(s)
     }
 }
 
@@ -132,17 +125,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn from_string_promotes_missing_rows_to_not_found() {
+    fn from_string_is_always_internal() {
+        // After removing the text-search heuristic, all From<String>
+        // errors become Internal (500). Typed 404s must use From<rusqlite::Error>.
         assert!(matches!(
             ApiError::from("no account found for id 5".to_string()),
-            ApiError::NotFound(_)
+            ApiError::Internal(_)
         ));
-        // Heuristic is case-insensitive.
-        assert!(matches!(
-            ApiError::from("Query Returned No Rows".to_string()),
-            ApiError::NotFound(_)
-        ));
-        // Everything else is a 500.
         assert!(matches!(
             ApiError::from("disk on fire".to_string()),
             ApiError::Internal(_)
@@ -151,9 +140,10 @@ mod tests {
 
     #[test]
     fn from_str_matches_from_string() {
+        // From<&str> delegates to From<String> → both are Internal now.
         assert!(matches!(
             ApiError::from("no account found"),
-            ApiError::NotFound(_)
+            ApiError::Internal(_)
         ));
         assert!(matches!(ApiError::from("boom"), ApiError::Internal(_)));
     }
