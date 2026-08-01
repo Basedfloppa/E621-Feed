@@ -48,6 +48,11 @@ pub struct AppMetrics {
 
     /// Total HTTP requests by method and route.
     pub http_requests_total: IntCounterVec,
+
+    /// Outbound e621 request failures by class — `429`, `5xx`, `4xx`,
+    /// `timeout`, `network`, `decode`. Feeds the "High % 429/5xx"
+    /// Grafana alert.
+    pub upstream_errors_total: IntCounterVec,
 }
 
 impl AppMetrics {
@@ -137,6 +142,13 @@ impl AppMetrics {
                 "e621_http_requests_total",
                 "Total HTTP requests by method and route",
                 &["method", "route"]
+            )
+            .unwrap(),
+
+            upstream_errors_total: register_int_counter_vec!(
+                "e621_upstream_errors_total",
+                "Outbound e621 request failures by class (429 / 5xx / 4xx / timeout / network / decode)",
+                &["class"]
             )
             .unwrap(),
         }

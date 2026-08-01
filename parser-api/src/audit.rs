@@ -153,6 +153,9 @@ impl Event {
 /// * `session.bootstrap` — `minted` (true/false)
 /// * `session.cleared`   — (no fields; cookie was wiped)
 /// * `token.revoked`    — `account_id`, `reason`
+///
+/// **Upstream e621** (dedicated error stream — grep `e621.failed`)
+/// * `e621.failed`       — `class` (429/5xx/4xx/timeout/network/decode), `url`, `detail`
 #[must_use]
 pub fn event(kind: &'static str) -> Event {
     Event::new(kind)

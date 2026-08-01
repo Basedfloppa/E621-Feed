@@ -167,6 +167,22 @@ No external dependencies — uses the pure-Rust `prometheus` crate.
 | `e621_feed_interactions_by_type_total` | Counter | `type` | Per-post feed interactions by type (legacy, no bucket split) |
 | `e621_experiment_bucket_accounts` | Gauge | `bucket` (`control` / `exploration` / …) | Current number of accounts per A/B arm |
 | `e621_experiment_bucket_interactions_total` | Counter | `bucket` | Total feed interactions per A/B arm since server start |
+| `e621_upstream_errors_total` | Counter | `class` (`429` / `5xx` / `4xx` / `timeout` / `network` / `decode`) | Outbound e621 request failures — feeds the “high % 429/5xx” alert |
+
+### Upstream e621 error stream
+
+Every terminal outbound e621 failure (retries exhausted or a non-retryable
+status) emits one audit line to **stderr** with the `[AUDIT-ERR] e621.failed`
+tag and bumps `e621_upstream_errors_total`. Grep it to watch upstream health
+without wading through `warn!` noise:
+
+```bash
+# live tail of just the e621 failure stream:
+journalctl -u e621-parser-api -f | grep 'e621.failed'
+# …or under Docker:
+docker compose logs -f app | grep 'e621.failed'
+# high 429 share in the last 15 min (PromQL):
+sum(rate(e621_upstream_errors_total{class="429"}[15m])) / clamp_min(sum(rate(e621_upstream_errors_total[15m])), 0.001)
 
 ### Quick check
 

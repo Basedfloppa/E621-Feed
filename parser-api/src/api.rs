@@ -7,7 +7,9 @@ use tokio::time::{sleep, timeout};
 use urlencoding::encode;
 
 use crate::{
+    audit,
     load_monitor::{AdaptiveGate, E621LoadMonitor, Priority},
+    metrics::METRICS,
     models::{Post, TruncatedAccount, UserApiResponse, UserSearchResult, cfg},
     ratelimit,
 };
@@ -359,6 +361,23 @@ fn err_kind(e: &reqwest::Error) -> &'static str {
     }
 }
 
+/// Record a terminal outbound e621 failure: bumps the Prometheus counter
+/// and emits an audit line so operators have a dedicated, greppable
+/// stream (`[AUDIT-ERR] e621.failed|class=...|url=...`) for upstream
+/// problems. Called only when retries are exhausted or a status is
+/// non-retryable — transient per-attempt failures stay on `warn!`.
+fn record_upstream_failure(class: &'static str, url: &str, detail: &str) {
+    METRICS
+        .upstream_errors_total
+        .with_label_values(&[class])
+        .inc();
+    audit::event("e621.failed")
+        .field("class", class)
+        .field("url", url)
+        .field("detail", detail)
+        .emit_err();
+}
+
 /// Parse x-ratelimit-remaining header into u32. Returns `u32::MAX` on
 /// missing/unparseable header (unknown).
 fn parse_ratelimit_remaining(resp: &Response) -> u32 {
@@ -440,6 +459,7 @@ async fn send_with_retry(
                     cfg.max_retries + 1,
                     url_for_logs
                 );
+                record_upstream_failure("timeout", &url_for_logs, "hard-timeout after all retries");
                 return Err(format!(
                     "request failed after retries [hard-timeout]: {:.2}s budget exceeded",
                     attempt_budget.as_secs_f64()
@@ -498,6 +518,14 @@ async fn send_with_retry(
                         url_for_logs,
                         diag
                     );
+                    let class = if status == StatusCode::TOO_MANY_REQUESTS {
+                        "429"
+                    } else if status.is_server_error() {
+                        "5xx"
+                    } else {
+                        "4xx"
+                    };
+                    record_upstream_failure(class, &url_for_logs, &status.to_string());
                 }
                 Ok(resp)
             }
@@ -525,6 +553,13 @@ async fn send_with_retry(
                     url_for_logs,
                     e
                 );
+                let class = match kind {
+                    "timeout" => "timeout",
+                    "connect" | "body" | "request" | "redirect" => "network",
+                    "decode" => "decode",
+                    _ => "network",
+                };
+                record_upstream_failure(class, &url_for_logs, &e.to_string());
                 Err(format!("request failed after retries [{kind}]: {e}"))
             }
         };
