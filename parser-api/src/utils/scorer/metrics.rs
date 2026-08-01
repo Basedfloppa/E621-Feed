@@ -135,13 +135,14 @@ pub struct PipelineMetrics {
     #[cfg(feature = "perf_metrics")]
     phases: Vec<PhaseRecord>,
     /// Dummy field so the struct is always instantiable (zero-cost when
-    /// perf_metrics is off — the struct is a ZST and mark/finish are no-ops).
+    /// `perf_metrics` is off — the struct is a ZST and mark/finish are no-ops).
     _dummy: (),
 }
 
 impl PipelineMetrics {
     /// Start a new pipeline trace.
     #[inline]
+    #[must_use]
     pub fn new(#[allow(unused_variables)] label: &'static str) -> Self {
         Self {
             #[cfg(feature = "perf_metrics")]
@@ -218,7 +219,7 @@ macro_rules! timed_channel {
     }};
 }
 
-impl<'a> super::context::ScoringContext<'a> {
+impl super::context::ScoringContext<'_> {
     /// Like `score_cached`, but also returns per-channel nanosecond timing.
     /// Only compiles when `feature = "perf_metrics"`.
     #[cfg(feature = "perf_metrics")]
@@ -297,8 +298,9 @@ impl<'a> super::context::ScoringContext<'a> {
         (score, breakdown, timing)
     }
 
-    /// Non-metrics stub — compiles when perf_metrics is disabled.
+    /// Non-metrics stub — compiles when `perf_metrics` is disabled.
     #[cfg(not(feature = "perf_metrics"))]
+    #[must_use]
     pub fn score_cached_with_metrics(
         &self,
         features: &super::cached::CachedPostFeatures,

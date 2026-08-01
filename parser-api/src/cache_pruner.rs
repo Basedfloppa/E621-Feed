@@ -12,9 +12,9 @@
 //!    Marks IDF + global graph dirty after deletion so the in-memory
 //!    graphs shrink on the next worker tick.
 //!  * `IDF_CACHE` / `GLOBAL_CACHE` — heavy recommendation caches loaded
-//!    from the catalog (HashMap<(u32,u32),i64> of co-occurrence pairs +
-//!    HashMap<String,i64> of per-tag document frequencies). On a 7 GB
-//!    SQLite catalog these inflate to 500 MB–1 GB resident. Each cache
+//!    from the catalog (`HashMap`<(u32,u32),i64> of co-occurrence pairs +
+//!    `HashMap`<String,i64> of per-tag document frequencies). On a 7 GB
+//!    `SQLite` catalog these inflate to 500 MB–1 GB resident. Each cache
 //!    tracks its last-touch wall-clock; if untouched for
 //!    `runtime.cache_idle_eviction_secs`, the graph/index is swapped
 //!    back to empty so the working set returns to the OS. The next

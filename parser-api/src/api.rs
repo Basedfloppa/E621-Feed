@@ -49,7 +49,7 @@ static API_CACHE_LAST_ACCESS: LazyLock<StdMutex<StdInstant>> =
 fn touch_api_cache_access() {
     let mut g = API_CACHE_LAST_ACCESS
         .lock()
-        .unwrap_or_else(|p| p.into_inner());
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     *g = StdInstant::now();
 }
 
@@ -107,7 +107,7 @@ pub fn evict_api_cache_if_idle(idle_secs: u64) -> (usize, usize) {
     let elapsed = {
         let g = API_CACHE_LAST_ACCESS
             .lock()
-            .unwrap_or_else(|p| p.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         g.elapsed()
     };
     if elapsed.as_secs() < idle_secs {
@@ -125,7 +125,7 @@ pub fn evict_api_cache_if_idle(idle_secs: u64) -> (usize, usize) {
     {
         let mut g = API_CACHE_LAST_ACCESS
             .lock()
-            .unwrap_or_else(|p| p.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         *g = StdInstant::now();
     }
     (before, after)
@@ -217,10 +217,10 @@ async fn fetch_authed_text(
         return Err(format!("returned {status}: {preview}"));
     }
 
-    if !bypass_cache {
-        api_cache_put(&url, body.clone(), ttl, max_entries);
-    } else {
+    if bypass_cache {
         debug!("[E621] cache bypassed (prefetch): {url}");
+    } else {
+        api_cache_put(&url, body.clone(), ttl, max_entries);
     }
     Ok(body)
 }
@@ -326,8 +326,7 @@ fn builder_url(builder: &reqwest::RequestBuilder) -> String {
     builder
         .try_clone()
         .and_then(|b| b.build().ok())
-        .map(|r| r.url().to_string())
-        .unwrap_or_else(|| "<unknown-url>".to_string())
+        .map_or_else(|| "<unknown-url>".to_string(), |r| r.url().to_string())
 }
 
 /// Classify a `reqwest::Error` into a short tag so log greppers can
@@ -360,7 +359,7 @@ fn err_kind(e: &reqwest::Error) -> &'static str {
     }
 }
 
-/// Parse x-ratelimit-remaining header into u32. Returns u32::MAX on
+/// Parse x-ratelimit-remaining header into u32. Returns `u32::MAX` on
 /// missing/unparseable header (unknown).
 fn parse_ratelimit_remaining(resp: &Response) -> u32 {
     resp.headers()
@@ -542,6 +541,7 @@ pub enum FavoritesPageError {
 }
 
 impl FavoritesPageError {
+    #[must_use]
     pub fn is_malformed(&self) -> bool {
         matches!(self, Self::Malformed(_))
     }
@@ -680,7 +680,7 @@ fn normalise_blacklist(bl: &str) -> String {
         .map(str::trim)
         .filter(|l| !l.is_empty())
         .collect();
-    tags.sort();
+    tags.sort_unstable();
     tags.join(" -")
 }
 
@@ -741,7 +741,7 @@ pub async fn get_posts_by_ids(ids: &[i64]) -> Result<Vec<Post>, String> {
     if ids.is_empty() {
         return Ok(Vec::new());
     }
-    let id_list: Vec<String> = ids.iter().map(|id| id.to_string()).collect();
+    let id_list: Vec<String> = ids.iter().map(std::string::ToString::to_string).collect();
     let tags = format!("id:{}", id_list.join(","));
     let cfg = cfg();
     let url = build_url(

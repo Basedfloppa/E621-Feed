@@ -16,7 +16,7 @@
 //!   (was 7 days) with a 6× pool.
 //! - **`get_popular_posts_since`** uses a 7-day window (was 2 days).
 //! - **Fresh-blood layer** (`get_old_random_posts`): 8 random posts older
-//!   than 14 days that the user hasn't seen in feed_interactions. Guarantees
+//!   than 14 days that the user hasn't seen in `feed_interactions`. Guarantees
 //!   new faces even when the user's favourite-tag pool is exhausted.
 //! - **Seen-post dedup**: the digest filters out any post shown in the feed
 //!   within the last 7 days via `get_digest_seen_ids`.
@@ -91,7 +91,7 @@ static DIGEST_CACHE: LazyLock<Mutex<HashMap<String, CachedDigest>>> =
 
 const DIGEST_TTL_SECS: u64 = 21600; // 6 hours — shorter TTL + randomness in stratified_sample means the digest changes more noticeably day-to-day
 
-/// Get digest seen-post IDs from feed_interactions for the last 7 days.
+/// Get digest seen-post IDs from `feed_interactions` for the last 7 days.
 /// This prevents the digest from showing posts the user already saw in
 /// their feed recently.
 fn get_digest_seen_ids(account_id: i32) -> HashSet<i64> {
@@ -281,7 +281,7 @@ async fn build_personalized_digest(
         .lines()
         .flat_map(|l| l.split_whitespace().filter(|t| !t.is_empty()))
         .filter(|t| !t.contains(':') && !t.starts_with('-'))
-        .map(|t| t.to_lowercase())
+        .map(str::to_lowercase)
         .collect();
     let blacklist_set: HashSet<String> = blacklisted_simple_tags.into_iter().collect();
 
@@ -559,7 +559,7 @@ pub(crate) async fn get_daily_digest(
     // Verify ownership and load account (needed for blacklist).
     let account = db_blocking({
         let ot = owner_token.clone();
-        move || get_account_by_id(&ot, account_id).map_err(|e| e.to_string())
+        move || get_account_by_id(&ot, account_id).map_err(|e| e.clone())
     })
     .await?;
 
@@ -605,8 +605,7 @@ pub(crate) async fn get_daily_digest(
     // Decide personalised vs generic.
     let use_personalized = force_full
         || db::get_visit_stats(account_id)
-            .map(|s| s.visit_streak >= 2 || s.avg_gap_days <= 3.0)
-            .unwrap_or(false);
+            .is_ok_and(|s| s.visit_streak >= 2 || s.avg_gap_days <= 3.0);
 
     let posts = if use_personalized {
         build_personalized_digest(account_id, hide_saved, &account.blacklist).await?

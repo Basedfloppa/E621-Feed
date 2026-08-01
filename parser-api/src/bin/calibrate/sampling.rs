@@ -58,7 +58,7 @@ pub(crate) fn split_train_test(
     }
 }
 
-/// TimeCausal split: take `(post_id, created_at_epoch)` tuples, sort by
+/// `TimeCausal` split: take `(post_id, created_at_epoch)` tuples, sort by
 /// timestamp ascending, and hold the newest `test_frac` as test. Mirrors
 /// the production "predict next favourite" task more honestly than the
 /// post-id-based split when post ids aren't strictly monotonic with time.

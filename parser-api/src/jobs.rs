@@ -40,7 +40,7 @@ pub struct ProcessJobState {
     pub started_at: DateTime<Utc>,
     #[schemars(with = "Option<String>", description = "RFC3339 timestamp")]
     pub finished_at: Option<DateTime<Utc>>,
-    /// Pipeline phase timing records (populated when perf_metrics is enabled).
+    /// Pipeline phase timing records (populated when `perf_metrics` is enabled).
     #[serde(default)]
     pub phases: Vec<JobPhaseRecord>,
     /// Total elapsed seconds since the process started.
@@ -58,12 +58,16 @@ fn registry() -> &'static RwLock<HashMap<i32, ProcessJobState>> {
     JOBS.get_or_init(|| RwLock::new(HashMap::new()))
 }
 
+#[must_use]
 pub fn get_state(account_id: i32) -> Option<ProcessJobState> {
     registry().read().ok()?.get(&account_id).cloned()
 }
 
+#[must_use]
 pub fn try_begin(account_id: i32) -> BeginResult {
-    let mut map = registry().write().unwrap_or_else(|e| e.into_inner());
+    let mut map = registry()
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     if let Some(existing) = map.get(&account_id)
         && existing.phase == ProcessJobPhase::Running
     {
@@ -105,11 +109,14 @@ pub fn record_page_done(account_id: i32) {
 /// zombie jobs whose tokio task was cancelled). Done/Failed retention comes
 /// from `runtime.jobs_finished_retain_secs`. Returns `(before, after)` for
 /// logging.
+#[must_use]
 pub fn prune_finished_jobs() -> (usize, usize) {
     let cfg = crate::models::cfg();
     let retain_secs = cfg.runtime.jobs_finished_retain_secs.max(0);
     let running_timeout_secs = cfg.runtime.jobs_running_timeout_secs.max(60);
-    let mut map = registry().write().unwrap_or_else(|e| e.into_inner());
+    let mut map = registry()
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let before = map.len();
     let cutoff = Utc::now() - ChronoDuration::seconds(retain_secs);
     let running_cutoff = Utc::now() - ChronoDuration::seconds(running_timeout_secs);
@@ -118,7 +125,7 @@ pub fn prune_finished_jobs() -> (usize, usize) {
             // Evict zombie Running jobs stuck past the timeout.
             return s.started_at > running_cutoff;
         }
-        s.finished_at.map(|f| f > cutoff).unwrap_or(true)
+        s.finished_at.is_none_or(|f| f > cutoff)
     });
     let after = map.len();
     (before, after)

@@ -1,6 +1,6 @@
 //! Cached-input variants of the tag-keyed channels. Used by the calibrate
-//! grid: each post's tag list is pre-resolved to (group, lc, df_raw,
-//! global_tid) once at prep time, and the hot loop here skips the
+//! grid: each post's tag list is pre-resolved to (group, lc, `df_raw`,
+//! `global_tid`) once at prep time, and the hot loop here skips the
 //! `IdfIndex::df_for` and `TagRelationGraph::tag_id` HashMap-by-string
 //! lookups.
 //!
@@ -19,10 +19,11 @@ use super::util::{
 };
 use crate::utils::tag_relation::TagId;
 
-impl<'a> ScoringContext<'a> {
+impl ScoringContext<'_> {
     /// Cached counterpart of `tag_similarity`. Same cosine-with-Jaccard-blend
     /// math, but each tag's IDF is reconstructed from the cached `df_raw`
-    /// (no `idf.df_for(...)` HashMap probe per post×probe).
+    /// (no `idf.df_for(...)` `HashMap` probe per post×probe).
+    #[must_use]
     pub fn tag_similarity_cached(&self, post: &CachedPostFeatures) -> f32 {
         let lambda = self.priors.idf_lambda;
         let alpha = self.priors.idf_alpha;
@@ -86,10 +87,11 @@ impl<'a> ScoringContext<'a> {
         ((1.0 - blend) * cosine + blend * jaccard).clamp(0.0, 1.0)
     }
 
-    /// Cached counterpart of `interaction_fit`. The feedback HashMap
-    /// itself isn't pre-resolved (one HashMap per account, rebuilt only
+    /// Cached counterpart of `interaction_fit`. The feedback `HashMap`
+    /// itself isn't pre-resolved (one `HashMap` per account, rebuilt only
     /// on profile change — not per-probe), but we skip the per-tag
     /// `normalize_tag` since cached tags are already lowercased.
+    #[must_use]
     pub fn interaction_fit_cached(&self, post: &CachedPostFeatures) -> (f32, bool) {
         let mut total_weight = 0.0f32;
         let mut weighted = 0.0f32;
@@ -102,7 +104,7 @@ impl<'a> ScoringContext<'a> {
             .clamp(0.05, 0.99);
         let p0 = self.user_base_positive_rate;
         let meta_w = self.priors.meta_interaction_weight.max(0.0);
-        let half_life = self.priors.feedback_decay_half_life_days.max(1.0) as f64;
+        let half_life = f64::from(self.priors.feedback_decay_half_life_days.max(1.0));
 
         for ct in &post.tags {
             let g_idx = ct.group as usize;
@@ -168,6 +170,7 @@ impl<'a> ScoringContext<'a> {
     /// `&Post` variant — both global and per-account graphs are queried
     /// via pre-resolved `TagId`s on the cached features, eliminating
     /// the per-pair HashMap-by-string lookups.
+    #[must_use]
     pub fn tag_relation_fit_cached(&self, post: &CachedPostFeatures) -> f32 {
         let w_g_cfg = self.priors.tag_relation_w_global.max(0.0);
         let w_u_cfg = self.priors.tag_relation_w_personal.max(0.0);
@@ -225,12 +228,12 @@ impl<'a> ScoringContext<'a> {
 
         for (i, entry_i) in entries.iter().enumerate() {
             let (gi_w, gi_global, gi_user) = *entry_i;
-            let gi_df = gi_global
-                .map(|id| self.global_relation.marginal_by_id(id).max(0) as f32)
-                .unwrap_or(0.0);
-            let gi_um = gi_user
-                .map(|id| self.user_relation.marginal_by_id(id).max(0) as f32)
-                .unwrap_or(0.0);
+            let gi_df = gi_global.map_or(0.0, |id| {
+                self.global_relation.marginal_by_id(id).max(0) as f32
+            });
+            let gi_um = gi_user.map_or(0.0, |id| {
+                self.user_relation.marginal_by_id(id).max(0) as f32
+            });
 
             for entry_j in &entries[i + 1..] {
                 let (gj_w, gj_global, gj_user) = *entry_j;
@@ -322,6 +325,7 @@ impl<'a> ScoringContext<'a> {
     /// Read-only access to the post-tag-count term that the cached sim
     /// path computed. Useful for diagnostic checks; not used by scoring.
     #[allow(dead_code)]
+    #[must_use]
     pub fn cached_post_tag_count(&self, post: &CachedPostFeatures) -> usize {
         post.tags.len()
     }
@@ -330,6 +334,7 @@ impl<'a> ScoringContext<'a> {
     /// `score_total / fav_count / comment_count` from the prebuilt
     /// features. Lets the calibrate hot path drop the underlying `Post`
     /// from the dataset entirely.
+    #[must_use]
     pub fn quality_fit_cached(&self, post: &CachedPostFeatures) -> f32 {
         let p = self.priors;
         let exp = p.one_sided_ratio_exp;
@@ -377,6 +382,7 @@ impl<'a> ScoringContext<'a> {
     }
 
     /// Cached `popularity_fit`.
+    #[must_use]
     pub fn popularity_fit_cached(&self, post: &CachedPostFeatures) -> f32 {
         let p = self.priors;
         let exp = p.one_sided_ratio_exp;
@@ -401,6 +407,7 @@ impl<'a> ScoringContext<'a> {
     }
 
     /// Cached `rating_fit`.
+    #[must_use]
     pub fn rating_fit_cached(&self, post: &CachedPostFeatures) -> f32 {
         let rating = post.rating.to_string();
         let matched = self
@@ -408,8 +415,7 @@ impl<'a> ScoringContext<'a> {
             .rating
             .iter()
             .find(|s| s.rating == rating)
-            .map(|s| s.count.max(0))
-            .unwrap_or(0);
+            .map_or(0, |s| s.count.max(0));
         let total = self.rating_total.max(1);
         let k = self.profile.rating.len().max(3);
         let boost = self.priors.coldstart_smoothing_boost.max(0.0);
@@ -427,14 +433,14 @@ impl<'a> ScoringContext<'a> {
     }
 
     /// Cached `media_fit`.
+    #[must_use]
     pub fn media_fit_cached(&self, post: &CachedPostFeatures) -> f32 {
         let matched = self
             .profile
             .media
             .iter()
             .find(|s| s.media_type == post.media_type)
-            .map(|s| s.count.max(0))
-            .unwrap_or(0);
+            .map_or(0, |s| s.count.max(0));
         let k = self.profile.media.len().max(3);
         let boost = self.priors.coldstart_smoothing_boost.max(0.0);
         let alpha =
@@ -450,6 +456,7 @@ impl<'a> ScoringContext<'a> {
 
     /// Cached `uploader_fit` — same math as [`super::channels`] but reads
     /// `uploader_id` from the prebuilt features.
+    #[must_use]
     pub fn uploader_fit_cached(&self, post: &CachedPostFeatures) -> f32 {
         let Some(stats) = self.uploader_map.get(&post.uploader_id) else {
             return FEEDBACK_NEUTRAL;
@@ -484,6 +491,7 @@ impl<'a> ScoringContext<'a> {
 
     /// Cached counterpart of `exclusivity_fit`. Uses pre-resolved `CachedTag`
     /// fields (`global_tid`, `lc`, `group`) to skip tag-ID lookups.
+    #[must_use]
     pub fn exclusivity_fit_cached(&self, post: &CachedPostFeatures) -> f32 {
         let p = self.priors;
         if p.mix_exclusivity <= 0.0 {
@@ -519,7 +527,7 @@ impl<'a> ScoringContext<'a> {
 
         // Truncate each group to top-K by weight.
         if max_tags > 0 {
-            for entries in group_tags.iter_mut() {
+            for entries in &mut group_tags {
                 entries.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
                 entries.truncate(max_tags);
             }
@@ -532,7 +540,7 @@ impl<'a> ScoringContext<'a> {
         let mut total_cooc_cross = 0i64;
 
         // Within-group pairs: tag co-occurrence computed inside each group.
-        for entries in group_tags.iter() {
+        for entries in &group_tags {
             for i in 0..entries.len() {
                 let tid_a = entries[i].1;
                 for entry_b in entries.iter().skip(i + 1) {
@@ -584,6 +592,7 @@ impl<'a> ScoringContext<'a> {
 
     /// Cached counterpart of `artist_discovery_fit`. Uses pre-resolved
     /// cached tags to skip `normalize_tag` and IDF lookups.
+    #[must_use]
     pub fn artist_discovery_fit_cached(&self, post: &CachedPostFeatures) -> f32 {
         let p = &self.priors;
         if p.mix_artist_discovery <= 0.0 {
@@ -678,7 +687,8 @@ impl<'a> ScoringContext<'a> {
 
     /// Cached counterpart of `novelty_fit`. Uses pre-resolved `ct.lc` to
     /// skip `normalize_tag`. Checks against `self.user` and `self.feedback`
-    /// HashMaps (same data as the uncached path).
+    /// `HashMaps` (same data as the uncached path).
+    #[must_use]
     pub fn novelty_fit_cached(&self, post: &CachedPostFeatures) -> f32 {
         let p = self.priors;
         if p.mix_novelty <= 0.0 {
@@ -1026,8 +1036,8 @@ mod tests {
         }
     }
 
-    /// Compute per-tag CachedPostFeatures for the same Post/IDF/graph used
-    /// by the ScoringContext.
+    /// Compute per-tag `CachedPostFeatures` for the same Post/IDF/graph used
+    /// by the `ScoringContext`.
     fn cache_post(post: &Post, idf: &IdfIndex, global: &TagRelationGraph) -> CachedPostFeatures {
         CachedPostFeatures::from_post(post, idf, global)
     }

@@ -23,6 +23,7 @@ pub struct IdfIndex {
 }
 
 impl IdfIndex {
+    #[must_use]
     pub fn empty() -> Self {
         Self {
             df: HashMap::new(),
@@ -44,6 +45,7 @@ impl IdfIndex {
             .max(0.0)
     }
 
+    #[must_use]
     pub fn from_df(df: &HashMap<String, i64>, n_posts: i64) -> Self {
         let mut df_lc: HashMap<String, i64> = HashMap::with_capacity(df.len());
         for (tag, &df_raw) in df {
@@ -59,17 +61,20 @@ impl IdfIndex {
         Ok(Self::from_df(&df, n_posts))
     }
 
+    #[must_use]
     pub fn n_posts(&self) -> i64 {
         self.n_posts
     }
 
     /// True if the index holds nothing — used by the idle-eviction path so
     /// we don't churn-evict an already-empty cache every tick.
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.df.is_empty() && self.n_posts == 0
     }
 
     /// Number of distinct (lowercased) tag names in the index. Diagnostic only.
+    #[must_use]
     pub fn n_tags(&self) -> usize {
         self.df.len()
     }
@@ -90,13 +95,15 @@ impl IdfIndex {
     /// post features once at prep time so the hot scoring loop doesn't
     /// HashMap-lookup the same tag repeatedly across grid probes.
     #[inline]
+    #[must_use]
     pub fn df_for(&self, tag: &str) -> i64 {
         self.lookup_df(tag)
     }
 
     /// Apply the IDF transform from a pre-resolved raw DF count. Mirrors
-    /// `idf_tempered` exactly but skips the `lookup_df` HashMap probe.
+    /// `idf_tempered` exactly but skips the `lookup_df` `HashMap` probe.
     #[inline]
+    #[must_use]
     pub fn idf_tempered_from_df(
         &self,
         df_raw: i64,
@@ -113,11 +120,13 @@ impl IdfIndex {
 
     /// Raw IDF — debug/inspection only; scoring goes through `idf_tempered`.
     #[inline]
+    #[must_use]
     pub fn idf_raw(&self, tag: &str, df_floor: f32, idf_max: f32, rsj: f32) -> f32 {
         Self::compute_idf(self.lookup_df(tag), self.n_posts, df_floor, idf_max, rsj)
     }
 
     #[inline]
+    #[must_use]
     pub fn idf_tempered(
         &self,
         tag: &str,
@@ -162,7 +171,7 @@ static IDF_REBUILDING: AtomicBool = AtomicBool::new(false);
 static BUMP_LOCK: Mutex<()> = Mutex::new(());
 static BUMP_DRIFT_COUNT: AtomicI64 = AtomicI64::new(0);
 
-/// Two separate access timers so background work (prefetch, save_posts_tags_batch)
+/// Two separate access timers so background work (prefetch, `save_posts_tags_batch`)
 /// doesn't prevent idle-eviction of the user-facing cache.
 ///
 /// `LAST_USER_ACCESS` — updated only by request-serving code (`current_idf`).
@@ -174,12 +183,16 @@ static LAST_USER_ACCESS: LazyLock<Mutex<Instant>> = LazyLock::new(|| Mutex::new(
 static LAST_SYSTEM_ACCESS: LazyLock<Mutex<Instant>> = LazyLock::new(|| Mutex::new(Instant::now()));
 
 fn touch_user_access() {
-    let mut g = LAST_USER_ACCESS.lock().unwrap_or_else(|p| p.into_inner());
+    let mut g = LAST_USER_ACCESS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     *g = Instant::now();
 }
 
 fn touch_system_access() {
-    let mut g = LAST_SYSTEM_ACCESS.lock().unwrap_or_else(|p| p.into_inner());
+    let mut g = LAST_SYSTEM_ACCESS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     *g = Instant::now();
 }
 
@@ -194,7 +207,9 @@ pub fn bump_idf(df_delta: HashMap<String, i64>, n_posts_delta: i64) {
         return;
     }
     touch_system_access();
-    let _guard = BUMP_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let _guard = BUMP_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let current = IDF_CACHE.load_full();
     let mut next = (*current).clone();
     next.bump(&df_delta, n_posts_delta);
@@ -293,7 +308,9 @@ pub fn evict_if_idle(idle_secs: u64) -> (usize, i64) {
     // Snapshot user-access under the lock, but drop the guard before
     // touching ArcSwap to keep the critical section short.
     let elapsed = {
-        let g = LAST_USER_ACCESS.lock().unwrap_or_else(|p| p.into_inner());
+        let g = LAST_USER_ACCESS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         g.elapsed()
     };
     if elapsed.as_secs() < idle_secs {
@@ -313,7 +330,9 @@ pub fn evict_if_idle(idle_secs: u64) -> (usize, i64) {
     // tight cadence) doesn't see "still idle, evict again" against the
     // empty cache and log spurious evictions.
     {
-        let mut g = LAST_USER_ACCESS.lock().unwrap_or_else(|p| p.into_inner());
+        let mut g = LAST_USER_ACCESS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         *g = Instant::now();
     }
     (prev_tags, prev_posts)

@@ -1,6 +1,6 @@
 //! Shared integration-test setup.
 //!
-//! Each integration-test binary gets its own SQLite catalog file. This keeps
+//! Each integration-test binary gets its own `SQLite` catalog file. This keeps
 //! assertions independent of the developer's `database.db` and of unrelated
 //! test binaries, while preserving the production DB layer and migrations.
 
@@ -11,7 +11,7 @@ use tempfile::NamedTempFile;
 
 static TEST_CONFIG: OnceLock<NamedTempFile> = OnceLock::new();
 
-/// Install a config pointing at a process-unique temporary SQLite database.
+/// Install a config pointing at a process-unique temporary `SQLite` database.
 ///
 /// Must run before the first DB access in an integration-test binary: the DB
 /// pool and dedicated writer connection intentionally cache their path.

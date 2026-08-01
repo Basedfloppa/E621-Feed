@@ -159,7 +159,7 @@ pub fn remove_feed_interaction(
 
 /// Batch version of `record_feed_interaction`. Processes up to 100
 /// interactions in a single write transaction. Ownership is verified
-/// per distinct account_id (cheaper than per-interaction).
+/// per distinct `account_id` (cheaper than per-interaction).
 /// Clear the interaction-derived recommendation state for one account owned by
 /// this device. Favorites, blacklist, profile, and account links are retained.
 pub fn clear_feed_interactions(owner_token: &str, account_id: i32) -> Result<usize, String> {
@@ -220,10 +220,7 @@ pub fn record_feed_interactions_batch(
                 )
                 .map_err(|e| format!("Failed to validate feed interaction owner link: {e}"))?;
             if !linked {
-                return Err(format!(
-                    "Account {} is not linked to this device token",
-                    aid
-                ));
+                return Err(format!("Account {aid} is not linked to this device token"));
             }
         }
 
@@ -284,7 +281,9 @@ pub fn record_feed_interactions_batch(
             .map_err(|e| format!("Failed to prepare batch feedback update: {e}"))?;
 
         for interaction in interactions {
-            let bucket = buckets.get(&interaction.account_id).and_then(|b| b.clone());
+            let bucket = buckets
+                .get(&interaction.account_id)
+                .and_then(std::clone::Clone::clone);
 
             let inserted = insert_interaction
                 .execute(params![
@@ -438,7 +437,7 @@ fn local_candidates_for_top_tags(
         .map_err(|e| format!("collect local_candidates_for_top_tags: {e}"))
 }
 
-/// Recent posts above the user's own popularity baseline (avg_fav_count).
+/// Recent posts above the user's own popularity baseline (`avg_fav_count`).
 /// Randomized instead of ranked — picks from a wider pool to reduce
 /// repetition of the same popular posts across requests.
 fn local_candidates_recent_popular(

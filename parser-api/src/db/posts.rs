@@ -347,13 +347,13 @@ fn post_upsert_params(post: &Post) -> Vec<rusqlite::types::Value> {
     let file_url = post.files.original.url.clone();
 
     fn opt_int(v: Option<i64>) -> Value {
-        v.map(Value::Integer).unwrap_or(Value::Null)
+        v.map_or(Value::Null, Value::Integer)
     }
     fn opt_text(v: Option<String>) -> Value {
-        v.map(Value::Text).unwrap_or(Value::Null)
+        v.map_or(Value::Null, Value::Text)
     }
     fn opt_real(v: Option<f64>) -> Value {
-        v.map(Value::Real).unwrap_or(Value::Null)
+        v.map_or(Value::Null, Value::Real)
     }
 
     vec![
@@ -368,12 +368,12 @@ fn post_upsert_params(post: &Post) -> Vec<rusqlite::types::Value> {
         opt_int(file_width),
         opt_int(file_height),
         opt_int(file_size),
-        Value::Integer(if post.is_animated() { 1 } else { 0 }),
+        Value::Integer(i64::from(post.is_animated())),
         opt_real(post.files.meta.duration),
         Value::Integer(post.stats.comment_count),
-        Value::Integer(if post.has.notes { 1 } else { 0 }),
-        Value::Integer(if post.flags.deleted { 1 } else { 0 }),
-        Value::Integer(if post.has.children { 1 } else { 0 }),
+        Value::Integer(i64::from(post.has.notes)),
+        Value::Integer(i64::from(post.flags.deleted)),
+        Value::Integer(i64::from(post.has.children)),
         opt_text(preview_url),
         opt_text(sample_url),
         opt_text(file_url),
@@ -456,6 +456,7 @@ pub fn upsert_catalog_posts(posts: &[Post]) -> Result<(), String> {
     })
 }
 
+#[must_use]
 pub fn post_count() -> i64 {
     let conn = open_db().expect("open_db failed");
     conn.query_row("SELECT COUNT(*) FROM posts", [], |row| row.get::<_, i64>(0))
@@ -728,7 +729,7 @@ pub fn hydrate_posts_by_ids(ids: &[i64]) -> Result<Vec<Post>, String> {
 
 /// Find post IDs similar to `post_id` via tag overlap. Returns candidates
 /// that share at least `min_overlap` tags with the source post, ordered by
-/// overlap count DESC, score_total DESC. Excludes owned and recently-seen
+/// overlap count DESC, `score_total` DESC. Excludes owned and recently-seen
 /// posts. Supports pagination via `page` / `limit`.
 pub fn find_similar_post_ids(
     post_id: i64,

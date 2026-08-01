@@ -55,7 +55,7 @@ pub(crate) fn run_grid_with_dataset(
             String::new()
         }
     );
-    eprintln!("[grid] adaptive step: {:?}", PASS_SCALES);
+    eprintln!("[grid] adaptive step: {PASS_SCALES:?}");
 
     eprintln!("[grid] running baseline eval...");
     let t_baseline = std::time::Instant::now();
@@ -250,8 +250,7 @@ pub(crate) fn run_grid_with_dataset(
                 if !m.ndcg_at_k.is_finite() {
                     skipped_nan += 1;
                     eprintln!(
-                        "[grid]   WARN paired probe ({}, {}) produced NaN/Inf NDCG, skipping",
-                        name_a, name_b
+                        "[grid]   WARN paired probe ({name_a}, {name_b}) produced NaN/Inf NDCG, skipping"
                     );
                     continue;
                 }

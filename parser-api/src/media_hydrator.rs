@@ -9,7 +9,7 @@ use std::{collections::HashSet, time::Duration};
 use crate::{api, db};
 
 const BATCH_SIZE: usize = 50;
-const CADENCE: Duration = Duration::from_secs(15 * 60);
+const CADENCE: Duration = Duration::from_mins(15);
 
 pub fn spawn_media_hydrator() {
     rocket::tokio::spawn(async {
@@ -27,7 +27,7 @@ pub fn spawn_media_hydrator() {
 pub async fn hydrate_catalog_once() {
     match rocket::tokio::task::spawn_blocking(|| db::purge_deleted_catalog_posts(500)).await {
         Ok(Ok(removed)) if removed > 0 => {
-            info!("[media-hydrator] purged {removed} locally deleted posts")
+            info!("[media-hydrator] purged {removed} locally deleted posts");
         }
         Ok(Ok(_)) => {}
         Ok(Err(error)) => warn!("[media-hydrator] deleted-post purge failed: {error}"),
@@ -69,7 +69,7 @@ pub async fn hydrate_catalog_once() {
                     Ok(Ok(((), purged))) => {
                         info!(
                             "[media-hydrator] scanned {requested} incomplete posts; e621 repaired {count}, purged {purged} absent posts"
-                        )
+                        );
                     }
                     Ok(Err(error)) => warn!("[media-hydrator] save failed: {error}"),
                     Err(error) => warn!("[media-hydrator] save task panicked: {error}"),

@@ -64,7 +64,7 @@ pub struct TagResolveBatchResponse {
 pub struct TasteThemeTag {
     pub name: String,
     pub count: i64,
-    /// PageRank centrality (0..1). High = more central to the theme.
+    /// `PageRank` centrality (0..1). High = more central to the theme.
     pub centrality: f32,
 }
 
@@ -186,7 +186,7 @@ pub struct AccountPreferenceProfile {
     pub last_refreshed_at: Option<DateTime<Utc>>,
     /// Positive preferences: tags the user wants to see more of (soft boost).
     /// Applied as IDF-weight multipliers in `ScoringContext`. Blacklist takes
-    /// priority over preferred_tags.
+    /// priority over `preferred_tags`.
     #[serde(default)]
     pub preferred_tags: Vec<crate::models::PreferredTag>,
 }
@@ -220,9 +220,9 @@ pub struct TagRelationScoring {
     /// PMI normalisation scale (mirrors `tag_relation_pmi_scale`). Both PMI
     /// terms divide by this before clamping to [0, 1].
     pub pmi_scale: f32,
-    /// log1p(cooc_ref) reference for global confidence shrinkage.
+    /// `log1p(cooc_ref)` reference for global confidence shrinkage.
     pub cooc_ref: f32,
-    /// log1p(cooc_ref) reference for user confidence shrinkage.
+    /// `log1p(cooc_ref)` reference for user confidence shrinkage.
     pub user_cooc_ref: f32,
     /// Minimum global co-occurrence required for a pair to contribute to the
     /// global PMI component.

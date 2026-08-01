@@ -22,7 +22,7 @@ use crate::prefetch_backfill::spawn_backfill_worker;
 
 // ── LCG constants for deterministic weighted sampling ─────────────────
 
-/// Linear Congruential Generator constants (same as glibc's TYPE_0).
+/// Linear Congruential Generator constants (same as glibc's `TYPE_0`).
 const LCG_A: u64 = 6364136223846793005;
 const LCG_C: u64 = 1442695040888963407;
 
@@ -67,7 +67,7 @@ async fn prefetch_loop<F1, F2>(
 {
     // Initial delay so we don't compete with startup work (migrations,
     // tag-cooccurrence backfill).
-    rocket::tokio::time::sleep(Duration::from_secs(60)).await;
+    rocket::tokio::time::sleep(Duration::from_mins(1)).await;
 
     loop {
         let runtime = cfg().runtime.clone();
@@ -104,7 +104,7 @@ pub struct PrefetchQueries {
     artist_queries: Vec<String>,
     /// Character tag queries to fetch.
     character_queries: Vec<String>,
-    /// "Recent popular" queries (ordered by fav_count above user baseline).
+    /// "Recent popular" queries (ordered by `fav_count` above user baseline).
     recent_popular: Vec<String>,
 }
 
@@ -280,7 +280,7 @@ pub fn pick_prefetch_targets(
         .prepare(&sql)
         .map_err(|e| format!("pick targets prepare: {e}"))?;
     let params_refs: Vec<&dyn rusqlite::types::ToSql> =
-        params_vec.iter().map(|p| p.as_ref()).collect();
+        params_vec.iter().map(std::convert::AsRef::as_ref).collect();
     let rows: Vec<(i32, String)> = stmt
         .query_map(params_refs.as_slice(), |r| {
             Ok((r.get::<_, i32>(0)?, r.get::<_, String>(1)?))
@@ -326,10 +326,10 @@ pub fn pick_prefetch_targets(
         let mut recent_popular = Vec::new();
         if include_recent {
             for tag in &artist_queries {
-                recent_popular.push(format!("{} order:fav_count", tag));
+                recent_popular.push(format!("{tag} order:fav_count"));
             }
             for tag in &character_queries {
-                recent_popular.push(format!("{} order:fav_count", tag));
+                recent_popular.push(format!("{tag} order:fav_count"));
             }
         }
 

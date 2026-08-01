@@ -39,6 +39,14 @@ MALLOC_CONF=dirty_decay_ms:0,muzzy_decay_ms:0 ./target/release/e621-account-pars
 Without jemalloc, `MALLOC_ARENA_MAX=2 MALLOC_TRIM_THRESHOLD_=65536` env
 vars cut glibc waste by ~30–50% without a rebuild.
 
+> **Where the memory actually goes**: a measured per-structure breakdown
+> (IDF, tag-relation graph hot vs. frozen, scoring) lives in
+> [`memory-profile.md`](memory-profile.md). At current catalog size the
+> structures themselves are ~100 MB — the rest of the 1.3–1.4 GB is the
+> e621 API response cache, SQLite page cache, and runtime.
+> SQLite concurrency behaviour under load is covered separately in
+> [`load-testing.md`](load-testing.md).
+
 ## nginx
 
 The shipped [`nginx-template`](../nginx-template) is a working server

@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 /// Current e621 user API format (as of 2025-07).
 /// e621 now returns a unified user format through /users/{id}.json —
-/// no more FullUser vs FullCurrentUser distinction.
+/// no more `FullUser` vs `FullCurrentUser` distinction.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum UserApiResponse {
@@ -80,7 +80,7 @@ pub struct BlacklistPayload {
 }
 
 /// A single preferred tag with a boost weight for the scoring system.
-/// `weight` ∈ [0.1, 10.0]; blacklist takes priority over preferred_tags.
+/// `weight` ∈ [0.1, 10.0]; blacklist takes priority over `preferred_tags`.
 #[derive(Debug, Serialize, Deserialize, Clone, JsonSchema)]
 #[serde(crate = "rocket::serde")]
 pub struct PreferredTag {
@@ -140,7 +140,7 @@ pub struct UserSearchResult {
 mod tests {
     use super::*;
 
-    /// The /settings page expects the exact snake_case wire format the
+    /// The /settings page expects the exact `snake_case` wire format the
     /// backend emits (no camelCase aliases). Lock it in so a rename can't
     /// silently break the frontend again.
     #[test]

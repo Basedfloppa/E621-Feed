@@ -83,7 +83,7 @@ pub fn get_old_random_posts(older_than_days: i64, limit: usize) -> Result<Vec<Sc
     ids_to_scored(&ids)
 }
 
-/// Random posts from the catalog, using SQLite's built-in RANDOM().
+/// Random posts from the catalog, using `SQLite`'s built-in `RANDOM()`.
 pub fn get_random_posts(limit: usize) -> Result<Vec<ScoredPost>, String> {
     let conn = open_db()?;
     let mut stmt = conn
@@ -162,7 +162,7 @@ pub fn get_random_posts_by_group(account_id: i32, limit: usize) -> Result<Vec<Sc
         params_vec.push(Box::new(*tid));
     }
     let params_refs: Vec<&dyn rusqlite::types::ToSql> =
-        params_vec.iter().map(|p| p.as_ref()).collect();
+        params_vec.iter().map(std::convert::AsRef::as_ref).collect();
 
     let ids: Vec<i64> = stmt
         .query_map(params_refs.as_slice(), |r| r.get::<_, i64>(0))

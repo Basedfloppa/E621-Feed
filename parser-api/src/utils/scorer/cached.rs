@@ -2,7 +2,7 @@
 //!
 //! Each post's tags are walked once at prep time; for every (group, tag)
 //! we resolve the per-tag bits the hot scoring loop needs (lowercase
-//! string, raw IDF document-frequency, and the global TagRelationGraph
+//! string, raw IDF document-frequency, and the global `TagRelationGraph`
 //! `TagId`) into a flat `Vec<CachedTag>`. Subsequent grid probes then
 //! score against `CachedPostFeatures` without calling `IdfIndex::df_for`
 //! or `TagRelationGraph::tag_id` HashMap-by-string lookups.
@@ -34,15 +34,15 @@ pub struct CachedTag {
     /// Lowercased, trimmed tag name.
     pub lc: CompactString,
     /// Raw document-frequency from `IdfIndex` at prep time. Used to
-    /// reconstruct IDF without re-looking-up the HashMap on every probe.
+    /// reconstruct IDF without re-looking-up the `HashMap` on every probe.
     pub df_raw: i64,
-    /// Pre-resolved global-graph TagId, if the tag was present in the
+    /// Pre-resolved global-graph `TagId`, if the tag was present in the
     /// graph at prep time. `None` → tag is unknown to the global graph
     /// (typically a brand-new tag) and PMI contribution will be skipped.
     pub global_tid: Option<TagId>,
-    /// Pre-resolved per-account user-graph TagId. `None` for the prod
+    /// Pre-resolved per-account user-graph `TagId`. `None` for the prod
     /// fast path (no user graph supplied) or when the tag wasn't in the
-    /// caller's train_posts.
+    /// caller's `train_posts`.
     pub user_tid: Option<TagId>,
 }
 
@@ -69,15 +69,17 @@ impl CachedPostFeatures {
     /// Build per-post features against a global tag-relation graph and
     /// no personal graph (`user_tid = None` for every tag). Used by
     /// callers that don't have a per-account graph available.
+    #[must_use]
     pub fn from_post(post: &Post, idf: &IdfIndex, global_relation: &TagRelationGraph) -> Self {
         Self::from_post_with_user(post, idf, global_relation, None)
     }
 
     /// Build per-post features with both global and per-account
-    /// (personal) tag-relation graphs pre-resolved into TagIds. The
+    /// (personal) tag-relation graphs pre-resolved into `TagIds`. The
     /// calibrate harness builds one fixture per account with its own
-    /// `user_relation` from train_posts; pass that here to give the
+    /// `user_relation` from `train_posts`; pass that here to give the
     /// personal `tag_relation_fit` channel real signal.
+    #[must_use]
     pub fn from_post_with_user(
         post: &Post,
         idf: &IdfIndex,

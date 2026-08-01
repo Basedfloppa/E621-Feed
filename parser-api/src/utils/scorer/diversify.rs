@@ -13,7 +13,7 @@
 //!
 //! ## Semantic similarity (v5.11)
 //!
-//! By default MMR uses Jaccard similarity on 64-bit SipHashes of tag
+//! By default MMR uses Jaccard similarity on 64-bit `SipHashes` of tag
 //! names — exact-match only. When `diversity_semantic_blend > 0`, a
 //! fraction of the similarity comes from PMI-based tag-pair association.
 //! Tags that co-occur more often than chance (PMI > threshold) count as
@@ -47,7 +47,7 @@ use super::util::{FEEDBACK_NEUTRAL, normalize_tag};
 type TagId = u32;
 
 /// Pre-computed fingerprints for one post. Each entry is a `(hash, tag_id)`
-/// tuple — the hash is the SipHash of the lowercased tag name (for Jaccard),
+/// tuple — the hash is the `SipHash` of the lowercased tag name (for Jaccard),
 /// and `tag_id` is the optional graph-interned id (for PMI-based semantic
 /// similarity). Sorted by hash for O(n) merge-intersection.
 #[derive(Clone)]
@@ -64,8 +64,9 @@ impl DiversityFeatures {
     ///
     /// `graph` is only used to resolve `TagId`s for PMI similarity; when
     /// `diversity_semantic_blend` is 0 in the calling code, the ids are
-    /// still stored but never queried — the HashMap lookups per tag are
+    /// still stored but never queried — the `HashMap` lookups per tag are
     /// negligible overhead compared to the rest of the scoring pipeline.
+    #[must_use]
     pub fn from_post(p: &Post, graph: &TagRelationGraph) -> Self {
         Self {
             artist: hashed_tag_set(&p.tags.artist, 0, graph),
@@ -107,7 +108,7 @@ fn hashed_tag_set(
 }
 
 /// Jaccard between two sorted-deduped slices via merge-intersection on
-/// the hash component only (ignoring TagId). Exact-match similarity.
+/// the hash component only (ignoring `TagId`). Exact-match similarity.
 fn jaccard_hashes(a: &[(u64, Option<TagId>)], b: &[(u64, Option<TagId>)]) -> f32 {
     if a.is_empty() || b.is_empty() {
         return 0.0;
@@ -169,7 +170,7 @@ fn pmi_group_similarity(
     }
 
     let n_posts_f = n_posts as f64;
-    let threshold_f = threshold as f64;
+    let threshold_f = f64::from(threshold);
     let mut matches = 0u32;
     let mut total = 0u32;
 
@@ -211,7 +212,7 @@ fn pmi_group_similarity(
 /// Blended group-level similarity: Jaccard (exact tag-match) and PMI
 /// (semantic soft-match). When `blend <= 0`, falls back to pure Jaccard.
 ///
-/// Jaccard uses the pre-resolved TagIds from `graph` (global, consistent
+/// Jaccard uses the pre-resolved `TagIds` from `graph` (global, consistent
 /// ID mapping). PMI uses `user_graph` when provided and `user_pmi_weight`
 /// is positive — capturing personalized tag co-occurrence so MMR diversity
 /// personalises around per-user tag associations (e.g. a `skeb`+`canine`
@@ -454,8 +455,7 @@ pub fn diversify_scored_posts(
             let interaction = sp
                 .breakdown
                 .as_ref()
-                .map(|b| b.interaction_fit)
-                .unwrap_or(FEEDBACK_NEUTRAL);
+                .map_or(FEEDBACK_NEUTRAL, |b| b.interaction_fit);
             (sp.score, interaction, sp.post.id)
         })
         .collect();
@@ -583,8 +583,14 @@ mod tests {
             sources: vec![],
             description: None,
             tags: Tags {
-                artist: artists.iter().map(|s| s.to_string()).collect(),
-                character: characters.iter().map(|s| s.to_string()).collect(),
+                artist: artists
+                    .iter()
+                    .map(std::string::ToString::to_string)
+                    .collect(),
+                character: characters
+                    .iter()
+                    .map(std::string::ToString::to_string)
+                    .collect(),
                 ..Tags::default()
             },
         }
@@ -989,7 +995,7 @@ mod tests {
         );
     }
 
-    /// When diversity_semantic_blend > 0 and user_graph is provided,
+    /// When `diversity_semantic_blend` > 0 and `user_graph` is provided,
     /// PMI queries should use the user graph's co-occurrence stats
     /// instead of the global graph's.
     #[test]

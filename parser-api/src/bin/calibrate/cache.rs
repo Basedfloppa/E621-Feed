@@ -75,14 +75,14 @@ pub(crate) const M_ALL: u16 = M_SIM
 // constants makes the registry table easier to read.
 
 /// `coldstart_n0` / `confidence_steepness` change `personal_confidence`,
-/// which is consumed by rating / media / recency / tag_relation.
+/// which is consumed by rating / media / recency / `tag_relation`.
 pub(crate) const M_CONFIDENCE_DERIVED: u16 = M_RATING | M_MEDIA | M_RECENCY | M_TAG_RELATION;
 /// `discrete_smoothing_alpha` / `discrete_pref_floor` /
 /// `coldstart_smoothing_boost` change rating + media smoothing only.
 pub(crate) const M_DISCRETE: u16 = M_RATING | M_MEDIA;
 /// `one_sided_ratio_exp` changes both quality and popularity ratios.
 pub(crate) const M_RATIO_EXP: u16 = M_QUALITY | M_POPULARITY;
-/// `group_w_*` change the per-group weight vector → sim+interaction+tag_relation.
+/// `group_w_*` change the per-group weight vector → `sim+interaction+tag_relation`.
 pub(crate) const M_GROUP_W: u16 = M_SIM | M_INTERACTION | M_TAG_RELATION;
 
 // ---- ChannelScores + ScoreCache --------------------------------------------
@@ -109,7 +109,7 @@ pub(crate) struct ChannelScores {
 /// re-reading the dataset.
 ///
 /// `context_base` holds the pre-computed account data (user/feedback
-/// HashMaps) from the prior probe. If the current probe's priors have the
+/// `HashMaps`) from the prior probe. If the current probe's priors have the
 /// same fingerprint, the base can be reused via [`ScoringContext::from_base`]
 /// instead of rebuilding the expensive hashmaps from scratch.
 pub(crate) struct AccountChannelCache {

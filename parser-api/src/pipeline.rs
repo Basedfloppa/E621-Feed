@@ -101,6 +101,7 @@ fn resolve_process_mode(mode: ProcessMode, local_count: i64, remote_count: i64) 
 /// Exposed so callers that prepare posts outside the pipeline (e.g.,
 /// the `seed` binary, or tests fabricating fake feeds) can apply the
 /// same filter the live ingest path uses.
+#[must_use]
 pub fn strip_blacklisted_tags(mut p: Post, blacklist: &HashSet<String>) -> Post {
     let filter = |v: &mut Vec<String>| {
         v.retain(|t| !blacklist.contains(&t.to_lowercase().trim().to_string()));
@@ -157,13 +158,13 @@ pub async fn run_process_with_mode(
     let blacklist: HashSet<String> = cfg.tag_blacklist.iter().map(|s| s.to_lowercase()).collect();
 
     let account =
-        db_blocking(move || get_account_by_id(&owner_token, account_id).map_err(|e| e.to_string()))
+        db_blocking(move || get_account_by_id(&owner_token, account_id).map_err(|e| e.clone()))
             .await?;
     let user = api::get_account(&account).await?;
     let favcount = match user {
         UserApiResponse::FullUser(u) => u.favorite_count,
     };
-    let pages = (favcount / cfg.posts_limit) + (if favcount % cfg.posts_limit > 0 { 1 } else { 0 });
+    let pages = (favcount / cfg.posts_limit) + i32::from(favcount % cfg.posts_limit > 0);
 
     macro_rules! record_phase {
         ($name:expr) => {{
@@ -577,11 +578,17 @@ mod tests {
             sources: vec![],
             description: None,
             tags: Tags {
-                artist: artist.iter().map(|s| s.to_string()).collect(),
+                artist: artist
+                    .iter()
+                    .map(std::string::ToString::to_string)
+                    .collect(),
                 character: vec![],
                 copyright: vec![],
                 species: vec![],
-                general: general.iter().map(|s| s.to_string()).collect(),
+                general: general
+                    .iter()
+                    .map(std::string::ToString::to_string)
+                    .collect(),
                 lore: vec![],
                 meta: vec![],
                 invalid: vec![],

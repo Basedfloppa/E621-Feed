@@ -230,13 +230,13 @@ pub fn get_accounts_for_owner(owner_token: &str) -> Result<Vec<TruncatedAccount>
     // pool slots and blocking unrelated reads under load.
     let mut stmt = conn
         .prepare(
-            r#"
+            r"
         SELECT a.id, a.name, COALESCE(NULLIF(adl.blacklisted_tags, ''), a.blacklisted_tags, '')
         FROM accounts a
         INNER JOIN account_device_links adl ON adl.account_id = a.id
         WHERE adl.owner_token = ?
         ORDER BY adl.last_seen_at DESC, a.name ASC
-        "#,
+        ",
         )
         .map_err(|e| format!("Failed to construct query: {e}"))?;
 
@@ -257,12 +257,12 @@ pub fn get_account_by_name(owner_token: &str, name: String) -> Result<TruncatedA
 
     let mut stmt = conn
         .prepare(
-            r#"
+            r"
         SELECT a.id, a.name, COALESCE(NULLIF(adl.blacklisted_tags, ''), a.blacklisted_tags, '')
         FROM accounts a
         INNER JOIN account_device_links adl ON adl.account_id = a.id
         WHERE a.name = ?1 AND adl.owner_token = ?2
-        "#,
+        ",
         )
         .map_err(|e| format!("Failed to construct query: {e}"))?;
 
@@ -290,12 +290,12 @@ pub fn get_account_by_id(owner_token: &str, id: i32) -> Result<TruncatedAccount,
 
     let mut stmt = conn
         .prepare(
-            r#"
+            r"
         SELECT a.id, a.name, COALESCE(NULLIF(adl.blacklisted_tags, ''), a.blacklisted_tags, '')
         FROM accounts a
         INNER JOIN account_device_links adl ON adl.account_id = a.id
         WHERE a.id = ?1 AND adl.owner_token = ?2
-        "#,
+        ",
         )
         .map_err(|e| format!("Failed to construct query: {e}"))?;
 
@@ -449,12 +449,12 @@ pub fn get_account_feed_settings(
     // 1) Blacklist: device-specific with global fallback.
     let blacklist: String = tx
         .query_row(
-            r#"
+            r"
             SELECT COALESCE(NULLIF(adl.blacklisted_tags, ''), a.blacklisted_tags, '')
             FROM accounts a
             INNER JOIN account_device_links adl ON adl.account_id = a.id
             WHERE a.id = ?1 AND adl.owner_token = ?2
-            "#,
+            ",
             params![account_id, owner_token],
             |r| r.get(0),
         )
@@ -556,7 +556,7 @@ pub fn set_preferred_tags(
 /// account falls into `pick_bucket(id, None)`. Used to seed the
 /// `e621_experiment_bucket_accounts` gauge at startup.
 /// Get all preferred tags for an account for backfill purposes.
-/// Returns (tag_name, group_type, weight).
+/// Returns (`tag_name`, `group_type`, weight).
 pub fn get_all_preferred_tags(account_id: i32) -> Result<Vec<(String, String, f64)>, String> {
     let conn = open_db()?;
     let mut stmt = conn

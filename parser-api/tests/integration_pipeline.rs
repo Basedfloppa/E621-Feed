@@ -262,7 +262,7 @@ fn count_table_for_account(table: &str, account_id: i32) -> i64 {
 // ==================================================================
 
 /// Happy path: e621 reports 6 favourites split across 2 pages of 4
-/// (posts_limit=4). After `run_process` the catalog has the posts,
+/// (`posts_limit=4`). After `run_process` the catalog has the posts,
 /// `accounts_post` links them all, tag-counts profile is populated,
 /// `pages_total = pages_done = 2`, and the job state is `Done`.
 #[tokio::test(flavor = "multi_thread")]
@@ -308,7 +308,7 @@ async fn analyze_account_happy_path() {
     // Account must exist (linked) before `run_process` because
     // `get_account_by_id` is the auth gate.
     db::set_account("pipeline_owner", account_id, "test_user", "").unwrap();
-    jobs::try_begin(account_id); // mark Running
+    drop(jobs::try_begin(account_id)); // mark Running
 
     pipeline::run_process(account_id, "pipeline_owner".to_string())
         .await
@@ -358,7 +358,7 @@ async fn analyze_account_happy_path() {
 
 /// e621 returns 500 for the user lookup. Pipeline must surface the
 /// error (no partial state), and the caller can mark `Failed` —
-/// importantly, the previous teardown phases (drop_old, drop_cooc)
+/// importantly, the previous teardown phases (`drop_old`, `drop_cooc`)
 /// should NOT have run.
 #[tokio::test(flavor = "multi_thread")]
 async fn analyze_account_e621_user_error_returns_err() {
@@ -481,7 +481,7 @@ async fn get_favorites_malformed_200_returns_err() {
         "wrong error: {error}"
     );
 
-    jobs::try_begin(account_id);
+    drop(jobs::try_begin(account_id));
     let pipeline_error = pipeline::run_process(account_id, "pipeline_owner".to_string())
         .await
         .expect_err("one malformed page must abort the pipeline immediately");
@@ -550,7 +550,7 @@ async fn analyze_account_aborts_on_consecutive_page_failures() {
         .await;
 
     db::set_account("pipeline_owner", account_id, "test_user", "").unwrap();
-    jobs::try_begin(account_id);
+    drop(jobs::try_begin(account_id));
     let result = pipeline::run_process(account_id, "pipeline_owner".to_string()).await;
 
     assert!(
@@ -684,7 +684,7 @@ async fn analyze_account_re_analyze_replaces_state() {
         .mount(&server)
         .await;
 
-    jobs::try_begin(account_id);
+    drop(jobs::try_begin(account_id));
     // Explicit Full mode: Auto would pick Incremental when local_count (2)
     // >= remote_count (2), which only adds new posts without dropping old
     // ones — this test asserts the old set is replaced entirely.
@@ -775,7 +775,7 @@ async fn analyze_account_global_blacklist_strips_tags() {
         .await;
 
     db::set_account("pipeline_owner", account_id, "test_user", "").unwrap();
-    jobs::try_begin(account_id);
+    drop(jobs::try_begin(account_id));
     pipeline::run_process(account_id, "pipeline_owner".to_string())
         .await
         .expect("pipeline completes");
@@ -935,7 +935,10 @@ fn find_similar_post_ids_ranks_by_overlap_and_filters() {
         sources: vec![],
         description: None,
         tags: e621_account_parser_api::models::Tags {
-            general: general.iter().map(|s| s.to_string()).collect(),
+            general: general
+                .iter()
+                .map(std::string::ToString::to_string)
+                .collect(),
             ..Default::default()
         },
     };
@@ -1098,8 +1101,8 @@ async fn digest_generic_returns_mixed_posts() {
 //  User story 3 — "Log my interactions"
 // ==================================================================
 
-/// `record_feed_interaction` requires a linked owner_token and writes
-/// to BOTH feed_interactions AND account_tag_feedback (via the tag fan-out).
+/// `record_feed_interaction` requires a linked `owner_token` and writes
+/// to BOTH `feed_interactions` AND `account_tag_feedback` (via the tag fan-out).
 #[test]
 fn feed_interaction_round_trip_writes_both_tables() {
     ensure_migrations();
@@ -1176,7 +1179,7 @@ fn feed_interaction_round_trip_writes_both_tables() {
     wipe_account(account_id);
 }
 
-/// Wrong owner_token → record refuses. This is the auth gate for the
+/// Wrong `owner_token` → record refuses. This is the auth gate for the
 /// public POST /interaction handler.
 #[test]
 fn feed_interaction_rejects_unlinked_owner() {
@@ -1396,8 +1399,7 @@ fn recommendations_owned_dedup_invariant() {
     let owned = db::get_owned_post_ids(account_id).unwrap();
     assert!(
         owned.contains(&90001),
-        "owned post 90001 must be returned by get_owned_post_ids, got {:?}",
-        owned
+        "owned post 90001 must be returned by get_owned_post_ids, got {owned:?}"
     );
     assert!(
         !owned.contains(&90002),
@@ -1452,7 +1454,7 @@ async fn process_then_owned_dedup_excludes_imported_favs() {
         .await;
 
     db::set_account("dedup_pipeline_owner", account_id, "test_user", "").unwrap();
-    jobs::try_begin(account_id);
+    drop(jobs::try_begin(account_id));
     pipeline::run_process(account_id, "dedup_pipeline_owner".to_string())
         .await
         .unwrap();
@@ -1462,8 +1464,7 @@ async fn process_then_owned_dedup_excludes_imported_favs() {
     for id in [95001_i64, 95002, 95003] {
         assert!(
             owned.contains(&id),
-            "post {id} imported by /process must be in owned set, got {:?}",
-            owned
+            "post {id} imported by /process must be in owned set, got {owned:?}"
         );
     }
 
@@ -1567,8 +1568,7 @@ async fn recommendations_cross_page_dedup_filters_shown_posts() {
     let shown_ids = db::get_session_shown_post_ids(session_id).unwrap();
     assert!(
         shown_ids.contains(&101) && shown_ids.contains(&103),
-        "dedup set should contain page-1 posts 101 and 103, got {:?}",
-        shown_ids
+        "dedup set should contain page-1 posts 101 and 103, got {shown_ids:?}"
     );
     assert_eq!(shown_ids.len(), 2, "should have exactly 2 shown posts");
 
@@ -1618,7 +1618,7 @@ async fn recommendations_cross_page_dedup_filters_shown_posts() {
 /// The prefetch worker picks targets based on recent feed interactions.
 /// Accounts with no interactions, or that were prefetched recently,
 /// should be excluded. This tests the DB setup that the prefetch
-/// worker depends on (interactions + tag_counts). The actual
+/// worker depends on (interactions + `tag_counts`). The actual
 /// `pick_prefetch_targets()` function is private but the DB schema
 /// it reads from is exercised here.
 #[tokio::test(flavor = "multi_thread")]

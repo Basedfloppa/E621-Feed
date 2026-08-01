@@ -278,7 +278,7 @@ pub fn set_tag_counts(account_id: i32) -> Result<(), String> {
     let counts: Vec<TagCount> = {
         let mut stmt = connection
             .prepare(
-                r#"
+                r"
         SELECT t.name, t.group_type, COUNT(*) as count
         FROM tags t
         INNER JOIN tags_posts tp ON t.id = tp.tag_id
@@ -286,7 +286,7 @@ pub fn set_tag_counts(account_id: i32) -> Result<(), String> {
         WHERE ap.account_id = ?
         GROUP BY t.name, t.group_type
         ORDER BY count DESC
-        "#,
+        ",
             )
             .map_err(|e| format!("Failed to construct query: {e}"))?;
 
@@ -402,7 +402,7 @@ use crate::models::{TagAlias, TagImplication};
 /// Bulk upsert tag aliases from e621 API. Uses INSERT OR REPLACE so
 /// existing rows are overwritten with fresh status/dates.
 /// Bulk upsert tag relation entries (aliases or implications).
-/// Both tables share the same schema: (antecedent_name, consequent_name, status, created_at, updated_at).
+/// Both tables share the same schema: (`antecedent_name`, `consequent_name`, status, `created_at`, `updated_at`).
 pub fn save_tag_relations(table: &str, entries: &[impl TagRelationEntry]) -> Result<(), String> {
     if entries.is_empty() {
         return Ok(());
@@ -491,7 +491,7 @@ pub fn save_tag_implications(implications: &[TagImplication]) -> Result<(), Stri
 }
 
 /// Resolve a tag through the alias chain to find its canonical name.
-/// E.g. "canyne" -> "canine" (following the consequent_name chain).
+/// E.g. "canyne" -> "canine" (following the `consequent_name` chain).
 pub fn get_alias_consequent(tag: &str) -> Result<Option<String>, String> {
     let tag = tag.to_ascii_lowercase();
     let conn = open_db()?;
@@ -621,7 +621,7 @@ fn is_cache_loaded() -> bool {
     false
 }
 
-/// Load or refresh the in-memory caches from SQLite.
+/// Load or refresh the in-memory caches from `SQLite`.
 pub fn load_tag_relation_caches() -> Result<(), String> {
     let conn = open_db()?;
 
@@ -671,8 +671,8 @@ pub fn load_tag_relation_caches() -> Result<(), String> {
     }
     info!(
         "[tag_relation_cache] loaded: {} aliases, {} implicators",
-        { ALIASES_CACHE.lock().map(|c| c.len()).unwrap_or(0) },
-        { IMPLICATIONS_CACHE.lock().map(|c| c.len()).unwrap_or(0) }
+        { ALIASES_CACHE.lock().map_or(0, |c| c.len()) },
+        { IMPLICATIONS_CACHE.lock().map_or(0, |c| c.len()) }
     );
     Ok(())
 }

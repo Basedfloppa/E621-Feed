@@ -56,7 +56,7 @@ impl Metrics {
     }
 
     /// 95% CI on the NDCG@K mean via percentile bootstrap with
-    /// `n_resamples` resamples. ~5–10 ms at N=915, n_resamples=1000.
+    /// `n_resamples` resamples. ~5–10 ms at N=915, `n_resamples=1000`.
     /// Used at print-time only (`[baseline]`, `[best]`); the grid loop
     /// uses the cheaper SE test for per-probe acceptance.
     pub(crate) fn ndcg_ci95(&self, n_resamples: usize) -> (f64, f64) {
@@ -118,9 +118,7 @@ fn bootstrap_ci_95(xs: &[f64], n_resamples: usize) -> (f64, f64) {
 pub(crate) fn pool() -> &'static ThreadPool {
     static POOL: OnceLock<ThreadPool> = OnceLock::new();
     POOL.get_or_init(|| {
-        let cores = std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(4);
+        let cores = std::thread::available_parallelism().map_or(4, std::num::NonZero::get);
         let configured = cfg().backtest.calibrate_threads;
         let n_threads = if configured == 0 {
             (cores / 2).max(1)

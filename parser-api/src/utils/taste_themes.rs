@@ -5,7 +5,7 @@
 //!   2. PMI-weighted edge scoring (user PMI + global PMI)
 //!   3. Backbone: MST + top-2 per node
 //!   4. Louvain community detection (modularity-based)
-//!   5. PageRank centrality on FULL PMI graph
+//!   5. `PageRank` centrality on FULL PMI graph
 //!   6. CORE/KINK split: p50/p25 percentiles
 //!   7. Generic + alias exclusion
 //!   8. Naming: max count among ALL community tags
@@ -225,6 +225,7 @@ pub(crate) struct TagEdge {
     clippy::too_many_arguments,
     reason = "This public computation boundary receives independently cached datasets and tuning inputs."
 )]
+#[must_use]
 pub fn compute_taste_themes(
     tag_counts: &[crate::models::TagCount],
     user_graph: &TagRelationGraph,
@@ -457,11 +458,12 @@ fn build_pmi_edges(
     edges
 }
 
+#[must_use]
 pub fn canonical_pair_key(a: &str, b: &str) -> String {
     if a < b {
-        format!("{}||{}", a, b)
+        format!("{a}||{b}")
     } else {
-        format!("{}||{}", b, a)
+        format!("{b}||{a}")
     }
 }
 
@@ -599,8 +601,7 @@ fn louvain_communities(n: usize, edges: &[TagEdge]) -> Vec<usize> {
                         .total_cmp(weight_b)
                         .then_with(|| label_b.cmp(label_a))
                 })
-                .map(|(label, _)| label)
-                .unwrap_or(own_label);
+                .map_or(own_label, |(label, _)| label);
             next[node] = best_label;
         }
 
@@ -621,7 +622,7 @@ fn louvain_communities(n: usize, edges: &[TagEdge]) -> Vec<usize> {
     for (i, c) in unique.iter().enumerate() {
         remap.insert(*c, i);
     }
-    for lab in labels.iter_mut() {
+    for lab in &mut labels {
         *lab = remap[lab];
     }
 
@@ -857,9 +858,8 @@ fn build_themes(
 
         // Naming = max count among ALL community members
         let name_entry = sorted.iter().max_by(|a, b| a.2.cmp(&b.2));
-        let theme_name = name_entry
-            .map(|(_, n, _, _)| n.to_string())
-            .unwrap_or_else(|| "unknown".to_string());
+        let theme_name =
+            name_entry.map_or_else(|| "unknown".to_string(), |(_, n, _, _)| n.to_string());
 
         // Filter weak communities with an account-size-aware minimum.
         let min_core_count = MIN_CORE_COUNT.max((n_user_posts / 500).max(20));

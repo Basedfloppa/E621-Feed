@@ -69,9 +69,9 @@ async fn main() -> anyhow::Result<()> {
         anyhow::bail!("no users to import");
     }
 
-    let max_fc = chosen.first().map(|x| x.2).unwrap_or(0);
-    let min_fc = chosen.last().map(|x| x.2).unwrap_or(0);
-    let median_fc = chosen.get(chosen.len() / 2).map(|x| x.2).unwrap_or(0);
+    let max_fc = chosen.first().map_or(0, |x| x.2);
+    let min_fc = chosen.last().map_or(0, |x| x.2);
+    let median_fc = chosen.get(chosen.len() / 2).map_or(0, |x| x.2);
     eprintln!(
         "[seed] selected top {} users by favorite_count (min={min_fc}, median={median_fc}, max={max_fc})",
         chosen.len()

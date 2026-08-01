@@ -5,7 +5,7 @@ use crate::models::{TagCount, TagRelationEdge, TagRelationGraphPayload, TagRelat
 
 use super::open_db;
 
-/// SQLite default SQLITE_MAX_VARIABLE_NUMBER is 999. Each pair is 2 params,
+/// `SQLite` default `SQLITE_MAX_VARIABLE_NUMBER` is 999. Each pair is 2 params,
 /// plus headroom — cap at 200 pairs (400 params) per statement.
 const COOC_PAIRS_PER_STATEMENT: usize = 200;
 
@@ -87,7 +87,7 @@ pub(super) fn upsert_account_cooccurrence_pairs(
             }
         }
         let params_refs: Vec<&dyn rusqlite::ToSql> =
-            params_vec.iter().map(|b| b.as_ref()).collect();
+            params_vec.iter().map(std::convert::AsRef::as_ref).collect();
         stmt.execute(rusqlite::params_from_iter(params_refs))
             .map_err(|e| format!("exec account cooc batch: {e}"))?;
     }
@@ -249,7 +249,7 @@ pub fn load_global_tag_relation() -> rusqlite::Result<crate::utils::TagRelationG
             cooc_rows += 1;
             match (sqlite_to_local.get(&sid1), sqlite_to_local.get(&sid2)) {
                 (Some(&a), Some(&b)) if a != b => {
-                    let c = count.max(0).min(u32::MAX as i64) as u32;
+                    let c = count.max(0).min(i64::from(u32::MAX)) as u32;
                     staged.push((a, b, c));
                 }
                 _ => cooc_skipped += 1,

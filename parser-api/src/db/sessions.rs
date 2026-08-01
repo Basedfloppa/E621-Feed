@@ -17,7 +17,7 @@ pub const FEED_SESSION_TTL_MIN: i64 = 30;
 /// Outcome of `touch_or_create_feed_session`. Drives whether the caller
 /// should load the dedup set, record new shown posts, and whether to
 /// signal `fresh_start` to the client (which prompts the frontend to
-/// rotate the session_id).
+/// rotate the `session_id`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FeedSessionState {
     /// Session row didn't exist; we just created it. No dedup history yet,
@@ -144,7 +144,7 @@ pub fn touch_or_create_feed_session(
     })
 }
 
-/// Record a batch of shown post_ids for a session (for dedup).
+/// Record a batch of shown `post_ids` for a session (for dedup).
 pub fn record_session_shown_posts(
     session_id: &str,
     posts: &[(i64, i32)], // (post_id, position)
@@ -168,7 +168,7 @@ pub fn record_session_shown_posts(
     })
 }
 
-/// Get all post_ids already shown in this session (dedup set).
+/// Get all `post_ids` already shown in this session (dedup set).
 pub fn get_session_shown_post_ids(session_id: &str) -> Result<HashSet<i64>, String> {
     let conn = open_db()?;
     let mut stmt = conn

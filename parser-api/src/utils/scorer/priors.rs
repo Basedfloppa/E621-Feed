@@ -73,7 +73,7 @@ pub struct Priors {
     pub recency_log_personal: bool,
     #[serde(default = "default_feedback_decay_half_life_days")]
     pub feedback_decay_half_life_days: f32,
-    /// Meta is excluded from tag_similarity / tag_relation; only counts here.
+    /// Meta is excluded from `tag_similarity` / `tag_relation`; only counts here.
     #[serde(default = "default_meta_interaction_weight")]
     pub meta_interaction_weight: f32,
     #[serde(default = "default_coldstart_n0")]
@@ -99,7 +99,7 @@ pub struct Priors {
 
     // ---- v5.3 Class A: previously hardcoded constants ----
     /// Multiplier on extra Laplace smoothing for cold profiles in
-    /// rating_fit / media_fit. Was hardcoded at 2.0 pre-v5.3.
+    /// `rating_fit` / `media_fit`. Was hardcoded at 2.0 pre-v5.3.
     #[serde(default = "default_coldstart_smoothing_boost")]
     pub coldstart_smoothing_boost: f32,
     /// Bayesian-prior strength for per-tag CTR. Was 4.0 pre-v5.3.
@@ -134,7 +134,7 @@ pub struct Priors {
     /// Exponent on redundancy in MMR penalty: `redundancy^p × gap`. p=1 = legacy.
     #[serde(default = "default_mmr_redundancy_exp")]
     pub mmr_redundancy_exp: f32,
-    /// Blend on Jaccard fallback in tag_similarity. 0 = pure cosine.
+    /// Blend on Jaccard fallback in `tag_similarity`. 0 = pure cosine.
     #[serde(default = "default_tag_sim_jaccard_blend")]
     pub tag_sim_jaccard_blend: f32,
 
@@ -156,7 +156,7 @@ pub struct Priors {
     pub tag_relation_pair_aggregator: String,
 
     // ---- Class F: quality upvote-ratio component ----
-    /// Weight for upvote-ratio component in quality_fit.
+    /// Weight for upvote-ratio component in `quality_fit`.
     /// `up / (up + down)` is blended in with this weight.
     /// 0 = disabled (legacy behaviour).
     #[serde(default = "default_quality_c")]
@@ -164,7 +164,7 @@ pub struct Priors {
 
     // ---- Class F: 3-piece recency kernel ----
     /// 3rd τ for posts younger than `recency_split_age_hours`.
-    /// NaN = disabled (falls back to 2-piece recency_tau_recent / recency_tau_days).
+    /// NaN = disabled (falls back to 2-piece `recency_tau_recent` / `recency_tau_days`).
     #[serde(default = "default_recency_tau_hot")]
     pub recency_tau_hot: f32,
     /// Age boundary in hours between the "hot" and "recent" pieces.
@@ -188,7 +188,7 @@ pub struct Priors {
     pub exploration_epsilon: f32,
 
     // ---- Class G: Cluster-PMI tag limit ----
-    /// Maximum number of tags to consider in tag_relation_fit's O(T²) loop.
+    /// Maximum number of tags to consider in `tag_relation_fit`'s O(T²) loop.
     /// Tags are sorted by group weight and only the top K are used, reducing
     /// complexity from O(T²) to O(K²). Default 20 → 190 pairs vs 1225 at T=50.
     /// 0 = no limit (legacy behaviour, potentially slower).
@@ -204,10 +204,10 @@ pub struct Priors {
     /// before the signal reaches 50% confidence.
     #[serde(default = "default_uploader_n0")]
     pub uploader_n0: f32,
-    /// Weight of the avg_score component inside the uploader channel.
+    /// Weight of the `avg_score` component inside the uploader channel.
     #[serde(default = "default_uploader_w_avg_score")]
     pub uploader_w_avg_score: f32,
-    /// Weight of the avg_fav component inside the uploader channel.
+    /// Weight of the `avg_fav` component inside the uploader channel.
     #[serde(default = "default_uploader_w_avg_fav")]
     pub uploader_w_avg_fav: f32,
 
@@ -216,7 +216,7 @@ pub struct Priors {
     #[serde(default = "default_mix_exclusivity")]
     pub mix_exclusivity: f32,
     /// Minimum co-occurrence count for a pair to be considered "not rare".
-    /// Pairs with cooc < min_exclusivity_cooc get full exclusivity credit.
+    /// Pairs with cooc < `min_exclusivity_cooc` get full exclusivity credit.
     #[serde(default = "default_min_exclusivity_cooc")]
     pub min_exclusivity_cooc: i64,
     /// Scale factor for the exclusivity sigmoid. Larger = sharper threshold.
@@ -241,7 +241,7 @@ pub struct Priors {
     /// is "not novel" to the user.
     #[serde(default = "default_novelty_n0")]
     pub novelty_n0: f32,
-    /// When true, uses feedback impression_count; when false, only checks
+    /// When true, uses feedback `impression_count`; when false, only checks
     /// whether the tag exists in the user's tag-counts (favourites).
     #[serde(default = "default_novelty_use_feedback")]
     pub novelty_use_feedback: bool,

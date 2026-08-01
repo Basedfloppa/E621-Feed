@@ -104,6 +104,7 @@ fn is_revoked(token: &str) -> bool {
 pub struct OwnerToken(pub String);
 
 impl OwnerToken {
+    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -111,6 +112,7 @@ impl OwnerToken {
 
 /// Canonical `Set-Cookie` for the owner token. Centralised so bootstrap
 /// and the per-request sliding refresh stay in sync.
+#[must_use]
 pub fn build_owner_cookie(token: String) -> Cookie<'static> {
     Cookie::build((OWNER_TOKEN_COOKIE, token))
         .http_only(true)
@@ -124,6 +126,7 @@ pub fn build_owner_cookie(token: String) -> Cookie<'static> {
 
 /// `Set-Cookie` that immediately expires the token. Used by
 /// `DELETE /api/session` and on validation failure of an inbound cookie.
+#[must_use]
 pub fn build_owner_cookie_clear() -> Cookie<'static> {
     Cookie::build((OWNER_TOKEN_COOKIE, String::new()))
         .http_only(true)
@@ -178,7 +181,7 @@ impl<'r> FromRequest<'r> for OwnerToken {
     }
 }
 
-impl<'r> OpenApiFromRequest<'r> for OwnerToken {
+impl OpenApiFromRequest<'_> for OwnerToken {
     fn from_request_input(
         _gen: &mut OpenApiGenerator,
         _name: String,
@@ -239,7 +242,9 @@ mod tests {
     fn is_revoked_known_and_unknown() {
         let set = revoked_set();
         // Recover from any prior poison and reset.
-        let mut g = set.write().unwrap_or_else(|p| p.into_inner());
+        let mut g = set
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         g.clear();
         g.insert("known_revoked".into());
         drop(g);

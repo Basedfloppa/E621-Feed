@@ -40,7 +40,7 @@ pub struct Config {
     #[serde(default = "default_user_agent")]
     pub user_agent: String,
 
-    /// Path to the SQLite database file. Relative to the working directory
+    /// Path to the `SQLite` database file. Relative to the working directory
     /// unless an absolute path is given. Default `"database.db"`.
     #[serde(default = "default_db_path")]
     pub db_path: String,
@@ -93,7 +93,7 @@ pub struct RuntimeConfig {
     /// the writer mutex and starves every other write for the entire
     /// duration — we've measured 200+ seconds on a 2.6M-row account.
     /// Splitting into batches releases the mutex between chunks and
-    /// surfaces visible progress in the logs. Default 50_000.
+    /// surfaces visible progress in the logs. Default `50_000`.
     #[serde(default = "default_drop_cooc_batch_size")]
     pub drop_cooc_batch_size: usize,
 
@@ -105,7 +105,7 @@ pub struct RuntimeConfig {
     /// full rebuild to flush accumulated drift.
     #[serde(default = "default_idf_bump_drift_threshold")]
     pub idf_bump_drift_threshold: i64,
-    /// Cooldown after a tag-relation rebuild (analogous to idf_rebuild_cooldown).
+    /// Cooldown after a tag-relation rebuild (analogous to `idf_rebuild_cooldown`).
     #[serde(default = "default_rebuild_cooldown_secs")]
     pub tag_relation_rebuild_cooldown_secs: u64,
 
@@ -196,7 +196,7 @@ pub struct RuntimeConfig {
     /// Idle-eviction window for the two heavy in-memory recommendation
     /// caches: `IDF_CACHE` (per-tag document frequency) and `GLOBAL_CACHE`
     /// (co-occurrence graph). On a cold box these can hold 500 MB–1 GB of
-    /// HashMap state extracted from the SQLite catalog. The cache-pruner
+    /// `HashMap` state extracted from the `SQLite` catalog. The cache-pruner
     /// worker tracks each cache's last-touch timestamp; if no read or
     /// dirty-mark has happened within this many seconds, the loaded
     /// graph/index is swapped back to empty and the next access lazily
@@ -206,7 +206,7 @@ pub struct RuntimeConfig {
     #[serde(default = "default_cache_idle_eviction_secs")]
     pub cache_idle_eviction_secs: u64,
 
-    /// Interval (in seconds) for the background tag_aliases / tag_implications
+    /// Interval (in seconds) for the background `tag_aliases` / `tag_implications`
     /// import worker. Fetches all pages on first run, then incremental page 1
     /// on subsequent ticks. 0 disables the worker entirely.
     #[serde(default = "default_tag_alias_import_interval_secs")]
@@ -553,7 +553,7 @@ pub struct BucketOverride {
 }
 
 /// Deserialize `priors` from a TOML inline table or JSON object. TOML's
-/// `{ key = value }` is valid JSON after key-quoting, and serde_json can
+/// `{ key = value }` is valid JSON after key-quoting, and `serde_json` can
 /// parse inline table values produced by `toml`.
 fn deserialize_priors_json<'de, D>(d: D) -> Result<Option<serde_json::Value>, D::Error>
 where
@@ -601,7 +601,7 @@ impl BucketOverride {
 }
 
 /// Merge non-default values from `overrides` into `base`. The Priors default
-/// for every numeric field is either 0.0 or a sentinel like f32::NAN; we
+/// for every numeric field is either 0.0 or a sentinel like `f32::NAN`; we
 /// overwrite base fields when the override carries a non-default value.
 /// This avoids requiring every field to be `Option<T>` in Priors itself.
 fn merge_priors(base: &mut Priors, overrides: &Priors) {
@@ -928,7 +928,7 @@ impl Config {
                 if keys.is_empty() {
                     None
                 } else {
-                    let h = (account_id as i64).wrapping_abs() as usize;
+                    let h = i64::from(account_id).wrapping_abs() as usize;
                     Some(keys[h % keys.len()].clone())
                 }
             });
@@ -949,6 +949,7 @@ pub struct ConfigWatcher {
 impl ConfigWatcher {
     /// Create a no-op watcher that never triggers. Used as a fallback
     /// when the real watcher fails to start.
+    #[must_use]
     pub fn new_noop() -> Self {
         Self {
             stop: Arc::new(AtomicBool::new(false)),
@@ -994,7 +995,7 @@ pub fn start_config_watcher(path: PathBuf) -> anyhow::Result<ConfigWatcher> {
                 thread::sleep(Duration::from_millis(120));
 
                 match reload_from(&path) {
-                    Ok(_) => {
+                    Ok(()) => {
                         last_mtime = Some(mtime);
                         info!("[config] reloaded {}", path.display());
                     }
@@ -1501,13 +1502,11 @@ mix_sim = 0.6
         // Both must be one of the defined bucket names
         assert!(
             name_a.as_deref() == Some("a") || name_a.as_deref() == Some("b"),
-            "bucket must be 'a' or 'b', got {:?}",
-            name_a
+            "bucket must be 'a' or 'b', got {name_a:?}"
         );
         assert!(
             name_b.as_deref() == Some("a") || name_b.as_deref() == Some("b"),
-            "bucket must be 'a' or 'b', got {:?}",
-            name_b
+            "bucket must be 'a' or 'b', got {name_b:?}"
         );
     }
 

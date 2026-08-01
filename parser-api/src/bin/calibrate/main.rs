@@ -187,7 +187,7 @@ fn run_eval_with_dataset(
     .average();
     let score_secs = t_score.elapsed().as_secs_f32();
     print_metrics("baseline", &m, top_k_ndcg, top_k_recall);
-    eprintln!("[eval] timings: score={:.1}s", score_secs);
+    eprintln!("[eval] timings: score={score_secs:.1}s");
     Ok(())
 }
 

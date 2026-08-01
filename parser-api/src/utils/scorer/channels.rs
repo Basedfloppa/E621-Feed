@@ -11,7 +11,8 @@ use super::util::{
     discrete_preference_smooth, normalize_tag, one_sided_ratio, sigmoid, wilson_lower_bound,
 };
 
-impl<'a> ScoringContext<'a> {
+impl ScoringContext<'_> {
+    #[must_use]
     pub fn tag_similarity(&self, post: &Post) -> f32 {
         let mut dot = 0.0f32;
         let mut p_norm_sq = 0.0f32;
@@ -91,6 +92,7 @@ impl<'a> ScoringContext<'a> {
         ((1.0 - blend) * cosine + blend * jaccard).clamp(0.0, 1.0)
     }
 
+    #[must_use]
     pub fn quality_fit(&self, post: &Post) -> f32 {
         let p = self.priors;
         let exp = p.one_sided_ratio_exp;
@@ -137,6 +139,7 @@ impl<'a> ScoringContext<'a> {
         score
     }
 
+    #[must_use]
     pub fn popularity_fit(&self, post: &Post) -> f32 {
         let p = self.priors;
         let exp = p.one_sided_ratio_exp;
@@ -160,6 +163,7 @@ impl<'a> ScoringContext<'a> {
         )
     }
 
+    #[must_use]
     pub fn rating_fit(&self, post: &Post) -> f32 {
         let rating = post.rating.to_string();
         let matched = self
@@ -167,8 +171,7 @@ impl<'a> ScoringContext<'a> {
             .rating
             .iter()
             .find(|s| s.rating == rating)
-            .map(|s| s.count.max(0))
-            .unwrap_or(0);
+            .map_or(0, |s| s.count.max(0));
         let total = self.rating_total.max(1);
         let k = self.profile.rating.len().max(3);
         let boost = self.priors.coldstart_smoothing_boost.max(0.0);
@@ -189,6 +192,7 @@ impl<'a> ScoringContext<'a> {
         (smoothed * (1.0 - confidence) + raw * confidence).clamp(0.0, 1.0)
     }
 
+    #[must_use]
     pub fn media_fit(&self, post: &Post) -> f32 {
         let media = post.media_type();
         let matched = self
@@ -196,8 +200,7 @@ impl<'a> ScoringContext<'a> {
             .media
             .iter()
             .find(|s| s.media_type == media)
-            .map(|s| s.count.max(0))
-            .unwrap_or(0);
+            .map_or(0, |s| s.count.max(0));
         let k = self.profile.media.len().max(3);
         let boost = self.priors.coldstart_smoothing_boost.max(0.0);
         let alpha =
@@ -211,6 +214,7 @@ impl<'a> ScoringContext<'a> {
         )
     }
 
+    #[must_use]
     pub fn interaction_fit(&self, post: &Post) -> (f32, bool) {
         let mut total_weight = 0.0f32;
         let mut weighted = 0.0f32;
@@ -223,7 +227,7 @@ impl<'a> ScoringContext<'a> {
             .clamp(0.05, 0.99);
         let p0 = self.user_base_positive_rate;
         let meta_w = self.priors.meta_interaction_weight.max(0.0);
-        let half_life = self.priors.feedback_decay_half_life_days.max(1.0) as f64;
+        let half_life = f64::from(self.priors.feedback_decay_half_life_days.max(1.0));
 
         let groups: [(Group, &Vec<String>, f32); 7] = [
             (
@@ -322,6 +326,7 @@ impl<'a> ScoringContext<'a> {
         (score, strong_neg)
     }
 
+    #[must_use]
     pub fn tag_relation_fit(&self, post: &Post) -> f32 {
         let w_g_cfg = self.priors.tag_relation_w_global.max(0.0);
         let w_u_cfg = self.priors.tag_relation_w_personal.max(0.0);
@@ -389,12 +394,12 @@ impl<'a> ScoringContext<'a> {
 
         for (i, entry_i) in entries.iter().enumerate() {
             let (gi_w, gi_global, gi_user) = *entry_i;
-            let gi_df = gi_global
-                .map(|id| self.global_relation.marginal_by_id(id).max(0) as f32)
-                .unwrap_or(0.0);
-            let gi_um = gi_user
-                .map(|id| self.user_relation.marginal_by_id(id).max(0) as f32)
-                .unwrap_or(0.0);
+            let gi_df = gi_global.map_or(0.0, |id| {
+                self.global_relation.marginal_by_id(id).max(0) as f32
+            });
+            let gi_um = gi_user.map_or(0.0, |id| {
+                self.user_relation.marginal_by_id(id).max(0) as f32
+            });
 
             for entry_j in &entries[i + 1..] {
                 let (gj_w, gj_global, gj_user) = *entry_j;
@@ -482,6 +487,7 @@ impl<'a> ScoringContext<'a> {
         }
     }
 
+    #[must_use]
     pub fn uploader_fit(&self, post: &Post) -> f32 {
         let Some(stats) = self.uploader_map.get(&post.uploader_id) else {
             return FEEDBACK_NEUTRAL;
@@ -514,6 +520,7 @@ impl<'a> ScoringContext<'a> {
         FEEDBACK_NEUTRAL * (1.0 - conf) + raw * conf
     }
 
+    #[must_use]
     pub fn recency_fit(&self, age_days: f32) -> f32 {
         let p = self.priors;
         // Class D v5.3: 2-piece kernel + Class F: 3-piece kernel.
@@ -561,7 +568,8 @@ impl<'a> ScoringContext<'a> {
     /// pairs score near 0.0.
     ///
     /// O(T²) in the number of tags — uses `exclusivity_max_tags` to truncate
-    /// to top-K tags by group weight, mirroring Cluster-PMI in tag_relation.
+    /// to top-K tags by group weight, mirroring Cluster-PMI in `tag_relation`.
+    #[must_use]
     pub fn exclusivity_fit(&self, post: &Post) -> f32 {
         let p = self.priors;
         if p.mix_exclusivity <= 0.0 {
@@ -615,7 +623,7 @@ impl<'a> ScoringContext<'a> {
 
         // Truncate each group to top-K by idf_weight.
         if max_tags > 0 {
-            for entries in group_entries.iter_mut() {
+            for entries in &mut group_entries {
                 entries.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
                 entries.truncate(max_tags);
             }
@@ -629,7 +637,7 @@ impl<'a> ScoringContext<'a> {
         let mut total_cooc_cross = 0i64;
 
         // Within-group pairs: tag co-occurrence computed inside each group.
-        for entries in group_entries.iter() {
+        for entries in &group_entries {
             for i in 0..entries.len() {
                 let tid_a = entries[i].3;
                 for entry_b in entries.iter().skip(i + 1) {
@@ -695,6 +703,7 @@ impl<'a> ScoringContext<'a> {
     /// 4. Confidence increases with the number of new artists on the post.
     ///
     /// Returns 0 when the post has no artist tags or all artists are known.
+    #[must_use]
     pub fn artist_discovery_fit(&self, post: &Post) -> f32 {
         let p = &self.priors;
         if p.mix_artist_discovery <= 0.0 {
@@ -801,6 +810,7 @@ impl<'a> ScoringContext<'a> {
     /// 3. Otherwise → fully novel (weight = 1.0).
     ///
     /// The per-tag novelty scores are averaged across all tags on the post.
+    #[must_use]
     pub fn novelty_fit(&self, post: &Post) -> f32 {
         let p = self.priors;
         if p.mix_novelty <= 0.0 {
@@ -874,6 +884,7 @@ impl<'a> ScoringContext<'a> {
 /// Each tag's weight = `group_w * idf(tag)`, with no frequency or BM25
 /// saturation (binary presence: 0 or 1). This keeps it a pure content
 /// signal suitable for "more like this" recommendations.
+#[must_use]
 pub fn post_pair_similarity(
     a: &Post,
     b: &Post,
@@ -978,7 +989,8 @@ pub fn post_pair_similarity(
 }
 
 /// Build a tag-weight vector for a single post (for `post_pair_similarity`).
-/// Returns a Vec of (group_index, weight) sorted by group for efficient comparison.
+/// Returns a Vec of (`group_index`, weight) sorted by group for efficient comparison.
+#[must_use]
 pub fn post_tag_vector(
     post: &Post,
     idf: &crate::utils::idf::IdfIndex,
@@ -1177,7 +1189,7 @@ mod tests {
         IdfIndex::from_df(&df, 10_000)
     }
 
-    /// Build a global graph using public API only (set_marginal + insert_pair
+    /// Build a global graph using public API only (`set_marginal` + `insert_pair`
     /// both call intern internally).
     fn build_global_graph() -> TagRelationGraph {
         // n_posts=1000, so expected cooc under independence for skeb(100)*cat(500)/1000 = 50.
@@ -1344,7 +1356,7 @@ mod tests {
     }
 
     /// Inline setup macro — creates variables on the test's own stack frame
-    /// so ScoringContext's borrows are valid for the test's body.
+    /// so `ScoringContext`'s borrows are valid for the test's body.
     macro_rules! setup {
         ($ctx:ident) => {
             let priors = default_priors();
@@ -2275,7 +2287,7 @@ mod tests {
     //  exclusivity_fit
     // ==================================================================
 
-    /// When mix_exclusivity ≤ 0 the channel returns 0 regardless of tags.
+    /// When `mix_exclusivity` ≤ 0 the channel returns 0 regardless of tags.
     #[test]
     fn exclusivity_fit_disabled_when_mix_zero() {
         let priors = default_priors(); // mix_exclusivity=0 by default
@@ -2326,7 +2338,7 @@ mod tests {
 
     /// Cross-group pairs use the `exclusivity_cross_group_weight` knob
     /// to adjust their contribution vs within-group pairs. Verifying that
-    /// different cross_group_weight values produce different results.
+    /// different `cross_group_weight` values produce different results.
     #[test]
     fn exclusivity_fit_cross_group_weight_changes_score() {
         let mut priors_default = default_priors();
@@ -2411,7 +2423,7 @@ mod tests {
         assert!(close(e, 0.0), "single tag → no pairs → 0.0, got {e}");
     }
 
-    /// Tags from groups with zero group_weight are excluded from the
+    /// Tags from groups with zero `group_weight` are excluded from the
     /// exclusivity computation.
     #[test]
     fn exclusivity_fit_respects_zero_group_weights() {
@@ -2448,7 +2460,7 @@ mod tests {
         );
     }
 
-    /// When exclusivity_max_tags truncates groups, only top-K tags
+    /// When `exclusivity_max_tags` truncates groups, only top-K tags
     /// participate in the O(T²) pair loop.
     #[test]
     fn exclusivity_fit_max_tags_truncation() {

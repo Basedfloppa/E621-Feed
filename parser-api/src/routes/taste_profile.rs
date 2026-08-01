@@ -13,7 +13,7 @@ use e621_account_parser_api::{
     },
     db_blocking,
     errors::ApiError,
-    models::*,
+    models::TasteProfileResponse,
     ratelimit::{self},
     utils::taste_themes,
 };

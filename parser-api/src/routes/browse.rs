@@ -115,7 +115,7 @@ pub(crate) async fn search_posts(
     }
     let owner_token = owner.0;
     let account =
-        db_blocking(move || get_account_by_id(&owner_token, account_id).map_err(|e| e.to_string()))
+        db_blocking(move || get_account_by_id(&owner_token, account_id).map_err(|e| e.clone()))
             .await?;
     let posts = api::get_posts_by_tags(&account.blacklist, query, page, limit, Priority::Live)
         .await
@@ -143,9 +143,9 @@ pub(crate) async fn search_scored_posts(
     }
     let owner_token = owner.0;
     let (account, tags, profile) = rocket::tokio::join!(
-        db_blocking(move || get_account_by_id(&owner_token, account_id).map_err(|e| e.to_string())),
-        db_blocking(move || get_tag_counts(account_id).map_err(|e| e.to_string())),
-        db_blocking(move || get_account_preference_profile(account_id).map_err(|e| e.to_string())),
+        db_blocking(move || get_account_by_id(&owner_token, account_id).map_err(|e| e.clone())),
+        db_blocking(move || get_tag_counts(account_id).map_err(|e| e.clone())),
+        db_blocking(move || get_account_preference_profile(account_id).map_err(|e| e.clone())),
     );
     let account = account?;
     let tags = tags?;
@@ -153,7 +153,7 @@ pub(crate) async fn search_scored_posts(
     let relation_tags = tags.clone();
     let user_relation = db_blocking(move || {
         e621_account_parser_api::db::load_account_tag_relation(account_id, &relation_tags)
-            .map_err(|e| e.to_string())
+            .map_err(|e| e.clone())
     })
     .await?;
     let posts = api::get_posts_by_tags(&account.blacklist, query, page, limit, Priority::Live)
@@ -215,9 +215,9 @@ pub(crate) async fn get_trending_scored(
 
     // Verify ownership and load profile data in parallel.
     let (account, tags, profile) = rocket::tokio::join!(
-        db_blocking(move || get_account_by_id(&owner_token, account_id).map_err(|e| e.to_string())),
-        db_blocking(move || get_tag_counts(account_id).map_err(|e| e.to_string())),
-        db_blocking(move || get_account_preference_profile(account_id).map_err(|e| e.to_string())),
+        db_blocking(move || get_account_by_id(&owner_token, account_id).map_err(|e| e.clone())),
+        db_blocking(move || get_tag_counts(account_id).map_err(|e| e.clone())),
+        db_blocking(move || get_account_preference_profile(account_id).map_err(|e| e.clone())),
     );
     let account = account?;
     let tags = tags?;
@@ -226,7 +226,7 @@ pub(crate) async fn get_trending_scored(
     let relation_tags = tags.clone();
     let user_relation = db_blocking(move || {
         e621_account_parser_api::db::load_account_tag_relation(account_id, &relation_tags)
-            .map_err(|e| e.to_string())
+            .map_err(|e| e.clone())
     })
     .await?;
 
@@ -308,7 +308,7 @@ pub(crate) async fn get_trending(
     // Verify ownership.
     let account = db_blocking({
         let ot = owner_token.clone();
-        move || get_account_by_id(&ot, account_id).map_err(|e| e.to_string())
+        move || get_account_by_id(&ot, account_id).map_err(|e| e.clone())
     })
     .await?;
 
@@ -338,7 +338,7 @@ pub(crate) async fn get_favorites(
 
     let account = db_blocking({
         let ot = owner_token.clone();
-        move || get_account_by_id(&ot, account_id).map_err(|e| e.to_string())
+        move || get_account_by_id(&ot, account_id).map_err(|e| e.clone())
     })
     .await?;
 

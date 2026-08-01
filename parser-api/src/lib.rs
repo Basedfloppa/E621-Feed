@@ -5,6 +5,19 @@
 //! Re-exports are deliberately permissive — the offline tools poke at the DB,
 //! IDF, and scorer internals that the production server doesn't expose.
 
+#![allow(
+    clippy::missing_errors_doc,
+    clippy::missing_panics_doc,
+    clippy::too_many_lines,
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::unnecessary_wraps,
+    clippy::float_cmp,
+    clippy::default_trait_access
+)]
+
 #[macro_use]
 extern crate rocket;
 // Route modules are shared by the binary and integration-test library surface;
@@ -31,8 +44,8 @@ pub mod routes;
 pub mod utils;
 pub mod validation;
 
-/// Run a blocking rusqlite closure on `spawn_blocking` so the SQLite
-/// call doesn't park the request's Tokio worker. Translates JoinHandle
+/// Run a blocking rusqlite closure on `spawn_blocking` so the `SQLite`
+/// call doesn't park the request's Tokio worker. Translates `JoinHandle`
 /// panics to `Err`.
 pub async fn db_blocking<F, T>(f: F) -> Result<T, String>
 where

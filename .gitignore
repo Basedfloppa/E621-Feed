@@ -18,3 +18,6 @@ parser-web/.well-known/security.txt
 
 # codeql db
 */db
+# load-test harness — real DB path + server logs (may contain tokens)
+parser-api/loadtest/server.log
+parser-api/loadtest/__pycache__/

@@ -33,7 +33,7 @@ pub struct ScoringContext<'a> {
     pub(super) personal_confidence: f32,
     pub(super) user_base_positive_rate: f32,
     pub(super) mix: MixWeights,
-    /// Per-uploader quality stats (uploader_id -> stats), built from profile.
+    /// Per-uploader quality stats (`uploader_id` -> stats), built from profile.
     pub(super) uploader_map: HashMap<i64, AccountUploaderStat>,
     /// Simple tag names (no e621 search syntax) that should be ignored during
     /// tag-similarity computation. Acts as an IDF prior: blacklisted tags
@@ -42,7 +42,7 @@ pub struct ScoringContext<'a> {
     pub(super) blacklisted_tags: HashSet<String>,
 }
 
-/// Pre-computed per-account data whose construction is expensive (HashMap
+/// Pre-computed per-account data whose construction is expensive (`HashMap`
 /// builds, per-tag IDF computations, BM25 saturation). Cached across grid
 /// probes by the calibrate harness so probes that don't touch IDF params
 /// or group weights can skip rebuilding the `user` / `feedback` maps.
@@ -71,6 +71,7 @@ pub struct ContextBase {
 /// Hash of the priors fields that affect [`ContextBase`] construction.
 /// Used by the calibrate grid to decide whether a cached base is still
 /// fresh for the current probe's priors.
+#[must_use]
 pub fn context_fingerprint(p: &Priors) -> u64 {
     let mut h: u64 = 0;
     // Fold each relevant f32 field via its raw bits.
@@ -107,10 +108,11 @@ pub fn context_fingerprint(p: &Priors) -> u64 {
 }
 
 impl ContextBase {
-    /// Build a new ContextBase from account profile data + current priors.
+    /// Build a new `ContextBase` from account profile data + current priors.
     /// This is the expensive path: per-tag `normalize_tag`, IDF computation,
-    /// BM25 saturation, `powf(freq_alpha)`, and HashMap insertion for every
+    /// BM25 saturation, `powf(freq_alpha)`, and `HashMap` insertion for every
     /// tag in the account's tag-counts and feedback profile.
+    #[must_use]
     pub fn new(
         account_tag_counts: &[TagCount],
         priors: &Priors,
@@ -258,16 +260,18 @@ impl ContextBase {
     }
 
     /// The fingerprint hash this base was built from.
+    #[must_use]
     pub fn fingerprint(&self) -> u64 {
         self.fingerprint
     }
 }
 
 impl<'a> ScoringContext<'a> {
-    /// Full constructor — builds the expensive ContextBase internally.
+    /// Full constructor — builds the expensive `ContextBase` internally.
     /// Prefer [`Self::from_base`] when a cached base is available.
     /// Construct with an empty blacklist set. See [`Self::new_with_blacklist`]
     /// for the version that accepts blacklisted tags.
+    #[must_use]
     pub fn new(
         account_tag_counts: &[TagCount],
         priors: &'a Priors,
@@ -290,6 +294,7 @@ impl<'a> ScoringContext<'a> {
     /// Like [`Self::new`] but accepts a set of simple tag names that should
     /// be ignored during tag-similarity computation (IDF prior for account
     /// blacklist). Pass an empty set for the same behaviour as [`Self::new`].
+    #[must_use]
     pub fn new_with_blacklist(
         account_tag_counts: &[TagCount],
         priors: &'a Priors,
@@ -306,10 +311,11 @@ impl<'a> ScoringContext<'a> {
     }
 
     /// Fast-path constructor: takes ownership of a pre-built [`ContextBase`]
-    /// and wraps it into a full ScoringContext. Only the cheap fields
+    /// and wraps it into a full `ScoringContext`. Only the cheap fields
     /// (`group_wts`, `pair_aggregator`, `mix`) are recomputed from the
-    /// current priors — the expensive `user` / `feedback` HashMaps are
+    /// current priors — the expensive `user` / `feedback` `HashMaps` are
     /// moved in from the base.
+    #[must_use]
     pub fn from_base(
         base: ContextBase,
         priors: &'a Priors,
@@ -355,6 +361,7 @@ impl<'a> ScoringContext<'a> {
     /// across probes that don't invalidate them, and only this final step
     /// is rerun under the new mix/temperature/penalty priors.
     #[allow(clippy::too_many_arguments)]
+    #[must_use]
     pub fn final_blend(
         &self,
         sim: f32,
@@ -395,6 +402,7 @@ impl<'a> ScoringContext<'a> {
         score.clamp(0.0, 1.0)
     }
 
+    #[must_use]
     pub fn score(&self, post: &Post) -> (f32, ScoreBreakdown) {
         let sim = self.tag_similarity(post);
         let age_days = (self.priors.now - post.created_at).num_seconds() as f32 / 86_400.0;
@@ -455,6 +463,7 @@ impl<'a> ScoringContext<'a> {
     /// `IdfIndex::df_for` / `TagRelationGraph::tag_id` HashMap-by-string
     /// lookups in the tag-keyed channels. Lets callers (calibrate `eval`
     /// + `grid`) drop the original `Post` from the dataset entirely.
+    #[must_use]
     pub fn score_cached(
         &self,
         features: &super::cached::CachedPostFeatures,

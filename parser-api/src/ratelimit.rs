@@ -28,8 +28,8 @@ struct Bucket {
     burst: f64,
 }
 
-const GC_INTERVAL: Duration = Duration::from_secs(300);
-const GC_IDLE_THRESHOLD: Duration = Duration::from_secs(900);
+const GC_INTERVAL: Duration = Duration::from_mins(5);
+const GC_IDLE_THRESHOLD: Duration = Duration::from_mins(15);
 /// Past this we evict the oldest half regardless of idle state to avoid OOM.
 const MAX_BUCKETS: usize = 50_000;
 
@@ -141,8 +141,7 @@ pub fn client_ip(req: &Request<'_>) -> String {
         }
     }
     req.client_ip()
-        .map(|ip| ip.to_string())
-        .unwrap_or_else(|| "unknown".to_string())
+        .map_or_else(|| "unknown".to_string(), |ip| ip.to_string())
 }
 
 /// Request guard exposing the rate-limit client IP to handlers.
@@ -157,7 +156,7 @@ impl<'r> FromRequest<'r> for ClientIp {
     }
 }
 
-impl<'r> OpenApiFromRequest<'r> for ClientIp {
+impl OpenApiFromRequest<'_> for ClientIp {
     fn from_request_input(
         _gen: &mut rocket_okapi::r#gen::OpenApiGenerator,
         _name: String,

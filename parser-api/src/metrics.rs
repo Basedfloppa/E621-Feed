@@ -21,9 +21,9 @@ pub struct AppMetrics {
     /// Total accounts deleted since server start.
     pub accounts_deleted_total: IntCounter,
 
-    /// Feed recommendation views by account_id.
+    /// Feed recommendation views by `account_id`.
     pub feed_views_total: IntCounterVec,
-    /// Digest views by account_id.
+    /// Digest views by `account_id`.
     pub digest_views_total: IntCounterVec,
     /// Browse views by source (trending / favorites).
     pub browse_views_total: IntCounterVec,
@@ -144,6 +144,7 @@ impl AppMetrics {
 }
 
 /// Render all registered metrics as Prometheus text format.
+#[must_use]
 pub fn render() -> String {
     use prometheus::Encoder;
     let encoder = prometheus::TextEncoder::new();

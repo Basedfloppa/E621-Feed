@@ -135,7 +135,7 @@ pub(crate) async fn get_tag_implications(
 }
 
 /// Batch-resolve multiple tags through the alias chain. Used by the
-/// frontend's TasteProfileCard to resolve all species tags at once.
+/// frontend's `TasteProfileCard` to resolve all species tags at once.
 ///
 /// Request body: `{ "tags": ["canyne", "wolf", "kitten", ...] }`
 /// Response: `{ "resolved": { "canyne": "canine", ... }, "canonicals": [...] }`
@@ -173,7 +173,7 @@ pub(crate) async fn resolve_tag_batch(
 
             for tag in &input {
                 let canonical = get_alias_consequent_cached(tag)
-                    .map_err(|e| format!("resolve {}: {e}", tag))?
+                    .map_err(|e| format!("resolve {tag}: {e}"))?
                     .unwrap_or_else(|| tag.clone());
                 resolved.insert(tag.clone(), canonical.clone());
                 all_canonicals.insert(canonical);

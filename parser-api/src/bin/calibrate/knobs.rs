@@ -337,7 +337,7 @@ pub(crate) const GRID_KNOBS: &[KnobSpec] = &[
     KnobSpec {
         name: "recency_personal_floor_frac",
         apply: |p, v| {
-            p.recency_personal_floor_frac = (p.recency_personal_floor_frac + v).clamp(0.0, 2.0)
+            p.recency_personal_floor_frac = (p.recency_personal_floor_frac + v).clamp(0.0, 2.0);
         },
         probes: PROBES_SMALL_FRACTION,
         invalidates: M_RECENCY,
@@ -428,7 +428,7 @@ pub(crate) const GRID_KNOBS: &[KnobSpec] = &[
         name: "artist_discovery_novelty_bonus",
         apply: |p, v| {
             p.artist_discovery_novelty_bonus =
-                (p.artist_discovery_novelty_bonus + v).clamp(0.0, 1.0)
+                (p.artist_discovery_novelty_bonus + v).clamp(0.0, 1.0);
         },
         probes: PROBES_SMALL_FRACTION,
         invalidates: M_ARTIST_DISCOVERY,
@@ -514,7 +514,7 @@ pub(crate) const GRID_KNOBS: &[KnobSpec] = &[
     KnobSpec {
         name: "coldstart_smoothing_boost",
         apply: |p, v| {
-            p.coldstart_smoothing_boost = (p.coldstart_smoothing_boost + v).clamp(0.0, 10.0)
+            p.coldstart_smoothing_boost = (p.coldstart_smoothing_boost + v).clamp(0.0, 10.0);
         },
         probes: PROBES_BOOST,
         invalidates: M_DISCRETE,
@@ -766,7 +766,7 @@ pub(crate) const GRID_KNOBS: &[KnobSpec] = &[
     KnobSpec {
         name: "diversity_interaction_damp",
         apply: |p, v| {
-            p.diversity_interaction_damp = (p.diversity_interaction_damp + v).clamp(0.0, 1.0)
+            p.diversity_interaction_damp = (p.diversity_interaction_damp + v).clamp(0.0, 1.0);
         },
         probes: PROBES_DIV_PENALTY,
         invalidates: M_NONE,
@@ -811,7 +811,7 @@ pub(crate) const GRID_KNOBS: &[KnobSpec] = &[
     KnobSpec {
         name: "diversity_user_pmi_weight",
         apply: |p, v| {
-            p.diversity_user_pmi_weight = (p.diversity_user_pmi_weight + v).clamp(0.1, 10.0)
+            p.diversity_user_pmi_weight = (p.diversity_user_pmi_weight + v).clamp(0.1, 10.0);
         },
         probes: &[0.5, 1.0, 2.0, 5.0],
         invalidates: M_NONE,
@@ -819,7 +819,7 @@ pub(crate) const GRID_KNOBS: &[KnobSpec] = &[
     },
 ];
 
-/// `mix_*`-only subset for fast iteration. All M_NONE — entire grid is
+/// `mix_*`-only subset for fast iteration. All `M_NONE` — entire grid is
 /// pure final-blend reshuffling.
 pub(crate) const MIX_ONLY_KNOBS: &[KnobSpec] = &[
     KnobSpec {

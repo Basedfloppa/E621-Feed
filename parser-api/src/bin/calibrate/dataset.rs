@@ -36,7 +36,7 @@ thread_local! {
 ///   * `rss_mb` — resident set size (what the kernel actually has us
 ///     using right now).
 ///   * `vsz_mb` — virtual size (allocator + mapped files; useful to
-///     spot huge un-touched HashMap capacity).
+///     spot huge un-touched `HashMap` capacity).
 fn rss_mb() -> Option<(f64, f64)> {
     let s = std::fs::read_to_string("/proc/self/statm").ok()?;
     let mut it = s.split_whitespace();
@@ -61,12 +61,12 @@ fn log_mem(label: &str) {
 /// Per-account state needed to score (test ∪ negatives) under any priors.
 ///
 /// `test_features` / `neg_features` are the hot scoring input — tag IDs
-/// and df values are pre-resolved so the grid loop avoids HashMap
+/// and df values are pre-resolved so the grid loop avoids `HashMap`
 /// lookups, and they carry everything the cached channel variants in
-/// `ScoringContext` read (score, fav_count, rating, media_type, …).
+/// `ScoringContext` read (score, `fav_count`, rating, `media_type`, …).
 /// `diversity_features` is the parallel MMR input, stored concatenated
 /// `[test ‖ neg]`. `user_relation` is the per-account tag-relation
-/// graph built from train_posts; it gives the personal `tag_relation`
+/// graph built from `train_posts`; it gives the personal `tag_relation`
 /// channel real signal under the synthetic split (otherwise `*_user_*`
 /// knobs and `tag_relation_w_personal` are gradient-dead). The original
 /// `Post` structs are dropped at the end of hydration.
@@ -117,9 +117,7 @@ pub(crate) fn load_catalog_index() -> anyhow::Result<CatalogIndex> {
         let (id, fav, ca_str) = r?;
         ids.push(id);
         fav_counts.push(fav);
-        let epoch = DateTime::parse_from_rfc3339(&ca_str)
-            .map(|dt| dt.timestamp())
-            .unwrap_or(0);
+        let epoch = DateTime::parse_from_rfc3339(&ca_str).map_or(0, |dt| dt.timestamp());
         created_at_epoch.push(epoch);
     }
 
@@ -626,9 +624,7 @@ fn account_favorite_ids_with_ts(account_id: i32) -> anyhow::Result<Vec<(i64, i64
     let mut out: Vec<(i64, i64)> = Vec::new();
     for r in rows {
         let (id, ca) = r?;
-        let ts = DateTime::parse_from_rfc3339(&ca)
-            .map(|dt| dt.timestamp())
-            .unwrap_or(0);
+        let ts = DateTime::parse_from_rfc3339(&ca).map_or(0, |dt| dt.timestamp());
         out.push((id, ts));
     }
     Ok(out)

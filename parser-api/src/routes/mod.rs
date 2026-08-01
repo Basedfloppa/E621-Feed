@@ -21,6 +21,7 @@ pub(crate) fn get_metrics() -> String {
 /// Minimal authenticated read-route set for integration tests.
 #[doc(hidden)]
 #[allow(dead_code)] // Mounted from the integration-test binary, not production main.
+#[must_use]
 pub fn integration_test_routes() -> Vec<rocket::Route> {
     rocket::routes![
         account::list_accounts,

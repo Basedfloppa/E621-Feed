@@ -398,7 +398,7 @@ async fn build_recommendations_shared(
         .lines()
         .flat_map(|l| l.split_whitespace().filter(|t| !t.is_empty()))
         .filter(|t| !t.contains(':') && !t.starts_with('-'))
-        .map(|t| t.to_lowercase())
+        .map(str::to_lowercase)
         .collect();
     if !blacklisted_simple_tags.is_empty() && !local_candidate_ids.is_empty() {
         let ids_for_filter = local_candidate_ids.clone();
@@ -588,11 +588,7 @@ async fn build_recommendations_shared(
     if priors.exploration_epsilon > 1e-4 {
         let eps = priors.exploration_epsilon.min(0.5);
         for sp in &mut scored {
-            let tag_novelty = 1.0
-                - sp.breakdown
-                    .as_ref()
-                    .map(|b| b.tag_similarity)
-                    .unwrap_or(0.0);
+            let tag_novelty = 1.0 - sp.breakdown.as_ref().map_or(0.0, |b| b.tag_similarity);
             sp.score = (sp.score + eps * tag_novelty).clamp(0.0, 1.0);
         }
     }
@@ -714,18 +710,17 @@ pub(crate) async fn get_similar_posts(
     })
     .await?;
 
-    let source_post = match source_post {
-        Some(p) => p,
-        None => {
-            // Fetch from e621 API.
-            let posts = api::get_posts_by_ids(&[post_id])
-                .await
-                .map_err(|e| ApiError::Internal(format!("Failed to fetch post from e621: {e}")))?;
-            posts
-                .into_iter()
-                .next()
-                .ok_or_else(|| ApiError::NotFound(format!("Post {post_id} not found")))?
-        }
+    let source_post = if let Some(p) = source_post {
+        p
+    } else {
+        // Fetch from e621 API.
+        let posts = api::get_posts_by_ids(&[post_id])
+            .await
+            .map_err(|e| ApiError::Internal(format!("Failed to fetch post from e621: {e}")))?;
+        posts
+            .into_iter()
+            .next()
+            .ok_or_else(|| ApiError::NotFound(format!("Post {post_id} not found")))?
     };
 
     // Find candidate IDs via tag overlap.

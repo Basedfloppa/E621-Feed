@@ -65,6 +65,7 @@ pub struct E621LoadMonitor {
 impl E621LoadMonitor {
     const UNKNOWN_REMAINING: u32 = u32::MAX;
 
+    #[must_use]
     pub fn global() -> &'static Self {
         static MONITOR: std::sync::LazyLock<E621LoadMonitor> =
             std::sync::LazyLock::new(|| E621LoadMonitor {
@@ -115,13 +116,13 @@ impl E621LoadMonitor {
     /// How many milliseconds since the last live (user-facing) request
     /// passed through the gate.
     pub fn ms_since_last_live(&self) -> u64 {
-        self.last_live_pass
-            .lock()
-            .map(|guard| guard.elapsed().as_millis() as u64)
-            .unwrap_or_else(|_| {
+        self.last_live_pass.lock().map_or_else(
+            |_| {
                 warn!("E621LoadMonitor::last_live_pass mutex poisoned — returning MAX");
                 u64::MAX
-            })
+            },
+            |guard| guard.elapsed().as_millis() as u64,
+        )
     }
 }
 
@@ -160,6 +161,7 @@ struct AdaptiveGateInner {
 }
 
 impl AdaptiveGate {
+    #[must_use]
     pub fn global() -> &'static Self {
         static GATE: std::sync::LazyLock<AdaptiveGate> =
             std::sync::LazyLock::new(|| AdaptiveGate {

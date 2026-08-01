@@ -23,7 +23,7 @@ pub fn spawn_backfill_worker() {
 
 async fn backfill_loop() {
     // Initial delay: let migrations and hot/cold workers stabilise.
-    rocket::tokio::time::sleep(Duration::from_secs(120)).await;
+    rocket::tokio::time::sleep(Duration::from_mins(2)).await;
 
     loop {
         let runtime = cfg().runtime.clone();

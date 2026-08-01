@@ -243,7 +243,7 @@ impl<'r> FromRequest<'r> for IfNoneMatch {
         request::Outcome::Success(IfNoneMatch(
             req.headers()
                 .get_one("If-None-Match")
-                .map(|s| s.to_string()),
+                .map(std::string::ToString::to_string),
         ))
     }
 }
@@ -263,8 +263,7 @@ impl EtagJson {
         let not_modified = if_none_match
             .0
             .as_deref()
-            .map(|tag| tag.split(',').any(|t| t.trim() == "*" || t.trim() == etag))
-            .unwrap_or(false);
+            .is_some_and(|tag| tag.split(',').any(|t| t.trim() == "*" || t.trim() == etag));
         Ok(Self {
             body,
             etag,

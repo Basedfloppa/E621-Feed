@@ -41,7 +41,7 @@
 //!
 //! Format: `<rfc3339-ts> [AUDIT] <event.kind>|key1=v1|key2=v2|...`
 //!
-//! Key naming convention: `dotted.scoped.kind` for the event, snake_case
+//! Key naming convention: `dotted.scoped.kind` for the event, `snake_case`
 //! for fields. Field values are escaped just enough to keep `|` and `=`
 //! from breaking the parse — anything richer (full error bodies, JSON,
 //! multi-line) goes to the regular log stream, not here.
@@ -87,7 +87,7 @@ impl Event {
 
     /// Append a key only when `value` is `Some`. Saves a couple of
     /// `if let Some(v) = ...` lines at call sites that want to log
-    /// optional context (session_id, page, etc.).
+    /// optional context (`session_id`, page, etc.).
     pub fn field_opt(self, key: &str, value: Option<impl Display>) -> Self {
         match value {
             Some(v) => self.field(key, v),
@@ -136,7 +136,7 @@ impl Event {
 ///
 /// **/process pipeline**
 /// * `process.start`     — `account_id`
-/// * `process.already`   — `account_id` (try_begin returned AlreadyRunning)
+/// * `process.already`   — `account_id` (`try_begin` returned `AlreadyRunning`)
 /// * `process.phase`     — `account_id`, `phase`, `ms`
 /// * `process.done`      — `account_id`, `favs`, `pages`, `ms`
 /// * `process.failed`    — `account_id`, `error`
@@ -146,13 +146,14 @@ impl Event {
 /// * `feed.continue`     — `account_id`, `session_state` (fresh/active/expired), `returned`
 /// * `feed.similar`      — `account_id`, `post_id`, `returned`
 /// * `feed.digest`       — `account_id`, `mode` (personalized/generic), `returned`, `cache_hit`
-/// * `feed.interaction`  — `account_id`, `post_id`, `event` (open/hide/qualified_impression)
+/// * `feed.interaction`  — `account_id`, `post_id`, `event` (`open/hide/qualified_impression`)
 /// * `feed.batch`        — `account_id`, `count`
 ///
 /// **Auth / sessions**
 /// * `session.bootstrap` — `minted` (true/false)
 /// * `session.cleared`   — (no fields; cookie was wiped)
 /// * `token.revoked`    — `account_id`, `reason`
+#[must_use]
 pub fn event(kind: &'static str) -> Event {
     Event::new(kind)
 }

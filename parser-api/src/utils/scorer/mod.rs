@@ -33,15 +33,18 @@ const GROUP_NAMES: [(Group, &str); GROUP_COUNT] = [
 ];
 
 impl Group {
+    #[must_use]
     pub const fn name(self) -> &'static str {
         GROUP_NAMES[self as usize].1
     }
 
     #[allow(clippy::should_implement_trait)]
+    #[must_use]
     pub fn from_str(s: &str) -> Option<Self> {
         GROUP_NAMES.iter().find(|(_, n)| *n == s).map(|(g, _)| *g)
     }
 
+    #[must_use]
     pub const fn is_scoring(self) -> bool {
         !matches!(self, Group::Meta)
     }

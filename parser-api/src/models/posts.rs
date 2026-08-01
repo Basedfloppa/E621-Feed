@@ -34,22 +34,19 @@ pub struct Post {
 }
 
 impl Post {
+    #[must_use]
     pub fn media_type(&self) -> &'static str {
-        let ext = self
-            .files
-            .meta
-            .ext
-            .as_deref()
-            .map(|ext| ext.to_ascii_lowercase());
+        let ext = self.files.meta.ext.as_deref().map(str::to_ascii_lowercase);
 
         match ext.as_deref() {
-            Some("webm") | Some("mp4") => "video",
+            Some("webm" | "mp4") => "video",
             Some("gif") => "animated",
             _ if self.files.meta.duration.unwrap_or(0.0) > 0.0 => "video",
             _ => "image",
         }
     }
 
+    #[must_use]
     pub fn is_animated(&self) -> bool {
         self.media_type() != "image"
     }
@@ -57,6 +54,7 @@ impl Post {
     /// Group flat tags into the legacy categorized structure.
     /// v2 API returns a flat list — we put everything in "general",
     /// which is the scorer's primary signal channel.
+    #[must_use]
     pub fn tag_groups(&self) -> Tags {
         self.tags.clone()
     }
@@ -367,7 +365,7 @@ mod tests {
             files: Files {
                 meta: FileMeta {
                     md5: None,
-                    ext: ext.map(|e| e.to_string()),
+                    ext: ext.map(std::string::ToString::to_string),
                     size: 1,
                     duration,
                     has_sample: false,

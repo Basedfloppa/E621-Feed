@@ -1,6 +1,6 @@
 //! Integration tests for the e621-account-parser DB layer.
 //!
-//! These tests exercise real SQLite reads/writes against a process-isolated
+//! These tests exercise real `SQLite` reads/writes against a process-isolated
 //! temporary database. Run with `cargo test --test integration`.
 
 mod support;
@@ -48,11 +48,20 @@ fn make_post(id: i64, tags: Tags, uploader_id: i64) -> Post {
 
 fn make_tags(artist: &[&str], character: &[&str], general: &[&str]) -> Tags {
     Tags {
-        artist: artist.iter().map(|s| s.to_string()).collect(),
-        character: character.iter().map(|s| s.to_string()).collect(),
+        artist: artist
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect(),
+        character: character
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect(),
         copyright: vec![],
         species: vec![],
-        general: general.iter().map(|s| s.to_string()).collect(),
+        general: general
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect(),
         lore: vec![],
         meta: vec![],
         invalid: vec![],
@@ -294,10 +303,10 @@ fn setup_test(account_id: i32) {
     }
 }
 
-/// RAII guard that owns a test account_id and (`owner_token`,
+/// RAII guard that owns a test `account_id` and (`owner_token`,
 /// `account_id`) link for the lifetime of the test. On drop — even on
 /// panic — `delete_device_link` runs the full cascade, batched cooc /
-/// feed_interactions wipes included.
+/// `feed_interactions` wipes included.
 ///
 /// Use `TestAccount::new()` for new tests; the legacy `setup_test` is
 /// still around for the old fixtures that haven't been migrated.
@@ -566,7 +575,7 @@ fn drop_account_cooccurrence_batched_loops_until_empty() {
 ///
 /// The previous code skipped the per-post sort+dedup of `post_tag_ids`
 /// for the account-cooc branch whenever ANY earlier post in the batch
-/// had triggered the global branch. With duplicate tag_ids (rare but
+/// had triggered the global branch. With duplicate `tag_ids` (rare but
 /// possible: a tag appearing in two groups of the same post), the
 /// cartesian pair loop would emit `(tag, tag)` self-pairs into
 /// `account_tag_cooccurrence`. This test seeds a batch where post 1
@@ -763,7 +772,7 @@ fn session_shown_posts_dedup_roundtrip() {
 /// Symmetric coverage for the second batched-delete helper. The cooc
 /// version is already covered by
 /// `drop_account_cooccurrence_batched_loops_until_empty`; this exercises
-/// the feed_interactions helper the same way so a future change to the
+/// the `feed_interactions` helper the same way so a future change to the
 /// shared `delete_by_account_in_batches` core can't break only one of
 /// the two callers.
 #[test]
@@ -842,8 +851,8 @@ fn drop_account_feed_interactions_batched_loops_until_empty() {
 
 /// `delete_device_link` underwent a 3-phase split to avoid pinning the
 /// writer mutex on the multi-million-row cooc wipe:
-///   1. drop the device_link, decide whether to cascade
-///   2. batched cooc + feed_interactions wipe (outside the cascade tx)
+///   1. drop the `device_link`, decide whether to cascade
+///   2. batched cooc + `feed_interactions` wipe (outside the cascade tx)
 ///   3. atomic small-table cascade + `accounts` row removal
 ///
 /// This regression test exercises all three phases by linking two
@@ -1056,13 +1065,11 @@ fn profile_rating_profile() {
     let s_count = profile
         .iter()
         .find(|r| r.rating == "s")
-        .map(|r| r.count)
-        .unwrap_or(0);
+        .map_or(0, |r| r.count);
     let q_count = profile
         .iter()
         .find(|r| r.rating == "q")
-        .map(|r| r.count)
-        .unwrap_or(0);
+        .map_or(0, |r| r.count);
     assert_eq!(s_count, 2, "should have 2 S-rated posts");
     assert_eq!(q_count, 1, "should have 1 Q-rated post");
 }
@@ -1125,18 +1132,15 @@ fn profile_media_profile() {
     let image_count = profile
         .iter()
         .find(|m| m.media_type == "image")
-        .map(|m| m.count)
-        .unwrap_or(0);
+        .map_or(0, |m| m.count);
     let animated = profile
         .iter()
         .find(|m| m.media_type == "animated")
-        .map(|m| m.count)
-        .unwrap_or(0);
+        .map_or(0, |m| m.count);
     let video_count = profile
         .iter()
         .find(|m| m.media_type == "video")
-        .map(|m| m.count)
-        .unwrap_or(0);
+        .map_or(0, |m| m.count);
     assert_eq!(image_count, 2, "jpg + png = 2 images");
     assert_eq!(animated, 1, "gif = 1 animated");
     assert_eq!(video_count, 3, "webm + mp4 + duration>0 = 3 video");
@@ -1242,7 +1246,7 @@ fn profile_recency_profile() {
     );
 }
 
-/// Verify uploader profile groups by uploader_id.
+/// Verify uploader profile groups by `uploader_id`.
 #[test]
 fn profile_uploader_profile() {
     let acc = TestAccount::new(90024);
@@ -1282,7 +1286,7 @@ fn profile_uploader_profile() {
     assert!((u200.avg_fav - 10.0).abs() < 1.0);
 }
 
-/// Verify full refresh sets all profiles and the profile_refreshed_at timestamp.
+/// Verify full refresh sets all profiles and the `profile_refreshed_at` timestamp.
 #[test]
 fn profile_refresh_full_sets_profiles_and_timestamp() {
     let acc = TestAccount::new(90025);
@@ -1319,7 +1323,7 @@ fn profile_refresh_full_sets_profiles_and_timestamp() {
     );
 }
 
-/// Verify get_account_preference_profile aggregates all sub-profiles.
+/// Verify `get_account_preference_profile` aggregates all sub-profiles.
 #[test]
 fn profile_preference_profile_aggregates_all() {
     let acc = TestAccount::new(90026);

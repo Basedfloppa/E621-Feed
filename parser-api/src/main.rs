@@ -1,3 +1,9 @@
+#![allow(
+    clippy::missing_errors_doc,
+    clippy::missing_panics_doc,
+    clippy::too_many_lines
+)]
+
 #[macro_use]
 extern crate rocket;
 
@@ -47,7 +53,7 @@ use rocket_okapi::{openapi, openapi_get_routes_spec, settings::OpenApiSettings};
 mod routes;
 
 /// Custom Shield policy for Content-Security-Policy.
-/// Uses the configured posts_domain to allow images/media from e621.
+/// Uses the configured `posts_domain` to allow images/media from e621.
 #[derive(Default)]
 struct Csp(String);
 
@@ -124,7 +130,7 @@ async fn process_posts(
     ratelimit::check(&format!("process:owner:{owner_token}"), 3, 3)?;
     ratelimit::check(&format!("process:ip:{}", client_ip.0), 5, 5)?;
     let owner_for_check = owner_token.clone();
-    db_blocking(move || get_account_by_id(&owner_for_check, account_id).map_err(|e| e.to_string()))
+    db_blocking(move || get_account_by_id(&owner_for_check, account_id).map_err(|e| e.clone()))
         .await?;
     let process_mode = mode
         .as_deref()
@@ -169,8 +175,7 @@ async fn process_status(
 ) -> Result<Json<Option<ProcessJobState>>, ApiError> {
     validation::validate_account_id(account_id)?;
     let owner_token = owner.0;
-    db_blocking(move || get_account_by_id(&owner_token, account_id).map_err(|e| e.to_string()))
-        .await?;
+    db_blocking(move || get_account_by_id(&owner_token, account_id).map_err(|e| e.clone())).await?;
     Ok(Json(jobs::get_state(account_id)))
 }
 
@@ -224,6 +229,9 @@ async fn session_clear(cookies: &CookieJar<'_>) -> Result<Json<serde_json::Value
                     warn!("session revoke failed: {e}");
                     ApiError::Internal("Failed to revoke session".into())
                 })?;
+            audit::event("token.revoked")
+                .field("reason", "logout")
+                .emit();
         }
     }
     cookies.add(auth::build_owner_cookie_clear());
@@ -409,7 +417,7 @@ async fn build_rocket() -> rocket::Rocket<rocket::Build> {
     // Default config uses "https://e621.net" which becomes "https://*.e621.net".
     let posts_host = url::Url::parse(&cfg().posts_domain)
         .ok()
-        .and_then(|u| u.host_str().map(|h| h.to_string()))
+        .and_then(|u| u.host_str().map(std::string::ToString::to_string))
         .unwrap_or_default();
     if !posts_host.is_empty() {
         let wildcard = format!("https://*.{posts_host}");

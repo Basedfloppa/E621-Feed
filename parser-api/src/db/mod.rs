@@ -46,7 +46,7 @@ impl Fairing for DbInit {
 
     async fn on_ignite(&self, rocket: Rocket<Build>) -> rocket::fairing::Result {
         match ensure_sqlite() {
-            Ok(_) => {
+            Ok(()) => {
                 println!("SQLite DB Initialized");
                 spawn_tag_cooccurrence_backfill_if_needed();
                 // Hot-cache the revocation denylist before any request can
@@ -87,13 +87,13 @@ fn pool() -> &'static DbPool {
         });
         Pool::builder()
             .max_size(16)
-            .connection_timeout(Duration::from_secs(120))
+            .connection_timeout(Duration::from_mins(2))
             .build(manager)
             .expect("build sqlite pool")
     })
 }
 
-/// Dedicated single writer connection guarded by a `Mutex`. SQLite WAL only
+/// Dedicated single writer connection guarded by a `Mutex`. `SQLite` WAL only
 /// permits one writer at a time anyway; serialising at the application
 /// level (instead of letting many writers compete via `busy_timeout`) gives
 /// FIFO ordering, frees the pool for readers, and avoids the cascading
@@ -129,7 +129,7 @@ where
 {
     let mut guard = write_conn()
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let tx = guard
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .map_err(|e| format!("Failed to begin write transaction: {e}"))?;
@@ -140,12 +140,12 @@ where
 }
 
 /// Run WAL checkpoint with truncate to keep the WAL file from growing
-/// unbounded. Safe to call frequently — SQLite no-ops when there's nothing
+/// unbounded. Safe to call frequently — `SQLite` no-ops when there's nothing
 /// to checkpoint. Uses the dedicated writer connection.
 pub fn wal_checkpoint() -> Result<(), String> {
     let guard = write_conn()
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     guard
         .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
         .map_err(|e| format!("WAL checkpoint failed: {e}"))
@@ -157,14 +157,14 @@ pub fn wal_checkpoint() -> Result<(), String> {
 pub fn ensure_sqlite() -> Result<(), String> {
     let mut guard = write_conn()
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     embedded::migrations::runner()
         .run(&mut *guard)
         .map_err(|e| format!("Failed to run migrations: {e}"))?;
     Ok(())
 }
 
-/// Verify that a pooled SQLite connection can execute a trivial query.
+/// Verify that a pooled `SQLite` connection can execute a trivial query.
 pub fn check_database_health() -> Result<(), String> {
     let conn = open_db()?;
     conn.query_row("SELECT 1", [], |_| Ok(()))

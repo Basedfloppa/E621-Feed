@@ -127,6 +127,7 @@ fn validate_blacklist_text(blacklist: &str) -> Result<(), ApiError> {
     Ok(())
 }
 
+#[must_use]
 pub fn normalize_blacklist(blacklist: &str) -> String {
     let mut seen = std::collections::HashSet::new();
     let mut lines: Vec<&str> = Vec::new();
@@ -236,7 +237,7 @@ pub fn validate_continue_count(count: Option<i32>) -> Result<i32, ApiError> {
 pub fn validate_similar_posts_limit(limit: Option<i32>) -> Result<i64, ApiError> {
     match limit {
         None => Ok(20),
-        Some(l) if (1..=100).contains(&l) => Ok(l as i64),
+        Some(l) if (1..=100).contains(&l) => Ok(i64::from(l)),
         Some(l) => Err(ApiError::BadRequest(format!(
             "limit {l} out of range [1, 100]"
         ))),
@@ -256,7 +257,7 @@ pub fn validate_similar_posts_min_overlap(overlap: Option<i32>) -> Result<i32, A
 pub fn validate_similar_posts_page(page: Option<i32>) -> Result<i64, ApiError> {
     match page {
         None => Ok(1),
-        Some(p) if (1..=100).contains(&p) => Ok(p as i64),
+        Some(p) if (1..=100).contains(&p) => Ok(i64::from(p)),
         Some(p) => Err(ApiError::BadRequest(format!(
             "page {p} out of range [1, 100]"
         ))),
@@ -553,7 +554,7 @@ mod tests {
         // Empty tag name
         let bad = PreferredTagPayload {
             preferred_tags: vec![PreferredTag {
-                tag: "".to_string(),
+                tag: String::new(),
                 group: "general".to_string(),
                 weight: 1.0,
             }],
@@ -584,7 +585,7 @@ mod tests {
         let bad = PreferredTagPayload {
             preferred_tags: vec![PreferredTag {
                 tag: "fluffy".to_string(),
-                group: "".to_string(),
+                group: String::new(),
                 weight: 1.0,
             }],
         };

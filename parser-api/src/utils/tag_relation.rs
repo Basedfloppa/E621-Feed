@@ -34,7 +34,7 @@ const GROUP_COUNT: usize = 7;
 /// [`Self::freeze`] is called (calibrate calls it once per per-account
 /// graph after `CachedPostFeatures` are resolved), pairs are compacted
 /// into a sorted `Vec<(TagId, TagId, i64)>` — 16 B/pair vs ~32-48 B in
-/// the HashMap, which cut per-account memory ~3× and let 1000-account
+/// the `HashMap`, which cut per-account memory ~3× and let 1000-account
 /// runs fit in 15 GB again. The query method handles both shapes.
 #[derive(Debug, Clone, Default)]
 pub struct TagRelationGraph {
@@ -80,8 +80,7 @@ impl PairStorage {
             PairStorage::Hot(m) => *m.get(&key).unwrap_or(&0),
             PairStorage::Frozen(v) => v
                 .binary_search_by(|&(a, b, _)| (a, b).cmp(&key))
-                .map(|i| v[i].2 as i64)
-                .unwrap_or(0),
+                .map_or(0, |i| i64::from(v[i].2)),
         }
     }
     fn entry_add(&mut self, key: (TagId, TagId), delta: i64) {
@@ -97,10 +96,12 @@ impl PairStorage {
 }
 
 impl TagRelationGraph {
+    #[must_use]
     pub fn empty() -> Self {
         Self::default()
     }
 
+    #[must_use]
     pub fn with_posts(n_posts: i64) -> Self {
         Self {
             tag_to_id: Default::default(),
@@ -125,7 +126,8 @@ impl TagRelationGraph {
     }
 
     /// Look up the id for a (group, tag) without inserting. Zero-alloc:
-    /// borrows directly into the per-group HashMap.
+    /// borrows directly into the per-group `HashMap`.
+    #[must_use]
     pub fn tag_id(&self, g: GroupKey, t: &str) -> Option<TagId> {
         if t.is_empty() {
             return None;
@@ -148,7 +150,7 @@ impl TagRelationGraph {
 
     /// Insert a pair using pre-resolved `TagId`s — caller has already
     /// interned both endpoints (typical when loading from a JOIN-free
-    /// cooccurrence scan against SQLite's `tag_id`s). Cuts ~400M string
+    /// cooccurrence scan against `SQLite`'s `tag_id`s). Cuts ~400M string
     /// alloc + lowercase ops on a multi-million-pair `load_global_tag_relation`.
     pub fn insert_pair_by_id(&mut self, a: TagId, b: TagId, count: i64) {
         if count <= 0 || a == b {
@@ -167,6 +169,7 @@ impl TagRelationGraph {
     }
 
     #[inline]
+    #[must_use]
     pub fn cooc_by_id(&self, a: TagId, b: TagId) -> i64 {
         if a == b {
             return self.marginal_by_id(a);
@@ -176,23 +179,27 @@ impl TagRelationGraph {
     }
 
     #[inline]
+    #[must_use]
     pub fn marginal_by_id(&self, id: TagId) -> i64 {
         self.marginals.get(id as usize).copied().unwrap_or(0)
     }
 
     #[inline]
+    #[must_use]
     pub fn n_posts(&self) -> i64 {
         self.n_posts
     }
 
     /// Total interned (group, tag) keys. Diagnostic only.
     #[inline]
+    #[must_use]
     pub fn n_tags(&self) -> usize {
         self.marginals.len()
     }
 
     /// Total stored co-occurrence pairs. Diagnostic only.
     #[inline]
+    #[must_use]
     pub fn n_pairs(&self) -> usize {
         self.pairs.len()
     }
@@ -200,6 +207,7 @@ impl TagRelationGraph {
     /// True if the graph holds nothing — used by the idle-eviction path so
     /// we don't churn-evict an already-empty cache every tick.
     #[inline]
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.pairs.is_empty() && self.marginals.is_empty() && self.n_posts == 0
     }
@@ -241,20 +249,20 @@ impl TagRelationGraph {
         self.freeze_inner(min_cooc, Some(queryable_tids));
     }
 
-    /// Bypass the Hot HashMap entirely: take ownership of a `Vec` of
+    /// Bypass the Hot `HashMap` entirely: take ownership of a `Vec` of
     /// pre-resolved `(TagId, TagId, count)` triples and store them
     /// directly as `PairStorage::Frozen`. Pairs may arrive in any
     /// order; this method canonicalises endpoints, sorts, and
     /// in-place coalesces adjacent duplicates without re-allocating.
     ///
     /// Used by `db::load_global_tag_relation` to skip the multi-GB
-    /// HashMap allocation peak when loading a multi-million-pair
+    /// `HashMap` allocation peak when loading a multi-million-pair
     /// catalog graph — prod doesn't need string-keyed lookups against
     /// the global graph after dataset prep, only id-keyed cooc/marginal
     /// queries.
     pub fn set_pairs_frozen_vec(&mut self, mut v: Vec<(TagId, TagId, u32)>) {
         v.retain(|&(a, b, _)| a != b);
-        for entry in v.iter_mut() {
+        for entry in &mut v {
             if entry.0 > entry.1 {
                 let (a, b, c) = (entry.1, entry.0, entry.2);
                 entry.0 = a;
@@ -293,7 +301,7 @@ impl TagRelationGraph {
             PairStorage::Hot(map) => map
                 .into_iter()
                 .filter_map(|((a, b), c)| {
-                    if c < min_cooc as i64 {
+                    if c < i64::from(min_cooc) {
                         return None;
                     }
                     if let Some(q) = queryable
@@ -301,7 +309,7 @@ impl TagRelationGraph {
                     {
                         return None;
                     }
-                    Some((a, b, c.max(0).min(u32::MAX as i64) as u32))
+                    Some((a, b, c.max(0).min(i64::from(u32::MAX)) as u32))
                 })
                 .collect(),
             PairStorage::Frozen(v) => v
@@ -337,6 +345,7 @@ impl TagRelationGraph {
     /// channel an actual gradient (the production path builds these
     /// graphs from the user's full favourite history; under the
     /// synthetic split, the train-half is the analogue).
+    #[must_use]
     pub fn from_train_posts(posts: &[crate::models::Post]) -> Self {
         let mut g = Self::with_posts(posts.len() as i64);
         // Same group set tag_relation_fit operates on (no `meta`).
@@ -354,7 +363,7 @@ impl TagRelationGraph {
         let mut scratch: Vec<(GroupKey, TagId)> = Vec::with_capacity(64);
         for post in posts {
             scratch.clear();
-            for (gk, getter) in groups.iter() {
+            for (gk, getter) in &groups {
                 for raw in getter(post) {
                     let trimmed = raw.trim();
                     if trimmed.is_empty() {
@@ -401,12 +410,16 @@ static LAST_USER_ACCESS: LazyLock<Mutex<Instant>> = LazyLock::new(|| Mutex::new(
 static LAST_SYSTEM_ACCESS: LazyLock<Mutex<Instant>> = LazyLock::new(|| Mutex::new(Instant::now()));
 
 fn touch_user_access() {
-    let mut g = LAST_USER_ACCESS.lock().unwrap_or_else(|p| p.into_inner());
+    let mut g = LAST_USER_ACCESS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     *g = Instant::now();
 }
 
 fn touch_system_access() {
-    let mut g = LAST_SYSTEM_ACCESS.lock().unwrap_or_else(|p| p.into_inner());
+    let mut g = LAST_SYSTEM_ACCESS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     *g = Instant::now();
 }
 
@@ -490,7 +503,9 @@ pub fn evict_if_idle(idle_secs: u64) -> (usize, usize) {
         return (0, 0);
     }
     let elapsed = {
-        let g = LAST_USER_ACCESS.lock().unwrap_or_else(|p| p.into_inner());
+        let g = LAST_USER_ACCESS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         g.elapsed()
     };
     if elapsed.as_secs() < idle_secs {
@@ -506,7 +521,9 @@ pub fn evict_if_idle(idle_secs: u64) -> (usize, usize) {
     GLOBAL_CACHE.store(Arc::new(TagRelationGraph::empty()));
     GLOBAL_DIRTY.store(true, Ordering::Release);
     {
-        let mut g = LAST_USER_ACCESS.lock().unwrap_or_else(|p| p.into_inner());
+        let mut g = LAST_USER_ACCESS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         *g = Instant::now();
     }
     (prev_pairs, prev_tags)

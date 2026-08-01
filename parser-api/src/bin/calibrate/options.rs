@@ -2,7 +2,7 @@
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub(crate) enum SplitStrategy {
-    /// Sort by post_id ASC, hold out newest 20% (legacy; biases recency).
+    /// Sort by `post_id` ASC, hold out newest 20% (legacy; biases recency).
     PostId,
     /// Uniform-random hold-out (deterministic per-account seed).
     Random,
