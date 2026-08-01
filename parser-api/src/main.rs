@@ -336,7 +336,10 @@ fn attach_cors(rocket: rocket::Rocket<rocket::Build>) -> rocket::Rocket<rocket::
 /// Build and configure the Rocket instance.
 async fn build_rocket() -> rocket::Rocket<rocket::Build> {
     info!("Starting server...");
-    let path = default_path().unwrap();
+    let path = default_path().unwrap_or_else(|e| {
+        error!("Failed to resolve config path: {e:#}; falling back to config.toml");
+        std::path::PathBuf::from("config.toml")
+    });
     // Startup config load: failure here means defaults are used, which
     // can subtly change behaviour (e621 base URL, blacklist, etc.).
     // Surface so an operator notices instead of silently running with
