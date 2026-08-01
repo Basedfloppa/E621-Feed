@@ -11,7 +11,7 @@ use crate::models::*;
 /// class string by matching the viewport width against Tailwind breakpoints.
 /// Best-known pixel dimensions for layout calculations.
 /// Prefers preview > sample > original, falling back to (4, 3) for 4:3.
-fn best_dimensions(files: &crate::models::Files) -> (i64, i64) {
+pub(crate) fn best_dimensions(files: &crate::models::Files) -> (i64, i64) {
     let w = files.preview.width.max(1);
     let h = files.preview.height.max(1);
     if w > 1 && h > 1 {

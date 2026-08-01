@@ -13,6 +13,7 @@ struct PendingBlacklistRule {
     label: String,
 }
 
+use crate::components::post_grid::best_dimensions;
 use crate::components::{ConfirmModal, shared_observer};
 use crate::models::*;
 
@@ -637,12 +638,38 @@ pub fn post_card(props: &PostCardProps) -> Html {
         }
     };
 
-    // Reserve minimum space so Masonry layout doesn't collapse while
-    // images are still loading. 300px is tall enough that a grid of 5
-    // columns is usable; the real height snaps in once the image loads.
+    // Temporary loading reserve (TODO 3.1). No permanent min-height — small
+    // media shouldn't leave an empty box. Instead, reserve height while the
+    // media is still loading: `aspect-ratio` from the known preview
+    // dimensions (with the legacy 300px as a floor), released as soon as the
+    // image/video fires a load event (or errors). Cards without a preview
+    // image skip the reserve — their 4/3 fallback handles the height.
+    let media_ready = use_state(|| img_url.is_none());
+    {
+        let media_ready = media_ready.clone();
+        let url = img_url.clone();
+        use_effect_with(url, move |url| {
+            // Re-arm the reserve whenever the media URL changes (resolution
+            // switch or error-fallback advance): the freshly-rendered element
+            // starts loading from scratch and must reserve height again.
+            media_ready.set(url.is_none());
+            || ()
+        });
+    }
+    let mark_media_ready = {
+        let media_ready = media_ready.clone();
+        Callback::from(move |_e: Event| media_ready.set(true))
+    };
+    let media_loading_style = if *media_ready {
+        String::new()
+    } else {
+        let (w, h) = best_dimensions(&post.files);
+        format!("aspect-ratio: {w} / {h}; min-height: 300px;")
+    };
+
     let inner: Html = html! {
         <>
-            <div class="relative p-0" style="min-height: 300px;">
+            <div class="relative p-0" style={media_loading_style}>
                 {
                     if let Some(url) = img_url {
                         let is_video = matches!(
@@ -676,6 +703,8 @@ pub fn post_card(props: &PostCardProps) -> Html {
                                         playsinline={true}
                                         preload="none"
                                         onplay={stop_video.clone()}
+                                        onloadeddata={mark_media_ready.clone()}
+                                        onloadedmetadata={mark_media_ready.clone()}
                                         onerror={on_video_error.clone()}
                                     />
                                 }
@@ -687,6 +716,7 @@ pub fn post_card(props: &PostCardProps) -> Html {
                                         alt={(*alt_text).clone()}
                                         loading="lazy"
                                         decoding="async"
+                                        onload={mark_media_ready.clone()}
                                         onerror={on_image_error.clone()}
                                     />
                                 }
@@ -699,6 +729,7 @@ pub fn post_card(props: &PostCardProps) -> Html {
                                     alt={(*alt_text).clone()}
                                     loading="lazy"
                                     decoding="async"
+                                    onload={mark_media_ready.clone()}
                                     onerror={on_image_error.clone()}
                                 />
                             }
