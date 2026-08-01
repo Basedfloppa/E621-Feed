@@ -371,6 +371,7 @@ async fn build_rocket() -> rocket::Rocket<rocket::Build> {
         routes::feed::log_feed_interaction_batch,
         routes::feed::undo_feed_interaction,
         routes::feed::clear_account_interactions,
+        routes::feed::get_account_interactions,
         routes::account::list_accounts,
         routes::account::get_account_tag_counts,
         routes::account::get_account_profile,

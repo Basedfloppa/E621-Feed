@@ -160,6 +160,61 @@ pub fn remove_feed_interaction(
 /// Batch version of `record_feed_interaction`. Processes up to 100
 /// interactions in a single write transaction. Ownership is verified
 /// per distinct `account_id` (cheaper than per-interaction).
+/// Fetch the most recent interaction rows for an account, newest first,
+/// optionally filtered to one event type. Used by the interaction-history
+/// page. Does not verify ownership — callers must gate on `owner_token`.
+pub fn get_account_interaction_history(
+    account_id: i32,
+    event_filter: Option<FeedInteractionType>,
+    limit: i64,
+) -> Result<Vec<crate::models::InteractionHistoryItem>, String> {
+    let conn = open_db()?;
+    let limit = limit.clamp(1, 500);
+    let et_str = event_filter.as_ref().map(ToString::to_string);
+    let sql = match &et_str {
+        Some(_) => "SELECT post_id, event_type, position, created_at \
+             FROM feed_interactions \
+             WHERE account_id = ?1 AND event_type = ?2 \
+             ORDER BY id DESC LIMIT ?3"
+            .to_string(),
+        None => "SELECT post_id, event_type, position, created_at \
+             FROM feed_interactions \
+             WHERE account_id = ?1 \
+             ORDER BY id DESC LIMIT ?2"
+            .to_string(),
+    };
+    let mut stmt = conn
+        .prepare(&sql)
+        .map_err(|e| format!("Failed to prepare interaction history query: {e}"))?;
+    let rows = match &et_str {
+        Some(et) => stmt.query_map(rusqlite::params![account_id, et, limit], history_row_mapper),
+        None => stmt.query_map(rusqlite::params![account_id, limit], history_row_mapper),
+    };
+    rows.map_err(|e| format!("Failed to query interaction history: {e}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("Failed to collect interaction history: {e}"))
+}
+
+fn history_row_mapper(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<crate::models::InteractionHistoryItem> {
+    let event_str: String = row.get(1)?;
+    let event_type = match event_str.as_str() {
+        "qualified_impression" => crate::models::FeedInteractionType::QualifiedImpression,
+        "open" => crate::models::FeedInteractionType::Open,
+        "like" => crate::models::FeedInteractionType::Like,
+        "strong_like" => crate::models::FeedInteractionType::StrongLike,
+        "hide" => crate::models::FeedInteractionType::Hide,
+        _ => crate::models::FeedInteractionType::Unknown,
+    };
+    Ok(crate::models::InteractionHistoryItem {
+        post_id: row.get(0)?,
+        event_type,
+        position: row.get(2)?,
+        created_at: row.get(3)?,
+    })
+}
+
 /// Clear the interaction-derived recommendation state for one account owned by
 /// this device. Favorites, blacklist, profile, and account links are retained.
 pub fn clear_feed_interactions(owner_token: &str, account_id: i32) -> Result<usize, String> {

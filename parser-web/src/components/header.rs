@@ -338,6 +338,12 @@ pub fn header() -> Html {
                             >
                                 {"Digest"}
                             </a>
+                            <a role="tab"
+                                class={classes!("tab", is_active("/history").then_some("tab-active"))}
+                                href="/history"
+                            >
+                                {"History"}
+                            </a>
                         </div>
                     </div>
                     <div class="navbar-end gap-1">
@@ -448,6 +454,14 @@ pub fn header() -> Html {
                             href="/digest"
                         >
                             {"Digest"}
+                        </a>
+                    </li>
+                    <li>
+                        <a
+                            class={classes!("text-base-content", is_active("/history").then_some("menu-active"))}
+                            href="/history"
+                        >
+                            {"History"}
                         </a>
                     </li>
                 </ul>

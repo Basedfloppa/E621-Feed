@@ -8,8 +8,8 @@ use web_sys::{Request, RequestMode, Response, window};
 use yew::prelude::*;
 
 use crate::components::{
-    IconArrowClockwise, IconSliders, SavedAccountsSelect, render_post_grid,
-    render_post_grid_skeleton, use_settings_tick,
+    IconArrowClockwise, SavedAccountsSelect, render_post_grid, render_post_grid_skeleton,
+    use_settings_tick,
 };
 use crate::models::*;
 use crate::pages::UserInfo;
@@ -86,7 +86,7 @@ pub fn digest_page() -> Html {
 
     // Display settings — display toggles read unified settings_show_* keys
     // (falling back to old `digest_*` keys); hide_saved stays digest-local.
-    let hide_saved = use_state(|| read_bool_local("digest_hide_saved", false));
+    let hide_saved = use_state(|| read_bool_local("digest_hide_saved", true));
     let show_breakdown = read_display_setting("breakdown", "digest_show_breakdown", true);
     let show_desc = read_display_setting("desc", "digest_show_desc", true);
     let show_metadata = read_display_setting("metadata", "digest_show_metadata", false);
@@ -203,6 +203,7 @@ pub fn digest_page() -> Html {
                 // still detect a new run triggered by another tab.
                 is_loading.set(true);
                 error.set(None);
+                posts.set(Vec::new()); // hide old content while loading new
 
                 let posts = posts.clone();
                 let is_loading = is_loading.clone();
@@ -349,11 +350,15 @@ pub fn digest_page() -> Html {
         Some(ProcessJobPhase::Running)
     );
 
-    let on_toggle_full = {
+    // Explicit tab selection for Quick/Full digest — clearer than a
+    // single toggle button whose label flips.
+    let on_select_quick = {
         let is_full = is_full.clone();
-        Callback::from(move |_: MouseEvent| {
-            is_full.set(!*is_full);
-        })
+        Callback::from(move |_: MouseEvent| is_full.set(false))
+    };
+    let on_select_full = {
+        let is_full = is_full.clone();
+        Callback::from(move |_: MouseEvent| is_full.set(true))
     };
 
     let on_toggle_hide_saved = {
@@ -443,39 +448,57 @@ pub fn digest_page() -> Html {
                     <IconArrowClockwise />
                     { " Refresh" }
                 </button>
-                <button
-                    class={classes!(
-                        "btn",
-                        if *is_full { "btn-primary" } else { "btn-outline" },
-                    )}
-                    onclick={on_toggle_full}
-                    disabled={*is_loading || process_is_running}
-                >
-                    { if *is_full { "Full digest" } else { "Quick digest" } }
-                </button>
 
-                <details class="dropdown dropdown-end">
-                    <summary class="btn btn-outline">
-                        <IconSliders />
-                        { " Display" }
-                    </summary>
-                    <div class="menu dropdown-content p-3 shadow bg-base-100 rounded-box w-72 z-50" style="min-width: 260px;">
-                        <label class="label cursor-pointer py-1">
-                            <span class="text-base-content">{"Hide already-saved posts"}</span>
-                            <input
-                                type="checkbox"
-                                class="toggle toggle-sm"
-                                checked={*hide_saved}
-                                onchange={on_toggle_hide_saved}
-                            />
-                        </label>
-                        <span class="text-xs text-base-content/70 block mb-1 ms-1">
-                            { "Filter out posts already in your favourites." }
-                        </span>
+                <div class="join" role="tablist" aria-label="Digest mode">
+                    <button
+                        type="button"
+                        role="tab"
+                        aria-selected={(!*is_full).to_string()}
+                        class={classes!(
+                            "btn", "btn-sm", "join-item",
+                            if !*is_full { "btn-primary" } else { "btn-outline" },
+                        )}
+                        onclick={on_select_quick}
+                        disabled={*is_loading || process_is_running}
+                    >{ "Quick digest" }</button>
+                    <button
+                        type="button"
+                        role="tab"
+                        aria-selected={(*is_full).to_string()}
+                        class={classes!(
+                            "btn", "btn-sm", "join-item",
+                            if *is_full { "btn-primary" } else { "btn-outline" },
+                        )}
+                        onclick={on_select_full}
+                        disabled={*is_loading || process_is_running}
+                    >{ "Full digest" }</button>
+                </div>
 
-                    </div>
-                </details>
+                <label class="label cursor-pointer gap-2">
+                    <span class="text-sm text-base-content">{ "Hide saved" }</span>
+                    <input
+                        type="checkbox"
+                        class="toggle toggle-sm"
+                        checked={*hide_saved}
+                        onchange={on_toggle_hide_saved}
+                        disabled={*is_loading || process_is_running}
+                        aria-label="Hide already-saved posts"
+                    />
+                </label>
             </div>
+
+            {
+                if selected_user.is_some() {
+                    let mode_hint = if *is_full {
+                        "Full digest: personalized scoring over the whole catalog (slower)".to_string()
+                    } else {
+                        "Quick digest: stratified picks — top, trending, exploration, wildcard, recent".to_string()
+                    };
+                    html! {
+                        <p class="text-xs text-base-content/60 -mt-2 mb-3">{ mode_hint }</p>
+                    }
+                } else { html!{} }
+            }
 
             if let Some(ref e) = *error {
                 <div class="alert alert-error flex justify-between items-center" role="alert" aria-live="polite">

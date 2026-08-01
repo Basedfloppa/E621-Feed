@@ -1483,6 +1483,90 @@ async fn account_export_import_round_trip() {
     assert_eq!(response.status(), Status::BadRequest);
 }
 
+/// Interaction history: records an interaction, fetches it back, applies an
+/// event filter, and rejects an unknown filter.
+#[tokio::test(flavor = "multi_thread")]
+async fn interaction_history_lists_and_filters() {
+    let account = TestAccount::new(9_100_102);
+    let owner = account.owner;
+    let aid = account.id;
+
+    // Seed two posts so the FK constraint on feed_interactions holds.
+    e621_account_parser_api::db::save_posts(
+        &[
+            make_post(7_100_001, Tags::default(), 1),
+            make_post(7_100_002, Tags::default(), 1),
+        ],
+        aid,
+    )
+    .unwrap();
+
+    // Record interactions directly via the DB layer.
+    for (post_id, event) in [
+        (7_100_001_i64, "open"),
+        (7_100_001_i64, "hide"),
+        (7_100_002_i64, "like"),
+    ] {
+        e621_account_parser_api::db::record_feed_interaction(
+            owner,
+            &e621_account_parser_api::models::FeedInteractionRequest {
+                account_id: aid,
+                post_id,
+                event_type: match event {
+                    "open" => e621_account_parser_api::models::FeedInteractionType::Open,
+                    "hide" => e621_account_parser_api::models::FeedInteractionType::Hide,
+                    _ => e621_account_parser_api::models::FeedInteractionType::Like,
+                },
+                position: 1,
+                session_id: "hist-test".into(),
+            },
+        )
+        .unwrap();
+    }
+
+    let client = Client::tracked(rocket::build().mount(
+        "/api",
+        e621_account_parser_api::routes::integration_test_routes(),
+    ))
+    .await
+    .unwrap();
+    let cookie = Cookie::new(e621_account_parser_api::auth::OWNER_TOKEN_COOKIE, owner);
+
+    // Unfiltered — all three rows, newest first.
+    let response = client
+        .get(format!("/api/account/{aid}/interactions"))
+        .cookie(cookie.clone())
+        .dispatch()
+        .await;
+    assert_eq!(response.status(), Status::Ok);
+    let items = response.into_json::<serde_json::Value>().await.unwrap();
+    let arr = items.as_array().unwrap();
+    assert_eq!(arr.len(), 3, "all three interactions listed");
+    assert!(arr.iter().any(|i| i["event_type"] == "open"));
+    assert!(arr.iter().any(|i| i["event_type"] == "hide"));
+    assert!(arr.iter().any(|i| i["event_type"] == "like"));
+
+    // Filtered by event.
+    let response = client
+        .get(format!("/api/account/{aid}/interactions?event=open"))
+        .cookie(cookie.clone())
+        .dispatch()
+        .await;
+    assert_eq!(response.status(), Status::Ok);
+    let items = response.into_json::<serde_json::Value>().await.unwrap();
+    let arr = items.as_array().unwrap();
+    assert_eq!(arr.len(), 1, "only open interactions");
+    assert_eq!(arr[0]["event_type"], "open");
+
+    // Unknown filter rejected.
+    let response = client
+        .get(format!("/api/account/{aid}/interactions?event=nope"))
+        .cookie(cookie.clone())
+        .dispatch()
+        .await;
+    assert_eq!(response.status(), Status::BadRequest);
+}
+
 #[test]
 fn catalog_hydration_scan_selects_only_incomplete_metadata() {
     ensure_migrations();

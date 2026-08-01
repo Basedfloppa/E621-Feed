@@ -30,6 +30,7 @@ pub fn integration_test_routes() -> Vec<rocket::Route> {
         account::export_account,
         account::import_account,
         feed::get_recommendations,
+        feed::get_account_interactions,
         digest::get_daily_digest,
         browse::get_trending,
         browse::get_trending_scored,

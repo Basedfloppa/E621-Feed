@@ -44,10 +44,10 @@ use e621_account_parser_api::{
     api, audit,
     db::{
         self, clear_feed_interactions, collect_local_candidate_ids, find_similar_post_ids,
-        get_account_by_id, get_account_preference_profile, get_long_term_seen_post_ids,
-        get_owned_post_ids, get_post_by_id, get_recently_seen_post_ids, get_tag_counts,
-        hydrate_posts_by_ids, record_feed_interaction, record_feed_interactions_batch,
-        remove_feed_interaction, upsert_catalog_posts,
+        get_account_by_id, get_account_interaction_history, get_account_preference_profile,
+        get_long_term_seen_post_ids, get_owned_post_ids, get_post_by_id,
+        get_recently_seen_post_ids, get_tag_counts, hydrate_posts_by_ids, record_feed_interaction,
+        record_feed_interactions_batch, remove_feed_interaction, upsert_catalog_posts,
     },
     errors::ApiError,
     models::{
@@ -135,6 +135,72 @@ pub(crate) async fn clear_account_interactions(
         .field("deleted", deleted)
         .emit();
     Ok(Json(deleted))
+}
+
+/// Interaction history for the history page. Optional `event` filter
+/// (`open` / `hide` / `like` / `strong_like` / `qualified_impression`)
+/// and `limit` (default 100, max 500). Newest first.
+#[openapi(tag = "Recommendations")]
+#[get("/account/<account_id>/interactions?<event>&<limit>")]
+pub(crate) async fn get_account_interactions(
+    account_id: i32,
+    event: Option<String>,
+    limit: Option<i64>,
+    owner: OwnerToken,
+) -> Result<Json<Vec<models::InteractionHistoryEntry>>, ApiError> {
+    validation::validate_account_id(account_id)?;
+    let owner_token = owner.0;
+    ratelimit::check(&format!("read:owner:{owner_token}"), 240, 60)?;
+    let filter = match event.as_deref() {
+        None => None,
+        Some("open") => Some(models::FeedInteractionType::Open),
+        Some("hide") => Some(models::FeedInteractionType::Hide),
+        Some("like") => Some(models::FeedInteractionType::Like),
+        Some("strong_like") => Some(models::FeedInteractionType::StrongLike),
+        Some("qualified_impression") => Some(models::FeedInteractionType::QualifiedImpression),
+        Some(other) => {
+            return Err(ApiError::BadRequest(format!(
+                "unknown event filter: {other}"
+            )));
+        }
+    };
+    let limit = limit.unwrap_or(100);
+    // Verify ownership first (history is account-scoped data).
+    let owner_for_auth = owner_token.clone();
+    db_blocking(move || get_account_by_id(&owner_for_auth, account_id).map_err(|e| e.clone()))
+        .await?;
+    let items = db_blocking(move || {
+        get_account_interaction_history(account_id, filter, limit)
+            .map_err(|e| format!("Failed to get interaction history: {e}"))
+    })
+    .await?;
+
+    // Hydrate catalog posts locally (cheap) so the page can render previews
+    // for posts that exist in the catalog; the rest come back `None`.
+    let ids: Vec<i64> = items.iter().map(|i| i.post_id).collect();
+    let hydrated: std::collections::HashMap<i64, Post> = db_blocking(move || {
+        hydrate_posts_by_ids(&ids)
+            .map(|posts| posts.into_iter().map(|p| (p.id, p)).collect())
+            .map_err(|e| format!("Failed to hydrate history posts: {e}"))
+    })
+    .await?;
+    let entries: Vec<models::InteractionHistoryEntry> = items
+        .into_iter()
+        .map(|item| models::InteractionHistoryEntry {
+            post_id: item.post_id,
+            event_type: item.event_type,
+            position: item.position,
+            created_at: item.created_at,
+            post: hydrated.get(&item.post_id).cloned(),
+        })
+        .collect();
+
+    audit::event("feed.history")
+        .field("account_id", account_id)
+        .field("returned", entries.len())
+        .field_opt("event", event)
+        .emit();
+    Ok(Json(entries))
 }
 
 #[openapi(tag = "Recommendations")]

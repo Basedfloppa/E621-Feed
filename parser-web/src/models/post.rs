@@ -212,6 +212,17 @@ pub struct FeedInteractionRequest {
     pub session_id: String,
 }
 
+/// One row of the interaction-history page.
+#[derive(Serialize, Deserialize, Clone, PartialEq)]
+pub struct InteractionHistoryEntry {
+    pub post_id: i64,
+    pub event_type: FeedInteractionType,
+    pub position: i32,
+    pub created_at: String,
+    #[serde(default)]
+    pub post: Option<Post>,
+}
+
 #[derive(Serialize, Deserialize, Clone, PartialEq)]
 pub struct ScoredPost {
     pub post: Post,

@@ -312,6 +312,31 @@ pub struct FeedInteractionRequest {
     pub session_id: String,
 }
 
+/// One row of interaction history for the history page.
+#[derive(Debug, Serialize, Deserialize, JsonSchema, Clone)]
+#[serde(crate = "rocket::serde")]
+pub struct InteractionHistoryItem {
+    pub post_id: i64,
+    pub event_type: FeedInteractionType,
+    pub position: i32,
+    pub created_at: String,
+}
+
+/// History entry as returned to the page: the raw interaction row plus the
+/// hydrated catalog post when it exists locally (`None` when the post is
+/// not in the catalog — e.g. it came from the live feed and was never
+/// stored).
+#[derive(Serialize, Deserialize, JsonSchema, Clone)]
+#[serde(crate = "rocket::serde")]
+pub struct InteractionHistoryEntry {
+    pub post_id: i64,
+    pub event_type: FeedInteractionType,
+    pub position: i32,
+    pub created_at: String,
+    #[serde(default)]
+    pub post: Option<Post>,
+}
+
 /// Batch interaction submission for offline sync. Max 100 interactions
 /// per batch to avoid overloading the server.
 #[derive(Debug, Serialize, Deserialize, JsonSchema, Clone)]

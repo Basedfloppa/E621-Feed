@@ -573,6 +573,31 @@ pub fn post_card(props: &PostCardProps) -> Html {
         })
     };
 
+    // Middle-click / mouse-wheel click also counts as an open, but
+    // `onclick` only fires for primary button. `auxclick` fires for
+    // all non-primary buttons; we only care about button === 1 (middle).
+    let on_aux_link_click = {
+        let backend_url = props.backend_url.to_string();
+        let session_id = props.session_id.to_string();
+        let account_id = props.account_id;
+        let position = props.position;
+        let post_id = post.id;
+        Callback::from(move |e: MouseEvent| {
+            if e.button() == 1 {
+                send_interaction(
+                    backend_url.clone(),
+                    FeedInteractionRequest {
+                        account_id,
+                        post_id,
+                        event_type: FeedInteractionType::Open,
+                        position,
+                        session_id: session_id.clone(),
+                    },
+                );
+            }
+        })
+    };
+
     let mut root_classes = classes!(
         "card",
         "post-card",
@@ -753,6 +778,7 @@ pub fn post_card(props: &PostCardProps) -> Html {
                     rel="noopener noreferrer"
                     class="absolute inset-0 z-1"
                     onclick={on_link_click}
+                    onauxclick={on_aux_link_click}
                     aria-label={format!(
                         "Open post {} on e621 (rating {}, score {}, affinity {:.2})",
                         post.id, rating_label, post.stats.score.total, &props.affinity
