@@ -500,14 +500,13 @@ pub fn feed_page() -> Html {
         <div class="m-4 gap-2 feed-page">
             <h1 class="text-2xl font-semibold text-base-content mb-3">{ "Latest Posts" }</h1>
 
-            <div id="feed-account">
-                <SavedAccountsSelect
-                    selected_user={selected_user.clone()}
-                    is_loading={is_loading.clone()}
-                />
-            </div>
-
             <div class="flex flex-wrap gap-3 items-center feed-toolbar">
+                <div id="feed-account">
+                    <SavedAccountsSelect
+                        selected_user={selected_user.clone()}
+                        is_loading={is_loading.clone()}
+                    />
+                </div>
                 <div class="feed-exploration-col" id="feed-exploration">
                     <label for="feed-exploration-input" class="mb-1 block">
                         <span class="text-base-content">{"Exploration"}

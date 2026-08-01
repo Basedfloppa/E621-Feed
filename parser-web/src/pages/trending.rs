@@ -146,8 +146,6 @@ pub fn trending_page() -> Html {
                         is_loading={is_loading.clone()}
                     />
                 </div>
-                <div class="feed-grid-col">
-                    <span class="block text-xs text-base-content/70 mb-1">{ "Scoring" }</span>                </div>
             </div>
 
             if selected_user.is_some() && !fetch_url.is_empty() {
