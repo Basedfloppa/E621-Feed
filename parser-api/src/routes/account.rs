@@ -22,9 +22,9 @@ use e621_account_parser_api::{
     },
     errors::ApiError,
     models::{
-        AccountFeedSettings, AccountFeedSettingsPatch, AccountPreferenceProfile, BlacklistPayload,
-        DeviceScopedAccount, PreferredTagPayload, TagCount, TagRelationScoring, TruncatedAccount,
-        UserApiResponse, cfg,
+        AccountDataExport, AccountDataImport, AccountFeedSettings, AccountFeedSettingsPatch,
+        AccountPreferenceProfile, BlacklistPayload, DeviceScopedAccount, ExportAccountSummary,
+        PreferredTagPayload, TagCount, TagRelationScoring, TruncatedAccount, UserApiResponse, cfg,
     },
     ratelimit::{self, ClientIp},
     validation,
@@ -579,6 +579,117 @@ pub(crate) async fn patch_feed_settings(
 
     // Same effective-bucket resolution as GET: when the account has no
     // persisted bucket, hash into a configured bucket on the fly.
+    let effective_bucket = settings.experiment_bucket.clone().or_else(|| {
+        let (name, _) = cfg().pick_bucket(account_id, None);
+        name
+    });
+    let mut settings = settings;
+    settings.experiment_bucket = effective_bucket;
+    Ok(Json(settings))
+}
+
+/// Full account data snapshot for backup / migration. Returns the
+/// account identity, effective blacklist, preferred tags, experiment
+/// bucket, and the current preference profile in one JSON document.
+///
+/// Import restores only the user-settable fields — the profile is
+/// derived state recomputed by `/process`.
+#[openapi(tag = "Accounts")]
+#[get("/account/<account_id>/export")]
+pub(crate) async fn export_account(
+    account_id: i32,
+    owner: OwnerToken,
+) -> Result<Json<AccountDataExport>, ApiError> {
+    validation::validate_account_id(account_id)?;
+    let owner_token = owner.0;
+    ratelimit::check(&format!("read:owner:{owner_token}"), 240, 60)?;
+    let owner_for_auth = owner_token.clone();
+    let (name, settings, profile) = db_blocking(move || {
+        let account = get_account_by_id(&owner_for_auth, account_id)
+            .map_err(|e| format!("Failed to validate account access: {e}"))?;
+        let settings = get_account_feed_settings(&owner_for_auth, account_id)
+            .map_err(|e| format!("Failed to get feed settings: {e}"))?;
+        let profile = get_account_preference_profile(account_id)
+            .map_err(|e| format!("Failed to get profile: {e}"))?;
+        Ok::<_, String>((account.name, settings, profile))
+    })
+    .await?;
+
+    let export = AccountDataExport {
+        account: ExportAccountSummary {
+            id: account_id,
+            name,
+        },
+        blacklist: settings.blacklist,
+        preferred_tags: settings.preferred_tags,
+        experiment_bucket: settings.experiment_bucket,
+        profile,
+    };
+    Ok(Json(export))
+}
+
+/// Restore user-settable account settings from an export payload.
+/// Accepts `{ blacklist, preferred_tags }` — only present fields are
+/// updated. The `profile` field of an export is ignored (it is derived
+/// state recomputed by `/process`). Returns the full current settings
+/// after the update.
+#[openapi(tag = "Accounts")]
+#[post("/account/<account_id>/import", data = "<payload>")]
+pub(crate) async fn import_account(
+    account_id: i32,
+    owner: OwnerToken,
+    payload: Json<AccountDataImport>,
+) -> Result<Json<AccountFeedSettings>, ApiError> {
+    validation::validate_account_id(account_id)?;
+    let owner_token = owner.0;
+    ratelimit::check(&format!("read:owner:{owner_token}"), 240, 60)?;
+    let import = payload.into_inner();
+
+    if let Some(blacklist) = &import.blacklist {
+        let normalized = if blacklist.is_empty() {
+            String::new()
+        } else {
+            validation::normalize_blacklist(blacklist)
+        };
+        let token = owner_token.clone();
+        db_blocking(move || {
+            update_device_blacklist(&token, account_id, &normalized).map_err(|e| {
+                let m = format!("Failed to update blacklist from import: {e}");
+                error!("{m}");
+                m
+            })
+        })
+        .await?;
+        // Blacklist change invalidates e621 API cache.
+        api::clear_api_cache();
+    }
+
+    if let Some(preferred_tags) = &import.preferred_tags {
+        validation::validate_preferred_tag_payload(&PreferredTagPayload {
+            preferred_tags: preferred_tags.clone(),
+        })?;
+        let token = owner_token.clone();
+        let tags = preferred_tags.clone();
+        db_blocking(move || {
+            set_preferred_tags(&token, account_id, &tags).map_err(|e| {
+                let m = format!("Failed to update preferred tags from import: {e}");
+                error!("{m}");
+                m
+            })
+        })
+        .await?;
+    }
+
+    // Return the full current state (same shape as GET /feed_settings).
+    let settings = db_blocking(move || {
+        get_account_feed_settings(&owner_token, account_id).map_err(|e| {
+            let m = format!("Failed to get feed settings after import: {e}");
+            error!("{m}");
+            m
+        })
+    })
+    .await?;
+
     let effective_bucket = settings.experiment_bucket.clone().or_else(|| {
         let (name, _) = cfg().pick_bucket(account_id, None);
         name

@@ -2,6 +2,8 @@ use chrono::{DateTime, Utc};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use crate::models::AccountPreferenceProfile;
+
 /// Current e621 user API format (as of 2025-07).
 /// e621 now returns a unified user format through /users/{id}.json —
 /// no more `FullUser` vs `FullCurrentUser` distinction.
@@ -121,6 +123,53 @@ pub struct AccountFeedSettingsPatch {
     /// `Some("")` = reset to server-side default at write time.
     pub blacklist: Option<String>,
     /// Replace the full preferred-tags list. `None` = no change.
+    pub preferred_tags: Option<Vec<PreferredTag>>,
+}
+
+/// Minimal account identity carried in an export snapshot.
+#[derive(Debug, Serialize, Deserialize, Clone, JsonSchema)]
+#[serde(crate = "rocket::serde")]
+pub struct ExportAccountSummary {
+    pub id: i32,
+    pub name: String,
+}
+
+/// Full account data snapshot for backup / migration.
+///
+/// `profile` is included for archival/diagnostic value but is **not
+/// importable** — it is derived state recomputed by `/process` from the
+/// account's favourites and the local catalog. Import restores only the
+/// user-settable fields (`blacklist`, `preferred_tags`).
+#[derive(Debug, Serialize, Deserialize, Clone, JsonSchema)]
+#[serde(crate = "rocket::serde")]
+pub struct AccountDataExport {
+    pub account: ExportAccountSummary,
+    /// Effective blacklist text (device-scoped, falls back to the server
+    /// default blacklist when empty).
+    #[serde(default)]
+    pub blacklist: Option<String>,
+    #[serde(default)]
+    pub preferred_tags: Vec<PreferredTag>,
+    /// A/B experiment bucket assignment (read-only).
+    #[serde(default)]
+    pub experiment_bucket: Option<String>,
+    pub profile: AccountPreferenceProfile,
+}
+
+/// Import payload for `POST /account/<id>/import`.
+///
+/// Only user-settable fields are accepted; `profile` from an export is
+/// intentionally ignored (recomputed by `/process`). `None` = leave that
+/// field untouched; `Some("")` for blacklist resets to the server default.
+#[derive(Debug, Deserialize, Clone, JsonSchema)]
+#[serde(crate = "rocket::serde")]
+pub struct AccountDataImport {
+    /// Replace the device-scoped blacklist. `None` = no change;
+    /// `Some("")` = reset to server-side default at write time.
+    #[serde(default)]
+    pub blacklist: Option<String>,
+    /// Replace the full preferred-tags list. `None` = no change.
+    #[serde(default)]
     pub preferred_tags: Option<Vec<PreferredTag>>,
 }
 

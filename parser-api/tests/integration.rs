@@ -1365,11 +1365,122 @@ async fn authenticated_read_routes_use_seeded_sqlite() {
         "/api/accounts".to_owned(),
         format!("/api/account/{}/tag_counts", account.id),
         format!("/api/account/{}/profile", account.id),
+        format!("/api/account/{}/export", account.id),
         format!("/api/digest/{}?full=false", account.id),
     ] {
         let response = client.get(path).cookie(cookie.clone()).dispatch().await;
         assert_eq!(response.status(), Status::Ok);
     }
+}
+
+/// Export returns the full snapshot (identity + blacklist + preferred tags +
+/// profile); import restores user-settable fields and returns current state.
+#[tokio::test(flavor = "multi_thread")]
+async fn account_export_import_round_trip() {
+    let account = TestAccount::new(9_100_101);
+    let owner = account.owner;
+    let aid = account.id;
+
+    // Seed a blacklist + preferred tags directly via the DB layer.
+    e621_account_parser_api::db::update_device_blacklist(owner, aid, "gore\nyoung").unwrap();
+    e621_account_parser_api::db::set_preferred_tags(
+        owner,
+        aid,
+        &[
+            e621_account_parser_api::models::PreferredTag {
+                tag: "wolf".into(),
+                group: "general".into(),
+                weight: 2.0,
+            },
+            e621_account_parser_api::models::PreferredTag {
+                tag: "canine".into(),
+                group: "species".into(),
+                weight: 1.5,
+            },
+        ],
+    )
+    .unwrap();
+
+    let client = Client::tracked(rocket::build().mount(
+        "/api",
+        e621_account_parser_api::routes::integration_test_routes(),
+    ))
+    .await
+    .unwrap();
+    let cookie = Cookie::new(e621_account_parser_api::auth::OWNER_TOKEN_COOKIE, owner);
+
+    // ── Export ────────────────────────────────────────────────────────
+    let response = client
+        .get(format!("/api/account/{aid}/export"))
+        .cookie(cookie.clone())
+        .dispatch()
+        .await;
+    assert_eq!(response.status(), Status::Ok);
+    let body = response.into_json::<serde_json::Value>().await.unwrap();
+    assert_eq!(body["account"]["id"], aid);
+    assert_eq!(body["account"]["name"], "test_user");
+    assert!(body["blacklist"].as_str().unwrap().contains("gore"));
+    assert_eq!(body["preferred_tags"].as_array().unwrap().len(), 2);
+    assert!(body["profile"].is_object(), "profile included for backup");
+
+    // ── Import (full replace) ─────────────────────────────────────────
+    let import = serde_json::json!({
+        "blacklist": "scat\nwatersports",
+        "preferred_tags": [
+            {"tag": "fluffy", "group": "general", "weight": 3.0}
+        ],
+    });
+    let response = client
+        .post(format!("/api/account/{aid}/import"))
+        .cookie(cookie.clone())
+        .header(rocket::http::ContentType::JSON)
+        .body(import.to_string())
+        .dispatch()
+        .await;
+    assert_eq!(response.status(), Status::Ok);
+    let state = response.into_json::<serde_json::Value>().await.unwrap();
+    assert!(
+        state["blacklist"].as_str().unwrap().contains("scat"),
+        "blacklist replaced: {:?}",
+        state["blacklist"]
+    );
+    assert_eq!(state["preferred_tags"].as_array().unwrap().len(), 1);
+    assert_eq!(state["preferred_tags"][0]["tag"], "fluffy");
+
+    // ── Partial import: only preferred_tags, blacklist untouched ──────
+    let partial = serde_json::json!({
+        "preferred_tags": [
+            {"tag": "canine", "group": "species", "weight": 1.0},
+            {"tag": "wolf", "group": "general", "weight": 2.0},
+        ],
+    });
+    let response = client
+        .post(format!("/api/account/{aid}/import"))
+        .cookie(cookie.clone())
+        .header(rocket::http::ContentType::JSON)
+        .body(partial.to_string())
+        .dispatch()
+        .await;
+    assert_eq!(response.status(), Status::Ok);
+    let state = response.into_json::<serde_json::Value>().await.unwrap();
+    assert!(
+        state["blacklist"].as_str().unwrap().contains("scat"),
+        "partial import must not touch blacklist"
+    );
+    assert_eq!(state["preferred_tags"].as_array().unwrap().len(), 2);
+
+    // ── Invalid import (bad group) must be rejected ───────────────────
+    let bad = serde_json::json!({
+        "preferred_tags": [{"tag": "wolf", "group": "nope", "weight": 1.0}],
+    });
+    let response = client
+        .post(format!("/api/account/{aid}/import"))
+        .cookie(cookie.clone())
+        .header(rocket::http::ContentType::JSON)
+        .body(bad.to_string())
+        .dispatch()
+        .await;
+    assert_eq!(response.status(), Status::BadRequest);
 }
 
 #[test]

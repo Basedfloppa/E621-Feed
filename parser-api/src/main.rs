@@ -385,6 +385,8 @@ async fn build_rocket() -> rocket::Rocket<rocket::Build> {
         routes::account::get_account_experiment_bucket,
         routes::account::get_feed_settings,
         routes::account::patch_feed_settings,
+        routes::account::export_account,
+        routes::account::import_account,
         routes::feed::get_recommendations,
         routes::feed::get_recommendations_continue,
         routes::feed::get_similar_posts,
