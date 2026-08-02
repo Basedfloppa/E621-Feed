@@ -1,3 +1,10 @@
+# ===================== BuildKit =====================
+# Requires BuildKit (`docker buildx` or Docker ≥ 23 with BuildKit enabled).
+# `--mount=type=cache` persists build caches (cargo registry/target, npm)
+# on the host between separate `docker build` runs, so toolchain installs,
+# dependency downloads and compilation are only redone when inputs change.
+# Without BuildKit these cache mounts are a hard error — see docs/deployment.md.
+
 # ===================== Base =====================
 # Shared base for every build stage (keeps the apt/toolchain layer cached).
 FROM rust:slim-trixie AS base
@@ -11,41 +18,34 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     make \
     && rm -rf /var/lib/apt/lists/*
 
-# cargo-chef for dependency-layer caching (planner/cacher stages).
-RUN cargo install cargo-chef --locked
-
 # ===================== Frontend (WASM) =====================
 # Compiles parser-web (Rust -> WASM via trunk) into parser-web/dist. The dist
 # is then embedded into the backend binary (build.rs -> serve_embedded.rs).
 #
-# Layer caching (classic Docker, no BuildKit): each COPY-then-RUN unit only
-# re-runs when its inputs change — `npm ci` reruns only when package.json /
-# package-lock.json change, and the wasm dependency build below only when
-# Cargo.toml / Cargo.lock change.
+# Caching:
+#   * `npm ci` runs only when package.json / package-lock.json change, and its
+#     downloads reuse the persistent `/root/.npm` cache mount.
+#   * `trunk build --release` reuses the persistent cargo registry + target
+#     cache mounts, so unchanged wasm deps are not rebuilt.
 FROM base AS frontend
 RUN rustup target add wasm32-unknown-unknown
 
-# trunk (wasm bundler) + node (tailwind hook in Trunk.toml)
-RUN cargo install trunk@0.21.14 --locked --root /usr/local
+# trunk (wasm bundler) + node (tailwind hook in Trunk.toml).
+# With the cache mount below, `cargo install trunk` only re-runs when the
+# pinned version changes.
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    cargo install trunk@0.21.14 --locked --root /usr/local
 RUN apt-get update && apt-get install -y --no-install-recommends nodejs npm \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /web
 
-# -- JS deps (cached until package.json / package-lock.json change) --
+# -- JS deps --
 COPY parser-web/package.json parser-web/package-lock.json ./
-RUN npm ci
+RUN --mount=type=cache,target=/root/.npm \
+    npm ci
 
-# -- Rust wasm deps (cached until Cargo.toml / Cargo.lock change) --
-# Build only the dependency graph with an empty lib so unchanged deps are
-# cached as a Docker layer; the real sources are copied afterwards.
-COPY parser-web/Cargo.toml parser-web/Cargo.lock ./
-RUN mkdir -p src/empty && printf '' > src/empty/lib.rs \
-    && cargo build --release --target wasm32-unknown-unknown \
-        --manifest-path Cargo.toml || true
-RUN rm -rf src
-
-# -- Actual frontend sources --
+# -- Frontend sources --
 COPY parser-web/src ./src
 COPY parser-web/index.html ./
 COPY parser-web/style.css ./
@@ -55,32 +55,22 @@ COPY parser-web/scripts ./scripts
 COPY parser-web/Trunk.toml ./
 
 # `--release` also runs the post-build compress hook (compress-dist.sh).
-RUN trunk build --release
+RUN --mount=type=cache,id=wasm-registry,target=/usr/local/cargo/registry \
+    --mount=type=cache,id=wasm-target,target=/web/target \
+    trunk build --release
 # Remove pre-compressed siblings; build.rs excludes them from the embed anyway.
 RUN find dist -name '*.gz' -delete -o -name '*.br' -delete
 
-# ===================== Planner =====================
-FROM base AS planner
-COPY parser-api ./parser-api
-WORKDIR /app/parser-api
-RUN cargo chef prepare --recipe-path recipe.json
-
-# ===================== Cacher =====================
-# Pre-build all dependency crates so the release build below is incremental.
-FROM base AS cacher
-WORKDIR /app/parser-api
-COPY --from=planner /app/parser-api/recipe.json ./recipe.json
-# build.rs reads ../parser-web/dist; make it resolvable in this cwd for cook.
-COPY --from=frontend /web/dist /app/parser-web/dist
-RUN cargo chef cook --release --recipe-path recipe.json
-
-# ===================== Builder =====================
-FROM cacher AS builder
+# ===================== Backend =====================
+FROM base AS builder
 ARG FEATURES=""
-# cwd is /app/parser-api (inherited from cacher). dist must exist for build.rs.
+# cwd is /app/parser-api so build.rs resolves ../parser-web/dist.
+WORKDIR /app/parser-api
 COPY --from=frontend /web/dist /app/parser-web/dist
 COPY parser-api/ .
-RUN cargo build --release --bin e621-account-parser-api ${FEATURES:+--features "$FEATURES"} \
+RUN --mount=type=cache,id=backend-registry,target=/usr/local/cargo/registry \
+    --mount=type=cache,id=backend-target,target=/app/parser-api/target \
+    cargo build --release --bin e621-account-parser-api ${FEATURES:+--features "$FEATURES"} \
     && cp /app/parser-api/target/release/e621-account-parser-api /app/e621-account-parser-api \
     && strip /app/e621-account-parser-api
 
@@ -99,7 +89,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && useradd --system --gid app --create-home --home-dir /app app
 
 COPY --from=builder /app/e621-account-parser-api /usr/local/bin/e621-account-parser-api
-COPY --from=planner /app/parser-api/migrations ./migrations
+COPY parser-api/migrations ./migrations
 
 ENV RUST_BACKTRACE=1
 

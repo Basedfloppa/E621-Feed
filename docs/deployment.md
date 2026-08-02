@@ -52,14 +52,43 @@ vars cut glibc waste by ~30–50% without a rebuild.
 
 ## Building the single binary (Docker, recommended)
 
+> **Requires BuildKit.** The [`parser-api/Dockerfile`](../parser-api/Dockerfile)
+> uses `--mount=type=cache` for persistent layer caches (cargo registry/target,
+> npm). BuildKit ships with Docker ≥ 23. On older setups (or where the `docker
+> buildx` plugin is missing), install it with the bundled cross-distro script
+> (covers Arch-based `pacman` and `apt`/dnf-based distros, with a static-binary
+> fallback):
+>
+> ```bash
+> ./install-buildx.sh          # idempotent; --force to reinstall
+> docker buildx version
+> ```
+>
+> The script detects the distro: Arch/manjaro/cachyos/… use `pacman -S
+> docker-buildx` (official repos), Debian/Ubuntu add the Docker apt repo and
+> install `docker-buildx-plugin`, unknown distros download a static binary into
+> `~/.docker/cli-plugins`. Manual fallback if you prefer:
+>
+> ```bash
+> mkdir -p ~/.docker/cli-plugins
+> cp buildx-v<VER>.linux-amd64 ~/.docker/cli-plugins/docker-buildx
+> chmod +x ~/.docker/cli-plugins/docker-buildx
+> docker buildx version
+> ```
+>
+> Verify the caches persist between builds with
+> `docker buildx build --load -t smoke .` run twice — the second run should
+> show `CACHED` layers instead of rebuilding trunk / deps.
+
 The repo ships a multi-stage [`parser-api/Dockerfile`](../parser-api/Dockerfile)
 plus [`docker-compose.yml`](../parser-api/docker-compose.yml) that:
 
 1. builds the **frontend** (`parser-web`) to WASM with `trunk build --release`
-   (Node for the Tailwind hook, Rust WASM toolchain + `trunk`), caching `npm`
-   and Cargo layers so unchanged sources don't rebuild;
-2. builds the **backend** with `cargo-chef` and embeds the compiled frontend
-   (`dist`) into the binary;
+   (Node for the Tailwind hook, Rust WASM toolchain + `trunk`). Pinned
+   toolchain (`cargo install trunk`) and deps are preserved in persistent
+   BuildKit cache mounts, so unchanged sources don't rebuild;
+2. builds the **backend** in release and embeds the compiled frontend
+   (`dist`) into the binary via `build.rs`;
 3. produces a single runtime image containing only the API binary (the
    embedded frontend is inside it).
 
