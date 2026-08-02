@@ -51,6 +51,7 @@ use rocket_okapi::swagger_ui::{SwaggerUIConfig, make_swagger_ui};
 use rocket_okapi::{openapi, openapi_get_routes_spec, settings::OpenApiSettings};
 
 mod routes;
+mod serve_embedded;
 
 /// Custom Shield policy for Content-Security-Policy.
 /// Uses the configured `posts_domain` to allow images/media from e621.
@@ -453,7 +454,11 @@ async fn build_rocket() -> rocket::Rocket<rocket::Build> {
         .mount("/api", rocket::routes![routes::get_metrics])
         .register("/api", catchers![catch_404, catch_422, catch_500])
         .attach(shield)
-        .attach(DbInit);
+        .attach(DbInit)
+        // Serve the embedded frontend (SPA + static assets) on the root path.
+        // The `/api` mount is kept separate; Rocket prefers the more specific
+        // `/api` mount for `/api/*` requests, so they never reach the SPA.
+        .mount("/", serve_embedded::routes());
 
     // Swagger UI / OpenAPI doc leak the full route map; mount only in
     // dev. nginx 404s these paths in prod as defense-in-depth.

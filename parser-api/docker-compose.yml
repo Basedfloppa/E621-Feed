@@ -1,13 +1,14 @@
 services:
   app:
     build:
-      context: .
-      dockerfile: Dockerfile
+      context: ..
+      dockerfile: parser-api/Dockerfile
       args:
         FEATURES: ""
     container_name: app
     ports:
-      - "8181:8181"
+      # External 8181 -> container 8080 (the binary binds to Rocket.toml's :8080)
+      - "8181:8080"
     volumes:
       - ./config.toml:/app/config.toml:ro
       - ./Rocket.toml:/app/Rocket.toml:ro
@@ -18,13 +19,14 @@ services:
   app-perf:
     profiles: ["perf"]
     build:
-      context: .
-      dockerfile: Dockerfile
+      context: ..
+      dockerfile: parser-api/Dockerfile
       args:
         FEATURES: "perf_metrics"
     container_name: app-perf
     ports:
-      - "8181:8181"
+      # External 8181 -> container 8080 (the binary binds to Rocket.toml's :8080)
+      - "8181:8080"
     volumes:
       - ./config.toml:/app/config.toml:ro
       - ./Rocket.toml:/app/Rocket.toml:ro
@@ -35,13 +37,14 @@ services:
   app-jemalloc:
     profiles: ["jemalloc"]
     build:
-      context: .
-      dockerfile: Dockerfile
+      context: ..
+      dockerfile: parser-api/Dockerfile
       args:
         FEATURES: "jemalloc"
     container_name: app-jemalloc
     ports:
-      - "8181:8181"
+      # External 8181 -> container 8080 (the binary binds to Rocket.toml's :8080)
+      - "8181:8080"
     volumes:
       - ./config.toml:/app/config.toml:ro
       - ./Rocket.toml:/app/Rocket.toml:ro
@@ -54,13 +57,14 @@ services:
   app-full:
     profiles: ["full"]
     build:
-      context: .
-      dockerfile: Dockerfile
+      context: ..
+      dockerfile: parser-api/Dockerfile
       args:
         FEATURES: "jemalloc perf_metrics"
     container_name: app-full
     ports:
-      - "8181:8181"
+      # External 8181 -> container 8080 (the binary binds to Rocket.toml's :8080)
+      - "8181:8080"
     volumes:
       - ./config.toml:/app/config.toml:ro
       - ./Rocket.toml:/app/Rocket.toml:ro

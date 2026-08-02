@@ -1,0 +1,36 @@
+# ==== Cargo / build artifacts (both crates) ====
+**/target
+
+# ==== Frontend build output (generated inside the docker build) ====
+parser-web/dist
+
+# ==== JS deps (installed via `npm ci` inside the build) ====
+**/node_modules
+
+# ==== Local SQLite database — 71GB, mounted at runtime via docker-compose ====
+parser-api/database.db
+parser-api/database.db-journal
+parser-api/database.db-wal
+parser-api/database.db-shm
+
+# ==== Editor / IDE ====
+.idea/
+.vscode/
+*.swp
+*~
+
+# ==== VCS ====
+.git/
+.gitignore
+
+# ==== OS ====
+.DS_Store
+Thumbs.db
+
+# ==== Pi tooling / local state ====
+.pi/
+
+# ==== Logs ====
+*.log
+parser-api/loadtest/server.log
+parser-api/loadtest/__pycache__/

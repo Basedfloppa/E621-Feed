@@ -1,95 +1,42 @@
+# Caddy — TLS terminator + reverse proxy for the single Rust binary.
+#
+# Since the frontend is embedded into the API binary (parser-api/build.rs →
+# parser-api/src/serve_embedded.rs), Caddy no longer serves static files from
+# parser-web/dist. The binary serves the SPA (/), its static assets, and /api
+# itself, and sets its own Cache-Control / Content-Type / CSP headers. Caddy
+# only terminates TLS (auto via Let's Encrypt) and proxies everything through.
+
 domain.com {
-    root * /var/www/E621-Account-Parser/parser-web/dist
-
-    # ====== Security headers ======
-    header {
-        Strict-Transport-Security     "max-age=31536000; includeSubDomains; preload"
-        Content-Security-Policy       "default-src 'self'; script-src 'self' 'wasm-unsafe-eval' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data: https://*.e621.net; media-src https://*.e621.net; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
-        Referrer-Policy               "no-referrer"
-        X-Content-Type-Options        "nosniff"
-        X-Frame-Options               "DENY"
-        Cross-Origin-Opener-Policy    "same-origin"
-        Cross-Origin-Resource-Policy  "same-origin"
-        Permissions-Policy            "geolocation=(), microphone=(), camera=(), payment=(), usb=(), interest-cohort=()"
-    }
-
+    # ====== Compression (the embedded binary serves raw bytes) ======
     encode zstd gzip
 
-    # OPTIONS preflight (for SPA routes, NOT /api)
+    # ====== Reverse proxy: SPA + static + /api all served by the binary ======
+    reverse_proxy 127.0.0.1:8080 {
+        header_up Host {host}
+        header_up X-Real-IP {remote_host}
+        # Keep the real client IP: Caddy is the single trusted hop and already
+        # overwrites the header for us (don't trust client-sent X-Forwarded-*).
+        header_up X-Forwarded-For {remote_host}
+        transport http {
+            read_timeout  300s
+            write_timeout 300s
+        }
+    }
+
+    # ====== OPTIONS preflight for SPA routes (NOT /api) ======
+    # The binary handles these in dev (CORS fairing) but not in release, so
+    # answer SPA preflights here.
     @options_site {
         method OPTIONS
         not path /api/*
     }
     respond @options_site 204
 
-    # robots.txt
-    @robots {
-        path /robots.txt
-    }
-    handle @robots {
-        header Content-Type "text/plain; charset=utf-8"
-        respond 200
-    }
-
-    # Block Swagger in production
+    # ====== Block Swagger / OpenAPI in production (defense-in-depth) ======
     @blocked {
         path /api/swagger-ui* /api/openapi.json
     }
     respond @blocked 404
-
-    # API — proxy to Go backend :8181
-    route /api/* {
-        reverse_proxy http://127.0.0.1:8181 {
-            header_up Host {host}
-            header_up X-Real-IP {remote_host}
-            transport http {
-                read_timeout  300s
-                write_timeout 300s
-            }
-        }
-    }
-
-    # ====== Caching rules ======
-
-    @no_cache {
-        path /static/config.js
-    }
-    header @no_cache {
-        Cache-Control "no-store, no-cache, must-revalidate, max-age=0"
-        Pragma        "no-cache"
-        Expires       "0"
-    }
-
-    @index {
-        path /index.html
-    }
-    header @index Cache-Control "no-cache, must-revalidate"
-
-    @wasm {
-        path *.wasm
-    }
-    header @wasm Cache-Control "public, max-age=31536000, immutable"
-
-    @mjs {
-        path *.mjs
-    }
-    header @mjs Cache-Control "public, max-age=31536000, immutable"
-
-    @assets {
-        path *.js *.css *.png *.jpg *.jpeg *.gif *.svg *.ico *.woff *.woff2
-    }
-    header @assets Cache-Control "public, max-age=31536000, immutable"
-
-    @sw {
-        path /manifest.json /manifest.webmanifest /service-worker.js
-    }
-    header @sw Cache-Control "public, max-age=3600, must-revalidate"
-
-    # SPA fallback
-    route {
-        try_files {path} /index.html
-        file_server
-    }
 
     request_body {
         max_size 50MB

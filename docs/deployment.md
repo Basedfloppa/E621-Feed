@@ -1,8 +1,11 @@
 # Production deployment
 
-Build-time and server-side setup for hosting the app behind nginx with
-release-mode pre-compression. For local dev, see the main
-[README](../Readme.md).
+Build-time and server-side setup for hosting the app. The frontend
+(`parser-web`) is **embedded into the API binary** at build time
+(`parser-api/build.rs` → `parser-api/src/serve_embedded.rs`), so a single
+binary serves both the SPA (`/`) and the API (`/api`). A reverse proxy
+(Caddy or nginx) is only needed for TLS/Let's Encrypt. For local dev, see
+the main [README](../Readme.md).
 
 ## Build-time tools
 
@@ -47,102 +50,96 @@ vars cut glibc waste by ~30–50% without a rebuild.
 > SQLite concurrency behaviour under load is covered separately in
 > [`load-testing.md`](load-testing.md).
 
-## nginx
+## Building the single binary (Docker, recommended)
 
-The shipped [`nginx-template`](../nginx-template) is a working server
-block — replace `domain.com` with the real hostname and the Let's
-Encrypt cert paths and drop it into `/etc/nginx/sites-available/<your-site>`.
+The repo ships a multi-stage [`parser-api/Dockerfile`](../parser-api/Dockerfile)
+plus [`docker-compose.yml`](../parser-api/docker-compose.yml) that:
 
-Two files outside the template need to land on disk before `nginx -t`
-will pass:
+1. builds the **frontend** (`parser-web`) to WASM with `trunk build --release`
+   (Node for the Tailwind hook, Rust WASM toolchain + `trunk`), caching `npm`
+   and Cargo layers so unchanged sources don't rebuild;
+2. builds the **backend** with `cargo-chef` and embeds the compiled frontend
+   (`dist`) into the binary;
+3. produces a single runtime image containing only the API binary (the
+   embedded frontend is inside it).
 
-- **`parser-web/dist/`** — output of `trunk build --release`, served as
-  `root` (default path in the template:
-  `/var/www/E621-Account-Parser/parser-web/dist`).
-- **`parser-web/.well-known/security.txt`** — copy from the shipped
-  template and fill in two values:
+```bash
+cd parser-api
+docker compose build app                  # or: app-jemalloc / app-perf / app-full
+docker compose up -d app
+```
 
-  ```bash
-  cp parser-web/.well-known/security.example.txt parser-web/.well-known/security.txt
-  $EDITOR parser-web/.well-known/security.txt          # replace TODO_CONTACT and TODO_EXPIRES
-  ```
+The binary listens on the port from its `Rocket.toml` (default `:8080`) and
+serves the SPA at `/`, static assets under their hashed paths, and the API
+under `/api`. `docker-compose.yml` maps a host port (e.g. `8181`) to the
+container.
 
-  The real `security.txt` is **gitignored** so the deploy contact stays
-  out of source control. Trunk's `copy-dir` hook then carries it into
-  `dist/.well-known/security.txt` on the next build, where nginx serves
-  it at `/.well-known/security.txt`. Without the rename, that path
-  returns 404 (honest — placeholder content would mislead scanners) and
-  `security.example.txt` itself is hidden by an explicit nginx
-  `return 404;`.
+### Local build (no Docker)
 
-After symlinking into `sites-enabled`:
+```bash
+cd parser-web && trunk build --release    # produces parser-web/dist
+cd ../parser-api && cargo build --release --bin e621-account-parser-api
+```
+
+`build.rs` embeds `../parser-web/dist`; if it's missing the binary still
+builds but serves `/` with a "Frontend not embedded" message.
+
+## Reverse proxy (nginx or Caddy)
+
+The shipped [`nginx-template`](../nginx-template) is now a minimal TLS
+terminator + reverse proxy: it forwards **everything** (SPA, static assets,
+`/api`) to the API binary on `:8080`. Replace `domain.com` with the real
+hostname, swap the Let's Encrypt cert paths, drop it into
+`/etc/nginx/sites-available/<your-site>`, then:
 
 ```bash
 sudo nginx -t              # syntax / paths sanity check
 sudo systemctl reload nginx
 ```
 
-## Compression
+No web root is served by nginx any more — the binary owns all static files
+and sets its own Cache-Control / Content-Type headers (mirroring the old
+nginx rules: hashed assets + `.wasm` immutable, `config.js` no-store,
+`index.html` no-cache).
 
-Release builds pre-compress every JS / WASM / CSS / HTML / JSON / SVG /
-TXT / XML asset over 1 KiB to `.br` and `.gz` siblings. The work happens
-in [`parser-web/scripts/compress-dist.sh`](../parser-web/scripts/compress-dist.sh),
-wired in as a Trunk `post_build` hook in
-[`parser-web/Trunk.toml`](../parser-web/Trunk.toml). The hook is gated on
-`TRUNK_PROFILE=release`, so `trunk serve` and the default `trunk build`
-stay instant.
+The repo also ships a [`Caddyfile`](../Caddyfile) with the same idea — TLS
+(Let's Encrypt auto) + a clean reverse proxy to the binary. Drop in your
+domain and it works; Caddy handles certificate issuance itself:
 
-**gzip works out of the box.** `gzip_static on;` is already enabled in
-`nginx-template` and the standard nginx package on Debian/Ubuntu builds
-with `--with-http_gzip_static_module`. WASM compresses ~1.6 MB → ~466 KB
-(≈29% of original) at `gzip -9`.
-
-**Brotli is opt-in** — it requires the `ngx_brotli` module that isn't
-shipped with stock nginx. Activation is three steps:
-
-1. Install the module on the **server**:
-
-   ```bash
-   # Debian/Ubuntu — try the packaged build first
-   sudo apt install libnginx-mod-http-brotli-filter libnginx-mod-http-brotli-static
-   ```
-
-   If the package is unavailable on your distro, build the dynamic
-   module from [google/ngx_brotli](https://github.com/google/ngx_brotli)
-   against your installed nginx version and drop
-   `ngx_http_brotli_{filter,static}_module.so` into
-   `/usr/lib/nginx/modules/`. nginx ≥ 1.25 plus a `load_module` line in
-   `/etc/nginx/modules-enabled/` is enough.
-
-2. Uncomment the `brotli_*` block at the bottom of
-   [`nginx-template`](../nginx-template) (it's left commented because
-   the directives raise `unknown directive "brotli"` until the module is
-   loaded).
-
-3. Install the **build-side** CLI on the machine that runs
-   `trunk build --release`:
-
-   ```bash
-   sudo apt install brotli
-   ```
-
-   The pre-compression script soft-fails when `brotli` is missing, so
-   omitting this step just means no `.br` files get generated and
-   `brotli_static` falls back to on-the-fly `brotli on;` (or to gzip if
-   even that's off).
-
-After all three steps, `trunk build --release` writes `*.br` next to
-every compressible asset and `nginx -t && systemctl reload nginx`
-activates the new directives. Verify with:
-
-```bash
-curl -sI -H 'Accept-Encoding: br' https://your.domain/ | grep -i content-encoding
-# → content-encoding: br
+```caddy
+// point reverse_proxy at wherever the binary listens (e.g. :8080)
+reverse_proxy 127.0.0.1:8080
 ```
 
-If you ever re-deploy without re-running the pre-compression step, nginx
-happily falls back to gzip / on-the-fly — `brotli_static` only serves
-what's on disk, it doesn't 404 when the sibling is missing.
+In both cases do **not** serve `parser-web/dist` as a static root any more —
+the binary owns it.
+
+## Compression
+
+**gzip for `/api` JSON and the SPA** is enabled on the reverse proxy
+(on-the-fly), since the embedded binary serves raw bytes. With nginx:
+
+```nginx
+# inside the proxy server block
+gzip on;
+gzip_vary on;
+gzip_min_length 1024;
+gzip_types text/html text/css text/plain application/wasm
+        application/javascript application/json image/svg+xml
+        application/octet-stream;
+```
+
+The old `compress-dist.sh` still runs on `trunk build --release` and writes
+`.br`/`.gz` siblings into `dist`, but **`parser-api/build.rs` deliberately
+excludes those siblings** (they'd double binary size), so they're not
+embedded. If you need Brotli at the edge, enable `ngx_brotli` and turn on
+`brotli on;` on the proxy. With Caddy, add `encode zstd gzip` to the site
+block for the same effect (Caddy handles Vary/Accept-Encoding for you).
+
+> **Note on ports:** the binary binds to the port in its `Rocket.toml`
+> (default `:8080`). Point the reverse proxy there. The `docker-compose.yml`
+> maps a host port to the container — align both if you run Caddy/nginx on
+> the host alongside the container.
 
 ---
 
