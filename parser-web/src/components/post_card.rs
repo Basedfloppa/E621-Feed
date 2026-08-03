@@ -14,6 +14,7 @@ struct PendingBlacklistRule {
 }
 
 use crate::components::post_grid::best_dimensions;
+use crate::components::post_viewer::open_post_viewer;
 use crate::components::{ConfirmModal, shared_observer};
 use crate::models::*;
 
@@ -559,7 +560,8 @@ pub fn post_card(props: &PostCardProps) -> Html {
         let account_id = props.account_id;
         let position = props.position;
         let post_id = post.id;
-        Callback::from(move |_e: MouseEvent| {
+        let post_clone = post.clone();
+        Callback::from(move |e: MouseEvent| {
             send_interaction(
                 backend_url.clone(),
                 FeedInteractionRequest {
@@ -570,6 +572,13 @@ pub fn post_card(props: &PostCardProps) -> Html {
                     session_id: session_id.clone(),
                 },
             );
+            // Plain primary click opens the in-app full viewer; modifier or
+            // middle clicks fall through to the external e621 link.
+            let modifier = e.meta_key() || e.ctrl_key() || e.shift_key() || e.alt_key();
+            if !modifier {
+                e.prevent_default();
+                open_post_viewer((*post_clone).clone(), account_id);
+            }
         })
     };
 
@@ -582,6 +591,7 @@ pub fn post_card(props: &PostCardProps) -> Html {
         let account_id = props.account_id;
         let position = props.position;
         let post_id = post.id;
+        let post_clone = post.clone();
         Callback::from(move |e: MouseEvent| {
             if e.button() == 1 {
                 send_interaction(
@@ -594,6 +604,10 @@ pub fn post_card(props: &PostCardProps) -> Html {
                         session_id: session_id.clone(),
                     },
                 );
+                // Middle click just opens the post in the in-app viewer,
+                // like a plain primary click.
+                e.prevent_default();
+                open_post_viewer((*post_clone).clone(), account_id);
             }
         })
     };

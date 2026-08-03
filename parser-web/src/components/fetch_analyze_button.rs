@@ -5,7 +5,10 @@ use yew::{
     use_effect_with, use_state,
 };
 
-use crate::models::{ProcessJobPhase, ProcessJobState, api_get, api_post, humanize_error_body};
+use crate::models::{
+    ProcessJobPhase, ProcessJobState, api_get, api_post, humanize_error_body,
+    humanize_network_error,
+};
 use crate::pages::{TagCount, UserInfo};
 
 const STATUS_POLL_INTERVAL_MS: i32 = 60000;
@@ -106,8 +109,10 @@ pub fn fetch_analyze_button(props: &AnalyzeButtonProps) -> Html {
                             job_status.set(Some(s));
                             error.set(None);
                         }
-                        Err(e) => {
-                            error.set(Some(format!("Bad /process response: {e}")));
+                        Err(_e) => {
+                            error.set(Some(
+                                "The /process response could not be read. Try again.".to_string(),
+                            ));
                             is_loading.set(false);
                         }
                     },
@@ -121,7 +126,7 @@ pub fn fetch_analyze_button(props: &AnalyzeButtonProps) -> Html {
                         is_loading.set(false);
                     }
                     Err(e) => {
-                        error.set(Some(format!("Processing error: {e}")));
+                        error.set(Some(humanize_network_error(e)));
                         is_loading.set(false);
                     }
                 }
@@ -170,8 +175,10 @@ pub fn fetch_analyze_button(props: &AnalyzeButtonProps) -> Html {
                                     Ok(resp) if resp.ok() => {
                                         match resp.json::<Option<ProcessJobState>>().await {
                                             Ok(s) => job_status.set(s),
-                                            Err(e) => {
-                                                let msg = format!("Status parse error: {e}");
+                                            Err(_e) => {
+                                                let msg =
+                                                    "Job status could not be read. Try again."
+                                                        .to_string();
                                                 error_for_poll.set(Some(msg.clone()));
                                                 if let Some(cur) = (*job_status).clone() {
                                                     job_status.set(Some(ProcessJobState {
@@ -193,7 +200,7 @@ pub fn fetch_analyze_button(props: &AnalyzeButtonProps) -> Html {
                                         if let Some(cur) = (*job_status).clone() {
                                             job_status.set(Some(ProcessJobState {
                                                 phase: ProcessJobPhase::Failed,
-                                                error: Some(format!("status HTTP {status}: {msg}")),
+                                                error: Some(msg.clone()),
                                                 ..cur
                                             }));
                                         } else {
@@ -204,8 +211,7 @@ pub fn fetch_analyze_button(props: &AnalyzeButtonProps) -> Html {
                                         // Transient network blip — surface it
                                         // but keep the loop running so we
                                         // recover when connectivity returns.
-                                        error_for_poll
-                                            .set(Some(format!("Status network error: {e}")));
+                                        error_for_poll.set(Some(humanize_network_error(e)));
                                     }
                                 }
                             });
@@ -355,21 +361,20 @@ fn make_fetch_tags(
                                 tag_count.set(counts);
                                 error.set(None);
                             }
-                            Err(e) => {
-                                error.set(Some(format!("Failed to parse tag data: {e}")));
+                            Err(_) => {
+                                error.set(Some(
+                                    "Tag data could not be read. Try again.".to_string(),
+                                ));
                             }
                         }
                     } else if response.status() != 404 {
                         let status = response.status();
-                        let text = response
-                            .text()
-                            .await
-                            .unwrap_or_else(|_| "Unknown error".into());
-                        error.set(Some(format!("Error {status}: {text}")));
+                        let body = response.text().await.unwrap_or_default();
+                        error.set(Some(humanize_error_body(status, &body)));
                     }
                 }
                 Err(e) => {
-                    error.set(Some(format!("Network error: {e}")));
+                    error.set(Some(humanize_network_error(e)));
                 }
             }
             is_fetching.set(false);

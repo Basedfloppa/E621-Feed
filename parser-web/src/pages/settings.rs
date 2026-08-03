@@ -1,5 +1,7 @@
 use crate::components::{IconSliders, PostGrid, SavedAccountsSelect};
-use crate::models::{api_get, api_patch, humanize_error_body, read_config_from_head};
+use crate::models::{
+    api_get, api_patch, humanize_error_body, humanize_network_error, read_config_from_head,
+};
 use crate::pages::UserInfo;
 use serde::{Deserialize, Serialize};
 use web_sys::{HtmlTextAreaElement, window};
@@ -196,8 +198,9 @@ pub fn settings_page() -> Html {
                                 experiment_bucket.set(s.experiment_bucket.clone());
                                 server_loading.set(false);
                             }
-                            Err(e) => {
-                                server_message.set(format!("Failed to parse settings: {e}"));
+                            Err(_e) => {
+                                server_message
+                                    .set("Settings could not be read. Try again.".to_string());
                                 server_is_error.set(true);
                                 server_loading.set(false);
                             }
@@ -210,7 +213,7 @@ pub fn settings_page() -> Html {
                             server_loading.set(false);
                         }
                         Err(e) => {
-                            server_message.set(format!("Network error: {e}"));
+                            server_message.set(humanize_network_error(e));
                             server_is_error.set(true);
                             server_loading.set(false);
                         }
@@ -304,8 +307,9 @@ pub fn settings_page() -> Html {
                             server_message.set("Settings saved.".to_string());
                             server_is_error.set(false);
                         }
-                        Err(e) => {
-                            server_message.set(format!("Failed to parse response: {e}"));
+                        Err(_e) => {
+                            server_message
+                                .set("Settings could not be read. Try again.".to_string());
                             server_is_error.set(true);
                         }
                     },
@@ -316,7 +320,7 @@ pub fn settings_page() -> Html {
                         server_is_error.set(true);
                     }
                     Err(e) => {
-                        server_message.set(format!("Network error: {e}"));
+                        server_message.set(humanize_network_error(e));
                         server_is_error.set(true);
                     }
                 }

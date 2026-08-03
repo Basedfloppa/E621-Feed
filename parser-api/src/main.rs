@@ -407,6 +407,9 @@ async fn build_rocket() -> rocket::Rocket<rocket::Build> {
         routes::taste_profile::get_taste_profile,
         routes::tag_relations::get_tag_implications,
         routes::tag_relations::get_tag_implications_batch,
+        routes::post::post_comments,
+        routes::post::get_single_post,
+        routes::post::get_pool_posts,
     ];
 
     // Increase JSON limit for batch tag resolution (400+ tags = ~130KB).

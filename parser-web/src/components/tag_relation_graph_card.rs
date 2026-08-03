@@ -17,8 +17,10 @@ use web_sys::{
 };
 use yew::prelude::*;
 
+use crate::components::error_alert::ErrorAlert;
 use crate::models::{
-    TagRelationEdge, TagRelationGraphPayload, TagRelationNode, api_get, read_config_from_head,
+    TagRelationEdge, TagRelationGraphPayload, TagRelationNode, api_get, humanize_error_body,
+    humanize_network_error, read_config_from_head,
 };
 use crate::pages::UserInfo;
 
@@ -264,6 +266,8 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
     let payload: UseStateHandle<Option<TagRelationGraphPayload>> = use_state(|| None);
     let loading = use_state(|| false);
     let error: UseStateHandle<Option<String>> = use_state(|| None);
+    // Bumped by the ErrorAlert Retry button to re-run the fetch.
+    let retry_tick = use_state(|| 0u32);
     let top_n = use_state(|| {
         read_local::<usize>(STORAGE_KEY_TOP_N)
             .unwrap_or(60)
@@ -356,6 +360,7 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
         let found_user = props.found_user.clone();
         let top_n_val = *top_n;
         let min_cooc_val = *min_cooc;
+        let retry_tick_val = *retry_tick;
 
         use_effect_with(
             (
@@ -363,8 +368,9 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
                 top_n_val,
                 min_cooc_val,
                 api_base.clone(),
+                retry_tick_val,
             ),
-            move |(user, top_n_val, min_cooc_val, api_base)| {
+            move |(user, top_n_val, min_cooc_val, api_base, _retry_tick)| {
                 let Some(user) = user.clone() else {
                     payload.set(None);
                     return;
@@ -387,18 +393,22 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
                             Ok(graph) => {
                                 payload.set(Some(graph));
                             }
-                            Err(e) => {
-                                error.set(Some(format!("Failed to parse graph: {e}")));
+                            Err(_) => {
+                                error.set(Some(
+                                    "The tag-relation graph could not be read. Try again."
+                                        .to_string(),
+                                ));
                                 payload.set(None);
                             }
                         },
                         Ok(resp) => {
                             let status = resp.status();
-                            error.set(Some(format!("Graph fetch failed (status {status})")));
+                            let body = resp.text().await.unwrap_or_default();
+                            error.set(Some(humanize_error_body(status, &body)));
                             payload.set(None);
                         }
                         Err(e) => {
-                            error.set(Some(format!("Network error: {e}")));
+                            error.set(Some(humanize_network_error(e)));
                             payload.set(None);
                         }
                     }
@@ -1165,6 +1175,12 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
         }
     };
 
+    // -------- Error/retry -------------------------------------------------
+    let on_retry = {
+        let retry_tick = retry_tick.clone();
+        Callback::from(move |_| retry_tick.set(*retry_tick + 1))
+    };
+
     let has_graph = payload
         .as_ref()
         .map(|g| !g.nodes.is_empty())
@@ -1178,7 +1194,7 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
     }
 
     let body = if let Some(err) = (*error).clone() {
-        html! { <p class="text-error mb-0">{err}</p> }
+        html! { <ErrorAlert message={err} on_retry={Some(on_retry)} /> }
     } else {
         let cursor = if *is_dragging { "grabbing" } else { "grab" };
         let transform = format!(

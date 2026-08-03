@@ -5,7 +5,8 @@
 use wasm_bindgen_futures::spawn_local;
 use yew::prelude::*;
 
-use crate::models::api_get;
+use crate::components::{ErrorAlert, SkeletonLines};
+use crate::models::{api_get, humanize_error_body, humanize_network_error};
 
 // ── Taste Theme models (match backend TasteTheme / TasteThemeTag) ────
 
@@ -46,18 +47,24 @@ pub struct TasteProfileCardProps {
 #[function_component(TasteProfileCard)]
 pub fn taste_profile_card(props: &TasteProfileCardProps) -> Html {
     let data: UseStateHandle<Option<TasteProfileResponse>> = use_state(|| None);
+    let error: UseStateHandle<Option<String>> = use_state(|| None);
+    let tick = use_state(|| 0u32);
 
-    // Fetch taste profile in one call.
+    // Fetch taste profile in one call. `tick` is bumped by the ErrorAlert
+    // Retry button to re-run the fetch after a failure.
     {
         let data = data.clone();
+        let error = error.clone();
         let api_base = props.api_base.clone();
         let user = (*props.found_user).clone();
+        let tick = *tick;
 
-        use_effect_with(user, move |user| {
+        use_effect_with((user, tick), move |(user, _tick)| {
             let u = match user.as_ref().cloned() {
                 Some(u) => u,
                 None => {
                     data.set(None);
+                    error.set(None);
                     return;
                 }
             };
@@ -66,14 +73,38 @@ pub fn taste_profile_card(props: &TasteProfileCardProps) -> Html {
                 api_base, u.id
             );
             spawn_local(async move {
-                if let Ok(resp) = api_get(&url).send().await
-                    && let Ok(body) = resp.json::<TasteProfileResponse>().await
-                {
-                    data.set(Some(body));
+                match api_get(&url).send().await {
+                    Ok(resp) if resp.ok() => match resp.json::<TasteProfileResponse>().await {
+                        Ok(body) => {
+                            error.set(None);
+                            data.set(Some(body));
+                        }
+                        Err(_) => {
+                            error.set(Some(
+                                "Your taste profile could not be read. Try again.".to_string(),
+                            ));
+                            data.set(None);
+                        }
+                    },
+                    Ok(resp) => {
+                        let status = resp.status();
+                        let body = resp.text().await.unwrap_or_default();
+                        error.set(Some(humanize_error_body(status, &body)));
+                        data.set(None);
+                    }
+                    Err(e) => {
+                        error.set(Some(humanize_network_error(e)));
+                        data.set(None);
+                    }
                 }
             });
         });
     }
+
+    let on_retry = {
+        let tick = tick.clone();
+        Callback::from(move |_| tick.set(*tick + 1))
+    };
 
     let Some(ref tp) = *data else {
         return html! {
@@ -81,9 +112,14 @@ pub fn taste_profile_card(props: &TasteProfileCardProps) -> Html {
                 <div class="bg-primary text-primary-content p-4">
                     <h5 class="text-lg font-semibold">{"Your Taste Profile"}</h5>
                 </div>
-                <div class="card-body flex items-center justify-center py-8">
-                    <span class="loading loading-spinner loading-md text-primary"></span>
-                    <span class="ml-3 text-base-content/60">{"Loading your taste profile…"}</span>
+                <div class="card-body text-base-content">
+                    {
+                        if let Some(err) = &*error {
+                            html! { <ErrorAlert message={err.clone()} on_retry={Some(on_retry.clone())} /> }
+                        } else {
+                            html! { <SkeletonLines /> }
+                        }
+                    }
                 </div>
             </div>
         };

@@ -5,7 +5,7 @@ use yew::{
     use_state,
 };
 
-use crate::models::{api_get, humanize_error_body};
+use crate::models::{api_get, humanize_error_body, humanize_network_error};
 use crate::pages::UserInfo;
 
 #[derive(Properties, PartialEq)]
@@ -81,15 +81,17 @@ pub fn user_search_form(props: &UserSearchProps) -> Html {
                                     found_user.set(Some(user));
                                     error.set(None);
                                 }
-                                Err(e) => {
-                                    error.set(Some(format!("Failed to parse user data: {e}")));
+                                Err(_e) => {
+                                    error.set(Some(
+                                        "User data could not be read. Try again.".to_string(),
+                                    ));
                                 }
                             }
                         } else {
                             error.set(Some(humanize_error_body(status, &text)));
                         }
                     }
-                    Err(e) => error.set(Some(format!("Network error: {e}"))),
+                    Err(e) => error.set(Some(humanize_network_error(e))),
                 }
                 is_loading.set(false);
                 inflight_done.borrow().set(false);

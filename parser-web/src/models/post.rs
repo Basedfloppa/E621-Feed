@@ -223,6 +223,26 @@ pub struct InteractionHistoryEntry {
     pub post: Option<Post>,
 }
 
+/// A comment on a post, mirroring the backend / e621 `comments.json`.
+/// Optional fields are `#[serde(default)]` so schema drift can't break
+/// the post viewer.
+#[derive(Deserialize, Serialize, Clone, PartialEq, Default)]
+pub struct Comment {
+    pub id: i64,
+    #[serde(default)]
+    pub created_at: String,
+    pub post_id: i64,
+    #[serde(default)]
+    pub creator_id: i64,
+    #[serde(default)]
+    pub creator_name: Option<String>,
+    pub body: String,
+    #[serde(default)]
+    pub score: i64,
+    #[serde(default)]
+    pub is_hidden: bool,
+}
+
 #[derive(Serialize, Deserialize, Clone, PartialEq)]
 pub struct ScoredPost {
     pub post: Post,

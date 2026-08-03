@@ -15,50 +15,58 @@ pub fn history_page() -> Html {
     let error = use_state(|| Option::<String>::None);
     let entries = use_state(Vec::<InteractionHistoryEntry>::new);
     let filter = use_state(|| Option::<String>::None);
+    // Bumped by the ErrorAlert Retry button to re-run the fetch.
+    let tick = use_state(|| 0u32);
 
-    // Fetch history whenever the user or the event filter changes.
+    // Fetch history whenever the user, the event filter, or the retry
+    // tick changes.
     {
         let user = selected_user.clone();
         let filter = filter.clone();
         let entries = entries.clone();
         let is_loading = is_loading.clone();
         let error = error.clone();
-        use_effect_with((user.clone(), filter.clone()), move |(user, filter)| {
-            let Some(user) = user.as_ref() else {
-                entries.set(Vec::new());
-                return;
-            };
-            let Some(cfg) = read_config_from_head() else {
-                error.set(Some("App configuration failed to load.".to_string()));
-                return;
-            };
-            let mut url = format!("{}/account/{}/interactions", cfg.backend_domain, user.id);
-            if let Some(f) = filter.as_ref() {
-                url.push_str(&format!("?event={f}"));
-            }
-            is_loading.set(true);
-            error.set(None);
-            let entries = entries.clone();
-            let is_loading = is_loading.clone();
-            let error = error.clone();
-            spawn_local(async move {
-                match api_get(&url).send().await {
-                    Ok(resp) if resp.ok() => {
-                        match resp.json::<Vec<InteractionHistoryEntry>>().await {
-                            Ok(items) => entries.set(items),
-                            Err(e) => error.set(Some(format!("Failed to parse history: {e}"))),
-                        }
-                    }
-                    Ok(resp) => {
-                        let status = resp.status();
-                        let body = resp.text().await.unwrap_or_default();
-                        error.set(Some(humanize_error_body(status, &body)));
-                    }
-                    Err(e) => error.set(Some(humanize_network_error(e))),
+        let tick_val = *tick;
+        use_effect_with(
+            (user.clone(), filter.clone(), tick_val),
+            move |(user, filter, _tick)| {
+                let Some(user) = user.as_ref() else {
+                    entries.set(Vec::new());
+                    return;
+                };
+                let Some(cfg) = read_config_from_head() else {
+                    error.set(Some("App configuration failed to load.".to_string()));
+                    return;
+                };
+                let mut url = format!("{}/account/{}/interactions", cfg.backend_domain, user.id);
+                if let Some(f) = filter.as_ref() {
+                    url.push_str(&format!("?event={f}"));
                 }
-                is_loading.set(false);
-            });
-        });
+                is_loading.set(true);
+                error.set(None);
+                let entries = entries.clone();
+                let is_loading = is_loading.clone();
+                let error = error.clone();
+                spawn_local(async move {
+                    match api_get(&url).send().await {
+                        Ok(resp) if resp.ok() => {
+                            match resp.json::<Vec<InteractionHistoryEntry>>().await {
+                                Ok(items) => entries.set(items),
+                                Err(_) => error
+                                    .set(Some("History could not be read. Try again.".to_string())),
+                            }
+                        }
+                        Ok(resp) => {
+                            let status = resp.status();
+                            let body = resp.text().await.unwrap_or_default();
+                            error.set(Some(humanize_error_body(status, &body)));
+                        }
+                        Err(e) => error.set(Some(humanize_network_error(e))),
+                    }
+                    is_loading.set(false);
+                });
+            },
+        );
     }
 
     // Filter tabs.
@@ -70,6 +78,11 @@ pub fn history_page() -> Html {
     let posts_domain = read_config_from_head()
         .map(|cfg| cfg.posts_domain)
         .unwrap_or_default();
+
+    let on_retry = {
+        let tick = tick.clone();
+        Callback::from(move |_| tick.set(*tick + 1))
+    };
 
     html! {
         <div class="m-4">
@@ -114,29 +127,11 @@ pub fn history_page() -> Html {
             </div>
 
             if let Some(ref e) = *error {
-                <div class="alert alert-error mb-3" role="alert" aria-live="polite">
-                    <span>{ e }</span>
-                    <button
-                        type="button"
-                        class="btn btn-sm btn-outline"
-                        onclick={{
-                            let user = selected_user.clone();
-                            let filter = filter.clone();
-                            Callback::from(move |_| {
-                                // Re-trigger the fetch by bumping both states.
-                                let _ = (user.as_ref(), filter.as_ref());
-                            })
-                        }}
-                    >{ "Retry" }</button>
-                </div>
+                <ErrorAlert message={(*e).clone()} on_retry={Some(on_retry.clone())} />
             }
 
             if *is_loading {
-                <div class="flex justify-center my-5">
-                    <div class="loading loading-spinner loading-lg" role="status">
-                        <span class="sr-only">{ "Loading..." }</span>
-                    </div>
-                </div>
+                { render_post_grid_skeleton("grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-3") }
             }
 
             if !*is_loading && !entries.is_empty() {

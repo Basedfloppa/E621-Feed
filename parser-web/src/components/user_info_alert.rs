@@ -1,5 +1,6 @@
 use yew::{Html, Properties, UseStateHandle, function_component, html};
 
+use crate::components::ErrorAlert;
 use crate::pages::UserInfo;
 
 #[derive(Properties, PartialEq)]
@@ -27,9 +28,7 @@ pub fn user_info_alert(props: &InfoAlertProps) -> Html {
             }
             {
                 if let Some(err) = &*props.error {
-                    html! {
-                        <div class="alert alert-error mb-3">{err}</div>
-                    }
+                    html! { <ErrorAlert message={err.clone()} /> }
                 } else {
                     html! {}
                 }

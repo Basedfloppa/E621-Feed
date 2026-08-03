@@ -10,7 +10,7 @@ use crate::{
     audit,
     load_monitor::{AdaptiveGate, E621LoadMonitor, Priority},
     metrics::METRICS,
-    models::{Post, TruncatedAccount, UserApiResponse, UserSearchResult, cfg},
+    models::{Comment, Post, TruncatedAccount, UserApiResponse, UserSearchResult, cfg},
     ratelimit,
 };
 
@@ -805,6 +805,55 @@ fn posts_cache_ttl(page: Option<i32>) -> u64 {
         1 => 120,                       // first page — fresh content matters
         _ => cfg().e621_cache_ttl_secs, // deeper pages — longer TTL
     }
+}
+
+/// Fetch every post in a pool, in pool order, for pool-to-pool navigation.
+/// The pool's own object exposes `post_ids` (ordered); we then hydrate them.
+#[derive(serde::Deserialize)]
+struct PoolEnvelope {
+    #[serde(rename = "post_ids")]
+    post_ids: Vec<i64>,
+}
+
+pub async fn get_pool_posts(pool_id: i64) -> Result<Vec<Post>, String> {
+    let url = build_url(&format!("pools/{pool_id}.json"), &[]);
+    let body = fetch_authed_text(url, true, 0, Priority::Live)
+        .await
+        .map_err(|e| format!("pool request: {e}"))?;
+    let envelope: PoolEnvelope =
+        json::from_str(&body).map_err(|e| format!("pool parse failed: {e}"))?;
+    let posts = get_posts_by_ids(&envelope.post_ids).await?;
+    // Reorder to the pool's canonical order (get_posts_by_ids returns by id).
+    let by_id: std::collections::HashMap<i64, Post> =
+        posts.into_iter().map(|p| (p.id, p)).collect();
+    Ok(envelope
+        .post_ids
+        .iter()
+        .filter_map(|id| by_id.get(id).cloned())
+        .collect())
+}
+
+/// Fetch the most recent comments for a post from e621 (`comments.json`).
+/// Cached with the global TTL and rate-gated like every other e621 call.
+pub async fn get_post_comments(post_id: i64, limit: i64) -> Result<Vec<Comment>, String> {
+    let limit = limit.clamp(1, 200);
+    // e621 filters by `search[post_id]`; the bare `post_id` param is silently
+    // ignored and would return the newest global comments, not this post's.
+    let url = build_url(
+        "comments.json",
+        &[
+            ("search[post_id]", post_id.to_string()),
+            ("limit", limit.to_string()),
+        ],
+    );
+    let body = fetch_authed_text(url, false, 0, Priority::Live)
+        .await
+        .map_err(|e| format!("comments request: {e}"))?;
+    let comments =
+        json::from_str::<Vec<Comment>>(&body).map_err(|e| format!("comments parse failed: {e}"))?;
+    // Drop hidden/deleted comments before they reach the client — the same
+    // ones e621 hides, so a viewer would never see them on the site anyway.
+    Ok(comments.into_iter().filter(|c| !c.is_hidden).collect())
 }
 
 pub async fn get_posts(account: &TruncatedAccount, page: Option<i32>) -> Result<Vec<Post>, String> {

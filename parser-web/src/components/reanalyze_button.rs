@@ -5,7 +5,10 @@ use yew::{
     use_state,
 };
 
-use crate::models::{ProcessJobPhase, ProcessJobState, api_get, api_post};
+use crate::models::{
+    ProcessJobPhase, ProcessJobState, api_get, api_post, humanize_error_body,
+    humanize_network_error,
+};
 
 /// How often (ms) to poll `/process/<id>/status` while a job is running.
 const STATUS_POLL_INTERVAL_MS: i32 = 5000;
@@ -141,27 +144,29 @@ pub fn reanalyze_button(props: &ReanalyzeButtonProps) -> Html {
                         Ok(s) => {
                             job_status.set(Some(s));
                         }
-                        Err(e) => {
+                        Err(_e) => {
                             job_status.set(Some(build_failed_state(
                                 account_id,
-                                &format!("Bad /process response: {e}"),
+                                "The /process response could not be read. Try again.",
                             )));
                             in_flight.set(false);
                             on_running.emit(false);
-                            on_complete.emit(Err(format!("Bad /process response: {e}")));
+                            on_complete
+                                .emit(Err("The /process response could not be read. Try again."
+                                    .to_string()));
                         }
                     },
                     Ok(resp) => {
                         let status = resp.status();
                         let text = resp.text().await.unwrap_or_default();
-                        let msg = format!("Server error {status}: {text}");
+                        let msg = humanize_error_body(status, &text);
                         job_status.set(Some(build_failed_state(account_id, &msg)));
                         in_flight.set(false);
                         on_running.emit(false);
                         on_complete.emit(Err(msg));
                     }
                     Err(e) => {
-                        let msg = format!("Network error: {e}");
+                        let msg = humanize_network_error(e);
                         job_status.set(Some(build_failed_state(account_id, &msg)));
                         in_flight.set(false);
                         on_running.emit(false);

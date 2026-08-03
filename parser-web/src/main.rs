@@ -69,6 +69,7 @@ fn app() -> Html {
             <main id="main-content" class="bg-base-200 min-h-screen pt-4">
                 <Switch<Route> render={switch} />
             </main>
+            <PostViewerHost />
         </BrowserRouter>
     }
 }

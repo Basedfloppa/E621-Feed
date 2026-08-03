@@ -4,7 +4,7 @@ use wasm_bindgen::prelude::Closure;
 use web_sys::js_sys;
 use yew::prelude::*;
 
-use crate::components::PostCard;
+use crate::components::{ErrorAlert, PostCard};
 use crate::models::*;
 
 /// Determine the current number of columns from a `columns-*` / `grid-cols-*`
@@ -432,19 +432,7 @@ pub fn post_grid(props: &PostGridProps) -> Html {
                         <>
                             {
                                 if let Some(error) = &*error {
-                                    html! {
-                                        <div class="alert alert-error mb-3" role="alert" aria-live="polite">
-                                            <span>{ error }</span>
-                                            <button
-                                                type="button"
-                                                class="btn btn-sm btn-outline"
-                                                onclick={{
-                                                    let fetch_more = fetch_more.clone();
-                                                    Callback::from(move |_| fetch_more.emit(()))
-                                                }}
-                                            >{ "Retry" }</button>
-                                        </div>
-                                    }
+                                    html! { <ErrorAlert message={error.clone()} on_retry={Some(fetch_more.clone())} /> }
                                 } else { html! {} }
                             }
                             { render_post_grid(

@@ -1,7 +1,7 @@
 use crate::components::{ConfirmModal, ReanalyzeButton, UserSearchForm};
 use crate::models::{
     api_delete, api_get, api_patch, api_post, dispatch_account_list_changed, humanize_error_body,
-    read_config_from_head,
+    humanize_network_error, read_config_from_head,
 };
 use crate::pages::UserInfo;
 use gloo_timers::callback::Timeout;
@@ -263,14 +263,13 @@ pub fn account_creator() -> Html {
                         }
                     }
                     Ok(resp) => {
-                        message.set(format!(
-                            "Failed to load blacklist (status {})",
-                            resp.status()
-                        ));
+                        let status = resp.status();
+                        let body = resp.text().await.unwrap_or_default();
+                        message.set(humanize_error_body(status, &body));
                         error.set(true);
                     }
                     Err(e) => {
-                        message.set(format!("Network error loading blacklist: {e}"));
+                        message.set(humanize_network_error(e));
                         error.set(true);
                     }
                 }
@@ -351,7 +350,7 @@ pub fn account_creator() -> Html {
                         remove_error.set(Some(humanize_error_body(status, &body)));
                     }
                     Err(e) => {
-                        remove_error.set(Some(format!("Network error: {e}")));
+                        remove_error.set(Some(humanize_network_error(e)));
                     }
                 }
             });
@@ -432,8 +431,8 @@ pub fn account_creator() -> Html {
                             message.set("Blacklist updated".to_string());
                             error.set(false);
                         }
-                        Err(e) => {
-                            message.set(format!("Failed to parse response: {e}"));
+                        Err(_) => {
+                            message.set("The response could not be read. Try again.".to_string());
                             error.set(true);
                         }
                     },
@@ -451,7 +450,7 @@ pub fn account_creator() -> Html {
                         error.set(true);
                     }
                     Err(e) => {
-                        message.set(format!("Network error: {e}"));
+                        message.set(humanize_network_error(e));
                         error.set(true);
                     }
                 }
@@ -594,7 +593,7 @@ pub fn account_creator() -> Html {
                         }
                     }
                     Err(e) => {
-                        message.set(format!("Network error: {e}"));
+                        message.set(humanize_network_error(e));
                         error.set(true);
                     }
                 }

@@ -33,6 +33,28 @@ pub struct Post {
     pub tags: Tags,
 }
 
+/// A comment on a post, as returned by e621 `comments.json`. Field set
+/// matches the real v2 payload; optional fields are `#[serde(default)]` so
+/// schema drift can't break the viewer.
+#[derive(Serialize, Deserialize, JsonSchema, Clone)]
+pub struct Comment {
+    pub id: i64,
+    #[serde(default)]
+    pub created_at: String,
+    pub post_id: i64,
+    #[serde(default)]
+    pub creator_id: i64,
+    #[serde(default)]
+    pub creator_name: Option<String>,
+    pub body: String,
+    #[serde(default)]
+    pub score: i64,
+    #[serde(default)]
+    pub is_hidden: bool,
+    #[serde(default)]
+    pub vote: i64,
+}
+
 impl Post {
     #[must_use]
     pub fn media_type(&self) -> &'static str {
