@@ -47,6 +47,10 @@ RUN --mount=type=cache,target=/root/.npm \
 
 # -- Frontend sources --
 COPY parser-web/src ./src
+# Cargo.toml + Cargo.lock are REQUIRED: without them trunk logs
+# `no rust project found` and builds CSS/static only — no wasm/.js is emitted
+# and the embedded SPA comes out as a blank page. (Regression from 699b544.)
+COPY parser-web/Cargo.toml parser-web/Cargo.lock ./
 COPY parser-web/index.html ./
 COPY parser-web/style.css ./
 COPY parser-web/static ./static
