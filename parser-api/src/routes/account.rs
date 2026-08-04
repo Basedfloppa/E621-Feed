@@ -417,9 +417,12 @@ pub(crate) async fn update_account_blacklist(
     validation::validate_account_id(account_id)?;
     validation::validate_blacklist_payload(&payload)?;
     let owner_token = owner.0;
+    // Blacklist writes flush the shared e621 cache; cap them per owner so a
+    // client can't keep the cache cold or burn the writer by replaying writes.
+    ratelimit::check(&format!("blacklist:owner:{owner_token}"), 60, 10)?;
     let body = payload.into_inner();
     let normalized_blacklist = normalize_optional_blacklist(body.blacklist.as_deref());
-    let updated = db_blocking(move || {
+    let (updated, changed) = db_blocking(move || {
         update_device_blacklist(&owner_token, account_id, &normalized_blacklist).map_err(|e| {
             let m = format!("Failed to update blacklist: {e}");
             error!("{m}");
@@ -428,10 +431,16 @@ pub(crate) async fn update_account_blacklist(
     })
     .await?;
 
-    // Blacklist change invalidates all cached e621 responses (keys contain
-    // the old blacklist as a query parameter). Clear the whole cache rather
-    // than trying to pattern-match individual keys.
-    api::clear_api_cache();
+    if changed {
+        // Blacklist change invalidates all cached e621 responses (keys contain
+        // the old blacklist as a query parameter). Clear the whole cache rather
+        // than trying to pattern-match individual keys. Only flush on an actual
+        // change so replaying an unchanged value can't keep the cache cold.
+        api::clear_api_cache();
+        // A digest built under a weaker/older blacklist must not be replayed
+        // for up to 6h — the digest cache is separate from the e621 API cache.
+        crate::routes::digest::clear_digest_cache();
+    }
 
     Ok(Json(updated))
 }
@@ -532,6 +541,9 @@ pub(crate) async fn patch_feed_settings(
 ) -> Result<Json<AccountFeedSettings>, ApiError> {
     validation::validate_account_id(account_id)?;
     let owner_token = owner.0;
+    // feed_settings can write the blacklist (flushing the shared cache) and
+    // preferred tags (rebuilding scoring state) — cap it per owner.
+    ratelimit::check(&format!("feed_settings:owner:{owner_token}"), 60, 10)?;
     let patch = payload.into_inner();
 
     // Apply partial updates in order.
@@ -541,8 +553,13 @@ pub(crate) async fn patch_feed_settings(
         } else {
             validation::normalize_blacklist(blacklist)
         };
+        // Enforce the same blacklist limits (size, control chars, HTML/script
+        // probes) that the dedicated /blacklist route applies — the feed
+        // settings path previously skipped `validate_blacklist_text`, letting a
+        // client persist arbitrarily large blobs into the shared table.
+        validation::validate_blacklist_text(&normalized)?;
         let token = owner_token.clone();
-        db_blocking(move || {
+        let (_, changed) = db_blocking(move || {
             update_device_blacklist(&token, account_id, &normalized).map_err(|e| {
                 let m = format!("Failed to update blacklist from feed_settings: {e}");
                 error!("{m}");
@@ -550,11 +567,21 @@ pub(crate) async fn patch_feed_settings(
             })
         })
         .await?;
-        // Blacklist change invalidates e621 API cache.
-        api::clear_api_cache();
+        if changed {
+            // Blacklist change invalidates e621 API cache (only on real change).
+            api::clear_api_cache();
+            crate::routes::digest::clear_digest_cache();
+        }
     }
 
     if let Some(preferred_tags) = &patch.preferred_tags {
+        // Enforce the same 50-tag cap / weight / group / duplicate rules as the
+        // dedicated PUT /preferred_tags route — this path previously bypassed
+        // `validate_preferred_tag_payload`, letting a client trigger an
+        // arbitrarily large delete+insert loop under the global writer mutex.
+        validation::validate_preferred_tag_payload(&PreferredTagPayload {
+            preferred_tags: preferred_tags.clone(),
+        })?;
         let token = owner_token.clone();
         let tags = preferred_tags.clone();
         db_blocking(move || {
@@ -651,8 +678,10 @@ pub(crate) async fn import_account(
         } else {
             validation::normalize_blacklist(blacklist)
         };
+        // Same blacklist size/control-char/HTML limits as the /blacklist route.
+        validation::validate_blacklist_text(&normalized)?;
         let token = owner_token.clone();
-        db_blocking(move || {
+        let (_, changed) = db_blocking(move || {
             update_device_blacklist(&token, account_id, &normalized).map_err(|e| {
                 let m = format!("Failed to update blacklist from import: {e}");
                 error!("{m}");
@@ -660,8 +689,11 @@ pub(crate) async fn import_account(
             })
         })
         .await?;
-        // Blacklist change invalidates e621 API cache.
-        api::clear_api_cache();
+        if changed {
+            // Blacklist change invalidates e621 API cache (only on real change).
+            api::clear_api_cache();
+            crate::routes::digest::clear_digest_cache();
+        }
     }
 
     if let Some(preferred_tags) = &import.preferred_tags {

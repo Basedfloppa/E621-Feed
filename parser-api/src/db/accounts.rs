@@ -162,13 +162,19 @@ pub fn set_account(
     };
 
     super::with_write_tx(|tx| {
+        // `accounts.blacklisted_tags` is the SHARED fallback used by every
+        // device link of that account id. Keep it on insert only — on a
+        // re-create (any device linking an already-known public account) we
+        // must not let one visitor overwrite the fallback the other devices
+        // rely on. Per-device blacklists live in `account_device_links` and
+        // are set separately via `update_device_blacklist`.
         tx.execute(
             "
             INSERT INTO accounts (id, name, blacklisted_tags)
             VALUES (?1, ?2, ?3)
             ON CONFLICT(id) DO UPDATE SET
-            name = excluded.name,
-            blacklisted_tags = excluded.blacklisted_tags",
+            name = excluded.name
+            /* keep existing blacklisted_tags — shared fallback */",
             params![account_id, name, resolved],
         )
         .map_err(|e| format!("Failed to upsert account: {e}"))?;
@@ -193,7 +199,7 @@ pub fn update_device_blacklist(
     owner_token: &str,
     account_id: i32,
     blacklisted_tags: &str,
-) -> Result<TruncatedAccount, String> {
+) -> Result<(TruncatedAccount, bool), String> {
     let owned: String;
     let resolved: &str = if blacklisted_tags.is_empty() {
         owned = default_blacklist_text();
@@ -202,23 +208,38 @@ pub fn update_device_blacklist(
         blacklisted_tags
     };
 
-    let affected = super::with_write_tx(|tx| {
-        tx.execute(
-            "
+    // Returns `true` only when the effective blacklist actually changed, so
+    // callers can skip the process-wide e621 cache flush on a no-op write
+    // (replaying an unchanged blacklist must not keep the shared cache cold).
+    let changed = super::with_write_tx(|tx| {
+        let existing: Option<String> = tx
+            .query_row(
+                "SELECT blacklisted_tags FROM account_device_links \
+                 WHERE owner_token = ?1 AND account_id = ?2",
+                params![owner_token, account_id],
+                |r| r.get(0),
+            )
+            .ok();
+        match existing {
+            None => Err("No account found for this device token".to_string()),
+            Some(cur) if cur == resolved => Ok(false),
+            Some(_) => {
+                tx.execute(
+                    "
             UPDATE account_device_links
             SET blacklisted_tags = ?3, last_seen_at = ?4
             WHERE owner_token = ?1 AND account_id = ?2
             ",
-            params![owner_token, account_id, resolved, Utc::now().to_rfc3339(),],
-        )
-        .map_err(|e| format!("Failed to update device blacklist: {e}"))
+                    params![owner_token, account_id, resolved, Utc::now().to_rfc3339(),],
+                )
+                .map_err(|e| format!("Failed to update device blacklist: {e}"))?;
+                Ok(true)
+            }
+        }
     })?;
 
-    if affected == 0 {
-        return Err("No account found for this device token".to_string());
-    }
-
-    get_account_by_id(owner_token, account_id)
+    let account = get_account_by_id(owner_token, account_id)?;
+    Ok((account, changed))
 }
 
 pub fn get_accounts_for_owner(owner_token: &str) -> Result<Vec<TruncatedAccount>, String> {

@@ -745,13 +745,14 @@ fn session_shown_posts_dedup_roundtrip() {
     let session_id = "test-shown-90012";
     db::touch_or_create_feed_session(session_id, account_id).unwrap();
 
-    db::record_session_shown_posts(session_id, &[(1001, 0), (1002, 1), (1003, 2)]).unwrap();
-    db::record_session_shown_posts(session_id, &[(1004, 0)]).unwrap();
+    db::record_session_shown_posts(session_id, account_id, &[(1001, 0), (1002, 1), (1003, 2)])
+        .unwrap();
+    db::record_session_shown_posts(session_id, account_id, &[(1004, 0)]).unwrap();
     // Duplicate (session_id, post_id) — must be silently ignored by the
     // INSERT OR IGNORE in the writer.
-    db::record_session_shown_posts(session_id, &[(1001, 10)]).unwrap();
+    db::record_session_shown_posts(session_id, account_id, &[(1001, 10)]).unwrap();
 
-    let shown = db::get_session_shown_post_ids(session_id).unwrap();
+    let shown = db::get_session_shown_post_ids(session_id, account_id).unwrap();
     assert_eq!(shown.len(), 4);
     for id in [1001, 1002, 1003, 1004] {
         assert!(shown.contains(&id), "expected post {id} in shown set");

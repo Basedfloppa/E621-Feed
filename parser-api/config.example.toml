@@ -14,6 +14,13 @@ admin_api = "api_key"
 # SQLite database file path (relative or absolute).
 db_path = "database.db"
 
+# Set to true ONLY when a trusted reverse proxy (nginx/Caddy) sits in front and
+# overwrites X-Forwarded-For from the real socket address (our nginx-template and
+# Caddyfile already do). Keep false (default) for a direct bind — when false the
+# socket peer IP is used for rate-limit keying, so a remote client can't forge
+# X-Forwarded-For to rotate per-IP buckets.
+trust_proxy = false
+
 # Tags stripped from imported posts (audio metadata, DNP markers).
 # Plain tag names only — no e621 search syntax.
 tag_blacklist = ["sound", "sound_warning", "conditional_dnp", "avoid_posting"]
@@ -88,10 +95,10 @@ artist_discovery_novelty_bonus = 0.2 # serendipity boost for low-confidence disc
 # IDF and frequency shaping.
 df_floor = 0.40           # minimum document frequency
 idf_max = 100.0           # maximum IDF value
-idf_lambda = 1.00        # global IDF weight
-idf_alpha = 1.05         # IDF shaping exponent
-freq_alpha = 0.95        # frequency shaping exponent
-bm25_k = 2.25            # BM25 saturation parameter
+idf_lambda = 1.00         # global IDF weight
+idf_alpha = 1.05          # IDF shaping exponent
+freq_alpha = 0.95         # frequency shaping exponent
+bm25_k = 2.25             # BM25 saturation parameter
 one_sided_ratio_exp = 0.5 # quality/popularity overshoot exponent
 idf_rsj_smoothing = 0.35  # RSJ smoothing factor
 

@@ -64,7 +64,19 @@ pub fn revoke(token: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn csrf_origin_is_allowed(req: &Request<'_>) -> bool {
+pub(crate) fn csrf_origin_is_allowed(req: &Request<'_>) -> bool {
+    // `Sec-Fetch-Site` is sent by browsers on every fetch and navigation,
+    // including GETs. Some GET routes have side effects (browse persistence,
+    // feed-session touch, visit tracking) and are reached cross-site with a
+    // SameSite=Lax cookie, so we must reject cross-site here rather than
+    // exempting all GETs. Same-origin app requests (served via the /api proxy)
+    // are `same-origin`/`same-site`, so this never blocks the first party.
+    if let Some(site) = req.headers().get_one("Sec-Fetch-Site")
+        && site.eq_ignore_ascii_case("cross-site")
+    {
+        return false;
+    }
+
     if matches!(req.method(), Method::Get | Method::Head | Method::Options) {
         return true;
     }
@@ -90,6 +102,49 @@ fn csrf_origin_is_allowed(req: &Request<'_>) -> bool {
         .or_else(|| origin.strip_prefix("http://"))
         .and_then(|value| value.split('/').next());
     origin_host.is_some_and(|origin_host| req.host().is_some_and(|host| origin_host == host))
+}
+
+/// Request guard that rejects cross-origin state-changing requests.
+///
+/// `session/bootstrap` mints/rotates the device `owner_token` cookie, which is
+/// the sole account-ownership identity, but it deliberately does not require an
+/// existing `OwnerToken`. Adding this guard to such routes applies the same
+/// same-origin (CSRF) check that the `OwnerToken` guard uses on every other
+/// mutating route, so a cross-site form auto-submit can no longer silently
+/// replace a victim's device token and strand their linked accounts.
+#[derive(Clone, Copy)]
+pub struct SameOrigin;
+
+#[rocket::async_trait]
+impl<'r> FromRequest<'r> for SameOrigin {
+    type Error = ApiError;
+
+    async fn from_request(req: &'r Request<'_>) -> Outcome<Self, Self::Error> {
+        if csrf_origin_is_allowed(req) {
+            Outcome::Success(SameOrigin)
+        } else {
+            Outcome::Error((
+                Status::Forbidden,
+                ApiError::Forbidden("cross-origin state-changing request rejected".into()),
+            ))
+        }
+    }
+}
+
+impl OpenApiFromRequest<'_> for SameOrigin {
+    fn from_request_input(
+        _gen: &mut OpenApiGenerator,
+        _name: String,
+        _required: bool,
+    ) -> rocket_okapi::Result<RequestHeaderInput> {
+        Ok(RequestHeaderInput::None)
+    }
+
+    fn get_responses(
+        _gen: &mut OpenApiGenerator,
+    ) -> rocket_okapi::Result<rocket_okapi::okapi::openapi3::Responses> {
+        Ok(rocket_okapi::okapi::openapi3::Responses::default())
+    }
 }
 
 fn is_revoked(token: &str) -> bool {

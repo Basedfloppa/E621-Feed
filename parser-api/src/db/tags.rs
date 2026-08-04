@@ -23,6 +23,12 @@ static TAG_COUNTS_CACHE: LazyLock<Mutex<HashMap<i32, CachedTagCounts>>> =
 /// data after a `/process` refresh resolves within half a minute.
 const TAG_COUNTS_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// Hard cap on cached tag-count snapshots. Each distinct account_id ever
+/// queried previously stayed cached forever (TTL only gated reads), so an
+/// attacker who could mint many accounts could grow this map without bound.
+/// Expired/stale entries are evicted on insert and the map is capped below.
+const TAG_COUNTS_CACHE_MAX_ENTRIES: usize = 2048;
+
 /// Clear the tag counts cache for a specific account.
 /// Called after `/process` updates an account's tag counts.
 pub fn clear_tag_counts_cache(account_id: i32) {
@@ -366,6 +372,9 @@ pub fn get_tag_counts(account_id: i32) -> Result<Vec<TagCount>, String> {
 
     // Store in cache before returning.
     if let Ok(mut cache) = TAG_COUNTS_CACHE.lock() {
+        // Reclaim stale entries so per-account snapshots don't accumulate
+        // forever; then enforce a hard size cap as a backstop.
+        cache.retain(|_, e| e.inserted_at.elapsed() < TAG_COUNTS_CACHE_TTL);
         cache.insert(
             account_id,
             CachedTagCounts {
@@ -373,6 +382,15 @@ pub fn get_tag_counts(account_id: i32) -> Result<Vec<TagCount>, String> {
                 inserted_at: std::time::Instant::now(),
             },
         );
+        if cache.len() > TAG_COUNTS_CACHE_MAX_ENTRIES {
+            let mut keys: Vec<(std::time::Instant, i32)> =
+                cache.iter().map(|(k, v)| (v.inserted_at, *k)).collect();
+            keys.sort_by_key(|(t, _)| *t);
+            let excess = cache.len() - TAG_COUNTS_CACHE_MAX_ENTRIES;
+            for (_, k) in keys.into_iter().take(excess) {
+                cache.remove(&k);
+            }
+        }
     }
 
     Ok(counts)

@@ -153,6 +153,18 @@ pub(crate) async fn resolve_tag_batch(
     }
     // Stricter rate limit for batch (50 req/min) since it does N lookups.
     ratelimit::check(&format!("tag_resolve_batch:ip:{}", client_ip.0), 50, 60)?;
+    // Bound batch size and per-tag length so one oversized payload can't force
+    // unbounded lowercasing / dedup / cache work on the shared blocking pool.
+    if req.tags.len() > 500
+        || req
+            .tags
+            .iter()
+            .any(|t| t.len() > 128 || t.chars().any(|c| c.is_control()))
+    {
+        return Err(ApiError::BadRequest(
+            "tag batch too large (max 500 tags, 128 chars each)".into(),
+        ));
+    }
 
     // Deduplicate and lowercase input tags.
     let unique_tags: Vec<String> = {
@@ -206,6 +218,18 @@ pub(crate) async fn get_tag_implications_batch(
     client_ip: ClientIp,
 ) -> Result<Json<TagImplicationsBatchResponse>, ApiError> {
     ratelimit::check(&format!("tag_impl_batch:ip:{}", client_ip.0), 50, 60)?;
+    // Bound batch size and per-tag length (same as resolve-batch) before any
+    // in-memory dedup / cache work.
+    if req.tags.len() > 500
+        || req
+            .tags
+            .iter()
+            .any(|t| t.len() > 128 || t.chars().any(|c| c.is_control()))
+    {
+        return Err(ApiError::BadRequest(
+            "tag batch too large (max 500 tags, 128 chars each)".into(),
+        ));
+    }
 
     let unique_tags: Vec<String> = {
         let mut seen = HashSet::new();

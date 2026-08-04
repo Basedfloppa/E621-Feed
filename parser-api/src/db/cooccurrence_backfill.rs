@@ -34,6 +34,16 @@ fn backfill_tag_cooccurrence_if_needed() -> Result<(), String> {
 
     drop(conn);
 
+    // The backfill and a concurrent `/process` job both increment the SAME
+    // `tag_cooccurrence` / `account_tag_cooccurrence` pairs from the shared
+    // `tags_posts` state. Running them at the same time double-counts those
+    // pairs until an operator rebuilds. If any process job is live, defer the
+    // one-shot backfill to the next restart (it re-checks the tables then).
+    if crate::jobs::any_running() {
+        info!("[cooc-backfill] skipping: a /process job is running; will retry next boot");
+        return Ok(());
+    }
+
     if needs_global {
         info!("[cooc-backfill] starting global tag co-occurrence backfill");
         backfill_global_tag_cooccurrence()?;

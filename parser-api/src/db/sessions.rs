@@ -145,8 +145,13 @@ pub fn touch_or_create_feed_session(
 }
 
 /// Record a batch of shown `post_ids` for a session (for dedup).
+///
+/// The dedup set is scoped by `account_id` via `feed_sessions`, so a caller
+/// can only write into a session that is actually linked to the account they
+/// own. A session belonging to another account is refused.
 pub fn record_session_shown_posts(
     session_id: &str,
+    account_id: i32,
     posts: &[(i64, i32)], // (post_id, position)
 ) -> Result<(), String> {
     if posts.is_empty() {
@@ -154,6 +159,19 @@ pub fn record_session_shown_posts(
     }
     let now = Utc::now().to_rfc3339();
     with_write_tx(|tx| {
+        // Confirm this session belongs to the given account before writing
+        // into its dedup namespace.
+        let owned: bool = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM feed_sessions \
+                 WHERE session_id = ?1 AND account_id = ?2)",
+                params![session_id, account_id],
+                |r| r.get(0),
+            )
+            .map_err(|e| format!("check session ownership: {e}"))?;
+        if !owned {
+            return Err("session does not belong to this account".to_string());
+        }
         let mut stmt = tx
             .prepare_cached(
                 "INSERT OR IGNORE INTO feed_session_posts (session_id, post_id, position, shown_at)
@@ -169,13 +187,22 @@ pub fn record_session_shown_posts(
 }
 
 /// Get all `post_ids` already shown in this session (dedup set).
-pub fn get_session_shown_post_ids(session_id: &str) -> Result<HashSet<i64>, String> {
+/// Scoped to the session owned by `account_id` — a caller cannot read the
+/// dedup namespace of another account's session.
+pub fn get_session_shown_post_ids(
+    session_id: &str,
+    account_id: i32,
+) -> Result<HashSet<i64>, String> {
     let conn = open_db()?;
     let mut stmt = conn
-        .prepare("SELECT post_id FROM feed_session_posts WHERE session_id = ?1")
+        .prepare(
+            "SELECT fp.post_id FROM feed_session_posts fp
+             INNER JOIN feed_sessions fs ON fs.session_id = fp.session_id
+             WHERE fp.session_id = ?1 AND fs.account_id = ?2",
+        )
         .map_err(|e| format!("Failed to prepare session shown posts query: {e}"))?;
     let rows = stmt
-        .query_map(params![session_id], |r| r.get::<_, i64>(0))
+        .query_map(params![session_id, account_id], |r| r.get::<_, i64>(0))
         .map_err(|e| format!("Failed to query session shown posts: {e}"))?;
     rows.collect::<Result<HashSet<_>, _>>()
         .map_err(|e| format!("Failed to collect session shown posts: {e}"))

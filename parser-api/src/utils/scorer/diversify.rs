@@ -445,9 +445,22 @@ pub fn diversify_scored_posts(
     if posts.is_empty() {
         return posts;
     }
+    // Build `DiversityFeatures` against the SAME graph that the PMI pass will
+    // query. `group_similarity` uses the user graph (when supplied and weighted)
+    // as `graph_for_pmi`; the stored `TagId`s are interned per graph instance in
+    // insertion order, so resolving them from the global graph and then querying
+    // the user graph produced garbage similarity (each graph assigns different
+    // `u32` ids to the same tag). Resolving from the graph that will actually be
+    // queried keeps the id namespace consistent.
+    let use_user_for_pmi = user_graph.is_some() && priors.diversity_user_pmi_weight > 1e-4;
+    let feature_graph = if use_user_for_pmi {
+        user_graph.unwrap_or(graph)
+    } else {
+        graph
+    };
     let features: Vec<DiversityFeatures> = posts
         .iter()
-        .map(|sp| DiversityFeatures::from_post(&sp.post, graph))
+        .map(|sp| DiversityFeatures::from_post(&sp.post, feature_graph))
         .collect();
     let entries: Vec<(f32, f32, i64)> = posts
         .iter()

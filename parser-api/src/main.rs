@@ -93,10 +93,11 @@ async fn healthcheck(client_ip: ClientIp) -> status::Custom<Json<HealthResponse>
         db_blocking(e621_account_parser_api::db::check_database_health),
         e621_account_parser_api::api::check_e621_reachable(),
     );
-    // These accessors lazily build their snapshots. A successful call means
-    // recommendation scoring can use both caches immediately.
-    e621_account_parser_api::utils::current_idf();
-    e621_account_parser_api::utils::current_global_relation();
+    // NOTE: intentionally do NOT call `current_idf()` / `current_global_relation()`
+    // here — those touch the "last user access" timestamps the cache pruner uses
+    // for idle eviction, so a public, unauthenticated `/health` probe would keep
+    // the heavy IDF/tag-relation caches resident forever and defeat the
+    // idle-eviction mechanism (and trigger rebuilds when dirty).
     let response = HealthResponse {
         database: database.is_ok(),
         caches: true,
@@ -190,13 +191,19 @@ fn get_default_blacklist() -> Json<serde_json::Value> {
 /// token if absent. The per-IP cap stops bootstrap from being a free
 /// token-mint primitive that XFF rotation could combo into amplification
 /// of admin-authenticated e621 calls.
-#[openapi(tag = "Session")]
+#[openapi(skip)]
 #[post("/session/bootstrap")]
 fn session_bootstrap(
+    _same_origin: auth::SameOrigin,
     cookies: &CookieJar<'_>,
     client_ip: ClientIp,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     ratelimit::check(&format!("bootstrap:ip:{}", client_ip.0), 5, 5)?;
+
+    // Bootstrap mints/rotates the device `owner_token` cookie, which doubles
+    // as the sole account-ownership identity. A cross-site POST (form auto-
+    // submit) must not be able to silently replace the victim's token and strand
+    // their linked accounts — hence the `SameOrigin` guard above.
 
     if let Some(c) = cookies.get(auth::OWNER_TOKEN_COOKIE) {
         if validation::validate_owner_token(c.value()).is_ok() {

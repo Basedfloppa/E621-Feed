@@ -1565,7 +1565,7 @@ async fn recommendations_cross_page_dedup_filters_shown_posts() {
     }
 
     // Verify the DB-level dedup set matches what the route would load.
-    let shown_ids = db::get_session_shown_post_ids(session_id).unwrap();
+    let shown_ids = db::get_session_shown_post_ids(session_id, account_id).unwrap();
     assert!(
         shown_ids.contains(&101) && shown_ids.contains(&103),
         "dedup set should contain page-1 posts 101 and 103, got {shown_ids:?}"
@@ -1592,10 +1592,10 @@ async fn recommendations_cross_page_dedup_filters_shown_posts() {
         .enumerate()
         .map(|(i, id)| (*id, (i + 1) as i32))
         .collect();
-    db::record_session_shown_posts(session_id, &posts_to_record).unwrap();
+    db::record_session_shown_posts(session_id, account_id, &posts_to_record).unwrap();
 
     // All 6 posts should now be in the shown set.
-    let shown_after: HashSet<i64> = db::get_session_shown_post_ids(session_id).unwrap();
+    let shown_after: HashSet<i64> = db::get_session_shown_post_ids(session_id, account_id).unwrap();
     assert!(
         shown_after.len() == 6,
         "after page-2 recording, shown set should have 6 posts, got {}",
@@ -1800,7 +1800,7 @@ fn wipe_account_cleans_prefetch_state() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn media_hydrator_repairs_returned_posts_and_purges_absent_ids() {
+async fn media_hydrator_repairs_returned_posts_and_preserves_absent_on_partial_response() {
     let _guard = pipeline_lock().lock().await;
     ensure_migrations();
     let server = MockServer::start().await;
@@ -1821,6 +1821,12 @@ async fn media_hydrator_repairs_returned_posts_and_purges_absent_ids() {
     absent.id = ids[1];
     db::upsert_catalog_posts(&[stale, absent]).unwrap();
 
+    // e621 returns ONLY ids[0] (a partial response — e.g. `posts_limit` <
+    // batch size, transient index lag, or a filter regression). Under the old
+    // logic this would hard-delete ids[1] as "absent", cascading into
+    // accounts_post / feed_interactions and destroying live data. The safety
+    // guard treats a response shorter than the requested set as inconclusive
+    // and must NOT purge anything.
     Mock::given(method("GET"))
         .and(path("/posts.json"))
         .respond_with(ResponseTemplate::new(200).set_body_json(vec![returned]))
@@ -1831,7 +1837,11 @@ async fn media_hydrator_repairs_returned_posts_and_purges_absent_ids() {
     let repaired = db::hydrate_posts_by_ids(&[ids[0]]).unwrap();
     assert_eq!(repaired[0].uploader_id, 42);
     assert_eq!(repaired[0].tags.general, vec!["hydration_tag"]);
-    assert!(db::hydrate_posts_by_ids(&[ids[1]]).unwrap().is_empty());
+    // Absent-but-unverifiable id must be PRESERVED on a partial response.
+    assert!(
+        !db::hydrate_posts_by_ids(&[ids[1]]).unwrap().is_empty(),
+        "partial response must not cascade-delete absent ids"
+    );
     db::delete_catalog_posts_by_ids(&ids).unwrap();
 }
 

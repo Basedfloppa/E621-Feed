@@ -63,6 +63,18 @@ pub fn get_state(account_id: i32) -> Option<ProcessJobState> {
     registry().read().ok()?.get(&account_id).cloned()
 }
 
+/// Whether any account currently has a running `/process` job. Used to
+/// gate the one-shot cooccurrence backfill: its global pass shares the same
+/// `tag_cooccurrence` increments as live ingest, so running both together
+/// would double-count pairs.
+#[must_use]
+pub fn any_running() -> bool {
+    registry()
+        .read()
+        .map(|m| m.values().any(|s| s.phase == ProcessJobPhase::Running))
+        .unwrap_or(false)
+}
+
 #[must_use]
 pub fn try_begin(account_id: i32) -> BeginResult {
     let mut map = registry()

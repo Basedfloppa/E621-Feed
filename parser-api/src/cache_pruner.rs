@@ -89,6 +89,13 @@ pub fn spawn_cache_pruner() {
                         (0, 0)
                     }
                 };
+                // Feed-session dedup state was never reaped in production
+                // (the function existed but had no caller), so attacker-chosen
+                // session IDs could grow feed_sessions/feed_session_posts
+                // without bound. Reap expired sessions on the same cadence.
+                if let Err(e) = db::prune_expired_sessions() {
+                    warn!("[cache-pruner] feed-session prune failed: {e}");
+                }
 
                 let idle_evict_secs = cfg().runtime.cache_idle_eviction_secs;
                 let api_evicted = api::evict_api_cache_if_idle(idle_evict_secs);

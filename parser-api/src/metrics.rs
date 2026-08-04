@@ -21,10 +21,13 @@ pub struct AppMetrics {
     /// Total accounts deleted since server start.
     pub accounts_deleted_total: IntCounter,
 
-    /// Feed recommendation views by `account_id`.
-    pub feed_views_total: IntCounterVec,
-    /// Digest views by `account_id`.
-    pub digest_views_total: IntCounterVec,
+    /// Feed recommendation views (global counter — deliberately NOT labelled
+    /// by `account_id`: that label leaked which e621 accounts are active to any
+    /// unauthenticated scraper of `/api/metrics`, and let a remote client grow
+    /// the registry without bound. It was removed for both reasons.).
+    pub feed_views_total: IntCounter,
+    /// Digest views (global counter — same rationale as feed_views_total).
+    pub digest_views_total: IntCounter,
     /// Browse views by source (trending / favorites).
     pub browse_views_total: IntCounterVec,
 
@@ -76,17 +79,15 @@ impl AppMetrics {
             )
             .unwrap(),
 
-            feed_views_total: register_int_counter_vec!(
+            feed_views_total: register_int_counter!(
                 "e621_feed_views_total",
-                "Feed recommendation views",
-                &["account_id"]
+                "Feed recommendation views"
             )
             .unwrap(),
 
-            digest_views_total: register_int_counter_vec!(
+            digest_views_total: register_int_counter!(
                 "e621_digest_views_total",
-                "Digest views",
-                &["account_id"]
+                "Digest views"
             )
             .unwrap(),
 

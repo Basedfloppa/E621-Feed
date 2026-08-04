@@ -1310,8 +1310,14 @@ pub fn post_viewer(props: &PostViewerProps) -> Html {
                             <div class="border-t border-base-300 pt-3">
                                 <div class="text-[0.65rem] uppercase tracking-widest text-base-content/45 font-semibold mb-1.5">{ "Sources" }</div>
                                 <ul class="space-y-1">
-                                    { for cur.sources.iter().take(5).map(|s| html! {
-                                        <li class="truncate"><a class="text-primary text-xs break-all" href={s.clone()} target="_blank" rel="noopener noreferrer">{ s }</a></li>
+                                    { for cur.sources.iter().take(5).map(|s| {
+                                        // e621 source strings are untrusted upstream metadata; run each
+                                        // through link_target so dangerous schemes (javascript:/data:)
+                                        // become a harmless relative link instead of an active href.
+                                        let href = link_target(s, &posts_domain);
+                                        html! {
+                                            <li class="truncate"><a class="text-primary text-xs break-all" href={href} target="_blank" rel="noopener noreferrer">{ s }</a></li>
+                                        }
                                     }) }
                                 </ul>
                             </div>

@@ -14,7 +14,7 @@ use e621_account_parser_api::{
     db_blocking,
     errors::ApiError,
     models::TasteProfileResponse,
-    ratelimit::{self},
+    ratelimit::{self, ClientIp},
     utils::taste_themes,
 };
 
@@ -27,14 +27,29 @@ pub(crate) async fn get_taste_profile(
     top: Option<i32>,
     min_cooc: Option<i64>,
     owner: OwnerToken,
+    client_ip: ClientIp,
 ) -> Result<Json<TasteProfileResponse>, ApiError> {
     crate::validation::validate_account_id(account_id)?;
     let owner_token = owner.0;
     ratelimit::check(&format!("read:owner:{owner_token}"), 240, 60)?;
+    // This endpoint does extremely heavy, non-cached per-request computation
+    // (catalog scan, O(n²) PMI, Louvain, PageRank). The shared per-token read
+    // bucket alone isn't enough — add a per-IP cap so a client minting many
+    // tokens/linked accounts can't saturate the 16-connection SQLite pool.
+    ratelimit::check(&format!("taste:ip:{}", client_ip.0), 20, 5)?;
 
-    let top_val = top.unwrap_or(250).clamp(5, 1000) as usize;
+    let top_val = top.unwrap_or(250).clamp(5, 300) as usize;
     let min_cooc_val = min_cooc.unwrap_or(3).max(1);
     let owner_token = owner_token.clone();
+
+    // Fail fast on an unlinked/unauthorized account BEFORE the heavy global
+    // tag-relation cache reload and per-account scan below, so a caller with
+    // a minted token can't force full cache reloads on a target it doesn't own.
+    db_blocking({
+        let ot = owner_token.clone();
+        move || get_account_by_id(&ot, account_id).map_err(|e| format!("account access: {e}"))
+    })
+    .await?;
 
     if let Err(e) = load_tag_relation_caches() {
         error!("Failed to load tag relation caches: {e}");

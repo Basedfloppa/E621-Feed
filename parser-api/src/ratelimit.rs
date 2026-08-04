@@ -129,10 +129,15 @@ fn maybe_gc(map: &mut HashMap<String, Bucket>, now: Instant) {
     *last_gc = now;
 }
 
-/// Client IP for rate-limit keying. Trusts leftmost `X-Forwarded-For`
-/// behind nginx; falls back to the socket peer.
+/// Client IP for rate-limit keying.
+///
+/// Only trusts the leftmost `X-Forwarded-For` value when `trust_proxy` is
+/// enabled in config (i.e. a trusted reverse proxy is present). Otherwise a
+/// remote client could forge the header and rotate per-IP buckets at will;
+/// the socket peer IP is the only identity we can trust by default.
 pub fn client_ip(req: &Request<'_>) -> String {
-    if let Some(xff) = req.headers().get_one("x-forwarded-for")
+    if crate::models::cfg().trust_proxy
+        && let Some(xff) = req.headers().get_one("x-forwarded-for")
         && let Some(first) = xff.split(',').next()
     {
         let trimmed = first.trim();

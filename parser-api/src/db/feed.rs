@@ -582,36 +582,45 @@ pub fn load_blacklisted_post_ids(
     }
 
     let conn = open_db()?;
+    let mut result = HashSet::new();
 
-    // Build placeholders for both tag names and post IDs.
-    let tag_ph = vec!["?"; blacklisted_tags.len()].join(",");
-    let post_ph = vec!["?"; post_ids.len()].join(",");
-    let sql = format!(
-        "SELECT DISTINCT tp.post_id
-         FROM tags_posts tp
-         INNER JOIN tags t ON t.id = tp.tag_id
-         WHERE t.name IN ({tag_ph})
-           AND tp.post_id IN ({post_ph})"
-    );
-    let mut stmt = conn
-        .prepare(&sql)
-        .map_err(|e| format!("prep load_blacklisted_post_ids: {e}"))?;
-
-    // Mixed parameter types (String + i64) → use rusqlite::types::Value.
-    let mut params: Vec<rusqlite::types::Value> =
-        Vec::with_capacity(blacklisted_tags.len() + post_ids.len());
-    for tag in blacklisted_tags {
-        params.push(rusqlite::types::Value::Text(tag.clone()));
+    // SQLITE_MAX_VARIABLE_NUMBER defaults to 999. A valid blacklist can hold
+    // well over 999 simple tags (16 KB cap / 64-char lines), so building one
+    // giant IN (...) with a bind per tag trips the ceiling and breaks the
+    // feed. Chunk both lists so each query stays under the limit and then
+    // union the results.
+    const CHUNK: usize = 400;
+    for tag_chunk in blacklisted_tags.chunks(CHUNK) {
+        for post_chunk in post_ids.chunks(CHUNK) {
+            let tag_ph = vec!["?"; tag_chunk.len()].join(",");
+            let post_ph = vec!["?"; post_chunk.len()].join(",");
+            let sql = format!(
+                "SELECT DISTINCT tp.post_id
+                 FROM tags_posts tp
+                 INNER JOIN tags t ON t.id = tp.tag_id
+                 WHERE t.name IN ({tag_ph})
+                   AND tp.post_id IN ({post_ph})"
+            );
+            let mut stmt = conn
+                .prepare(&sql)
+                .map_err(|e| format!("prep load_blacklisted_post_ids: {e}"))?;
+            let mut params: Vec<rusqlite::types::Value> =
+                Vec::with_capacity(tag_chunk.len() + post_chunk.len());
+            for tag in tag_chunk {
+                params.push(rusqlite::types::Value::Text(tag.clone()));
+            }
+            for id in post_chunk {
+                params.push(rusqlite::types::Value::Integer(*id));
+            }
+            let rows = stmt
+                .query_map(rusqlite::params_from_iter(params), |r| r.get::<_, i64>(0))
+                .map_err(|e| format!("query load_blacklisted_post_ids: {e}"))?;
+            for row in rows {
+                result.insert(row.map_err(|e| format!("collect load_blacklisted_post_ids: {e}"))?);
+            }
+        }
     }
-    for id in post_ids {
-        params.push(rusqlite::types::Value::Integer(*id));
-    }
-
-    let rows = stmt
-        .query_map(rusqlite::params_from_iter(params), |r| r.get::<_, i64>(0))
-        .map_err(|e| format!("query load_blacklisted_post_ids: {e}"))?;
-    rows.collect::<Result<HashSet<_>, _>>()
-        .map_err(|e| format!("collect load_blacklisted_post_ids: {e}"))
+    Ok(result)
 }
 
 #[cfg(test)]

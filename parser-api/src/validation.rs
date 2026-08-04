@@ -82,7 +82,7 @@ fn validate_account_name(name: &str) -> Result<(), ApiError> {
 
 const MAX_BLACKLIST_LINE_LEN: usize = 64;
 
-fn validate_blacklist_text(blacklist: &str) -> Result<(), ApiError> {
+pub fn validate_blacklist_text(blacklist: &str) -> Result<(), ApiError> {
     if blacklist.len() > MAX_BLACKLIST_LEN {
         return Err(ApiError::BadRequest(format!(
             "blacklist too long ({} bytes, max {MAX_BLACKLIST_LEN})",
@@ -327,6 +327,18 @@ pub fn validate_preferred_tag_payload(payload: &PreferredTagPayload) -> Result<(
         if trimmed.len() > MAX_TAG_NAME_LEN {
             return Err(ApiError::BadRequest(format!(
                 "tag name too long (max {MAX_TAG_NAME_LEN} chars)"
+            )));
+        }
+        // Preferred tags must be plain, single-token e621 tag names. Reject
+        // anything with whitespace, ':', or search operators so a stored
+        // value like `rating:e` can't be interpolated into a backfill e621
+        // search query and drive shared-catalog writes under the admin key.
+        if !trimmed
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+        {
+            return Err(ApiError::BadRequest(format!(
+                "tag '{trimmed}' must be a plain lowercase tag name "
             )));
         }
         let weight = pt.weight;

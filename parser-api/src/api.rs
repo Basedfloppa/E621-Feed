@@ -789,7 +789,10 @@ pub async fn get_posts_by_ids(ids: &[i64]) -> Result<Vec<Post>, String> {
             ("mode", "extended".to_string()),
         ],
     );
-    let body = fetch_authed_text(url, true, 0, Priority::Prefetch)
+    // These hydrate user-facing viewer requests (single post, pool navigation,
+    // digest hydration), so they must be Live priority — using Prefetch here lets
+    // an unauthenticated /posts/<id> burst enqueue ahead of real Live traffic.
+    let body = fetch_authed_text(url, true, 0, Priority::Live)
         .await
         .map_err(|e| format!("posts by ids request: {e}"))?;
     let posts =

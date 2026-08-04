@@ -77,6 +77,34 @@ fn matches_local_blacklist_metatag(post: &Post, blacklist: &str) -> bool {
         })
 }
 
+/// Does the post match any blacklisted SIMPLE tag (exact tag-name match)?
+/// Used as a hard exclusion in the generic/personalised digest, so a
+/// blacklisted tag removes the post rather than merely down-weighting it.
+fn has_blacklisted_simple_tag(post: &Post, blacklist_set: &HashSet<String>) -> bool {
+    if blacklist_set.is_empty() {
+        return false;
+    }
+    post.tags
+        .general
+        .iter()
+        .chain(post.tags.artist.iter())
+        .chain(post.tags.copyright.iter())
+        .chain(post.tags.character.iter())
+        .chain(post.tags.species.iter())
+        .chain(post.tags.lore.iter())
+        .any(|t| blacklist_set.contains(&t.to_ascii_lowercase()))
+}
+
+/// Parse the plain (simple) blacklist tags from blacklist text.
+fn blacklist_simple_tag_set(account_blacklist: &str) -> HashSet<String> {
+    account_blacklist
+        .lines()
+        .flat_map(|l| l.split_whitespace().filter(|t| !t.is_empty()))
+        .filter(|t| !t.contains(':') && !t.starts_with('-'))
+        .map(str::to_lowercase)
+        .collect()
+}
+
 // ---------------------------------------------------------------------------
 // In-memory TTL cache
 // ---------------------------------------------------------------------------
@@ -90,6 +118,20 @@ static DIGEST_CACHE: LazyLock<Mutex<HashMap<String, CachedDigest>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
 const DIGEST_TTL_SECS: u64 = 21600; // 6 hours — shorter TTL + randomness in stratified_sample means the digest changes more noticeably day-to-day
+/// Clear every cached digest. Called when an account's blacklist changes
+/// (alongside the e621 API cache flush) so a digested response built under a
+/// weaker blacklist can't be replayed for up to 6 hours, and one device can't
+/// seed a shared cache that a stricter device then inherits.
+pub fn clear_digest_cache() {
+    if let Ok(mut map) = DIGEST_CACHE.lock() {
+        map.clear();
+    }
+}
+/// Hard cap on cached digest payloads. Every (account, day, mode) combination
+/// inserts a unique date-stamped key, so without a bound this map grows one
+/// full payload per account per day forever — a monotonic process-memory leak.
+/// When full, expired + oldest entries are dropped on insert.
+const DIGEST_CACHE_MAX_ENTRIES: usize = 512;
 
 /// Get digest seen-post IDs from `feed_interactions` for the last 7 days.
 /// This prevents the digest from showing posts the user already saw in
@@ -116,6 +158,9 @@ fn cache_get(key: &str) -> Option<Vec<ScoredPost>> {
 
 fn cache_set(key: String, posts: Vec<ScoredPost>) {
     let mut map = DIGEST_CACHE.lock().expect("digest cache poisoned");
+    // Evict expired entries so a date-stamped key from a prior day/mode is
+    // actually reclaimed instead of lingering forever.
+    map.retain(|_, e| e.cached_at.elapsed().as_secs() < DIGEST_TTL_SECS);
     map.insert(
         key,
         CachedDigest {
@@ -123,6 +168,16 @@ fn cache_set(key: String, posts: Vec<ScoredPost>) {
             cached_at: Instant::now(),
         },
     );
+    // Size cap as a hard backstop (drop the oldest entries past the cap).
+    if map.len() > DIGEST_CACHE_MAX_ENTRIES {
+        let mut sorted: Vec<(Instant, String)> =
+            map.iter().map(|(k, v)| (v.cached_at, k.clone())).collect();
+        sorted.sort_by_key(|(t, _)| *t);
+        let excess = map.len() - DIGEST_CACHE_MAX_ENTRIES;
+        for (_, k) in sorted.into_iter().take(excess) {
+            map.remove(&k);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -477,6 +532,7 @@ async fn build_personalized_digest(
 async fn build_generic_digest(
     account_id: i32,
     exclude_saved: bool,
+    account_blacklist: &str,
 ) -> Result<Vec<ScoredPost>, ApiError> {
     use rayon::prelude::*;
 
@@ -491,11 +547,23 @@ async fn build_generic_digest(
     // Seen-post dedup via feed_interactions (7 days).
     let seen_ids = get_digest_seen_ids(account_id);
 
+    // Blacklist is a hard content-safety exclusion, not a scoring hint: drop
+    // any post that matches a blacklisted metatag or carries a blacklisted
+    // simple tag before returning the digest (the generic branch previously
+    // ignored it entirely).
+    let blacklist_set = blacklist_simple_tag_set(account_blacklist);
     let mut all_posts: Vec<ScoredPost> = Vec::with_capacity(20);
-    all_posts.extend(trending);
-    all_posts.extend(popular_new);
-    all_posts.extend(fresh_blood);
-    all_posts.extend(random);
+    for sp in [trending, popular_new, fresh_blood, random]
+        .into_iter()
+        .flatten()
+    {
+        if matches_local_blacklist_metatag(&sp.post, account_blacklist)
+            || has_blacklisted_simple_tag(&sp.post, &blacklist_set)
+        {
+            continue;
+        }
+        all_posts.push(sp);
+    }
 
     if exclude_saved {
         let owned: HashSet<i64> = db::get_owned_post_ids(account_id).unwrap_or_default();
@@ -597,7 +665,6 @@ pub(crate) async fn get_daily_digest(
             .emit();
         e621_account_parser_api::metrics::METRICS
             .digest_views_total
-            .with_label_values(&[&account_id.to_string()])
             .inc();
         return Ok(Json(cached));
     }
@@ -610,7 +677,7 @@ pub(crate) async fn get_daily_digest(
     let posts = if use_personalized {
         build_personalized_digest(account_id, hide_saved, &account.blacklist).await?
     } else {
-        build_generic_digest(account_id, hide_saved).await?
+        build_generic_digest(account_id, hide_saved, &account.blacklist).await?
     };
 
     e621_account_parser_api::audit::event("feed.digest")
@@ -628,7 +695,6 @@ pub(crate) async fn get_daily_digest(
         .emit();
     e621_account_parser_api::metrics::METRICS
         .digest_views_total
-        .with_label_values(&[&account_id.to_string()])
         .inc();
     cache_set(cache_key, posts.clone());
     Ok(Json(posts))

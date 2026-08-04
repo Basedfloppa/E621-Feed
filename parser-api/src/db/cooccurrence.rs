@@ -333,6 +333,13 @@ pub fn get_account_tag_relation_graph(
 
     let pair_min = min_user_cooc.max(1);
 
+    // Bound the edges scan. The route only needs edges among the top-N nodes
+    // (≤ `top*(top-1)/2` ≈ 31k for top=250), but a huge account can hold
+    // millions of co-occurrence rows and the query previously materialized
+    // ALL of them before the top-N filter — a single-request CPU/heap DoS.
+    // Order by the strongest co-occurrence and cap how many rows are scanned.
+    let edge_limit: i64 = (top as i64).saturating_mul(500).clamp(5000, 250_000);
+
     let mut stmt = conn
         .prepare(
             "
@@ -352,12 +359,14 @@ pub fn get_account_tag_relation_graph(
                    ON c.tag1_id = t1.id AND c.tag2_id = t2.id
             WHERE atc.account_id = ?1
               AND atc.cooc_count >= ?2
+            ORDER BY atc.cooc_count DESC
+            LIMIT ?3
             ",
         )
         .map_err(|e| format!("Failed to prepare relation graph query: {e}"))?;
 
     let rows = stmt
-        .query_map(params![account_id, pair_min], |row| {
+        .query_map(params![account_id, pair_min, edge_limit], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,

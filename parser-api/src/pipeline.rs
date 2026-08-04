@@ -164,7 +164,15 @@ pub async fn run_process_with_mode(
     let favcount = match user {
         UserApiResponse::FullUser(u) => u.favorite_count,
     };
-    let pages = (favcount / cfg.posts_limit) + i32::from(favcount % cfg.posts_limit > 0);
+    let mut pages = (favcount / cfg.posts_limit) + i32::from(favcount % cfg.posts_limit > 0);
+    // Full-mode teardown+rebuild is the most expensive path (sequential e621
+    // fetches on the shared admin key + writer-lock teardown). Cap the page
+    // count so a caller who has linked a huge-favcount public account can't
+    // trigger unbounded upstream traffic and SQLite writer work via
+    // ?mode=full. The incremental path below applies its own tighter internal
+    // cap (200), so this bound only constrains full-mode work.
+    const FULL_MODE_MAX_PAGES: i32 = 500;
+    pages = pages.min(FULL_MODE_MAX_PAGES);
 
     macro_rules! record_phase {
         ($name:expr) => {{

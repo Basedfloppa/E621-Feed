@@ -26,6 +26,14 @@ pub struct Config {
     pub posts_limit: i32,
     pub rps_delay_ms: u64,
     pub max_retries: u64,
+    /// Set to `true` only when a trusted reverse proxy (nginx/Caddy) sits in
+    /// front and rewrites `X-Forwarded-For`. When `false` (the default — direct
+    /// bind, e.g. the shipped docker-compose `8181:8080` mapping), the raw socket
+    /// peer IP is used for rate-limit keying so a remote client cannot forge
+    /// `X-Forwarded-For` to rotate per-IP buckets:
+    ///     X-Forwarded-For: 1.2.3.4
+    #[serde(default)]
+    pub trust_proxy: bool,
     /// Hard ceiling per individual e621 HTTP attempt, in seconds.
     /// `reqwest`'s built-in `.timeout(30)` does not always fire when
     /// Cloudflare slow-streams the body (rare-byte trickle keeps the

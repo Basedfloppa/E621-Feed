@@ -243,6 +243,13 @@ pub(crate) async fn get_recommendations(
     validation::validate_recommendations_page(page)?;
     let affinity_threshold = validation::validate_affinity_threshold(affinity_threshold)?;
     let exploration = validation::validate_exploration(exploration)?;
+    // The session value is written verbatim into feed_sessions/feed_session_posts,
+    // so enforce the same size/charset bound the /continue route already uses;
+    // otherwise an authenticated client could insert arbitrary-length keys and
+    // bloat those tables indefinitely.
+    if let Some(ref sess) = session {
+        validation::validate_session_token(sess)?;
+    }
     let owner_token = owner.0;
     // Cap per device — admin-authenticated round-trip per request, so an
     // infinite-scroll loop must not burn through the admin quota.
@@ -274,7 +281,7 @@ pub(crate) async fn get_recommendations(
         db_blocking(move || db::touch_or_create_feed_session(&sess_for_touch, account_id)).await?;
         let session_for_dedup = sess.clone();
         let shown_ids: std::collections::HashSet<i64> =
-            db_blocking(move || db::get_session_shown_post_ids(&session_for_dedup))
+            db_blocking(move || db::get_session_shown_post_ids(&session_for_dedup, account_id))
                 .await
                 .unwrap_or_default(); // session does not exist yet or has expired
 
@@ -298,7 +305,7 @@ pub(crate) async fn get_recommendations(
         if !posts_to_record.is_empty() {
             let session_for_record = sess.clone();
             db_blocking(move || {
-                db::record_session_shown_posts(&session_for_record, &posts_to_record)
+                db::record_session_shown_posts(&session_for_record, account_id, &posts_to_record)
             })
             .await?;
         }
@@ -371,7 +378,6 @@ pub(crate) async fn get_recommendations(
         .emit();
     e621_account_parser_api::metrics::METRICS
         .feed_views_total
-        .with_label_values(&[&account_id.to_string()])
         .inc();
 
     Ok(Json(scored))
@@ -682,6 +688,16 @@ pub(crate) async fn get_recommendations_continue(
 
     ratelimit::check(&format!("recs:owner:{owner_token}"), 60, 30)?;
 
+    // Verify ownership BEFORE touching/creating feed-session state — otherwise
+    // a request for an account the caller doesn't own would still commit a
+    // feed_session row under that account (and leak account existence via the
+    // two distinct failure paths).
+    db_blocking({
+        let ot = owner_token.clone();
+        move || get_account_by_id(&ot, account_id).map_err(|e| format!("account access: {e}"))
+    })
+    .await?;
+
     // Single atomic read/check/touch. Three outcomes:
     //   Fresh    — first time this (session_id, account_id) is seen
     //   Active   — existing valid session, touched
@@ -699,7 +715,7 @@ pub(crate) async fn get_recommendations_continue(
     let shown_ids: HashSet<i64> = if matches!(session_state, db::FeedSessionState::Active) {
         let session_for_dedup = session.clone();
         db_blocking(move || {
-            db::get_session_shown_post_ids(&session_for_dedup)
+            db::get_session_shown_post_ids(&session_for_dedup, account_id)
                 .map_err(|e| format!("Failed to load session shown posts: {e}"))
         })
         .await?
@@ -727,8 +743,10 @@ pub(crate) async fn get_recommendations_continue(
             .enumerate()
             .map(|(i, sp)| (sp.post.id, i as i32))
             .collect();
-        db_blocking(move || db::record_session_shown_posts(&session_for_record, &shown_for_record))
-            .await?;
+        db_blocking(move || {
+            db::record_session_shown_posts(&session_for_record, account_id, &shown_for_record)
+        })
+        .await?;
     }
 
     let session_state_str = match session_state {
@@ -853,7 +871,6 @@ pub(crate) async fn get_similar_posts(
         .emit();
     e621_account_parser_api::metrics::METRICS
         .feed_views_total
-        .with_label_values(&[&account_id.to_string()])
         .inc();
 
     Ok(Json(scored))

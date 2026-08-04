@@ -53,14 +53,31 @@ pub async fn hydrate_catalog_once() {
         match api::get_posts_by_ids(&ids).await {
             Ok(posts) => {
                 let count = posts.len();
+                let requested_set: HashSet<i64> = ids.iter().copied().collect();
                 let returned: HashSet<i64> = posts.iter().map(|post| post.id).collect();
-                let missing: Vec<i64> = ids
+                // Protect the shared catalog: (1) only upsert posts we actually
+                // requested — an unfiltered/expanded response must not inject
+                // unrelated rows into the corpus; (2) only treat an id as
+                // "missing/deleted" when the response is provably complete
+                // (returned as many ids as requested). A truncated/partial
+                // response (e.g. `posts_limit` < batch size, transient index
+                // lag, or an e621 filter regression) must never cause a c
+                // ascading `DELETE FROM posts` on live, still-present rows.
+                let to_upsert: Vec<_> = posts
                     .into_iter()
-                    .filter(|id| !returned.contains(id))
+                    .filter(|p| requested_set.contains(&p.id))
                     .collect();
+                let missing: Vec<i64> = if count == requested {
+                    ids.iter()
+                        .copied()
+                        .filter(|id| !returned.contains(id))
+                        .collect()
+                } else {
+                    Vec::new()
+                };
                 match rocket::tokio::task::spawn_blocking(move || {
-                    db::upsert_catalog_posts(&posts)?;
-                    db::replace_posts_tags_batch(&posts)?;
+                    db::upsert_catalog_posts(&to_upsert)?;
+                    db::replace_posts_tags_batch(&to_upsert)?;
                     let purged = db::delete_catalog_posts_by_ids(&missing)?;
                     Ok::<_, String>(((), purged))
                 })

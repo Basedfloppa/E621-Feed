@@ -20,6 +20,7 @@ use e621_account_parser_api::{
     errors::ApiError,
     load_monitor::Priority,
     models::{Post, ScoredPost, cfg},
+    ratelimit::{self, ClientIp},
     utils::{CachedPostFeatures, ScoringContext, current_global_relation, current_idf},
     validation,
 };
@@ -105,6 +106,7 @@ pub(crate) async fn search_posts(
     page: Option<i32>,
     limit: Option<i32>,
     owner: OwnerToken,
+    client_ip: ClientIp,
 ) -> Result<Json<Vec<Post>>, ApiError> {
     validation::validate_account_id(account_id)?;
     let query = query.trim();
@@ -114,6 +116,11 @@ pub(crate) async fn search_posts(
         ));
     }
     let owner_token = owner.0;
+    // Every browse search is a live, cache-bypassing e621 fetch plus catalog
+    // persistence, so cap per-owner and per-IP to protect the shared admin-key
+    // budget and the catalog/writer from one client's repeated queries.
+    ratelimit::check(&format!("browse_search:owner:{owner_token}"), 60, 30)?;
+    ratelimit::check(&format!("browse_search:ip:{}", client_ip.0), 120, 30)?;
     let account =
         db_blocking(move || get_account_by_id(&owner_token, account_id).map_err(|e| e.clone()))
             .await?;
@@ -133,6 +140,7 @@ pub(crate) async fn search_scored_posts(
     page: Option<i32>,
     limit: Option<i32>,
     owner: OwnerToken,
+    client_ip: ClientIp,
 ) -> Result<Json<Vec<ScoredPost>>, ApiError> {
     validation::validate_account_id(account_id)?;
     let query = query.trim();
@@ -142,12 +150,20 @@ pub(crate) async fn search_scored_posts(
         ));
     }
     let owner_token = owner.0;
-    let (account, tags, profile) = rocket::tokio::join!(
-        db_blocking(move || get_account_by_id(&owner_token, account_id).map_err(|e| e.clone())),
+    // Same throttles as `search_posts`; the scored path also does DB reads,
+    // scoring and background persistence per request.
+    ratelimit::check(&format!("browse_search:owner:{owner_token}"), 60, 30)?;
+    ratelimit::check(&format!("browse_search:ip:{}", client_ip.0), 120, 30)?;
+    // Verify ownership FIRST so a caller with a minted token can't force a
+    // full profile/tag-count fan-out on an account it doesn't own. Only the
+    // profile + tag-count reads (not the ownership check) run in parallel.
+    let account =
+        db_blocking(move || get_account_by_id(&owner_token, account_id).map_err(|e| e.clone()))
+            .await?;
+    let (tags, profile) = rocket::tokio::join!(
         db_blocking(move || get_tag_counts(account_id).map_err(|e| e.clone())),
         db_blocking(move || get_account_preference_profile(account_id).map_err(|e| e.clone())),
     );
-    let account = account?;
     let tags = tags?;
     let profile = profile?;
     let relation_tags = tags.clone();
