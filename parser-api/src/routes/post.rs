@@ -31,11 +31,12 @@ pub(crate) async fn post_comments(
             "post id must be a positive integer".into(),
         ));
     }
-    // All public post-viewer fetches share one server-wide budget kept far
-    // below the shared `e621:admin-key` pool (240/min). Without it the per-IP
-    // caps (120/120/60) sum to the whole global budget, so a single IP could
-    // starve every legitimate consumer (/recommendations, /process, workers).
-    ratelimit::check("e621:public-viewer", 60, 15)?;
+    // Each IP gets its own public-viewer budget so a single anonymous attacker
+    // cannot monopolize the shared anonymous-viewer allowance for every consumer
+    // (a single global `e621:public-viewer` cap was exhaustible by one IP). The
+    // per-IP route caps also keep the aggregate anonymous spend below the shared
+    // `e621:admin-key` pool (240/min).
+    ratelimit::check(&format!("public-viewer:{}", client_ip.0), 60, 15)?;
     ratelimit::check(&format!("post_comments:{}", client_ip.0), 60, 10)?;
     let comments = api::get_post_comments(id, limit.unwrap_or(50))
         .await
@@ -52,10 +53,10 @@ pub(crate) async fn get_single_post(id: i64, client_ip: ClientIp) -> Result<Json
             "post id must be a positive integer".into(),
         ));
     }
-    // Same shared public-viewer budget as the other unauthenticated viewer
+    // Per-IP public-viewer budget shared with the other unauthenticated viewer
     // routes — see `post_comments` for the rationale.
-    ratelimit::check("e621:public-viewer", 60, 15)?;
-    ratelimit::check(&format!("post:{} ", client_ip.0), 120, 30)?;
+    ratelimit::check(&format!("public-viewer:{}", client_ip.0), 60, 15)?;
+    ratelimit::check(&format!("post:{}", client_ip.0), 120, 30)?;
     let mut posts = api::get_posts_by_ids(&[id])
         .await
         .map_err(ApiError::Internal)?;
@@ -78,9 +79,9 @@ pub(crate) async fn get_pool_posts(
             "pool id must be a positive integer".into(),
         ));
     }
-    // Same shared public-viewer budget; each pool request costs two admin-key
+    // Per-IP public-viewer budget; each pool request costs two admin-key
     // tokens (envelope + by-ids hydration), so this must be tighter.
-    ratelimit::check("e621:public-viewer", 60, 15)?;
+    ratelimit::check(&format!("public-viewer:{}", client_ip.0), 60, 15)?;
     ratelimit::check(&format!("pool_posts:{}", client_ip.0), 60, 15)?;
     let posts = api::get_pool_posts(pool_id)
         .await

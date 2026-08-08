@@ -1,14 +1,14 @@
 """SQLite concurrency load test for the E621 Account Parser backend.
 
-Measures how the SQLite-backed API behaves under concurrent read/write
+Measure how the SQLite-backed API behaves under concurrent read/write
 load. Three request classes simulate the real production mix:
 
   * SessionUser  — read-heavy: account reads + tag resolve
   * RecHeavyUser — the scoring hot path (recommendations) — heavy reads
   * WriteHeavy   — feedback interactions (feed_interactions inserts)
 
-Tokens below are real `owner_token`s from `account_device_links`, so
-each virtual user authenticates as a real linked account.
+Tokens are read from the OWNER_TOKENS env var at runtime so no live
+`owner_token` is ever committed to this repository.
 
 Run the server first:
     cd parser-api/loadtest && ROCKET_PORT=8088 \
@@ -19,29 +19,35 @@ Then launch locust:
         --headless -u 50 --spawn-rate 10 -t 2m
 """
 
+import os
 import random
 
 from locust import HttpUser, task, between
 
-# Real owner_tokens from the production DB (each linked to account 658288 etc).
-OWNER_TOKENS = [
-    "hRbkZsk5BDlzAmsOs_W0Pcz8D6U6p2Q-7nRJUuqpWV8",
-    "TRJsc9Kq4_KsThd6N05konRmz6uxAPF9uqYqKUVrTdo",
-    "wXmETD2YIUXC0YTy_prtCF-Ld6hg8LdePQy2WOOZ7KI",
-    "sqt0Z2RM_yvHYrtOa5mN9QQ-IcJQKSXD1rxGopyNI-Y",
-    "uiMWLbEnqp9l9M2y0QCkPvZKtjH4GrUQS573SnbNOnY",
-    "rEgzt6K7DscwHTn5q2TrL54RjRU7MlaUmchW-i9e_eQ",
-    "l_9W9Y1WTxpgxG9pDlDMNSpjeToOiBR01CfBV58Bqac",
-    "CTnVO70dweq7Rti4CsY_NQVm134Fp-FhYSoo3yP031E",
-    "UF_jb3BDYxiIpn4etqSRgYyeFPtGi9r0XM0uUKBXVGs",
-    "NhNMRIfuQHiO4OSywVpStIMUsYgoBGP_KxdeXLxAAfc",
-    "Lc3pENttHDRqouWM1GAMx9p8QRF9hthQgBIl7ZsJ0Qw",
-    "k8UPmTUk9TnchzvVDBx_D9LBs1M34hdbKLssoa9qDTg",
-    "RAwl5wM5_X3DcfUhXSr4_XmprcRdPgBbjHCdJNrPCjo",
-    "wi_Xhz65wU2Jb2APKmB9OKg2x19-ob0L2c5cEP75msM",
-    "ni6Kd20rCMCjM9b46nFHm85-CSt8JuFFPozUYp3cSQ4",
-    "NhU1UR9ZZ4MLwSlA7ifWlVO5dLymWAuPC9KETQS6gZI",
+# WARNING: never commit live `owner_token` values — possession of a token is
+# account ownership. Tokens are loaded at runtime from the OWNER_TOKENS env
+# var (comma-separated) so this file stays secret-free and safe to commit.
+#
+#   OWNER_TOKENS="tok1,tok2" locust -f ...
+#
+# To make a token: POST /api/session/bootstrap to mint one, then link it to a
+# real account via POST /api/account {id,name} (or reuse an existing linked
+# token from your own deployment's `account_device_links`).
+_DEFAULT_OWNER_TOKENS = [
+    # Placeholders only — replace via OWNER_TOKENS env var at runtime.
+    "REPLACE_ME_loadtest_token_1",
+    "REPLACE_ME_loadtest_token_2",
 ]
+
+
+def _owner_tokens() -> list[str]:
+    raw = os.environ.get("OWNER_TOKENS", "").strip()
+    if raw:
+        return [t.strip() for t in raw.split(",") if t.strip()]
+    return _DEFAULT_OWNER_TOKENS
+
+
+OWNER_TOKENS = _owner_tokens()
 TAGS = ["fluffy", "cat", "skeb", "artist", "outdoor", "scaly", "night", "indoor"]
 
 

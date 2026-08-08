@@ -1,21 +1,28 @@
 //! Owner-token request guard with sliding-refresh cookie.
 //!
-//! The device token lives in an `HttpOnly; Secure; SameSite=Lax` cookie
+//! The device token lives in an `HttpOnly; Secure; SameSite=Strict` cookie
 //! that the server refreshes on every authenticated request. Saved
 //! accounts persist as long as the user comes back inside the browser's
 //! 400-day cap.
 //!
-//! `SameSite=Lax` is sufficient CSRF protection because every
-//! mutating route is `POST/PATCH/DELETE` (Lax does not attach cookies to
-//! cross-origin requests of those methods) and GET routes are read-only.
+//! `SameSite=Strict` is our primary CSRF boundary: the browser only attaches
+//! a Strict cookie to same-origin requests, so it is never delivered on a
+//! cross-site top-level GET navigation, form POST, or credentialed fetch —
+//! regardless of what security headers the UA sends. This matters because some
+//! GET routes carry side effects (browse persistence, feed-session touch,
+//! visit tracking); with `Lax` such GETs still received the cookie on cross-*
+//! site top-level navigation, so we had to lean on the client-settable
+//! `Sec-Fetch-Site` header just for them. `Strict` removes that reliance — the
+//! cookie itself is the boundary. The same-origin `csrf_origin_is_allowed`
+//! check is retained as defense-in-depth.
 //!
 //! ## Local dev
 //!
-//! `trunk serve` + Rocket on different ports IS cross-origin, so Lax
-//! would block the cookie. The fix is **Trunk's proxy** (`Trunk.toml`
-//! already configures `[[proxy]]` for `/api/` → `http://127.0.0.1:8080`).
-//! With `backend_domain = ""` in `static/config.js`, all API calls use
-//! relative paths — same origin, no cross-site context, cookie works.
+//! `trunk serve` + Rocket on different ports looks cross-origin, so the fix is
+//! **Trunk's proxy** (`Trunk.toml` already configures `[[proxy]]` for `/api/`
+//! → `http://127.0.0.1:8080`). With `backend_domain = ""` in
+//! `static/config.js`, all API calls use relative paths — same origin (Strict
+//! attaches), cookie works.
 
 use std::collections::HashSet;
 use std::sync::{OnceLock, RwLock};
@@ -65,12 +72,13 @@ pub fn revoke(token: &str) -> Result<(), String> {
 }
 
 pub(crate) fn csrf_origin_is_allowed(req: &Request<'_>) -> bool {
-    // `Sec-Fetch-Site` is sent by browsers on every fetch and navigation,
-    // including GETs. Some GET routes have side effects (browse persistence,
-    // feed-session touch, visit tracking) and are reached cross-site with a
-    // SameSite=Lax cookie, so we must reject cross-site here rather than
-    // exempting all GETs. Same-origin app requests (served via the /api proxy)
-    // are `same-origin`/`same-site`, so this never blocks the first party.
+    // Defense-in-depth alongside the `SameSite=Strict` owner cookie (the
+    // primary boundary). `Sec-Fetch-Site` is sent by browsers on every fetch
+    // and navigation; a UA that omits/weakens it must not be able to drive
+    // cross-site state changes, and for cross-site requests the Strict cookie
+    // is anyway never attached. Same-origin app requests (served via the /api
+    // proxy) are `same-origin`/`same-site`, so this never blocks the first
+    // party.
     if let Some(site) = req.headers().get_one("Sec-Fetch-Site")
         && site.eq_ignore_ascii_case("cross-site")
     {
@@ -173,7 +181,11 @@ pub fn build_owner_cookie(token: String) -> Cookie<'static> {
         .http_only(true)
         // `Secure` would block the cookie over plain HTTP in `trunk serve`.
         .secure(cfg!(not(debug_assertions)))
-        .same_site(SameSite::Lax)
+        // `Strict` (not `Lax`): the frontend is served same-origin by this
+        // binary, so Strict never blocks the first party, and it stops
+        // cross-site top-level GET navigations (CSRF on side-effecting GETs)
+        // from ever receiving the cookie. See the module docs.
+        .same_site(SameSite::Strict)
         .path("/api")
         .max_age(Duration::days(OWNER_TOKEN_MAX_AGE_DAYS))
         .build()
@@ -186,7 +198,7 @@ pub fn build_owner_cookie_clear() -> Cookie<'static> {
     Cookie::build((OWNER_TOKEN_COOKIE, String::new()))
         .http_only(true)
         .secure(cfg!(not(debug_assertions)))
-        .same_site(SameSite::Lax)
+        .same_site(SameSite::Strict)
         .path("/api")
         .max_age(Duration::ZERO)
         .build()
@@ -264,7 +276,7 @@ mod tests {
         assert_eq!(cookie.name(), OWNER_TOKEN_COOKIE);
         assert_eq!(cookie.value(), token);
         assert_eq!(cookie.http_only(), Some(true));
-        assert_eq!(cookie.same_site(), Some(SameSite::Lax));
+        assert_eq!(cookie.same_site(), Some(SameSite::Strict));
         assert_eq!(cookie.path(), Some("/api"));
         assert_eq!(
             cookie.max_age(),
