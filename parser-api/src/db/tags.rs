@@ -791,7 +791,7 @@ async fn run_full_import() -> Result<(), String> {
         );
         let mut page = 1;
         loop {
-            let entries =
+            let (entries, _changed) =
                 api::fetch_tag_relations::<crate::models::TagAlias>("tag_aliases.json", page)
                     .await?;
             if entries.is_empty() {
@@ -812,16 +812,20 @@ async fn run_full_import() -> Result<(), String> {
             warn!("[tag_relation_import] cache preload failed: {e}");
         }
     } else {
-        let entries =
+        let (entries, changed) =
             api::fetch_tag_relations::<crate::models::TagAlias>("tag_aliases.json", 1).await?;
-        if !entries.is_empty() {
-            save_tag_aliases(&entries)?;
-            clear_tag_relation_caches();
+        if changed {
+            if !entries.is_empty() {
+                save_tag_aliases(&entries)?;
+                clear_tag_relation_caches();
+            }
+            info!(
+                "[tag_relation_import] tag_aliases incremental check: {} entries synced",
+                entries.len()
+            );
+        } else {
+            info!("[tag_relation_import] tag_aliases unchanged (304); nothing to sync");
         }
-        info!(
-            "[tag_relation_import] tag_aliases incremental check: {} entries synced",
-            entries.len()
-        );
     }
 
     // ── tag_implications ─────────────────────────────────────────
@@ -834,7 +838,7 @@ async fn run_full_import() -> Result<(), String> {
         );
         let mut page = 1;
         loop {
-            let entries = api::fetch_tag_relations::<crate::models::TagImplication>(
+            let (entries, _changed) = api::fetch_tag_relations::<crate::models::TagImplication>(
                 "tag_implications.json",
                 page,
             )
@@ -857,17 +861,21 @@ async fn run_full_import() -> Result<(), String> {
             warn!("[tag_relation_import] cache preload failed: {e}");
         }
     } else {
-        let entries =
+        let (entries, changed) =
             api::fetch_tag_relations::<crate::models::TagImplication>("tag_implications.json", 1)
                 .await?;
-        if !entries.is_empty() {
-            save_tag_implications(&entries)?;
-            clear_tag_relation_caches();
+        if changed {
+            if !entries.is_empty() {
+                save_tag_implications(&entries)?;
+                clear_tag_relation_caches();
+            }
+            info!(
+                "[tag_relation_import] tag_implications incremental check: {} entries synced",
+                entries.len()
+            );
+        } else {
+            info!("[tag_relation_import] tag_implications unchanged (304); nothing to sync");
         }
-        info!(
-            "[tag_relation_import] tag_implications incremental check: {} entries synced",
-            entries.len()
-        );
     }
 
     Ok(())

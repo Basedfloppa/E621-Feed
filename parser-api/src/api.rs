@@ -34,6 +34,10 @@ async fn rate_gate_wait(priority: Priority) {
 /// doesn't stay resident indefinitely on an idle server.
 struct CachedBody {
     body: String,
+    /// HTTP validator (`ETag`) from the upstream that produced this body.
+    /// Used for conditional revalidation (If-None-Match) so unchanged
+    /// resources short-circuit with a 304 instead of a full re-download.
+    etag: Option<String>,
     inserted_at: std::time::Instant,
 }
 
@@ -83,6 +87,33 @@ fn remove_api_cache_entry(url: &str) {
 
 /// Drop every cache entry past TTL. Called by the periodic worker since
 /// `api_cache_put` only evicts on insert.
+/// ETag stored with a cached entry (fresh or stale) — the validator to send
+/// on a conditional revalidation. `None` when the entry has no validator.
+fn api_cache_etag(url: &str) -> Option<String> {
+    let map = API_CACHE.lock().expect("api cache poisoned");
+    map.get(url).and_then(|e| e.etag.clone())
+}
+
+/// Body of a cached entry regardless of freshness — used to serve a 304
+/// revalidation without re-reading the network.
+fn api_cache_stale_body(url: &str) -> Option<String> {
+    let map = API_CACHE.lock().expect("api cache poisoned");
+    map.get(url).map(|e| e.body.clone())
+}
+
+/// Extend an existing cache entry's TTL window (used after a 304). Returns
+/// false when no entry is present to refresh.
+fn api_cache_refresh_ttl(url: &str) -> bool {
+    let mut map = API_CACHE.lock().expect("api cache poisoned");
+    match map.get_mut(url) {
+        Some(e) => {
+            e.inserted_at = std::time::Instant::now();
+            true
+        }
+        None => false,
+    }
+}
+
 pub fn prune_api_cache() -> (usize, usize) {
     let ttl = Duration::from_secs(cfg().e621_cache_ttl_secs);
     if ttl.is_zero() {
@@ -133,7 +164,7 @@ pub fn evict_api_cache_if_idle(idle_secs: u64) -> (usize, usize) {
     (before, after)
 }
 
-fn api_cache_put(url: &str, body: String, ttl: Duration, max_entries: usize) {
+fn api_cache_put(url: &str, body: String, etag: Option<String>, ttl: Duration, max_entries: usize) {
     if ttl.is_zero() || max_entries == 0 {
         return;
     }
@@ -159,6 +190,7 @@ fn api_cache_put(url: &str, body: String, ttl: Duration, max_entries: usize) {
         url.to_string(),
         CachedBody {
             body,
+            etag,
             inserted_at: std::time::Instant::now(),
         },
     );
@@ -178,6 +210,27 @@ async fn fetch_authed_text(
     cache_ttl_secs: u64,
     priority: Priority,
 ) -> Result<String, String> {
+    let (body, _) = fetch_authed_conditional(url, bypass_cache, cache_ttl_secs, priority).await?;
+    Ok(body)
+}
+
+/// Authenticated GET with HTTP conditional revalidation (ETag / If-None-Match).
+///
+/// When a stale-but-present cache entry carries an `ETag`, the upstream is
+/// revalidated with `If-None-Match`; a 304 Not Modified short-circuits the
+/// download — the cached body is returned and its TTL window is extended —
+/// so unchanged resources (e.g. tag_aliases / tag_implications dumps) are not
+/// re-downloaded on every expiry.
+///
+/// Returns `(body, not_modified)` where `not_modified=true` means the caller
+/// received the cached body that is already persisted/valid (re-saving is a
+/// no-op and caches need not be invalidated).
+async fn fetch_authed_conditional(
+    url: String,
+    bypass_cache: bool,
+    cache_ttl_secs: u64,
+    priority: Priority,
+) -> Result<(String, bool), String> {
     let cfg = cfg();
     let ttl = Duration::from_secs(if cache_ttl_secs > 0 {
         cache_ttl_secs
@@ -188,8 +241,14 @@ async fn fetch_authed_text(
 
     if !bypass_cache && let Some(body) = api_cache_get(&url, ttl) {
         debug!("[E621] cache hit: {url}");
-        return Ok(body);
+        return Ok((body, false));
     }
+
+    let conditional_etag = if bypass_cache {
+        None
+    } else {
+        api_cache_etag(&url)
+    };
 
     // A single server-wide budget protects the shared admin key even when
     // many owners or prefetch workers issue distinct e621 requests.
@@ -197,16 +256,38 @@ async fn fetch_authed_text(
         .map_err(|_| "global e621 admin-key request limit exceeded".to_string())?;
 
     let client = get_client();
-    let resp = send_with_retry(
-        client
-            .get(&url)
-            .basic_auth(cfg.admin_user.clone(), Some(cfg.admin_api.clone())),
-        priority,
-    )
-    .await
-    .map_err(|e| format!("request failed: {e}"))?;
+    let mut req = client
+        .get(&url)
+        .basic_auth(cfg.admin_user.clone(), Some(cfg.admin_api.clone()));
+    if let Some(etag) = &conditional_etag {
+        req = req.header("If-None-Match", etag);
+    }
+    let resp = send_with_retry(req, priority)
+        .await
+        .map_err(|e| format!("request failed: {e}"))?;
 
     let status = resp.status();
+
+    // 304 Not Modified: the upstream body is unchanged — serve the cached
+    // copy and extend its TTL so we don't re-download on the next expiry.
+    if status == StatusCode::NOT_MODIFIED {
+        if let Some(body) = api_cache_stale_body(&url) {
+            api_cache_refresh_ttl(&url);
+            touch_api_cache_access();
+            debug!("[E621] 304 Not Modified (conditional): {url}");
+            return Ok((body, true));
+        }
+        warn!("[E621] 304 without a cached body for {url}; refusing to retry");
+        return Err(format!(
+            "upstream returned 304 but no cached body for {url}"
+        ));
+    }
+
+    let new_etag = resp
+        .headers()
+        .get("etag")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
     let body = resp
         .text()
         .await
@@ -222,9 +303,9 @@ async fn fetch_authed_text(
     if bypass_cache {
         debug!("[E621] cache bypassed (prefetch): {url}");
     } else {
-        api_cache_put(&url, body.clone(), ttl, max_entries);
+        api_cache_put(&url, body.clone(), new_etag, ttl, max_entries);
     }
-    Ok(body)
+    Ok((body, false))
 }
 
 /// First non-empty line, capped to 160 chars — keeps Cloudflare HTML
@@ -903,21 +984,29 @@ pub async fn get_posts(account: &TruncatedAccount, page: Option<i32>) -> Result<
     Ok(posts)
 }
 
-/// Fetch one page of tag relation data from e621.
-/// Used for both `/tag_aliases.json` and `/tag_implications.json`.
-pub async fn fetch_tag_relations<T>(endpoint: &str, page: i32) -> Result<Vec<T>, String>
+/// Fetch one page of tag relation data from e621 with conditional
+/// revalidation (ETag / If-None-Match). Used for both `/tag_aliases.json` and
+/// `/tag_implications.json`.
+///
+/// Returns `(entries, changed)`. `changed=false` when the upstream replied
+/// 304 Not Modified and the (already-persisted) cached body was served as-is;
+/// callers should skip re-saving and cache invalidation in that case.
+pub async fn fetch_tag_relations<T>(endpoint: &str, page: i32) -> Result<(Vec<T>, bool), String>
 where
     T: serde::de::DeserializeOwned,
 {
     let limit = crate::models::cfg().posts_limit.to_string();
     let url = build_url(endpoint, &[("limit", limit), ("page", page.to_string())]);
     debug!("GET (auth) /{endpoint} page={page}");
-    let body = fetch_authed_text(url, false, 86400, Priority::Live)
+    let (body, not_modified) = fetch_authed_conditional(url, false, 86400, Priority::Live)
         .await
         .map_err(|e| format!("{endpoint} request page {page}: {e}"))?;
+    if not_modified {
+        return Ok((Vec::new(), false));
+    }
     let entries: Vec<T> = rocket::serde::json::from_str(&body)
         .map_err(|e| format!("{endpoint} parse failed page {page}: {e}"))?;
-    Ok(entries)
+    Ok((entries, true))
 }
 
 #[cfg(test)]
