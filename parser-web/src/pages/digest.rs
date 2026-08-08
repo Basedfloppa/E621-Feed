@@ -88,6 +88,11 @@ pub fn digest_page() -> Html {
     // (falling back to old `digest_*` keys); hide_saved stays digest-local.
     let hide_saved = use_state(|| read_bool_local("digest_hide_saved", true));
     let show_breakdown = read_display_setting("breakdown", "digest_show_breakdown", true);
+    let show_detailed_breakdown = read_display_setting(
+        "detailed_breakdown",
+        "digest_show_detailed_breakdown",
+        false,
+    );
     let show_desc = read_display_setting("desc", "digest_show_desc", true);
     let show_metadata = read_display_setting("metadata", "digest_show_metadata", false);
     let show_rating = read_display_setting("rating", "digest_show_rating", true);
@@ -429,7 +434,7 @@ pub fn digest_page() -> Html {
         show_desc,
         show_metadata,
         show_breakdown,
-        false,
+        show_detailed_breakdown,
     );
 
     html! {

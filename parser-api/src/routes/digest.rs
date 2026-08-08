@@ -398,6 +398,7 @@ async fn build_personalized_digest(
                     post,
                     score,
                     breakdown: Some(breakdown),
+                    reasons: Vec::new(),
                 }
             })
             .collect();
@@ -443,6 +444,7 @@ async fn build_personalized_digest(
                     post,
                     score: s,
                     breakdown: Some(breakdown),
+                    reasons: Vec::new(),
                 }
             })
             .collect()
@@ -602,6 +604,7 @@ async fn build_generic_digest(
                 post: sp.post,
                 score: s,
                 breakdown: Some(breakdown),
+                reasons: Vec::new(),
             }
         })
         .collect();
@@ -674,11 +677,19 @@ pub(crate) async fn get_daily_digest(
         || db::get_visit_stats(account_id)
             .is_ok_and(|s| s.visit_streak >= 2 || s.avg_gap_days <= 3.0);
 
-    let posts = if use_personalized {
+    let mut posts = if use_personalized {
         build_personalized_digest(account_id, hide_saved, &account.blacklist).await?
     } else {
         build_generic_digest(account_id, hide_saved, &account.blacklist).await?
     };
+
+    // Human-readable "why this post" reasons for digest cards (both modes).
+    let user_tags: std::collections::HashSet<String> = get_tag_counts(account_id)
+        .unwrap_or_default()
+        .iter()
+        .map(|t| t.name.to_lowercase())
+        .collect();
+    e621_account_parser_api::utils::explain_scored_posts(&mut posts, &user_tags, false);
 
     e621_account_parser_api::audit::event("feed.digest")
         .field("account_id", account_id)

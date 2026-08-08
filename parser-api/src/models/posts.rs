@@ -372,6 +372,12 @@ pub struct ScoredPost {
     pub post: Post,
     pub score: f32,
     pub breakdown: Option<ScoreBreakdown>,
+    /// Concise human-readable reasons for this recommendation (e.g. "New
+    /// artist near your tastes: x", "Matches your … taste", "Exploration
+    /// pick"). Filled by the recommendation pipeline; empty when not scored
+    /// (plain browse, similar, digest) or when no reason applies.
+    #[serde(default)]
+    pub reasons: Vec<String>,
 }
 
 /// Response wrapper for session-based feed continuation.

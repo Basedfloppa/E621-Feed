@@ -28,6 +28,9 @@ pub struct PostCardProps {
     pub position: i32,
     #[prop_or_default]
     pub breakdown: Option<ScoreBreakdown>,
+    /// Human-readable "why this post" reasons (from the backend).
+    #[prop_or_default]
+    pub reasons: Vec<String>,
     #[prop_or_default]
     pub alt: Option<AttrValue>,
     #[prop_or_default]
@@ -654,6 +657,7 @@ pub fn post_card(props: &PostCardProps) -> Html {
                 <div class="p-2">
                     <crate::components::scoring_breakdown::ScoringBreakdown
                         breakdown={bd.clone()}
+                        reasons={props.reasons.clone()}
                         detailed={props.show_detailed_breakdown}
                     />
                 </div>

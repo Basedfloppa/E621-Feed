@@ -190,6 +190,7 @@ pub fn render_post_grid(
                             session_id={session_id.to_string()}
                             position={(position_offset + post_index) as i32}
                             breakdown={scored_post.breakdown.clone()}
+                            reasons={scored_post.reasons.clone()}
                             show_rating={show_rating}
                             show_affinity={show_affinity}
                             show_score={show_score}
@@ -324,6 +325,7 @@ pub fn post_grid(props: &PostGridProps) -> Html {
                                     post: p,
                                     score: 0.0,
                                     breakdown: None,
+                                    reasons: Vec::new(),
                                 })
                                 .collect()
                         };

@@ -620,6 +620,7 @@ async fn build_recommendations_shared(
                 post,
                 score: s,
                 breakdown: Some(breakdown),
+                reasons: Vec::new(),
             };
             (sp, timing)
         })
@@ -664,6 +665,16 @@ async fn build_recommendations_shared(
             sp.score = (sp.score + eps * tag_novelty).clamp(0.0, 1.0);
         }
     }
+
+    // Human-readable "why this post" reasons for the frontend. Uses the
+    // account's tag counts only to name a shared tag — never re-scores.
+    let user_tags: std::collections::HashSet<String> =
+        tags.iter().map(|t| t.name.to_lowercase()).collect();
+    e621_account_parser_api::utils::explain_scored_posts(
+        &mut scored,
+        &user_tags,
+        priors.exploration_epsilon > 1e-4,
+    );
 
     // Drop bucket_name — the caller handles bucket logging.
     let _ = bucket_name;
@@ -851,6 +862,7 @@ pub(crate) async fn get_similar_posts(
                 post,
                 score: sim,
                 breakdown: Some(breakdown),
+                reasons: Vec::new(),
             }
         })
         .filter(|sp| sp.score > 0.0)

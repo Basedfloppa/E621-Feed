@@ -614,6 +614,7 @@ mod tests {
             post: post(id, artists, characters),
             score: 1.0,
             breakdown: None,
+            reasons: Vec::new(),
         }
     }
 

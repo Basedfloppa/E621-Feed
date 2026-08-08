@@ -1,3 +1,7 @@
+use crate::components::icons::{
+    IconClock, IconDiscover, IconExclusive, IconInteract, IconMedia, IconNovel, IconPopular,
+    IconQuestion, IconRating, IconRelation, IconStar, IconTag, IconUploader,
+};
 use crate::models::*;
 use yew::prelude::*;
 
@@ -10,16 +14,21 @@ use yew::prelude::*;
 #[derive(Properties, PartialEq, Clone)]
 pub struct ScoringBreakdownProps {
     pub breakdown: ScoreBreakdown,
+    /// Backend-generated human-readable reasons ("New artist…", "Matches
+    /// your … taste", …). Shown above the channel breakdown when present.
+    #[prop_or_default]
+    pub reasons: Vec<String>,
     #[prop_or(false)]
     pub detailed: bool,
 }
 
 #[function_component(ScoringBreakdown)]
 pub fn scoring_breakdown(props: &ScoringBreakdownProps) -> Html {
+    let reasons = &props.reasons;
     if props.detailed {
-        render_detailed(&props.breakdown)
+        render_detailed(&props.breakdown, reasons)
     } else {
-        render_simple(&props.breakdown)
+        render_simple(&props.breakdown, reasons)
     }
 }
 
@@ -27,7 +36,7 @@ pub fn scoring_breakdown(props: &ScoringBreakdownProps) -> Html {
 
 struct ChannelInfo {
     label: &'static str,
-    icon: &'static str,
+    icon: Html,
     value: f32,
     /// Short explanation prefix, e.g. "tags match your profile"
     why: &'static str,
@@ -37,73 +46,73 @@ fn all_channels(bd: &ScoreBreakdown) -> [ChannelInfo; 12] {
     [
         ChannelInfo {
             label: "Tag",
-            icon: "🏷️",
+            icon: html! { <IconTag /> },
             value: bd.tag_similarity,
             why: "tags match your profile",
         },
         ChannelInfo {
             label: "Quality",
-            icon: "⭐",
+            icon: html! { <IconStar /> },
             value: bd.quality_fit,
             why: "high-quality post",
         },
         ChannelInfo {
             label: "Recent",
-            icon: "🕐",
+            icon: html! { <IconClock /> },
             value: bd.recency_fit,
             why: "recently posted",
         },
         ChannelInfo {
             label: "Rating",
-            icon: "🔞",
+            icon: html! { <IconRating /> },
             value: bd.rating_fit,
             why: "rating you prefer",
         },
         ChannelInfo {
             label: "Media",
-            icon: "🎞️",
+            icon: html! { <IconMedia /> },
             value: bd.media_fit,
             why: "media type you like",
         },
         ChannelInfo {
             label: "Popular",
-            icon: "🔥",
+            icon: html! { <IconPopular /> },
             value: bd.popularity_fit,
             why: "popular with others",
         },
         ChannelInfo {
             label: "Interact",
-            icon: "👆",
+            icon: html! { <IconInteract /> },
             value: bd.interaction_fit,
             why: "similar to posts you interacted with",
         },
         ChannelInfo {
             label: "Relation",
-            icon: "🔗",
+            icon: html! { <IconRelation /> },
             value: bd.tag_relation_fit,
             why: "coherent tag combination",
         },
         ChannelInfo {
             label: "Uploader",
-            icon: "📤",
+            icon: html! { <IconUploader /> },
             value: bd.uploader_fit,
             why: "uploader you tend to favourite",
         },
         ChannelInfo {
             label: "Exclusive",
-            icon: "💎",
+            icon: html! { <IconExclusive /> },
             value: bd.exclusivity_fit,
             why: "rare tag combination",
         },
         ChannelInfo {
             label: "Novel",
-            icon: "✨",
+            icon: html! { <IconNovel /> },
             value: bd.novelty_fit,
             why: "fresh unfamiliar tags",
         },
         ChannelInfo {
             label: "Discover",
-            icon: "🔍",
+            icon: html! { <IconDiscover /> },
             value: bd.artist_discovery_fit,
             why: "new artist near your tastes",
         },
@@ -156,12 +165,28 @@ fn why_sentence(chs: &[&ChannelInfo]) -> String {
 
 // ── Simple mode ───────────────────────────────────────────────────
 
-fn render_simple(bd: &ScoreBreakdown) -> Html {
+fn reasons_blocks(reasons: &[String]) -> Html {
+    if reasons.is_empty() {
+        return html! {};
+    }
+    html! {
+        <div class="flex flex-wrap justify-center gap-1 px-1 pt-1">
+            { for reasons.iter().map(|r| html! {
+                <span class="inline-flex items-center gap-1 max-w-full rounded-full border border-primary/40 bg-primary/10 px-2.5 py-1 text-xs font-normal leading-snug text-primary">
+                    <IconQuestion />
+                    <span class="min-w-0 break-words">{ r.as_str() }</span>
+                </span>
+            }) }
+        </div>
+    }
+}
+
+fn render_simple(bd: &ScoreBreakdown, reasons: &[String]) -> Html {
     let chs = all_channels(bd);
     let tops = top_k(&chs, 3);
     let sentence = why_sentence(&tops);
 
-    if tops.is_empty() {
+    if tops.is_empty() && reasons.is_empty() {
         return html! {
             <div class="flex flex-col gap-1 px-2 py-1 text-center text-xs" aria-label="Why this post">
                 <p class="text-base-content/40 text-xs italic">{ &sentence }</p>
@@ -171,16 +196,27 @@ fn render_simple(bd: &ScoreBreakdown) -> Html {
 
     let badges: Html = tops.iter().map(|c| html! {
         <span class="badge badge-ghost gap-1 text-xs" title={format!("{} = {:.4}", c.label, c.value)}>
-            <span class="opacity-70">{ c.icon }</span>
+            <span class="opacity-70">{ c.icon.clone() }</span>
             { format!("{:.2}", c.value) }
         </span>
     }).collect();
 
-    html! {
-        <div class="flex flex-col gap-1 px-2 py-1 text-center text-xs" aria-label="Why this post">
+    // When the backend produced concrete reasons, they are the primary
+    // explanation; the generi top-channel sentence is omitted to avoid
+    // saying the same thing twice in different words.
+    let primary: Html = if reasons.is_empty() {
+        html! {
             <p class="text-base-content/80 text-xs leading-tight italic text-center">
                 { &sentence }
             </p>
+        }
+    } else {
+        reasons_blocks(reasons)
+    };
+
+    html! {
+        <div class="flex flex-col gap-1 px-2 py-1 text-center text-xs" aria-label="Why this post">
+            { primary }
             <div class="flex flex-wrap justify-center gap-1">
                 { badges }
             </div>
@@ -190,11 +226,12 @@ fn render_simple(bd: &ScoreBreakdown) -> Html {
 
 // ── Detailed mode ─────────────────────────────────────────────────
 
-fn render_detailed(bd: &ScoreBreakdown) -> Html {
+fn render_detailed(bd: &ScoreBreakdown, reasons: &[String]) -> Html {
     let chs = all_channels(bd);
 
     html! {
         <div class="flex flex-col gap-1 p-2" aria-label="Score breakdown">
+            { reasons_blocks(reasons) }
             { for chs.iter().map(|c| {
                 let bar_pct = (c.value * 100.0).clamp(0.0, 100.0);
                 let bar_style = format!("width: {:.0}%", bar_pct);
@@ -202,7 +239,7 @@ fn render_detailed(bd: &ScoreBreakdown) -> Html {
                 html! {
                     <div class="flex items-center gap-2 text-xs">
                         <span class="w-16 shrink-0 text-base-content/70 truncate" title={c.label}>
-                            { c.icon }
+                            { c.icon.clone() }
                             { " " }
                             { c.label }
                         </span>

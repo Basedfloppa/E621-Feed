@@ -248,6 +248,10 @@ pub struct ScoredPost {
     pub post: Post,
     pub score: f32,
     pub breakdown: Option<ScoreBreakdown>,
+    /// Human-readable reasons for this recommendation (populated on the
+    /// backend for scored/feed responses; empty otherwise).
+    #[serde(default)]
+    pub reasons: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]

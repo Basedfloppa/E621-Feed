@@ -131,7 +131,7 @@ pub fn trending_page() -> Html {
     let show_metadata = read_display_setting("metadata", "trending_show_metadata", false);
     let show_breakdown = read_display_setting("breakdown", "trending_show_breakdown", false);
     let show_detailed_breakdown = read_display_setting(
-        "show_detailed_breakdown",
+        "detailed_breakdown",
         "trending_show_detailed_breakdown",
         false,
     );

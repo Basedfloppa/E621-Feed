@@ -25,6 +25,7 @@ fn ids_to_scored(ids: &[i64]) -> Result<Vec<ScoredPost>, String> {
             post,
             score: 0.0,
             breakdown: None,
+            reasons: Vec::new(),
         })
         .collect())
 }

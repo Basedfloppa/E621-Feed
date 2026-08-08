@@ -203,9 +203,16 @@ pub(crate) async fn search_scored_posts(
                 post,
                 score,
                 breakdown: Some(breakdown),
+                reasons: Vec::new(),
             }
         })
         .collect();
+
+    // Human-readable "why this post" reasons for trending cards.
+    let user_tags: std::collections::HashSet<String> =
+        tags.iter().map(|t| t.name.to_lowercase()).collect();
+    e621_account_parser_api::utils::explain_scored_posts(&mut scored, &user_tags, false);
+
     scored.sort_by(|a, b| {
         b.score
             .partial_cmp(&a.score)
@@ -282,9 +289,15 @@ pub(crate) async fn get_trending_scored(
                 post,
                 score,
                 breakdown: Some(breakdown),
+                reasons: Vec::new(),
             }
         })
         .collect();
+
+    // Human-readable "why this post" reasons for trending cards.
+    let user_tags: std::collections::HashSet<String> =
+        tags.iter().map(|t| t.name.to_lowercase()).collect();
+    e621_account_parser_api::utils::explain_scored_posts(&mut scored, &user_tags, false);
 
     // Apply affinity threshold if provided.
     if let Some(threshold) = affinity_threshold {
