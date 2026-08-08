@@ -23,3 +23,5 @@ parser-api/loadtest/server.log
 parser-api/loadtest/__pycache__/
 # Never allow a live owner_token back into a committed load-test harness.
 parser-api/loadtest/locustfile.py
+
+.pi**
