@@ -56,6 +56,11 @@ pub struct AppMetrics {
     /// `timeout`, `network`, `decode`. Feeds the "High % 429/5xx"
     /// Grafana alert.
     pub upstream_errors_total: IntCounterVec,
+
+    /// Cache entries dropped by the cache-pruner worker, by category.
+    /// Categories: api_ttl, api_idle, jobs, ratelimit, candidates, revoked,
+    /// idf, relation.
+    pub cache_pruned_total: IntCounterVec,
 }
 
 impl AppMetrics {
@@ -150,6 +155,13 @@ impl AppMetrics {
                 "e621_upstream_errors_total",
                 "Outbound e621 request failures by class (429 / 5xx / 4xx / timeout / network / decode)",
                 &["class"]
+            )
+            .unwrap(),
+
+            cache_pruned_total: register_int_counter_vec!(
+                "e621_cache_pruned_total",
+                "Cache entries dropped by the cache-pruner, by category",
+                &["category"]
             )
             .unwrap(),
         }

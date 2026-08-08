@@ -3,7 +3,11 @@
   "__requires": [],
   "title": "E621 Feed \u2014 Usage Analytics",
   "description": "Usage metrics for E621 Feed: active users, feature popularity, process health, catalog growth, and A/B experiment comparison (control vs exploration). Source: e621-feed /api/metrics",
-  "tags": ["e621-feed", "prometheus", "ab-testing"],
+  "tags": [
+    "e621-feed",
+    "prometheus",
+    "ab-testing"
+  ],
   "timezone": "browser",
   "editable": true,
   "refresh": "30s",
@@ -648,6 +652,33 @@
             }
           },
           "unit": "req/s"
+        }
+      }
+    },
+    {
+      "title": "Cache Pruner \u2014 Entries Dropped",
+      "type": "timeseries",
+      "description": "Rate of cache entries dropped by the cache-pruner worker, split by category (api_ttl, api_idle, jobs, ratelimit, candidates, revoked, idf, relation)",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 48
+      },
+      "targets": [
+        {
+          "expr": "sum by (category) (rate(e621_cache_pruned_total[$__rate_interval]))",
+          "legendFormat": "{{category}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 20
+          },
+          "unit": "none"
         }
       }
     }

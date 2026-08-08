@@ -31,10 +31,21 @@ use std::time::{Duration, Instant};
 
 use crate::{
     api, auth, db, jobs,
+    metrics::METRICS,
     models::cfg,
     ratelimit,
     utils::{evict_global_relation_if_idle, evict_idf_if_idle},
 };
+
+/// Record one cache-pruner drop batch against the Prometheus counter.
+fn record_pruned(category: &str, dropped: usize) {
+    if dropped > 0 {
+        METRICS
+            .cache_pruned_total
+            .with_label_values(&[category])
+            .inc_by(dropped as u64);
+    }
+}
 
 const MIN_INTERVAL_SECS: u64 = 30;
 
@@ -63,6 +74,10 @@ pub fn spawn_cache_pruner() {
                 let api_diff = api::prune_api_cache();
                 let jobs_diff = jobs::prune_finished_jobs();
                 let rl_diff = ratelimit::prune_buckets();
+                record_pruned("api_ttl", api_diff.0 - api_diff.1);
+                record_pruned("jobs", jobs_diff.0 - jobs_diff.1);
+                record_pruned("ratelimit", rl_diff.0 - rl_diff.1);
+
                 let orphan_retention = cfg().runtime.orphan_retention_secs;
                 let candidate_diff = if orphan_retention > 0 {
                     match db::prune_orphan_candidates(orphan_retention) {
@@ -75,6 +90,7 @@ pub fn spawn_cache_pruner() {
                 } else {
                     (0, 0)
                 };
+                record_pruned("candidates", candidate_diff.0 - candidate_diff.1);
                 let revoked_diff = match db::prune_revoked_tokens(auth::REVOKED_TOKEN_RETENTION_SECS) {
                     Ok((before, after)) => {
                         if before != after
@@ -89,6 +105,7 @@ pub fn spawn_cache_pruner() {
                         (0, 0)
                     }
                 };
+                record_pruned("revoked", revoked_diff.0 - revoked_diff.1);
                 // Feed-session dedup state was never reaped in production
                 // (the function existed but had no caller), so attacker-chosen
                 // session IDs could grow feed_sessions/feed_session_posts
@@ -101,6 +118,9 @@ pub fn spawn_cache_pruner() {
                 let api_evicted = api::evict_api_cache_if_idle(idle_evict_secs);
                 let idf_evicted = evict_idf_if_idle(idle_evict_secs);
                 let relation_evicted = evict_global_relation_if_idle(idle_evict_secs);
+                record_pruned("api_idle", api_evicted.0 - api_evicted.1);
+                record_pruned("idf", idf_evicted.0);
+                record_pruned("relation", relation_evicted.0 - relation_evicted.1);
                 if api_evicted.0 > 0 {
                     info!(
                         "[cache-pruner] idle-evict API cache after {}s: dropped {} entries",

@@ -1165,6 +1165,7 @@ pub fn post_viewer(props: &PostViewerProps) -> Html {
                                         class={classes!("max-h-full", "max-w-full", "object-contain", if *fs_active { vec!["w-full", "h-full", "max-h-none", "max-w-none", "object-fill"] } else { Vec::new() })}
                                         src={media_url}
                                         autoplay={true}
+                                        loop={true}
                                         muted={true}
                                         playsinline={true}
                                         onloadedmetadata={on_video_loaded.clone()}
