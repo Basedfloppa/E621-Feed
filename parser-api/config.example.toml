@@ -37,9 +37,9 @@ default_account_blacklist = [
   "shota",
 ]
 posts_domain = "https://uri.com"
-posts_limit = 160         # e621 maximum: 320
-rps_delay_ms = 250        # legacy global delay; priority delays are under [runtime]
-max_retries = 2           # 0 disables retries
+posts_limit = 160 # e621 maximum: 320
+rps_delay_ms = 250 # legacy global delay; priority delays are under [runtime]
+max_retries = 2 # 0 disables retries
 attempt_timeout_secs = 30 # hard timeout per HTTP attempt
 
 # HTTP User-Agent sent to e621.
@@ -81,8 +81,8 @@ exclusivity_max_tags = 15            # top-K tags by group weight in O(T²) loop
 exclusivity_cross_group_weight = 0.5 # cross-group cooc weight; >1 = rare multi-group combos score higher
 
 mix_novelty = 0.02
-novelty_n0 = 3.0             # impressions needed for 50% confidence tag is "not novel"
-novelty_use_feedback = true  # false = only check favourites, not impression counts
+novelty_n0 = 3.0            # impressions needed for 50% confidence tag is "not novel"
+novelty_use_feedback = true # false = only check favourites, not impression counts
 
 mix_artist_discovery = 0.03
 artist_discovery_n0 = 3.0            # new artists needed for 50% confidence
@@ -115,7 +115,7 @@ score_temperature = 0.0     # 0 = identity; >0 sigmoid-sharpens the final score
 confidence_steepness = 1.0  # 1 = n/(n+n0); >1 sharpens warm-up
 mmr_redundancy_exp = 1.0    # 1 = linear MMR penalty
 tag_sim_jaccard_blend = 0.0 # 0 = pure cosine; small >0 hedges sparse profiles
-exploration_epsilon   = 0.0 # ε-greedy exploration bonus; 0 = disabled (default)
+exploration_epsilon = 0.0   # ε-greedy exploration bonus; 0 = disabled (default)
 
 # Optional point splits. NaN disables a split and follows the parent value.
 idf_lambda_meta = 0.40
@@ -203,6 +203,7 @@ cleanup_interval_secs = 21600           # catalog pruning interval
 catalog_retention_days = 90             # retain unowned posts for this many days
 orphan_retention_secs = 3600            # orphan-candidate retention period
 jobs_finished_retain_secs = 600         # in-memory /process job retention
+jobs_running_timeout_secs = 86400       # max wall-clock per running /process job (24 h)
 prefetch_active_window_days = 14        # account activity window
 prefetch_breaker_threshold = 3          # failures before pausing prefetch (0 = disabled)
 prefetch_breaker_pause_secs = 600       # prefetch pause duration
@@ -214,6 +215,8 @@ prefetch_cold_interval_secs = 900       # cold-worker interval
 cache_validate_interval_secs = 300      # interval for cache cleanup
 # Idle eviction for in-memory caches. 0 = disabled.
 cache_idle_eviction_secs = 1800 # cache idle-eviction timeout
+
+tag_alias_import_interval_secs = 86400 # daily sync of tag aliases / implications
 
 live_rps_delay_ms = 250         # live request base delay (ms)
 prefetch_rps_delay_ms = 500     # hot/cold prefetch base delay (ms)

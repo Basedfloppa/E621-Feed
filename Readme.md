@@ -16,7 +16,6 @@ personalized feed, daily digest, and search.
 
 <https://e621feed.zorolin.rs/feed>
 
-
 ---
 
 ## Features
@@ -31,6 +30,9 @@ personalized feed, daily digest, and search.
   optional per-account result scoring (Wide / Balanced / Strict cutoffs)
 - **Similar posts** — find posts by tag overlap
 - **Interactive tag-relation graph** — account data visualisations
+- **PWA / offline** — installable as an app (Chromium); works offline with
+  cached static assets and your recent data, re-syncs feedback when back
+  online, and the installed app refreshes itself in the background
 
 ---
 
@@ -81,4 +83,3 @@ first `/process` import builds your profile.
 | Contributing & local quality gate | [CONTRIBUTING.md](CONTRIBUTING.md) |
 
 ---
-

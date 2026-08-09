@@ -388,7 +388,7 @@ pub(crate) async fn get_recommendations(
 /// Fetches e621 posts, hydrates local candidates, scores, thresholds, and
 /// diversifies — returning posts already sorted by adjusted (MMR) score.
 ///
-/// ## Dedup strategy (v6+)
+/// ## Dedup strategy
 /// - **Live posts** from e621: deduped against a short window (14 days via
 ///   `get_recently_seen_post_ids`).
 /// - **Local candidates** (old cached posts): deduped against a **union** of
@@ -397,7 +397,7 @@ pub(crate) async fn get_recommendations(
 ///   reappearing across weeks.
 /// - **Owned posts** (user's favourites) are always excluded.
 ///
-/// ## Randomisation (v6+)
+/// ## Randomisation
 /// `collect_local_candidate_ids` now uses `ORDER BY RANDOM()` (see
 /// `db/feed.rs`) — the same top-N tags produce different candidates on every
 /// call, distributing impressions across the long tail instead of always

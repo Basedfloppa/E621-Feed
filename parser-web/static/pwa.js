@@ -170,7 +170,7 @@
 		registerPeriodicSync();
 	});
 
-	// ── Periodic background sync (task 8) ───────────────────────────────
+	// ── Periodic background sync ────────────────────────────────────────
 	// Refresh cached feed data roughly every 6 hours while the installed PWA is
 	// idle. Requires the app to be installed and the permission granted; this is
 	// best-effort on Chromium and silently skipped elsewhere.

@@ -48,7 +48,6 @@ pub fn get_trending_posts(days: i64, limit: usize) -> Result<Vec<ScoredPost>, St
 }
 
 /// Popular posts created since `since`, randomised.
-/// Window widened from 2→7 days and pull pool from 3×→6× to get more variety.
 pub fn get_popular_posts_since(
     since: DateTime<Utc>,
     limit: usize,

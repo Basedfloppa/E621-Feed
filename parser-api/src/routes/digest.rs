@@ -6,15 +6,15 @@
 //!
 //! `GET /digest/<account_id>?<full>&<exclude_saved>`
 //!
-//! ## Freshness guarantees (v6+)
+//! ## Freshness guarantees
 //!
-//! - **TTL reduced** to 6 h (was 24 h) — the cache is a coarse cap, not a
-//!   "same all day" guarantee.
+//! - **TTL of 6 h** — the cache is a coarse cap, not a "same all day"
+//!   guarantee.
 //! - **Every stratum randomises** its selection — top-3 are picked from
 //!   top-6, trending is a random subset, etc.
 //! - **`get_trending_posts`** uses `ORDER BY RANDOM()` over a 30-day window
-//!   (was 7 days) with a 6× pool.
-//! - **`get_popular_posts_since`** uses a 7-day window (was 2 days).
+//!   with a 6× pool.
+//! - **`get_popular_posts_since`** uses a 7-day window.
 //! - **Fresh-blood layer** (`get_old_random_posts`): 8 random posts older
 //!   than 14 days that the user hasn't seen in `feed_interactions`. Guarantees
 //!   new faces even when the user's favourite-tag pool is exhausted.
@@ -529,7 +529,7 @@ async fn build_personalized_digest(
 }
 
 /// Generic (non-personalised) digest — trending + popular + random + fresh.
-/// Uses the same widened windows and randomness as the personalised path.
+/// Uses the same randomisation and windows as the personalised path.
 /// Scores posts using global defaults so breakdown is always available.
 async fn build_generic_digest(
     account_id: i32,
@@ -539,7 +539,7 @@ async fn build_generic_digest(
     use rayon::prelude::*;
 
     let mut rng = rand::thread_rng();
-    // V6: widened windows matching personalised path
+    // Same widened windows as the personalised path
     let trending = db::get_trending_posts(30, 10).unwrap_or_default();
     let popular_new =
         db::get_popular_posts_since(Utc::now() - chrono::Duration::days(7), 5).unwrap_or_default();

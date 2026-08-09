@@ -531,12 +531,12 @@ fn local_candidates_recent_popular(
 /// Three SQL streams (top-artist, top-character, recent-popular) unioned and
 /// capped at `limit`. Caller dedups against seen/owned in memory.
 ///
-/// ## Randomisation (v6+)
-/// Each stream uses `ORDER BY RANDOM()` instead of `ORDER BY score_total DESC`
-/// so the same best posts don't dominate every feed request.
-/// - Artist/character: pulls from the user's top 20 tags (was 10/12).
-/// - Recent-popular: looks back 60 days instead of 30.
-/// - Pool size per stream: `(limit / 3 * 2).max(100)` (was `(limit / 3).max(50)`).
+/// ## Randomisation
+/// Each stream uses `ORDER BY RANDOM()` so the same best posts don't
+/// dominate every feed request.
+/// - Artist/character: pulls from the user's top 20 tags.
+/// - Recent-popular: looks back 60 days.
+/// - Pool size per stream: `(limit / 3 * 2).max(100)`.
 pub fn collect_local_candidate_ids(account_id: i32, limit: i64) -> Result<Vec<i64>, String> {
     let conn = open_db()?;
     // Use a larger multiplier per stream so each source contributes a diverse

@@ -681,7 +681,7 @@ pub fn post_card(props: &PostCardProps) -> Html {
         }
     };
 
-    // Temporary loading reserve (TODO 3.1). No permanent min-height — small
+    // Temporary loading reserve. No permanent min-height — small
     // media shouldn't leave an empty box. Instead, reserve height while the
     // media is still loading: `aspect-ratio` from the known preview
     // dimensions (with the legacy 300px as a floor), released as soon as the

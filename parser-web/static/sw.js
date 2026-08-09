@@ -1,14 +1,12 @@
 // static/sw.js — E621 Feed Service Worker.
 //
-// Registered at the root scope (`/sw.js`, scope `/`). Responsibilities grow
-// across the PWA tasks:
-//   * task 2 — offline fallback page: navigations that fail while offline and
-//     have no cached app shell are answered with `offline.html` instead of a
-//     blank white screen.
-//   * task 3 — cache-first static assets (wasm/css/js/static) on repeat
-//     visits.
-//   * task 4 — cache API responses for offline browsing.
-//   * task 7/8 — background / periodic sync.
+// Registered at the root scope (`/sw.js`, scope `/`). Responsibilities:
+//   * offline fallback — navigations that fail while offline and have no
+//     cached app shell are answered with `offline.html` instead of a blank
+//     white screen.
+//   * cache-first static assets (wasm/css/js/static) on repeat visits.
+//   * cache API responses for offline browsing.
+//   * background sync for queued feedback + periodic self-refresh.
 //
 // Bump CACHE_VERSION whenever pre-cache or cache names change.
 
@@ -27,8 +25,8 @@ const API_CACHEABLE = [
 	"/api/posts/",
 ];
 
-// IndexedDB schema: cached API responses (task 4) and pending interaction
-// events awaiting background-sync replay (task 7).
+// IndexedDB schema: cached API responses and pending interaction events
+// awaiting background-sync replay.
 const DB_NAME = "e621-feed";
 const DB_VERSION = 2;
 const API_STORE = "api-responses";
@@ -76,7 +74,7 @@ self.addEventListener("fetch", (event) => {
 
 	// Interaction feedback (open/hide/like…): if the network is down, queue
 	// the POST in IndexedDB and schedule a background sync to replay it later
-	// (task 7) instead of dropping the user's feedback.
+	// instead of dropping the user's feedback.
 	if (event.request.method === "POST" && isInteractionUrl(url.pathname)) {
 		event.respondWith(handleInteractionPost(event.request));
 		return;
@@ -87,7 +85,7 @@ self.addEventListener("fetch", (event) => {
 		return;
 	}
 
-	// Offline fallback for page navigations (task 2). A navigation is answered
+	// Offline fallback for page navigations. A navigation is answered
 	// network-first so the freshest app shell is used when online; if it fails
 	// while offline, serve a cached app shell (index) or the offline page.
 	if (event.request.mode === "navigate") {
@@ -95,7 +93,7 @@ self.addEventListener("fetch", (event) => {
 		return;
 	}
 
-	// API responses: network-first with an IndexedDB offline fallback (task 4).
+	// API responses: network-first with an IndexedDB offline fallback.
 	if (url.pathname.startsWith("/api/")) {
 		if (API_CACHEABLE.some((p) => url.pathname.startsWith(p))) {
 			event.respondWith(networkFirstApi(event.request));
@@ -122,7 +120,7 @@ async function cacheFirst(request) {
 	return response;
 }
 
-// ── IndexedDB-backed API caching (task 4) ────────────────────────────
+// ── IndexedDB-backed API caching ──────────────────────────────────────
 
 function openDB() {
 	return new Promise((resolve, reject) => {
@@ -242,7 +240,7 @@ async function handleNavigation(request) {
 	}
 }
 
-// ── Background sync for interaction feedback (task 7) ────────────────
+// ── Background sync for interaction feedback ─────────────────────────
 
 function isInteractionUrl(pathname) {
 	return (
@@ -378,7 +376,7 @@ self.addEventListener("sync", (event) => {
 	}
 });
 
-// ── Periodic background sync (task 8) ────────────────────────────────
+// ── Periodic background sync ─────────────────────────────────────────
 // Fires roughly every `minInterval` while the (installed) PWA is idle, so a
 // returning user is served fresh content: flush queued interactions and
 // re-hydrate the app shell + core static assets in place.
@@ -388,7 +386,7 @@ const PERIODIC_TAG = "feed-refresh";
 const PERIODIC_INTERVAL_MS = 6 * 60 * 60 * 1000;
 
 async function refreshPeriodically() {
-	// Deliver any queued feedback from task 7 first.
+	// Deliver any queued feedback first.
 	await replayPendingEvents();
 
 	// Re-validate the app shell and static shell so installed clients pick up
