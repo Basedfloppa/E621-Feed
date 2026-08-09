@@ -3,10 +3,10 @@
 A self-hosted personalized feed engine for e621: import favorites, build
 per-account preference profiles, and get a scored + diversified feed.
 
-[![Stars](https://img.shields.io/github/stars/Basedfloppa/e621-Account-Parser?style=flat-square)](https://github.com/Basedfloppa/e621-Account-Parser/stargazers)
-[![Forks](https://img.shields.io/github/forks/Basedfloppa/e621-Account-Parser?style=flat-square)](https://github.com/Basedfloppa/e621-Account-Parser/network/members)
-[![Issues](https://img.shields.io/github/issues/Basedfloppa/e621-Account-Parser?style=flat-square)](https://github.com/Basedfloppa/e621-Account-Parser/issues)
-[![License](https://img.shields.io/github/license/Basedfloppa/e621-Account-Parser?style=flat-square)](https://github.com/Basedfloppa/E621-Account-Parser/blob/master/LICENCE)
+[![Stars](https://img.shields.io/github/stars/Basedfloppa/E621-Feed?style=flat-square)](https://github.com/Basedfloppa/E621-Feed/stargazers)
+[![Forks](https://img.shields.io/github/forks/Basedfloppa/E621-Feed?style=flat-square)](https://github.com/Basedfloppa/E621-Feed/network/members)
+[![Issues](https://img.shields.io/github/issues/Basedfloppa/E621-Feed?style=flat-square)](https://github.com/Basedfloppa/E621-Feed/issues)
+[![License](https://img.shields.io/github/license/Basedfloppa/E621-Feed?style=flat-square)](https://github.com/Basedfloppa/E621-Feed/blob/master/LICENCE)
 
 ## About
 

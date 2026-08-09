@@ -303,7 +303,7 @@ fn default_tag_alias_import_interval_secs() -> u64 {
 }
 
 fn default_user_agent() -> String {
-    "E621AccountParser/0.1 (+https://github.com/zorolin/E621-Account-Parser)".to_string()
+    "E621AccountParser/0.1 (+https://github.com/Basedfloppa/E621-Feed)".to_string()
 }
 
 fn default_default_account_blacklist() -> Vec<String> {
