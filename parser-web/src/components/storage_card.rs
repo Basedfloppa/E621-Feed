@@ -204,7 +204,7 @@ pub fn storage_card() -> Html {
     let on_install_now = Callback::from(move |_| dispatch_pwa_event("pwa-request-install"));
 
     html! {
-        <div class="card bg-base-200 border border-base-300 shadow-sm">
+        <div id="settings-storage" class="card bg-base-200 border border-base-300 shadow-sm">
             <div class="card-body">
                 <h2 class="card-title text-xl">{ "Storage / Offline" }</h2>
                 <p class="text-sm text-base-content/70">

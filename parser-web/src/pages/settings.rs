@@ -480,7 +480,7 @@ pub fn settings_page() -> Html {
             <div class="flex justify-center">
                 <div class="w-full max-w-3xl flex flex-col gap-6">
 
-                    <div class="card bg-base-100 shadow">
+                    <div id="settings-server" class="card bg-base-100 shadow">
                         <div class="card-body text-base-content">
                             <h2 class="card-title text-xl">
                                 <IconSliders /> { "Server Settings" }
@@ -551,7 +551,7 @@ pub fn settings_page() -> Html {
 
                     <StorageCard />
 
-                    <div class="card bg-base-100 shadow">
+                    <div id="settings-display" class="card bg-base-100 shadow">
                         <div class="card-body text-base-content">
                             <h2 class="card-title text-xl">
                                 <IconSliders /> { "Display Settings" }
