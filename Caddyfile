@@ -1,21 +1,11 @@
-# Caddy — TLS terminator + reverse proxy for the single Rust binary.
-#
-# Since the frontend is embedded into the API binary (parser-api/build.rs →
-# parser-api/src/serve_embedded.rs), Caddy no longer serves static files from
-# parser-web/dist. The binary serves the SPA (/), its static assets, and /api
-# itself, and sets its own Cache-Control / Content-Type / CSP headers. Caddy
-# only terminates TLS (auto via Let's Encrypt) and proxies everything through.
-
 domain.com {
-    # ====== Compression (the embedded binary serves raw bytes) ======
+    # Compression
     encode zstd gzip
 
-    # ====== Reverse proxy: SPA + static + /api all served by the binary ======
+    # Reverse proxy
     reverse_proxy 127.0.0.1:8080 {
         header_up Host {host}
         header_up X-Real-IP {remote_host}
-        # Keep the real client IP: Caddy is the single trusted hop and already
-        # overwrites the header for us (don't trust client-sent X-Forwarded-*).
         header_up X-Forwarded-For {remote_host}
         transport http {
             read_timeout  300s
@@ -23,16 +13,14 @@ domain.com {
         }
     }
 
-    # ====== OPTIONS preflight for SPA routes (NOT /api) ======
-    # The binary handles these in dev (CORS fairing) but not in release, so
-    # answer SPA preflights here.
+    #OPTIONS preflight
     @options_site {
         method OPTIONS
         not path /api/*
     }
     respond @options_site 204
 
-    # ====== Block Swagger / OpenAPI in production (defense-in-depth) ======
+    # Block Swagger / OpenAPI
     @blocked {
         path /api/swagger-ui* /api/openapi.json
     }
@@ -47,7 +35,7 @@ domain.com {
     }
 }
 
-# www → apex redirect
+# www
 www.domain.com {
     redir https://domain.com{uri}
 }

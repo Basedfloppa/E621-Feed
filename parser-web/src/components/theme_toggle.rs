@@ -1,5 +1,5 @@
-use wasm_bindgen::prelude::*;
-use web_sys::{StorageEvent, wasm_bindgen::prelude::Closure, window};
+use wasm_bindgen::JsCast;
+use web_sys::{HtmlMetaElement, StorageEvent, wasm_bindgen::prelude::Closure, window};
 use yew::{Callback, Html, classes, function_component, html, use_effect_with, use_state};
 
 /// Available themes and their human-readable labels.
@@ -46,6 +46,44 @@ fn apply_theme(theme: &str) {
     }
     if let Some(storage) = window().and_then(|w| w.local_storage().ok()).flatten() {
         let _ = storage.set_item("theme", theme);
+    }
+    sync_theme_color_meta();
+}
+
+/// Keep the `<meta name="theme-color">` tags in sync with the selected theme's
+/// page background, so the browser chrome (and the native PWA install prompt)
+/// reflects the chosen theme instead of a fixed brand colour.
+fn sync_theme_color_meta() {
+    let Some(window) = window() else {
+        return;
+    };
+    let Some(doc) = window.document() else {
+        return;
+    };
+    let Some(elem) = doc.document_element() else {
+        return;
+    };
+    let Ok(style) = window.get_computed_style(&elem) else {
+        return;
+    };
+    let Some(style) = style else {
+        return;
+    };
+    let Ok(color) = style.get_property_value("--color-base-200") else {
+        return;
+    };
+    if color.is_empty() {
+        return;
+    }
+    let Ok(list) = doc.query_selector_all("meta[name='theme-color']") else {
+        return;
+    };
+    for i in 0..list.length() {
+        if let Some(node) = list.item(i)
+            && let Some(meta) = node.dyn_ref::<HtmlMetaElement>()
+        {
+            let _ = meta.set_attribute("content", &color);
+        }
     }
 }
 

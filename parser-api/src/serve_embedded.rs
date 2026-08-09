@@ -28,26 +28,35 @@ use rocket::response::{self, Responder, Response};
 include!(concat!(env!("OUT_DIR"), "/embedded_assets.rs"));
 
 /// Thin responder that renders an embedded file with a cached content-type,
-/// status and cache-control header.
+/// status and cache-control header (plus an optional extra header).
 pub struct EmbeddedFile {
     status: Status,
     content_type: ContentType,
     body: &'static [u8],
     cache: Cow<'static, str>,
+    /// Optional extra header, e.g. `Service-Worker-Allowed`.
+    extra: Option<(&'static str, &'static str)>,
 }
 
 impl<'r> Responder<'r, 'static> for EmbeddedFile {
     fn respond_to(self, _: &'r Request<'_>) -> response::Result<'static> {
-        Ok(Response::build()
-            .status(self.status)
-            .header(self.content_type)
-            .sized_body(self.body.len(), Cursor::new(self.body))
-            .raw_header("Cache-Control", self.cache)
-            .finalize())
+        match self.extra {
+            Some((name, value)) => Ok(Response::build()
+                .status(self.status)
+                .header(self.content_type)
+                .sized_body(self.body.len(), Cursor::new(self.body))
+                .raw_header("Cache-Control", self.cache)
+                .raw_header(name, value)
+                .finalize()),
+            None => Ok(Response::build()
+                .status(self.status)
+                .header(self.content_type)
+                .sized_body(self.body.len(), Cursor::new(self.body))
+                .raw_header("Cache-Control", self.cache)
+                .finalize()),
+        }
     }
 }
-
-/// Return the embedded SPA entry page payload.
 fn index_payload() -> Option<&'static [u8]> {
     if !EMBEDDED {
         return None;
@@ -124,6 +133,7 @@ fn file_response(
         content_type,
         body,
         cache: Cow::Borrowed(cache),
+        extra: None,
     }
 }
 
@@ -137,6 +147,7 @@ pub fn index() -> EmbeddedFile {
             content_type: ContentType::Plain,
             body: b"Frontend not embedded. Build parser-web (trunk build --release) before building the API.\n",
             cache: Cow::Borrowed("no-cache"),
+            extra: None,
         },
     }
 }
@@ -182,12 +193,30 @@ fn not_found() -> EmbeddedFile {
         content_type: ContentType::Plain,
         body: b"Not found\n",
         cache: Cow::Borrowed("no-cache"),
+        extra: None,
+    }
+}
+
+/// Serve the Service Worker from the root path so its scope covers the whole
+/// origin (no `Service-Worker-Allowed` header is needed at `/`).
+#[rocket::get("/sw.js")]
+pub fn service_worker() -> EmbeddedFile {
+    if let Some(asset) = lookup("static/sw.js") {
+        EmbeddedFile {
+            status: Status::Ok,
+            content_type: ContentType::JavaScript,
+            body: asset.data,
+            cache: Cow::Borrowed("no-cache"),
+            extra: Some(("Service-Worker-Allowed", "/")),
+        }
+    } else {
+        not_found()
     }
 }
 
 /// Rocket routes for the SPA root path. Callers mount at `/`.
 pub fn routes() -> Vec<rocket::Route> {
-    rocket::routes![index, files]
+    rocket::routes![index, files, service_worker]
 }
 
 #[cfg(test)]
@@ -280,6 +309,45 @@ mod tests {
         let c = client();
         let r = c.get("/nope.js").dispatch();
         assert_eq!(r.status(), Status::NotFound);
+    }
+
+    #[test]
+    fn serves_manifest_and_pwa_icons() {
+        if !super::EMBEDDED {
+            eprintln!("skipping: frontend not embedded in this build");
+            return;
+        }
+        let c = client();
+        let r = c.get("/static/manifest.json").dispatch();
+        assert_eq!(r.status(), Status::Ok);
+        assert_eq!(r.content_type(), Some(ContentType::JSON));
+        let body = String::from_utf8(r.into_bytes().unwrap()).unwrap();
+        assert!(body.contains("\"short_name\""));
+
+        let r = c.get("/static/pwa/icon-192.png").dispatch();
+        assert_eq!(r.status(), Status::Ok);
+        assert_eq!(r.content_type(), Some(ContentType::PNG));
+    }
+
+    #[test]
+    fn serves_service_worker_at_root_scope() {
+        if !super::EMBEDDED {
+            eprintln!("skipping: frontend not embedded in this build");
+            return;
+        }
+        if super::lookup("static/sw.js").is_none() {
+            eprintln!("skipping: static/sw.js not present in embedded assets");
+            return;
+        }
+        let c = client();
+        let r = c.get("/sw.js").dispatch();
+        assert_eq!(r.status(), Status::Ok);
+        assert_eq!(r.content_type(), Some(ContentType::JavaScript));
+        let allowed = r.headers().get_one("Service-Worker-Allowed");
+        assert_eq!(allowed, Some("/"), "SW should be served with root scope");
+        // Must not be treated as the SPA fallback.
+        let cc = r.headers().get_one("Cache-Control").unwrap_or("");
+        assert!(cc.contains("no-cache"));
     }
 }
 

@@ -1,0 +1,57 @@
+{
+  "name": "E621 Feed",
+  "short_name": "E621 Feed",
+  "description": "Self-hosted personalised feed and recommendations for e621.",
+  "id": "e621-feed",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait-primary",
+  "background_color": "#111827",
+  "theme_color": "#0d6efd",
+  "lang": "en",
+  "categories": ["entertainment", "tools"],
+  "icons": [
+    {
+      "src": "/static/pwa/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/static/pwa/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/static/pwa/icon-maskable-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    },
+    {
+      "src": "/static/favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ],
+  "shortcuts": [
+    {
+      "name": "Feed",
+      "url": "/feed",
+      "description": "Your personalised feed"
+    },
+    {
+      "name": "Trending",
+      "url": "/trending",
+      "description": "Currently trending posts"
+    },
+    {
+      "name": "Digest",
+      "url": "/digest",
+      "description": "Daily digest"
+    }
+  ]
+}

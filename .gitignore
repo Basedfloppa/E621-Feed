@@ -11,17 +11,9 @@ tailwind-output.css
 config.toml
 config.js
 
-# Real security.txt — contains the deploy contact email + expiry, generated
-# from .well-known/security.example.txt during deploy. Keep it local so the
-# repo doesn't leak personal contact info.
 parser-web/.well-known/security.txt
-
-# codeql db
 */db
-# load-test harness — real DB path + server logs (may contain tokens)
 parser-api/loadtest/server.log
 parser-api/loadtest/__pycache__/
-# Never allow a live owner_token back into a committed load-test harness.
 parser-api/loadtest/locustfile.py
-
 .pi**

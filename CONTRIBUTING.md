@@ -1,7 +1,3 @@
-# Contributing
-
-Thank you for improving E621 Feed. This document covers the local quality gate, the Rust workflow, and the checks required before a commit.
-
 ## Prerequisites
 
 - Stable Rust and Cargo

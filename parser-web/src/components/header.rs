@@ -288,7 +288,7 @@ pub fn header() -> Html {
     };
 
     html! {
-        <div class="drawer">
+        <div class="drawer sticky top-0 z-40">
             <input id="header-drawer" type="checkbox" class="drawer-toggle" aria-label="Toggle navigation" />
             <div class="drawer-content flex flex-col">
                 <nav class="navbar bg-base-100 border-b border-base-300 sticky top-0 shadow-md z-10" id="header">

@@ -65,11 +65,13 @@ fn switch(routes: Route) -> Html {
 fn app() -> Html {
     html! {
         <BrowserRouter>
+            <OfflineBanner />
             <Header />
             <main id="main-content" class="bg-base-200 min-h-screen pt-4">
                 <Switch<Route> render={switch} />
             </main>
             <PostViewerHost />
+            <AdultGate />
         </BrowserRouter>
     }
 }

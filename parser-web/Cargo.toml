@@ -9,9 +9,12 @@ edition = "2024"
 
 [dependencies]
 wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
 wasm-bindgen = { version = "0.2", features = [] }
 web-sys = { version = "0.3", features = [
   "Window",
+  "Navigator",
+  "Location",
   "Crypto",
   "Storage",
   "StorageEvent",
@@ -48,6 +51,18 @@ web-sys = { version = "0.3", features = [
   "CustomEvent",
   "EventTarget",
   "MediaQueryList",
+  "Document",
+  "NodeList",
+  "HtmlMetaElement",
+  "CacheStorage",
+  "Cache",
+  "CacheQueryOptions",
+  "Response",
+  "Request",
+  "StorageManager",
+  "StorageEstimate",
+  "IdbFactory",
+  "IdbOpenDbRequest",
 ] }
 urlencoding = "2"
 yew = { version = "0.23", features = ["csr"] }

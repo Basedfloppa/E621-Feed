@@ -37,9 +37,9 @@ default_account_blacklist = [
   "shota",
 ]
 posts_domain = "https://uri.com"
-posts_limit = 160 # e621 maximum: 320
-rps_delay_ms = 250 # legacy global delay; priority delays are under [runtime]
-max_retries = 2 # 0 disables retries
+posts_limit = 160         # e621 maximum: 320
+rps_delay_ms = 250        # legacy global delay; priority delays are under [runtime]
+max_retries = 2           # 0 disables retries
 attempt_timeout_secs = 30 # hard timeout per HTTP attempt
 
 # HTTP User-Agent sent to e621.
@@ -51,7 +51,7 @@ user_agent = "E621AccountParser/0.1 (+https://github.com/Basedfloppa/E621-Feed; 
 e621_cache_ttl_secs = 600     # 10 minutes
 e621_cache_max_entries = 5000
 
-# --- Scoring priors ---------------------------------------------------------
+# Scoring priors
 # Scoring priors and per-group multipliers.
 [priors]
 now = "2000-1-01T12:00:00Z" # dummy, replaced with current date at load
@@ -69,25 +69,21 @@ mix_media = 0.042
 mix_popularity = 0.017
 mix_interaction = 0.084
 mix_tag_relation = 0.067
-# Uploader quality channel. 0 = disabled.
 mix_uploader = 0.05
 uploader_n0 = 5.0          # cold-start: how many posts from an uploader needed for 50% confidence
 uploader_w_avg_score = 0.6 # blend weight for avg_score component in uploader_fit
 uploader_w_avg_fav = 0.4   # blend weight for avg_fav component in uploader_fit
 
-# Tag exclusivity channel. 0 = disabled.
 mix_exclusivity = 0.02
 min_exclusivity_cooc = 2             # pairs with cooc < this get full exclusivity credit
 exclusivity_scale = 0.5              # sigmoid scale; larger = sharper threshold
 exclusivity_max_tags = 15            # top-K tags by group weight in O(T²) loop (0 = no limit)
 exclusivity_cross_group_weight = 0.5 # cross-group cooc weight; >1 = rare multi-group combos score higher
 
-# Tag novelty channel. 0 = disabled.
 mix_novelty = 0.02
-novelty_n0 = 3.0   # impressions needed for 50% confidence tag is "not novel"
-# novelty_use_feedback = true  # false = only check favourites, not impression counts
+novelty_n0 = 3.0             # impressions needed for 50% confidence tag is "not novel"
+novelty_use_feedback = true  # false = only check favourites, not impression counts
 
-# Artist discovery channel. 0 = disabled.
 mix_artist_discovery = 0.03
 artist_discovery_n0 = 3.0            # new artists needed for 50% confidence
 artist_discovery_novelty_bonus = 0.2 # serendipity boost for low-confidence discoveries
@@ -119,11 +115,11 @@ score_temperature = 0.0     # 0 = identity; >0 sigmoid-sharpens the final score
 confidence_steepness = 1.0  # 1 = n/(n+n0); >1 sharpens warm-up
 mmr_redundancy_exp = 1.0    # 1 = linear MMR penalty
 tag_sim_jaccard_blend = 0.0 # 0 = pure cosine; small >0 hedges sparse profiles
-# exploration_epsilon   = 0.0  # ε-greedy exploration bonus; 0 = disabled (default)
+exploration_epsilon   = 0.0 # ε-greedy exploration bonus; 0 = disabled (default)
 
 # Optional point splits. NaN disables a split and follows the parent value.
-# idf_lambda_meta             = 0.40
-# recency_tau_recent          = 4.0
+idf_lambda_meta = 0.40
+recency_tau_recent = 4.0
 recency_split_age_days = 30.0
 # tag_relation_pmi_scale_user = 2.0
 # Optional hot recency kernel for posts younger than recency_split_age_hours.
