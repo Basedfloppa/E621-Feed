@@ -1224,7 +1224,7 @@ pub fn post_viewer(props: &PostViewerProps) -> Html {
                                 <span class="badge badge-info" title="Comments">{ format!("💬 {}", comment_count_label) }</span>
                             </div>
                             <button type="button" class="btn btn-sm btn-circle btn-ghost absolute end-12 top-1/2 -translate-y-1/2" title="Hide info panel" onclick={{ let side_open=side_open.clone(); Callback::from(move |e: MouseEvent| { e.stop_propagation(); side_open.set(false); }) }} aria-label="Hide panel">{ icon_panel_collapse() }</button>
-                            <button type="button" class="btn btn-sm btn-circle btn-ghost absolute end-2 top-1/2 -translate-y-1/2" title="Close" onclick={props.on_close.reform(|_: MouseEvent| ())} aria-label="Close">{"✕"}</button>
+                            <button type="button" class="btn btn-sm btn-circle btn-error absolute end-2 top-1/2 -translate-y-1/2" title="Close" onclick={props.on_close.reform(|_: MouseEvent| ())} aria-label="Close">{"✕"}</button>
                         </div>
 
                         <div class="flex flex-wrap items-center gap-1.5">
