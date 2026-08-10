@@ -158,9 +158,73 @@ pub fn ensure_sqlite() -> Result<(), String> {
     let mut guard = write_conn()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // Guard against pointing a stale/older build at an already-migrated
+    // database BEFORE refinery runs. With `abort_missing` (default) refinery
+    // otherwise just aborts with a terse "migration V21 is missing from the
+    // filesystem" whenever the shared `database.db` was migrated by a newer
+    // build — i.e. its applied history contains a version this binary doesn't
+    // embed. Diagnose that up front so the operator gets an actionable message
+    // ("this binary is older than the schema; rebuild it") instead of an
+    // opaque startup crash.
+    ensure_embedded_migrations_cover_db(&guard)?;
     embedded::migrations::runner()
         .run(&mut *guard)
         .map_err(|e| format!("Failed to run migrations: {e}"))?;
+    Ok(())
+}
+
+/// Reject starting against a database whose applied schema history this
+/// binary's embedded migrations cannot account for, with an actionable message.
+///
+/// Returns `Ok(())` when the DB has no history yet, its history is empty, or
+/// every applied version is embedded in this binary (i.e. schema ≤ binary).
+fn ensure_embedded_migrations_cover_db(conn: &rusqlite::Connection) -> Result<(), String> {
+    let runner = embedded::migrations::runner();
+    let embedded: Vec<i64> = runner
+        .get_migrations()
+        .iter()
+        .map(|m| m.version() as i64)
+        .collect();
+    let embedded_min = embedded.iter().copied().min().unwrap_or(0);
+    let embedded_max = embedded.iter().copied().max().unwrap_or(0);
+
+    // Applied history — absent or empty on a brand-new database.
+    let applied: Vec<i64> =
+        match conn.prepare("SELECT version FROM refinery_schema_history ORDER BY version") {
+            Ok(mut stmt) => match stmt.query_map([], |row| row.get::<_, i64>(0)) {
+                Ok(rows) => rows.filter_map(|r| r.ok()).collect(),
+                Err(_) => Vec::new(),
+            },
+            Err(_) => Vec::new(),
+        };
+    if applied.is_empty() {
+        return Ok(());
+    }
+    let db_max = *applied.iter().max().unwrap();
+
+    // Versions applied in the DB but not embedded in this build — the exact
+    // situation refinery reports as "missing from the filesystem".
+    let ahead: Vec<i64> = applied
+        .iter()
+        .copied()
+        .filter(|v| !embedded.contains(v))
+        .collect();
+    if !ahead.is_empty() {
+        let ahead_name = ahead
+            .iter()
+            .map(|v| format!("V{v}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(format!(
+            "database schema is newer than this binary: the shared database has \
+             applied migration(s) {ahead_name} that this build does not embed \
+             (this binary embeds V{embedded_min}..V{embedded_max}; the database \
+             is at V{db_max}). A newer build migrated this database. Rebuild this \
+             binary / image from the current source (`cargo build` / `docker build`) \
+             so it embeds the full migration set, then restart. Never delete or \
+             renumber an already-applied migration by hand."
+        ));
+    }
     Ok(())
 }
 
@@ -197,4 +261,49 @@ pub(super) fn parse_db_datetime(raw: &str) -> Result<DateTime<Utc>, String> {
                 .map(|dt| dt.with_timezone(&Utc))
         })
         .map_err(|e| format!("Failed to parse datetime '{raw}': {e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ensure_embedded_migrations_cover_db;
+
+    fn mem() -> rusqlite::Connection {
+        rusqlite::Connection::open_in_memory().unwrap()
+    }
+
+    #[test]
+    fn guard_is_ok_when_no_history_or_history_covered() {
+        // No schema-history table yet (brand-new DB) -> treat as fresh.
+        let conn = mem();
+        assert!(ensure_embedded_migrations_cover_db(&conn).is_ok());
+
+        // History exists and every applied version is embedded in this binary.
+        let conn = mem();
+        conn.execute_batch(
+            "CREATE TABLE refinery_schema_history(version int4 PRIMARY KEY,
+                 name VARCHAR(255), applied_on VARCHAR(255), checksum VARCHAR(255));
+             INSERT INTO refinery_schema_history(version,name,applied_on,checksum)
+                 VALUES (25, 'backfill_timestamp', '', '');",
+        )
+        .unwrap();
+        assert!(ensure_embedded_migrations_cover_db(&conn).is_ok());
+    }
+
+    #[test]
+    fn guard_rejects_db_ahead_of_this_binary() {
+        let conn = mem();
+        conn.execute_batch(
+            "CREATE TABLE refinery_schema_history(version int4 PRIMARY KEY,
+                 name VARCHAR(255), applied_on VARCHAR(255), checksum VARCHAR(255));
+             INSERT INTO refinery_schema_history(version,name,applied_on,checksum)
+                 VALUES (99, 'future_migration', '', '');",
+        )
+        .unwrap();
+        let err = ensure_embedded_migrations_cover_db(&conn).unwrap_err();
+        assert!(
+            err.contains("V99"),
+            "message should name the missing migration: {err}"
+        );
+        assert!(err.contains("database schema is newer"), "{err}");
+    }
 }
