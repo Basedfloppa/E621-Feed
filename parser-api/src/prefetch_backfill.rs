@@ -2,7 +2,8 @@
 //!
 //! Runs on a long interval (default 6h), picks accounts that haven't been
 //! backfilled recently, and for each preferred tag fetches both fresh
-//! posts (page=1) and retro posts (last available page). Uses the shared
+//! posts (page=1, newest) and retro posts (page=1, `order:id_asc` → oldest).
+//! Uses the shared
 //! e621 rate gate via `api::get_posts_by_tags` at `Priority::Backfill`
 //! (longest delay).
 
@@ -58,7 +59,6 @@ async fn backfill_loop() {
 async fn run_backfill_tick(cooldown_secs: u64) -> Result<(), String> {
     const MAX_ACCOUNTS_PER_TICK: usize = 3;
     const BACKFILL_PAGE_FRESH: i32 = 1;
-    const BACKFILL_PAGE_RETRO: i32 = 9999; // sentinel for "last page"
 
     let accounts = db::get_backfill_candidates(cooldown_secs, MAX_ACCOUNTS_PER_TICK)?;
 
@@ -87,12 +87,16 @@ async fn run_backfill_tick(cooldown_secs: u64) -> Result<(), String> {
                 return Ok(());
             }
 
-            // 1) Fetch retro posts (last available page → oldest posts).
-            let query = format!("{tag_name} order:id");
+            // 1) Fetch retro posts (oldest posts). e621 caps `posts.json?page=`
+            //    at 750 and returns 410 Gone beyond it, so a large "last page"
+            //    sentinel can never work. Ask e621 to sort ascending by id on
+            //    page 1 instead — that directly returns the oldest posts and
+            //    never exceeds the page cap.
+            let query = format!("{tag_name} order:id_asc");
             match api::get_posts_by_tags(
                 blacklist,
                 &query,
-                Some(BACKFILL_PAGE_RETRO),
+                Some(BACKFILL_PAGE_FRESH),
                 None,
                 Priority::Backfill,
             )
