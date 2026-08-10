@@ -800,18 +800,20 @@ pub async fn get_user_by_name(name: &str) -> Result<UserApiResponse, String> {
 ///   spaces in the query) and case-insensitively dedupes so an accumulated /
 ///   bloated blacklist can't explode the request or repeat the same
 ///   exclusion dozens of times.
+///
+/// The input is split on *any* whitespace (not just newlines): a blacklist
+/// that was saved as one long space-joined line is tokenised per-tag, so each
+/// tag is independently de-duplicated, stripped and sorted instead of being
+/// treated as a single opaque token.
 fn normalise_blacklist(bl: &str) -> String {
     let mut seen = std::collections::HashSet::new();
     let mut tags: Vec<&str> = Vec::new();
-    for raw in bl.lines() {
-        let trimmed = raw.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        // Align with e621 query syntax: strip any leading '-' so a rule that
-        // is already negated doesn't become '--x' once the caller adds the
-        // exclusion prefix. A line such as '--fav:me' also collapses cleanly.
-        let stripped = trimmed.trim_start_matches('-');
+    for raw in bl.split_whitespace() {
+        // `split_whitespace` already drops blank runs (stray empty lines /
+        // doubled spaces). Align with e621 query syntax: strip any leading '-' so
+        // a rule that is already negated doesn't become '--x' once the caller adds
+        // the exclusion prefix. A token such as '--fav:me' also collapses cleanly.
+        let stripped = raw.trim_start_matches('-');
         if stripped.is_empty() {
             continue;
         }
@@ -821,6 +823,42 @@ fn normalise_blacklist(bl: &str) -> String {
     }
     tags.sort_unstable();
     tags.join(" -")
+}
+
+/// Sanitise a combined e621 tag query before it is sent upstream.
+///
+/// Covers both the user-supplied search terms and the merged blacklist, so a
+/// pasted e621 blacklist (which is often full of duplicates, blank runs and
+/// already-negated `-x` tokens) can't make e621 return 422:
+/// - splits on any whitespace, dropping blank tokens / doubled spaces;
+/// - collapses repeated leading `-` so `--fav:me` becomes a valid `-fav:me`;
+/// - de-duplicates case-insensitively (18× `-fav:me` → one);
+/// - preserves polarity — `kuribon` stays positive, `-fav:me` stays an exclusion.
+fn sanitise_tags_query(q: &str) -> String {
+    let mut seen = std::collections::HashSet::new();
+    let mut tokens: Vec<String> = Vec::new();
+    for raw in q.split_whitespace() {
+        let (neg, tail) = if raw.starts_with('-') {
+            (true, raw.trim_start_matches('-'))
+        } else {
+            (false, raw)
+        };
+        if tail.is_empty() {
+            continue;
+        }
+        // Dedup case-insensitively, keeping the first-seen (normalised) form.
+        if !seen.insert(tail.to_ascii_lowercase()) {
+            continue;
+        }
+        let token = if neg {
+            format!("-{tail}")
+        } else {
+            tail.to_string()
+        };
+        tokens.push(token);
+    }
+    tokens.sort_unstable();
+    tokens.join(" ")
 }
 
 /// `get_posts` with a caller-supplied `tags` query — used by the
@@ -853,6 +891,9 @@ pub async fn get_posts_by_tags(
     } else {
         format!("{tags_query} {blacklist}")
     };
+    // Sanitise the whole query (user terms + merged blacklist) so duplicates,
+    // blank runs and stray `--x` tokens can't 422 upstream e621.
+    let combined = sanitise_tags_query(&combined);
     let cfg = cfg();
     let limit = limit.unwrap_or(cfg.posts_limit).clamp(1, 320);
     let url = build_url(
@@ -991,7 +1032,7 @@ pub async fn get_posts(account: &TruncatedAccount, page: Option<i32>) -> Result<
         &[
             ("limit", cfg.posts_limit.to_string()),
             ("page", page.unwrap_or(1).to_string()),
-            ("tags", blacklist),
+            ("tags", sanitise_tags_query(&blacklist)),
             ("v2", true.to_string()),
             ("mode", "extended".to_string()),
         ],
@@ -1034,7 +1075,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::normalise_blacklist;
+    use super::{normalise_blacklist, sanitise_tags_query};
 
     #[test]
     fn normalise_blacklist_sorts_and_drops_blanks() {
@@ -1061,5 +1102,56 @@ mod tests {
         assert_eq!(normalise_blacklist("-FAV:me\nfav:me"), "FAV:me");
         // A bare dash-only line is dropped entirely.
         assert_eq!(normalise_blacklist("---\n\nfav:me"), "fav:me");
+    }
+
+    #[test]
+    fn normalise_blacklist_splits_space_joined_blob() {
+        // A blacklist saved as ONE long space-joined line (with duplicates,
+        // blank runs and a double-dash) — the exact shape that 422'd e621 —
+        // must be tokenised per-tag, de-duplicated, sorted and dash-stripped.
+        let blob =
+            "kuribon --fav:me -4_balls  -fav:me -4_breasts -fav:me -id:123 -fav:me -rating:s";
+        let out = normalise_blacklist(blob);
+        assert_eq!(out, "4_balls -4_breasts -fav:me -id:123 -kuribon -rating:s");
+        // Only one '-fav:me' survives the dedup, and no '--' / double spaces remain.
+        assert_eq!(
+            out.matches("fav:me").count(),
+            1,
+            "duplicates must collapse: {out}"
+        );
+        assert!(!out.contains("  "), "blank runs must be gone: {out}");
+        assert!(!out.contains("--"), "double dash must be gone: {out}");
+    }
+
+    #[test]
+    fn sanitise_normalises_the_real_world_blob() {
+        // `kuribon` search + a pasted e621 blacklist that is duplicated, has
+        // blank runs and a stray double-dash. This is the exact shape that
+        // 422'd e621. After sanitising: duplicates collapse, blanks/double
+        // dashes vanish, `kuribon` stays positive and the negations stay single.
+        let blob =
+            "kuribon --fav:me -4_balls  -fav:me -4_breasts -fav:me -id:123 -fav:me -rating:s";
+        let out = sanitise_tags_query(blob);
+        assert_eq!(out, "-4_balls -4_breasts -fav:me -id:123 -rating:s kuribon");
+        assert!(!out.contains("--"), "double dash must be gone: {out}");
+        assert!(!out.contains("  "), "blank runs must be gone: {out}");
+        assert_eq!(
+            out.matches("-fav:me").count(),
+            1,
+            "dup must collapse: {out}"
+        );
+    }
+
+    #[test]
+    fn sanitise_preserves_polarity() {
+        // Positive search terms stay positive; exclusions stay exclusions.
+        assert_eq!(
+            sanitise_tags_query("kuribon yellow -4_balls"),
+            "-4_balls kuribon yellow"
+        );
+        // A bare '-' or '---' token is dropped, not forwarded as an empty tag;
+        // 'fish' stays a positive term (no '-' is added).
+        assert_eq!(sanitise_tags_query("kuribon - --- fish"), "fish kuribon");
+        assert_eq!(sanitise_tags_query("   "), "");
     }
 }
