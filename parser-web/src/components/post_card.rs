@@ -1,3 +1,5 @@
+use std::cell::{Cell, RefCell};
+use std::collections::VecDeque;
 use std::rc::Rc;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
@@ -1004,52 +1006,111 @@ pub fn post_card(props: &PostCardProps) -> Html {
     }
 }
 
+/// Serialised, idempotent blacklist append.
+///
+/// Blacklist writes are read-modify-write (GET current → append → PATCH), so
+/// several post cards firing at once (hiding posts, blocking tags/ratings /
+/// uploaders) can race: one PATCH overwrites another and rules get lost, or
+/// the shared list balloons. This queues appends and processes them one at a
+/// time, each re-reading the *latest* server state before deciding whether the
+/// rule already exists — so a rule is never appended twice and no update is
+/// dropped.
+type PendingBlacklistAppend = (String, i32, String);
+
+thread_local! {
+    static BLACKLIST_APPEND_QUEUE: RefCell<VecDeque<PendingBlacklistAppend>> =
+        const { RefCell::new(VecDeque::new()) };
+    static BLACKLIST_APPEND_DRAINING: Cell<bool> = const { Cell::new(false) };
+}
+
 fn append_blacklist_rule(backend_url: String, account_id: i32, rule: String) {
-    spawn_local(async move {
-        let url = format!("{backend_url}/account/{account_id}/blacklist");
-        #[derive(serde::Deserialize)]
-        struct BlacklistResponse {
-            blacklist: Option<String>,
-        }
-        let current = match api_get(&url).send().await {
-            Ok(response) if response.ok() => response
-                .json::<BlacklistResponse>()
-                .await
-                .ok()
-                .and_then(|value| value.blacklist)
-                .unwrap_or_default(),
-            Ok(response) => {
-                web_sys::console::warn_1(
-                    &format!("failed to load blacklist: {}", response.status()).into(),
-                );
-                return;
-            }
-            Err(error) => {
-                web_sys::console::warn_1(&format!("failed to load blacklist: {error}").into());
-                return;
-            }
-        };
-        if current
-            .lines()
-            .any(|line| line.trim().eq_ignore_ascii_case(&rule))
+    let rule = rule.trim().to_string();
+    if rule.is_empty() {
+        return;
+    }
+    let draining = BLACKLIST_APPEND_DRAINING.with(|d| d.get());
+    let already = BLACKLIST_APPEND_QUEUE.with(|q| {
+        let mut queue = q.borrow_mut();
+        // Drop an identical (backend, account, rule) request that's already
+        // queued, so a burst of clicks can't pile up duplicate work.
+        if queue
+            .iter()
+            .any(|(b, a, r)| b == &backend_url && *a == account_id && r == &rule)
         {
-            return;
+            return true;
         }
-        let next = if current.trim().is_empty() {
-            rule
-        } else {
-            format!("{current}\n{rule}")
-        };
-        let body = serde_json::json!({ "blacklist": next }).to_string();
-        if let Err(error) = api_patch(&url)
-            .header("Content-Type", "application/json")
-            .body(body)
-            .send()
-            .await
-        {
-            web_sys::console::warn_1(&format!("failed to update blacklist: {error}").into());
-        }
+        queue.push_back((backend_url, account_id, rule));
+        false
     });
+    if already {
+        return;
+    }
+    // Start a drain only if none is already running; a live drain picks up
+    // newly queued appends on its next loop iteration.
+    if !draining {
+        BLACKLIST_APPEND_DRAINING.with(|d| d.set(true));
+        spawn_local(drain_blacklist_appends());
+    }
+}
+
+async fn drain_blacklist_appends() {
+    loop {
+        let next = BLACKLIST_APPEND_QUEUE.with(|q| q.borrow_mut().pop_front());
+        let Some((backend_url, account_id, rule)) = next else {
+            break;
+        };
+        // Each append re-reads the *latest* server state, so a rule that a
+        // previous queued append already added is skipped — idempotent end to end.
+        if let Err(msg) = append_blacklist_rule_one(backend_url, account_id, rule).await {
+            web_sys::console::warn_1(&msg.into());
+        }
+    }
+    BLACKLIST_APPEND_DRAINING.with(|d| d.set(false));
+}
+
+async fn append_blacklist_rule_one(
+    backend_url: String,
+    account_id: i32,
+    rule: String,
+) -> Result<(), String> {
+    let url = format!("{backend_url}/account/{account_id}/blacklist");
+    #[derive(serde::Deserialize)]
+    struct BlacklistResponse {
+        blacklist: Option<String>,
+    }
+    let current = match api_get(&url).send().await {
+        Ok(response) if response.ok() => response
+            .json::<BlacklistResponse>()
+            .await
+            .ok()
+            .and_then(|value| value.blacklist)
+            .unwrap_or_default(),
+        Ok(response) => {
+            return Err(format!("failed to load blacklist: {}", response.status()));
+        }
+        Err(error) => return Err(format!("failed to load blacklist: {error}")),
+    };
+    if current
+        .lines()
+        .any(|line| line.trim().eq_ignore_ascii_case(&rule))
+    {
+        return Ok(());
+    }
+    let next = if current.trim().is_empty() {
+        rule
+    } else {
+        format!("{current}\n{rule}")
+    };
+    let body = serde_json::json!({ "blacklist": next }).to_string();
+    match api_patch(&url)
+        .header("Content-Type", "application/json")
+        .body(body)
+        .send()
+        .await
+    {
+        Ok(_) => Ok(()),
+        Err(error) => Err(format!("failed to update blacklist: {error}")),
+    }
 }
 
 fn send_interaction(backend_url: String, payload: FeedInteractionRequest) {

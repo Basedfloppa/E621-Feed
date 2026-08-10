@@ -790,12 +790,35 @@ pub async fn get_user_by_name(name: &str) -> Result<UserApiResponse, String> {
 
 /// Normalise the order of blacklist tags so two semantically identical
 /// blacklists produce the same cache key regardless of line order.
+///
+/// Also hardens the value before it is turned into an e621 `tags` query:
+/// - strips any leading `-` from a stored line, so a rule that was already
+///   pasted in e621's negated form (`-fav:me`, `-rating:s`, `-id:123`) does
+///   not become an invalid double-minus `--fav:me` when callers re-apply the
+///   exclusion prefix;
+/// - drops blank tokens (stray empty lines that previously produced double
+///   spaces in the query) and case-insensitively dedupes so an accumulated /
+///   bloated blacklist can't explode the request or repeat the same
+///   exclusion dozens of times.
 fn normalise_blacklist(bl: &str) -> String {
-    let mut tags: Vec<&str> = bl
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty())
-        .collect();
+    let mut seen = std::collections::HashSet::new();
+    let mut tags: Vec<&str> = Vec::new();
+    for raw in bl.lines() {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        // Align with e621 query syntax: strip any leading '-' so a rule that
+        // is already negated doesn't become '--x' once the caller adds the
+        // exclusion prefix. A line such as '--fav:me' also collapses cleanly.
+        let stripped = trimmed.trim_start_matches('-');
+        if stripped.is_empty() {
+            continue;
+        }
+        if seen.insert(stripped.to_ascii_lowercase()) {
+            tags.push(stripped);
+        }
+    }
     tags.sort_unstable();
     tags.join(" -")
 }
@@ -1023,5 +1046,20 @@ mod tests {
         assert_eq!(normalise_blacklist("  b \n a \n c "), "a -b -c");
         assert_eq!(normalise_blacklist("c\nb\na"), "a -b -c");
         assert_eq!(normalise_blacklist("z\n\n\ny"), "y -z");
+    }
+
+    #[test]
+    fn normalise_blacklist_strips_double_dashes_and_dedups() {
+        // Rules pasted in e621's negated form must not become '--x'.
+        assert_eq!(normalise_blacklist("-fav:me"), "fav:me");
+        assert_eq!(normalise_blacklist("--fav:me"), "fav:me");
+        assert_eq!(
+            normalise_blacklist("-id:123\n-rating:s"),
+            "id:123 -rating:s"
+        );
+        // Case-insensitive dedup keeps a single copy, preserving the first seen case.
+        assert_eq!(normalise_blacklist("-FAV:me\nfav:me"), "FAV:me");
+        // A bare dash-only line is dropped entirely.
+        assert_eq!(normalise_blacklist("---\n\nfav:me"), "fav:me");
     }
 }
