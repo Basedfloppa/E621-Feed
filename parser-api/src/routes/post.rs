@@ -40,7 +40,7 @@ pub(crate) async fn post_comments(
     ratelimit::check(&format!("post_comments:{}", client_ip.0), 60, 10)?;
     let comments = api::get_post_comments(id, limit.unwrap_or(50))
         .await
-        .map_err(ApiError::Internal)?;
+        .map_err(ApiError::from_string)?;
     Ok(Json(comments))
 }
 
@@ -59,7 +59,7 @@ pub(crate) async fn get_single_post(id: i64, client_ip: ClientIp) -> Result<Json
     ratelimit::check(&format!("post:{}", client_ip.0), 120, 30)?;
     let mut posts = api::get_posts_by_ids(&[id])
         .await
-        .map_err(ApiError::Internal)?;
+        .map_err(ApiError::from_string)?;
     match posts.pop() {
         Some(p) => Ok(Json(p)),
         None => Err(ApiError::NotFound("post not found or removed".into())),
@@ -85,6 +85,6 @@ pub(crate) async fn get_pool_posts(
     ratelimit::check(&format!("pool_posts:{}", client_ip.0), 60, 15)?;
     let posts = api::get_pool_posts(pool_id)
         .await
-        .map_err(ApiError::Internal)?;
+        .map_err(ApiError::from_string)?;
     Ok(Json(posts))
 }

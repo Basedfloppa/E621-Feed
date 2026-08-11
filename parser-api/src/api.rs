@@ -264,7 +264,7 @@ async fn fetch_authed_conditional(
     }
     let resp = send_with_retry(req, priority)
         .await
-        .map_err(|e| format!("request failed: {e}"))?;
+        .map_err(|e| format!("{}request failed: {e}", crate::errors::UPSTREAM_ERR_MARKER))?;
 
     let status = resp.status();
 
@@ -279,7 +279,8 @@ async fn fetch_authed_conditional(
         }
         warn!("[E621] 304 without a cached body for {url}; refusing to retry");
         return Err(format!(
-            "upstream returned 304 but no cached body for {url}"
+            "{}upstream returned 304 but no cached body for {url}",
+            crate::errors::UPSTREAM_ERR_MARKER
         ));
     }
 
@@ -288,16 +289,21 @@ async fn fetch_authed_conditional(
         .get("etag")
         .and_then(|v| v.to_str().ok())
         .map(str::to_string);
-    let body = resp
-        .text()
-        .await
-        .map_err(|e| format!("body read failed: {e}"))?;
+    let body = resp.text().await.map_err(|e| {
+        format!(
+            "{}body read failed: {e}",
+            crate::errors::UPSTREAM_ERR_MARKER
+        )
+    })?;
 
     if !status.is_success() {
         // Don't cache Cloudflare/rate-limit pages — would pin an outage past recovery.
         let preview = body_preview(&body);
         warn!("[E621] returned {status} for {url}: {preview}");
-        return Err(format!("returned {status}: {preview}"));
+        return Err(format!(
+            "{}returned {status}: {preview}",
+            crate::errors::UPSTREAM_ERR_MARKER
+        ));
     }
 
     if bypass_cache {

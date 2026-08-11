@@ -502,7 +502,7 @@ async fn build_recommendations_shared(
 
     let live_posts: Vec<Post> = api::get_posts(&account, page)
         .await
-        .map_err(|e| ApiError::Internal(format!("Failed to fetch posts: {e}")))?;
+        .map_err(|e| ApiError::from_string(format!("Failed to fetch posts: {e}")))?;
     if let Some(p) = &mut pipe {
         p.mark("e621_fetch");
     }
@@ -811,7 +811,7 @@ pub(crate) async fn get_similar_posts(
         // Fetch from e621 API.
         let posts = api::get_posts_by_ids(&[post_id])
             .await
-            .map_err(|e| ApiError::Internal(format!("Failed to fetch post from e621: {e}")))?;
+            .map_err(|e| ApiError::from_string(format!("Failed to fetch post from e621: {e}")))?;
         posts
             .into_iter()
             .next()

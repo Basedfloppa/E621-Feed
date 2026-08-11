@@ -126,7 +126,7 @@ pub(crate) async fn search_posts(
             .await?;
     let posts = api::get_posts_by_tags(&account.blacklist, query, page, limit, Priority::Live)
         .await
-        .map_err(ApiError::Internal)?;
+        .map_err(ApiError::from_string)?;
     spawn_browse_persist(posts.clone(), "search", account_id, false);
     Ok(Json(posts))
 }
@@ -174,7 +174,7 @@ pub(crate) async fn search_scored_posts(
     .await?;
     let posts = api::get_posts_by_tags(&account.blacklist, query, page, limit, Priority::Live)
         .await
-        .map_err(ApiError::Internal)?;
+        .map_err(ApiError::from_string)?;
     spawn_browse_persist(posts.clone(), "search", account_id, false);
 
     let idf = current_idf();
@@ -256,7 +256,7 @@ pub(crate) async fn get_trending_scored(
     // Fetch trending posts from e621.
     let posts = api::get_posts_by_tags(&account.blacklist, "order:hot", page, None, Priority::Live)
         .await
-        .map_err(ApiError::Internal)?;
+        .map_err(ApiError::from_string)?;
 
     // Fire-and-forget persist to catalog (same as get_trending).
     spawn_browse_persist(posts.clone(), "trending", account_id, false);
@@ -345,7 +345,7 @@ pub(crate) async fn get_trending(
 
     let posts = api::get_posts_by_tags(blacklist_tags, "order:hot", page, None, Priority::Live)
         .await
-        .map_err(ApiError::Internal)?;
+        .map_err(ApiError::from_string)?;
 
     // Сохраняем в каталог (без привязки к аккаунту — trending не является
     // явным предпочтением пользователя). Fire-and-forget, не задерживает ответ.
@@ -376,7 +376,7 @@ pub(crate) async fn get_favorites(
 
     let posts = api::get_posts_by_tags(blacklist_tags, &query, page, None, Priority::Live)
         .await
-        .map_err(ApiError::Internal)?;
+        .map_err(ApiError::from_string)?;
 
     // Сохраняем в каталог И привязываем к аккаунту — это фавориты пользователя.
     // Fire-and-forget, не задерживает ответ.

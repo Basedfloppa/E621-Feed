@@ -29,6 +29,13 @@ pub struct ApiErrorBody {
     pub code: u16,
 }
 
+/// Marker embedded in e621-layer error strings to flag a failure that is the
+/// *upstream's* fault (e621/Cloudflare unreachable or non-2xx) rather than our
+/// own. `ApiError::from_string` strips it and maps such strings to
+/// `ApiError::Upstream` (HTTP 503) so the frontend can tell the user that
+/// e621 itself is unavailable instead of showing a generic 500.
+pub const UPSTREAM_ERR_MARKER: &str = "e621-upstream-unavailable: ";
+
 #[derive(Debug)]
 pub enum ApiError {
     BadRequest(String),
@@ -36,6 +43,10 @@ pub enum ApiError {
     NotFound(String),
     Forbidden(String),
     TooManyRequests(String),
+    /// The e621 upstream itself failed (503/429/network/timeout) — surfaced
+    /// as HTTP 503 so clients can show "upstream is down" rather than a
+    /// generic server error.
+    Upstream(String),
     Internal(String),
 }
 
@@ -47,6 +58,7 @@ impl ApiError {
             ApiError::NotFound(_) => Status::NotFound,
             ApiError::Forbidden(_) => Status::Forbidden,
             ApiError::TooManyRequests(_) => Status::TooManyRequests,
+            ApiError::Upstream(_) => Status::ServiceUnavailable,
             ApiError::Internal(_) => Status::InternalServerError,
         }
     }
@@ -58,7 +70,20 @@ impl ApiError {
             | ApiError::NotFound(m)
             | ApiError::Forbidden(m)
             | ApiError::TooManyRequests(m)
+            | ApiError::Upstream(m)
             | ApiError::Internal(m) => m,
+        }
+    }
+
+    /// Classify an e621-layer error string: if it carries the upstream marker
+    /// (position-independent, so contextual prefixes are preserved), map it to
+    /// `Upstream` (503); otherwise it is our own internal error (500).
+    pub fn from_string(s: String) -> Self {
+        if let Some(idx) = s.find(UPSTREAM_ERR_MARKER) {
+            let rest = s[idx + UPSTREAM_ERR_MARKER.len()..].trim();
+            ApiError::Upstream(rest.to_string())
+        } else {
+            ApiError::Internal(s)
         }
     }
 }
@@ -79,17 +104,18 @@ impl From<rusqlite::Error> for ApiError {
 }
 
 impl From<String> for ApiError {
-    /// All string errors become `Internal` (500). Code that needs a typed
+    /// All string errors become `Internal` (500), except those carrying the
+    /// upstream marker, which map to `Upstream` (503). Code that needs a typed
     /// 404 should use `ApiError::NotFound(…)` directly or propagate a
     /// `rusqlite::Error::QueryReturnedNoRows` through `From<rusqlite::Error>`.
     fn from(s: String) -> Self {
-        ApiError::Internal(s)
+        ApiError::from_string(s)
     }
 }
 
 impl From<&str> for ApiError {
     fn from(s: &str) -> Self {
-        ApiError::from(s.to_string())
+        ApiError::from_string(s.to_string())
     }
 }
 
@@ -113,7 +139,7 @@ impl<'r> Responder<'r, 'static> for ApiError {
 impl OpenApiResponderInner for ApiError {
     fn responses(_gen: &mut OpenApiGenerator) -> rocket_okapi::Result<Responses> {
         let mut responses = Responses::default();
-        for code in [400u16, 401, 403, 404, 429, 500] {
+        for code in [400u16, 401, 403, 404, 429, 500, 503] {
             ensure_status_code_exists(&mut responses, code);
         }
         Ok(responses)
@@ -123,6 +149,30 @@ impl OpenApiResponderInner for ApiError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn upstream_marker_maps_to_503() {
+        use crate::errors::UPSTREAM_ERR_MARKER;
+        // Marker as a bare prefix → Upstream.
+        assert!(matches!(
+            ApiError::from_string(format!(
+                "{UPSTREAM_ERR_MARKER}returned 503 Service Unavailable: <html>"
+            )),
+            ApiError::Upstream(_)
+        ));
+        // Marker buried inside a contextual prefix is still detected.
+        assert!(matches!(
+            ApiError::from_string(format!(
+                "Failed to fetch posts: {UPSTREAM_ERR_MARKER}returned 502 Bad Gateway"
+            )),
+            ApiError::Upstream(_)
+        ));
+        // Plain internal errors are untouched.
+        assert!(matches!(
+            ApiError::from_string("database error".to_string()),
+            ApiError::Internal(_)
+        ));
+    }
 
     #[test]
     fn from_string_is_always_internal() {
