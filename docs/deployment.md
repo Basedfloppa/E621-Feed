@@ -156,6 +156,23 @@ serves the SPA at `/`, static assets under their hashed paths, and the API
 under `/api`. `docker-compose.yml` maps a host port (e.g. `8181`) to the
 container.
 
+> **The runtime image boots out of the box.** The Dockerfile bakes
+> `config.example.toml` → `/app/config.toml` (placeholder e621 creds) and
+> `Rocket.toml` → `/app/Rocket.toml` (binds `0.0.0.0:8080`) into the runtime
+> image, so a bare `docker run ghcr.io/<owner>/e621-account-parser` starts and
+> serves the embedded SPA even without mounts. These defaults exist because
+> the binary FATALs at startup without a parseable `config.toml` (the config
+> `LazyLock` exits on first access), and Rocket's own default bind is
+> `127.0.0.1:8000`. docker-compose mounts the real `config.toml` /
+> `Rocket.toml` / `database.db` **over** the baked files at runtime (bind
+> mounts fully shadow image content), so production behaviour is unchanged.
+>
+> Startup is also safe against a **fresh/empty database**: the DB (migrations
+> + WAL switch) is initialized before any background worker is spawned, and
+> the writer connection sets `busy_timeout` *before* the `journal_mode = WAL`
+> switch — so a concurrently-starting worker holding a shared lock makes the
+> WAL switch wait instead of failing with a "database is locked" panic.
+
 ### Local build (no Docker)
 
 ```bash
@@ -222,6 +239,31 @@ block for the same effect (Caddy handles Vary/Accept-Encoding for you).
 > (default `:8080`). Point the reverse proxy there. The `docker-compose.yml`
 > maps a host port to the container — align both if you run Caddy/nginx on
 > the host alongside the container.
+
+## Publishing the image (GitHub Actions)
+
+[`.github/workflows/docker-publish.yml`](../.github/workflows/docker-publish.yml)
+builds the image with BuildKit on GitHub runners and publishes it to **GHCR**
+(`ghcr.io/<owner>/e621-account-parser`):
+
++ **push to `master`** → `latest` + `sha-<commit>`;
++ **`v*` git tag** → `v1.2.3`, `1.2.3`, `1.2`, `sha-<commit>`;
++ **manual dispatch** → `sha-<commit>` plus optional `tag` and `features`
+  inputs (e.g. `jemalloc`).
+
+Build context is the repo root (same as docker-compose's `context: ..`), so
+the root `.dockerignore` applies (it excludes the 71 GB `database.db`). The
+`type=gha` BuildKit cache keeps the cargo/trunk layers warm between runs.
+
+After pushing, the workflow **smoke-tests the image**: it runs the container
+and requires `GET /` to answer `200` (which also catches the "Frontend not
+embedded" 503 regression). With the baked boot defaults above, the
+container comes up on a fresh database without external mounts.
+
+All third-party actions are pinned to commit SHAs; the workflow passes
+`actionlint` and `zizmor` with no findings. To also publish to Docker Hub,
+add a `docker/login-action` step for it and append
+`docker.io/<user>/e621-account-parser` to the metadata `images` list.
 
 ---
 
@@ -422,9 +464,9 @@ preferred tags (not just the top-N) and fetches:
 Uses `Priority::Backfill` through the adaptive rate gate (base delay
 750 ms). Automatically yields to live user traffic:
 
-* If a live request passed within `backfill_live_window_ms` (default 2s),
++ If a live request passed within `backfill_live_window_ms` (default 2s),
   backfill adds extra delay proportional to recency
-* When `x-ratelimit-remaining` from e621 drops below thresholds, the gate
++ When `x-ratelimit-remaining` from e621 drops below thresholds, the gate
   increases delays: 2× at < 200 remaining, 3× at < 100, 5× at < 50
 
 The backfill has its own circuit breaker (`backfill_breaker_threshold`,
