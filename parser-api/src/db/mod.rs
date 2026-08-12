@@ -105,6 +105,14 @@ fn write_conn() -> &'static Mutex<rusqlite::Connection> {
     WRITE_CONN.get_or_init(|| {
         let path = crate::models::cfg().db_path.clone();
         let conn = rusqlite::Connection::open(&path).expect("open writer connection");
+        // Set busy_timeout BEFORE the batch below: the `journal_mode = WAL`
+        // switch needs an exclusive lock, and a concurrently-starting worker
+        // (e.g. tag_relation_import on a fresh DB) may hold a shared lock.
+        // With the default busy_timeout of 0 the switch fails immediately
+        // with SQLITE_BUSY and this `.expect` panics — observed as
+        // "init writer connection: database is locked" at startup.
+        conn.busy_timeout(std::time::Duration::from_secs(60))
+            .expect("set writer busy_timeout");
         conn.execute_batch(
             "
             PRAGMA foreign_keys = ON;

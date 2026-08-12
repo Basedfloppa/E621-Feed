@@ -481,6 +481,14 @@ async fn build_rocket() -> rocket::Rocket<rocket::Build> {
         }),
     );
 
+    // Initialize the DB (migrations + WAL switch) BEFORE spawning background
+    // workers. The writer connection's `journal_mode = WAL` switch needs an
+    // exclusive lock; if a worker (e.g. tag_relation_import) already holds a
+    // shared lock on a fresh database, the switch fails with SQLITE_BUSY and
+    // the process panics ("init writer connection: database is locked").
+    // DbInit re-runs ensure_sqlite at ignite — idempotent and cheap here.
+    e621_account_parser_api::db::ensure_sqlite().expect("DB initialization failed at startup");
+
     prefetch::spawn_prefetch_workers();
     e621_account_parser_api::cache_pruner::spawn_cache_pruner();
     e621_account_parser_api::media_hydrator::spawn_media_hydrator();
