@@ -1,0 +1,15 @@
+# Pin the Rust toolchain for reproducible builds (frontend WASM + backend).
+#
+# The frontend dist filenames and SRI integrity hashes are derived from the
+# compiled wasm, and wasm-bindgen's JS glue is version-sensitive. Without a
+# pinned toolchain (and a committed Cargo.lock — see .gitignore), two builds
+# of the same source can produce different wasm/JS bytes, which is exactly
+# what caused the "sha384 integrity attribute mismatch" errors on the live
+# site: the hashed bundle URL got reused across builds while the file bytes
+# changed, and stale cached copies then failed the SRI check.
+#
+# Keep this channel in sync with the `FROM rust:...` image in
+# parser-api/Dockerfile (both must be the same rustc release).
+[toolchain]
+channel = "1.96.0"
+targets = ["wasm32-unknown-unknown"]

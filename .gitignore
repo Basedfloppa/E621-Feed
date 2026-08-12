@@ -4,9 +4,12 @@
 .vscode/*
 */node_modules
 
-*.lock
-package-lock.json
 *.db*
+# NOTE: Cargo.lock / package-lock.json are deliberately NOT ignored — the
+# wasm-bindgen version pinned in parser-web/Cargo.lock determines the JS glue
+# and wasm bytes served to browsers, and parser-web/package-lock.json is
+# required by `npm ci` in the Docker build. An unpinned lockfile is what
+# caused the live-site SRI integrity mismatches (see docs/deployment.md).
 tailwind-output.css
 config.toml
 config.js

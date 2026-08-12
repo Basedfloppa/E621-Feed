@@ -7,7 +7,14 @@
 
 # ===================== Base =====================
 # Shared base for every build stage (keeps the apt/toolchain layer cached).
-FROM rust:slim-trixie AS base
+#
+# IMPORTANT: the rust version is PINNED, not floating. The frontend dist
+# filenames + SRI integrity hashes are derived from the compiled wasm, and
+# wasm-bindgen's JS glue is version-sensitive — a floating `rust:slim-trixie`
+# tag was how two builds ended up with the same bundle URL but different
+# bytes, breaking SRI on the live site. Keep this tag in sync with
+# `rust-toolchain.toml` at the repo root (same rustc release).
+FROM rust:1.96.0-slim-trixie AS base
 WORKDIR /app
 
 # make is needed by tikv-jemalloc-sys; gcc comes with the rust toolchain.
@@ -35,10 +42,21 @@ RUN rustup target add wasm32-unknown-unknown
 # pinned version changes.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     cargo install trunk@0.21.14 --locked --root /usr/local
+# wasm-bindgen CLI must match the `wasm-bindgen` crate pinned in
+# parser-web/Cargo.lock (0.2.126) — trunk generates the JS glue with this
+# binary, and a version mismatch between the crate and the CLI is a build
+# error. trunk can auto-install the matching version, but pinning it here
+# keeps the toolchain explicit and reproducible.
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    cargo install wasm-bindgen-cli@0.2.126 --locked --root /usr/local
 RUN apt-get update && apt-get install -y --no-install-recommends nodejs npm \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /web
+
+# Pin the toolchain for every rustup invocation in this stage (must match the
+# base image tag above).
+COPY rust-toolchain.toml ./
 
 # -- JS deps --
 COPY parser-web/package.json parser-web/package-lock.json ./
@@ -70,6 +88,8 @@ FROM base AS builder
 ARG FEATURES=""
 # cwd is /app/parser-api so build.rs resolves ../parser-web/dist.
 WORKDIR /app/parser-api
+# Pin the toolchain for the backend build too (see rust-toolchain.toml note).
+COPY rust-toolchain.toml /app/rust-toolchain.toml
 COPY --from=frontend /web/dist /app/parser-web/dist
 COPY parser-api/ .
 RUN --mount=type=cache,id=backend-registry,target=/usr/local/cargo/registry \

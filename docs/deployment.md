@@ -20,6 +20,59 @@ Both are gated behind `TRUNK_PROFILE=release` and soft-fail (the hook
 logs and skips) if a binary is missing — `trunk serve` and the default
 `trunk build` work without them.
 
+Trunk also needs `wasm-bindgen` on PATH, matching the version pinned in
+`parser-web/Cargo.lock` (trunk can auto-install it, but the Dockerfile
+pins it explicitly). Keep the pinned versions in sync:
+
+| Tool | Pinned version | Where |
+|---|---|---|
+| rustc | 1.96.0 | [`rust-toolchain.toml`](../rust-toolchain.toml) + `FROM rust:1.96.0-slim-trixie` in the Dockerfile |
+| trunk | 0.21.14 | Dockerfile |
+| wasm-bindgen-cli | 0.2.126 | Dockerfile (must match `parser-web/Cargo.lock`) |
+
+## Frontend asset integrity (SRI) & reproducible builds
+
+The SPA index embeds SRI `integrity="sha384-…"` attributes for every hashed
+bundle (js/wasm/css/snippet). Trunk names those files with a **weak 64-bit
+hash of the wasm only** (`seahash`) and computes each file's SRI separately,
+so two builds can reuse the **same URL with different bytes** — e.g. after a
+wasm-bindgen / rustc upgrade the JS glue changes while the wasm (and thus
+the filename) stays identical. Combined with the SW's cache-first static
+cache and the `immutable` 1-year Cache-Control on hashed assets, a stale
+copy gets served against a fresh index.html and the browser fails loudly:
+
+```
+None of the "sha384" hashes in the integrity attribute match the content
+of the subresource at …e621-account-parser-web-<hash>.js
+```
+
+What keeps this from happening (and self-heals it when it does):
+
+1. **Reproducible builds** — commit `parser-web/Cargo.lock`,
+   `parser-web/package-lock.json` and `parser-api/Cargo.lock` (they are
+   intentionally **not** gitignored; `*.lock` was removed from
+   `.gitignore`), pin rustc via [`rust-toolchain.toml`](../rust-toolchain.toml)
+   and the exact `rust:…` image tag, and keep trunk/wasm-bindgen pinned.
+   Identical inputs then produce identical wasm **and** JS, so a reused URL
+   always carries the same bytes. A floating `rust:slim-trixie` tag or an
+   unpinned Cargo.lock silently breaks this.
+2. **Self-healing service worker** — `static/sw.js` verifies every cached
+   response against the request's `integrity` attribute before serving it;
+   on mismatch it drops the entry and re-fetches bypassing the HTTP cache
+   (and only re-caches bytes that pass SRI). So even if a URL is ever
+   reused with different bytes, clients recover on the next load instead of
+   staying stuck.
+3. **Cache version bump on deploy** — bump `CACHE_VERSION` in
+   `parser-web/static/sw.js` whenever the frontend changes. The SW purge
+   runs on activation, so stale `e621-static-vN` entries (including any
+   poisoned ones) are dropped. `sw.js` itself is served `no-cache` and
+   browsers bypass the HTTP cache for SW updates, so the bump reaches
+   clients automatically.
+
+After shipping these fixes, clients that were stuck on stale cached bytes
+self-heal on their next load once the new SW (v3) activates; a one-off hard
+refresh is only needed if a browser never re-fetched `sw.js`.
+
 ## Memory allocator
 
 The server keeps in-memory caches (IDF, tag-relation graph, e621 API

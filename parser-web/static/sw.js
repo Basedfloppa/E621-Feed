@@ -8,9 +8,12 @@
 //   * cache API responses for offline browsing.
 //   * background sync for queued feedback + periodic self-refresh.
 //
-// Bump CACHE_VERSION whenever pre-cache or cache names change.
+// Bump CACHE_VERSION whenever pre-cache or cache names change. Must be
+// bumped on every frontend deploy that can affect asset bytes — the static
+// cache holds entries keyed by URL, and a bumped version is the only way to
+// purge entries that went stale (see the SRI notes below).
 
-const CACHE_VERSION = "e621-static-v2";
+const CACHE_VERSION = "e621-static-v3";
 const STATIC_CACHE = `${CACHE_VERSION}`;
 
 // API content endpoints worth keeping for offline browsing. Cached responses
@@ -104,18 +107,90 @@ self.addEventListener("fetch", (event) => {
 
 	// Static assets (wasm/css/js/static): cache-first so repeat visits are
 	// instant and the app keeps working offline once assets are cached.
+	// Hashed bundles carry an `integrity` attribute — see cacheFirst for why
+	// those are verified against their digest before serving from cache.
 	event.respondWith(cacheFirst(event.request));
 });
 
+// Map an `integrity` attribute token to a WebCrypto digest algorithm name.
+function integrityAlgo(value) {
+	if (value.startsWith("sha256-")) return "SHA-256";
+	if (value.startsWith("sha384-")) return "SHA-384";
+	if (value.startsWith("sha512-")) return "SHA-512";
+	return null;
+}
+
+// Base64 (standard, padded) of a byte array, chunked so multi-megabyte wasm
+// bundles don't overflow the call stack via String.fromCharCode(...spread).
+function bytesToBase64(bytes) {
+	let binary = "";
+	const CHUNK = 0x8000;
+	for (let i = 0; i < bytes.length; i += CHUNK) {
+		binary += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
+	}
+	return btoa(binary);
+}
+
+// True when `response` satisfies the request's SRI `integrity` metadata
+// ("sha384-<base64>", possibly a space-separated list of algorithms).
+// A response fetched without an integrity requirement always passes.
+async function passesIntegrity(response, integrity) {
+	if (!integrity) {
+		return true;
+	}
+	for (const part of integrity.trim().split(/\s+/)) {
+		const algo = integrityAlgo(part);
+		if (!algo) {
+			continue; // unsupported token — treated as "no matching hash"
+		}
+		try {
+			const expected = part.slice(part.indexOf("-") + 1);
+			const bytes = await response.clone().arrayBuffer();
+			const digest = await crypto.subtle.digest(algo, bytes);
+			if (bytesToBase64(new Uint8Array(digest)) === expected) {
+				return true;
+			}
+		} catch (err) {
+			return false;
+		}
+	}
+	return false;
+}
+
+// Cache-first with SRI self-healing.
+//
+// The hashed bundles (wasm/js/css) are named by trunk with a weak 64-bit hash
+// of the *wasm* only — not of each file's own bytes — so two builds can reuse
+// the same URL while the file content differs (toolchain drift, a rebuild
+// whose wasm happens to match, or a hash collision). Served stale, that copy
+// makes the browser's SRI check fail loudly with "None of the sha384 hashes
+// in the integrity attribute match the content of the subresource…". To
+// prevent that:
+//   * a cached copy is served only if it still matches the request's
+//     `integrity` metadata;
+//   * on mismatch the entry is dropped and re-fetched bypassing the HTTP
+//     cache, so the client self-heals on the very next load instead of
+//     staying stuck on the stale bytes for the cache lifetime;
+//   * the fresh copy is cached only if it too passes SRI, so the cache is
+//     never re-poisoned with bytes that fail the page's integrity check.
 async function cacheFirst(request) {
 	const cache = await caches.open(STATIC_CACHE);
 	const cached = await cache.match(request);
-	if (cached) {
+	if (cached && (await passesIntegrity(cached, request.integrity))) {
 		return cached;
 	}
-	const response = await fetch(request);
+	if (cached) {
+		await cache.delete(request);
+	}
+	const response = await fetch(request, {
+		// The browser's HTTP cache may hold the same stale bytes we just
+		// rejected — bypass it so the re-fetch goes to the server.
+		cache: request.integrity ? "no-cache" : "default",
+	});
 	if (response && (response.status === 200 || response.type === "opaque")) {
-		cache.put(request, response.clone());
+		if (await passesIntegrity(response, request.integrity)) {
+			cache.put(request, response.clone());
+		}
 	}
 	return response;
 }
