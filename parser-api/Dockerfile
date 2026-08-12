@@ -115,9 +115,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=builder /app/e621-account-parser-api /usr/local/bin/e621-account-parser-api
 COPY parser-api/migrations ./migrations
 
+# Bootable defaults so `docker run` works out of the box:
+#   * config.toml      — config.example.toml (placeholder e621 creds). The
+#     binary FATALs on startup without a parseable config.toml (the config
+#     LazyLock exits on first access), so a bare image must ship one.
+#   * Rocket.toml      — binds 0.0.0.0:8080 (Rocket's own defaults are
+#     127.0.0.1:8000, which would make the container unreachable).
+# Both are overridden at runtime by the docker-compose mounts
+# (`./config.toml:/app/config.toml:ro`, `./Rocket.toml:/app/Rocket.toml:ro`).
+COPY parser-api/config.example.toml /app/config.toml
+COPY parser-api/Rocket.toml /app/Rocket.toml
+
 ENV RUST_BACKTRACE=1
 
-# The binary binds to Rocket.toml's :8080 (the actual listening port).
+# The binary binds to /app/Rocket.toml's :8080 (the actual listening port).
 EXPOSE 8080
 
 CMD ["/usr/local/bin/e621-account-parser-api"]
