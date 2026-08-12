@@ -76,6 +76,7 @@ async fn prefetch_loop<F1, F2>(
 
         if threshold > 0 && fails >= threshold {
             let pause = runtime.prefetch_breaker_pause_secs.max(60);
+            crate::metrics::METRICS.prefetch_breaker_trips_total.inc();
             warn!(
                 "[catalog-prefetch:{name}] circuit breaker open after {fails} consecutive failures \
                  (threshold {threshold}); pausing {pause}s before resuming"

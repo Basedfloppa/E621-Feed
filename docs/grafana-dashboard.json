@@ -681,6 +681,154 @@
           "unit": "none"
         }
       }
+    },
+    {
+      "title": "Process Job Wall Time (running)",
+      "type": "timeseries",
+      "description": "Age in seconds of the currently running /process job. Above 1800s (~30 min) signals a stuck or pathologically slow import.",
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 0,
+        "y": 56
+      },
+      "targets": [
+        {
+          "expr": "e621_process_running_seconds",
+          "legendFormat": "Running"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 20
+          },
+          "thresholds": {
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              },
+              {
+                "color": "orange",
+                "value": 1800
+              },
+              {
+                "color": "red",
+                "value": 3600
+              }
+            ]
+          },
+          "unit": "s"
+        }
+      }
+    },
+    {
+      "title": "Last /process Duration (s)",
+      "type": "stat",
+      "description": "Wall-clock seconds of the most recently finished /process job.",
+      "gridPos": {
+        "h": 6,
+        "w": 6,
+        "x": 12,
+        "y": 56
+      },
+      "targets": [
+        {
+          "expr": "e621_process_last_duration_seconds",
+          "legendFormat": "Last"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              },
+              {
+                "color": "orange",
+                "value": 1800
+              },
+              {
+                "color": "red",
+                "value": 3600
+              }
+            ]
+          },
+          "unit": "s"
+        }
+      }
+    },
+    {
+      "title": "Prefetch Breaker Trips (24h)",
+      "type": "stat",
+      "description": "Times the catalog-prefetch circuit breaker opened in the last 24h (e621 failures exceeded prefetch_breaker_threshold).",
+      "gridPos": {
+        "h": 6,
+        "w": 6,
+        "x": 18,
+        "y": 56
+      },
+      "targets": [
+        {
+          "expr": "increase(e621_prefetch_breaker_trips_total[24h])",
+          "legendFormat": "Trips"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          },
+          "unit": "none"
+        }
+      }
+    },
+    {
+      "title": "e621 Upstream Errors by Class (5m rate)",
+      "type": "timeseries",
+      "description": "Rate of outbound e621 failures split by class (5xx / 429 / 4xx / timeout / network / decode). Sustained 5xx/network = e621 outage; 429 = we are being rate-limited.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 62
+      },
+      "targets": [
+        {
+          "expr": "sum by (class) (rate(e621_upstream_errors_total[5m]))",
+          "legendFormat": "{{class}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 20
+          },
+          "unit": "req/s"
+        }
+      }
     }
   ],
   "schemaVersion": 39,

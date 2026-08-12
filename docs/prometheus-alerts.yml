@@ -1,0 +1,122 @@
+# Prometheus alert rules for the E621 Feed parser.
+#
+# Usage:
+#   Prometheus flavour — add to prometheus.yml:
+#     rule_files:
+#       - /etc/prometheus/alerts.yml
+#   Grafana flavour — create the same rules via Grafana Alerting
+#     (Alert rules → new rule), selecting the Prometheus datasource.
+#
+# Delivery: these rules feed the configured alert manager / notification
+# policy. Recommended contact points:
+#   * Discord (webhook URL) — lowest setup cost
+#   * Telegram (bot) — optional
+#   * Email (SMTP) — backup
+#
+# Thresholds are tuned for a self-hosted single instance scraping itself.
+# Adjust `for:` / threshold constants to your traffic.
+
+groups:
+  - name: e621-feed-upstream
+    rules:
+      # e621/Cloudflare is returning persistent 5xx — the outage class behind
+      # the "503 Service Unavailable" incidents. 5m of >=1/s 5xx = real outage.
+      - alert: E621Upstream5xxRate
+        expr: 'sum(rate(e621_upstream_errors_total{class="5xx"}[5m])) > 1'
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "e621 upstream returning 5xx"
+          description: "e621/Cloudflare returned {{ $value | humanize }} 5xx/s over 5m. e621 is likely down or at capacity; user-facing reads will fail."
+
+      # e621 is rate-limiting us (HTTP 429) — we are hammering their API
+      # (admin key / per-owner budget exhausted).
+      - alert: E621UpstreamLimitHit
+        expr: 'increase(e621_upstream_errors_total{class="429"}[15m]) > 20'
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "e621 rate-limiting our requests"
+          description: "{{ $value }} requests were rate-limited (429) by e621 in the last 15m. Back off admin-key workers or raise per-owner budgets."
+
+      # Loss of connectivity / timeouts to e621 (not a JSON error response).
+      - alert: E621UpstreamUnreachable
+        expr: 'sum(rate(e621_upstream_errors_total{class=~"timeout|network"}[5m])) > 0'
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Cannot reach e621 (timeouts/net errors)"
+          description: "e621 requests failing on timeout/network for 5m. Check DNS/TLS/outbound connectivity and e621 status."
+
+  - name: e621-feed-processing
+    rules:
+      # New metric: age (s) of the currently running /process job. >1800s
+      # (30 min) suggests a stuck or pathologically slow import.
+      - alert: ProcessWallTimeHigh
+        expr: "e621_process_running_seconds > 1800"
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "/process running for over 30 minutes"
+          description: "The /process pipeline has been running {{ $value | humanizeDuration }}. Investigate a stuck or runaway import."
+
+      # New metric: last finished /process wall-clock duration.
+      - alert: ProcessLastRunSlow
+        expr: "e621_process_last_duration_seconds > 3600"
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Last /process run took over an hour"
+          description: "The most recent /process run took {{ $value | humanizeDuration }} — import latency is unacceptably high."
+
+      # Backend reports /process runs failed.
+      - alert: ProcessRunsFailed
+        expr: 'increase(e621_process_runs_total{status="failed"}[15m]) > 0'
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "/process pipeline failing"
+          description: "/process reported failed runs in the last 15m. Check job state / logs."
+
+  - name: e621-feed-catalog
+    rules:
+      # New metric: prefetch circuit-breaker opened (e621 failures exceeded
+      # prefetch_breaker_threshold) → catalog prefetch has stalled.
+      - alert: PrefetchBreakerTripped
+        expr: "increase(e621_prefetch_breaker_trips_total[15m]) > 0"
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Catalog prefetch circuit breaker opened"
+          description: "Prefetch hit the failure threshold and paused. e621 is failing prefetch traffic; catalog freshness may lag."
+
+      # Local catalog is essentially empty → DB wiped or initial seed pending.
+      - alert: CatalogEmpty
+        expr: "e621_catalog_posts_total < 100"
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Local catalog is empty"
+          description: "e621_catalog_posts_total = {{ $value }}. Catalog likely needs a /process run or db_exports seed."
+
+  - name: e621-feed-availability
+    rules:
+      # No feed/digest/browse views at all while accounts exist → app or
+      # queue likely wedged (or upstream fully blocked). Low signal: suppress
+      # on intentionally quiet instances. Uses alerting-relabeling if needed.
+      - alert: E621NoTraffic
+        expr: "sum(rate(e621_feed_views_total[10m]) or rate(e621_digest_views_total[10m]) or rate(e621_browse_views_total[10m])) == 0 and e621_accounts_total > 0"
+        for: 15m
+        labels:
+          severity: info
+        annotations:
+          summary: "No user-facing traffic detected"
+          description: "No feed/digest/browse views for 15m despite {{ $value }} accounts. Possible outage or inactivity — verify app health."

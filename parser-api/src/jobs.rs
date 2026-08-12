@@ -58,6 +58,21 @@ fn registry() -> &'static RwLock<HashMap<i32, ProcessJobState>> {
     JOBS.get_or_init(|| RwLock::new(HashMap::new()))
 }
 
+/// Refresh the `e621_process_running_seconds` gauge to the age (seconds) of
+/// the longest currently-running /process job, or 0 when none is running.
+/// Kept in sync on every state change so the scrape reflects live wall time.
+fn refresh_running_seconds() {
+    if let Ok(map) = registry().read() {
+        let secs = map
+            .values()
+            .filter(|s| s.phase == ProcessJobPhase::Running)
+            .map(|s| (Utc::now() - s.started_at).num_seconds().max(0))
+            .max()
+            .unwrap_or(0);
+        crate::metrics::METRICS.process_running_seconds.set(secs);
+    }
+}
+
 #[must_use]
 pub fn get_state(account_id: i32) -> Option<ProcessJobState> {
     registry().read().ok()?.get(&account_id).cloned()
@@ -97,6 +112,7 @@ pub fn try_begin(account_id: i32) -> BeginResult {
         elapsed_secs: 0.0,
     };
     map.insert(account_id, state.clone());
+    refresh_running_seconds();
     BeginResult::Started(state)
 }
 
@@ -114,6 +130,7 @@ pub fn record_page_done(account_id: i32) {
     {
         s.pages_done += 1;
     }
+    refresh_running_seconds();
 }
 
 /// Drop old Done/Failed entries. Running jobs older than
@@ -140,6 +157,7 @@ pub fn prune_finished_jobs() -> (usize, usize) {
         s.finished_at.is_none_or(|f| f > cutoff)
     });
     let after = map.len();
+    refresh_running_seconds();
     (before, after)
 }
 
@@ -156,6 +174,7 @@ pub fn record_phase(account_id: i32, name: impl Into<String>, elapsed_ms: f64) {
         });
         s.elapsed_secs = (Utc::now() - s.started_at).num_milliseconds() as f64 / 1000.0;
     }
+    refresh_running_seconds();
 }
 
 pub fn finish(account_id: i32, result: Result<(), String>) {
@@ -173,5 +192,11 @@ pub fn finish(account_id: i32, result: Result<(), String>) {
             }
         }
         s.finished_at = Some(Utc::now());
+        // Record the finished job's wall-clock duration for alerting, then
+        // refresh the "running" gauge (0 unless another job is still going).
+        crate::metrics::METRICS
+            .process_last_duration_seconds
+            .set((s.finished_at.unwrap() - s.started_at).num_seconds().max(0));
     }
+    refresh_running_seconds();
 }

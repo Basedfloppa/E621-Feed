@@ -209,12 +209,25 @@ async function networkFirstApi(request) {
 		}
 		return response;
 	} catch (err) {
-		// Offline — serve the last cached response, if any.
-		const cached = await readApiResponse(request.url);
+		// Offline or a transient blip in the service worker's own network stack
+		// (stale keep-alive, connection reset, worker replacement during deploy).
+		// Serve the last cached response if any; otherwise hand the page a clean
+		// 503 so the app's own error/retry UI handles it. We must NEVER reject
+		// `respondWith` — a rejected respondWith surfaces as a confusing
+		// "ServiceWorker unexpected error" and hard-blocks the request even
+		// though the backend/app are perfectly healthy.
+		const cached = await readApiResponse(request.url).catch(() => null);
 		if (cached) {
 			return fromStoredApi(cached);
 		}
-		throw err;
+		return new Response(
+			JSON.stringify({ error: "network_unavailable", code: 503 }),
+			{
+				status: 503,
+				statusText: "Service Unavailable",
+				headers: { "Content-Type": "application/json" },
+			},
+		);
 	}
 }
 

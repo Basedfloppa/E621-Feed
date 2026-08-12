@@ -34,6 +34,17 @@ pub struct AppMetrics {
     /// /process pipeline runs (label: status = "success" | "failed").
     pub process_runs_total: IntCounterVec,
 
+    /// Age in seconds of the currently-running /process job (0 when idle).
+    /// Feeds the "/process wall time > 30 min" alert.
+    pub process_running_seconds: IntGauge,
+
+    /// Wall-clock seconds the most recently finished /process job took.
+    pub process_last_duration_seconds: IntGauge,
+
+    /// Times the catalog-prefetch circuit breaker opened (e621 failures
+    /// exceeded `prefetch_breaker_threshold`).
+    pub prefetch_breaker_trips_total: IntCounter,
+
     /// Feed interactions (open / hide / impression), split by A/B bucket.
     pub feed_interactions_total: IntCounterVec,
 
@@ -110,6 +121,24 @@ impl AppMetrics {
             )
             .unwrap(),
 
+            process_running_seconds: register_int_gauge!(
+                "e621_process_running_seconds",
+                "Age in seconds of the currently running /process job (0 when idle)"
+            )
+            .unwrap(),
+
+            process_last_duration_seconds: register_int_gauge!(
+                "e621_process_last_duration_seconds",
+                "Wall-clock seconds of the most recently finished /process job"
+            )
+            .unwrap(),
+
+            prefetch_breaker_trips_total: register_int_counter!(
+                "e621_prefetch_breaker_trips_total",
+                "Times the catalog-prefetch circuit breaker opened"
+            )
+            .unwrap(),
+
             feed_interactions_total: register_int_counter_vec!(
                 "e621_feed_interactions_total",
                 "Feed interactions by bucket and type (qualified_impression / open / like / strong_like / hide)",
@@ -176,4 +205,24 @@ pub fn render() -> String {
     let mut buffer = Vec::new();
     encoder.encode(&prometheus::gather(), &mut buffer).unwrap();
     String::from_utf8(buffer).unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Touching the new fields forces LazyLock init (which panics on a
+    /// duplicate metric registration) and asserts the names are exported so
+    /// dashboards / alerts keep working.
+    #[test]
+    fn registers_new_process_and_breaker_metrics() {
+        let m = &METRICS;
+        m.process_running_seconds.set(0);
+        m.process_last_duration_seconds.set(0);
+        m.prefetch_breaker_trips_total.inc();
+        let out = render();
+        assert!(out.contains("e621_process_running_seconds"));
+        assert!(out.contains("e621_process_last_duration_seconds"));
+        assert!(out.contains("e621_prefetch_breaker_trips_total"));
+    }
 }
