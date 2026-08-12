@@ -422,9 +422,9 @@ preferred tags (not just the top-N) and fetches:
 Uses `Priority::Backfill` through the adaptive rate gate (base delay
 750 ms). Automatically yields to live user traffic:
 
-- If a live request passed within `backfill_live_window_ms` (default 2s),
+* If a live request passed within `backfill_live_window_ms` (default 2s),
   backfill adds extra delay proportional to recency
-- When `x-ratelimit-remaining` from e621 drops below thresholds, the gate
+* When `x-ratelimit-remaining` from e621 drops below thresholds, the gate
   increases delays: 2× at < 200 remaining, 3× at < 100, 5× at < 50
 
 The backfill has its own circuit breaker (`backfill_breaker_threshold`,

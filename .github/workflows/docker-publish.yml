@@ -1,0 +1,135 @@
+# Builds the single-binary image (embedded SPA + API) and publishes it to
+# the GitHub Container Registry (ghcr.io).
+#
+# Published tags:
+#   * master push          → latest, sha-<commit>
+#   * v* tag push          → v1.2.3, 1.2.3, 1.2, sha-<commit>
+#   * manual dispatch      → sha-<commit> (+ the optional `tag` input)
+#
+# Notes:
+#   * The Dockerfile (parser-api/Dockerfile) needs BuildKit for its cache
+#     mounts; setup-buildx + the `type=gha` cache keep rebuilds fast.
+#   * Build context is the repo ROOT (docker-compose uses `context: ..`),
+#     so the root .dockerignore applies — it excludes the 71 GB database.db.
+#   * The image is smoke-tested (GET / must answer 200) before the job
+#     completes; a boot regression fails loudly even though the push already
+#     happened.
+#   * To also push to Docker Hub, add a docker/login-action step for it and
+#     append `docker.io/<user>/e621-account-parser` to the metadata `images`.
+
+name: Publish Docker image
+
+on:
+  push:
+    branches: [master]
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: >-
+          Optional tag for a manual publish (e.g. v1.2.3). Empty → sha-<commit>.
+        required: false
+        type: string
+      features:
+        description: >-
+          Cargo features for the API binary, e.g. "jemalloc" or
+          "jemalloc,perf_metrics". Empty → default image. Note: feature
+          variants share the sha tag of the commit, so use a distinct `tag`
+          input for them.
+        required: false
+        type: string
+
+env:
+  REGISTRY: ghcr.io
+
+concurrency:
+  group: docker-publish-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  publish:
+    name: Build, push & smoke-test
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          # The GITHUB_TOKEN is only used for the GHCR login (injected at
+          # runtime); don't leave it in .git/config for later steps.
+          persist-credentials: false
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+
+      # GHCR image names must be lowercase; the repo name is mixed-case.
+      - name: Resolve lowercase image name
+        id: img
+        run: echo "name=${{ env.REGISTRY }}/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata (tags, labels)
+        id: meta
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5.10.0
+        with:
+          images: ${{ steps.img.outputs.name }}
+          tags: |
+            type=sha,format=long
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=ref,event=tag
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=${{ inputs.tag }},enable=${{ inputs.tag != '' }}
+          flavor: |
+            latest=false
+            prefix=
+            suffix=
+
+      - name: Build and push
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          context: .
+          file: parser-api/Dockerfile
+          push: true
+          load: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            FEATURES=${{ inputs.features || '' }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Boot regression check: with no config.toml the server must still
+      # come up and serve the embedded SPA (missing dist → "Frontend not
+      # embedded" 503, which this catches).
+      - name: Smoke-test the image
+        env:
+          IMG: ${{ steps.img.outputs.name }}
+        run: |
+          img="$IMG:sha-$GITHUB_SHA"
+          cid="$(docker run -d -p 18080:8080 "$img")"
+          cleanup() {
+            docker logs "$cid" 2>&1 | tail -40
+            docker rm -f "$cid" >/dev/null 2>&1
+          }
+          trap cleanup EXIT
+          for i in $(seq 1 30); do
+            if curl -sf -o /dev/null http://127.0.0.1:18080/; then
+              echo "smoke OK: GET / returned 200"
+              docker rm -f "$cid" >/dev/null 2>&1
+              trap - EXIT
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "smoke FAILED: image did not answer on :8080 within 60s" >&2
+          exit 1

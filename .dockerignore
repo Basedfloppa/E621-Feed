@@ -29,6 +29,7 @@ Thumbs.db
 
 # ==== Pi tooling / local state ====
 .pi/
+.pi-subagents/
 
 # ==== Logs ====
 *.log

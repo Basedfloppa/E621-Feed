@@ -112,6 +112,12 @@ pub fn try_begin(account_id: i32) -> BeginResult {
         elapsed_secs: 0.0,
     };
     map.insert(account_id, state.clone());
+    // Release the write guard BEFORE refreshing the gauge: refresh_running_seconds()
+    // takes a read lock on the same RwLock, and std::sync::RwLock is not
+    // reentrant — a read while this thread still holds the write lock is
+    // undefined behaviour and deadlocks in practice (observed as hanging
+    // integration tests).
+    drop(map);
     refresh_running_seconds();
     BeginResult::Started(state)
 }
@@ -157,6 +163,10 @@ pub fn prune_finished_jobs() -> (usize, usize) {
         s.finished_at.is_none_or(|f| f > cutoff)
     });
     let after = map.len();
+    // Same as try_begin: drop the write guard before refresh_running_seconds()
+    // takes its read lock (std::sync::RwLock is not reentrant — a read while
+    // the write lock is held by this thread deadlocks).
+    drop(map);
     refresh_running_seconds();
     (before, after)
 }
