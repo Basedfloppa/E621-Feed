@@ -1114,24 +1114,12 @@ async fn append_blacklist_rule_one(
 }
 
 fn send_interaction(backend_url: String, payload: FeedInteractionRequest) {
-    spawn_local(async move {
-        let body = match serde_json::to_string(&payload) {
-            Ok(body) => body,
-            Err(err) => {
-                web_sys::console::warn_1(&format!("failed to encode interaction: {err}").into());
-                return;
-            }
-        };
-
-        if let Err(err) = api_post(&format!("{backend_url}/interaction"))
-            .header("Content-Type", "application/json")
-            .body(body)
-            .send()
-            .await
-        {
-            web_sys::console::warn_1(&format!("failed to send interaction: {err}").into());
-        }
-    });
+    // Coalesce feed events (impressions + explicit actions) into a single
+    // `/interaction/batch` request instead of one POST per event. The backend
+    // has a single SQLite writer, so batching removes most write-transaction
+    // churn; explicit events still flush immediately. Undo stays a direct
+    // DELETE because it is keyed per-event.
+    crate::interaction_queue::push(backend_url, payload);
 }
 
 fn undo_interaction(backend_url: String, payload: FeedInteractionRequest) {

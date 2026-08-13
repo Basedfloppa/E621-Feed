@@ -18,6 +18,7 @@ use yew::prelude::*;
 use yew_router::prelude::*;
 
 mod components;
+mod interaction_queue;
 mod models;
 mod pages;
 

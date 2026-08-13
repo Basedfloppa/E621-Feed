@@ -212,6 +212,15 @@ pub struct FeedInteractionRequest {
     pub session_id: String,
 }
 
+/// Batch of feed interactions sent to `/interaction/batch`. Mirrors the
+/// backend `BatchInteractionRequest`. The backend processes up to 100 per
+/// request inside a single write transaction, which is far cheaper than
+/// one write transaction per event under its single-writer SQLite.
+#[derive(Serialize, Deserialize, Clone, PartialEq)]
+pub struct BatchInteractionRequest {
+    pub interactions: Vec<FeedInteractionRequest>,
+}
+
 /// One row of the interaction-history page.
 #[derive(Serialize, Deserialize, Clone, PartialEq)]
 pub struct InteractionHistoryEntry {
