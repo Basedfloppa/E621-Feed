@@ -79,8 +79,23 @@ impl Opts {
 // Download (streamed to disk, never held in memory)
 // ---------------------------------------------------------------------------
 
-async fn download(url: &str, dest: &Path) -> anyhow::Result<u64> {
-    let resp = reqwest::get(url)
+/// Shared HTTP client with the configured e621 User-Agent. e621 refuses
+/// requests that carry a default/empty User-Agent (HTTP 403) — the same
+/// `cfg().user_agent` the main API client uses.
+fn seed_client() -> anyhow::Result<reqwest::Client> {
+    let ua = models::cfg().user_agent.clone();
+    reqwest::Client::builder()
+        .user_agent(ua)
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(300))
+        .build()
+        .context("failed to build e621 download client — check TLS/network config")
+}
+
+async fn download(client: &reqwest::Client, url: &str, dest: &Path) -> anyhow::Result<u64> {
+    let resp = client
+        .get(url)
+        .send()
         .await
         .with_context(|| format!("GET {url}"))?;
     anyhow::ensure!(
@@ -100,7 +115,11 @@ async fn download(url: &str, dest: &Path) -> anyhow::Result<u64> {
     Ok(size)
 }
 
-async fn ensure_download(opts: &Opts, name: &str) -> anyhow::Result<PathBuf> {
+async fn ensure_download(
+    client: &reqwest::Client,
+    opts: &Opts,
+    name: &str,
+) -> anyhow::Result<PathBuf> {
     let path = opts.dir.join(name);
     if opts.skip_download {
         anyhow::ensure!(
@@ -118,7 +137,7 @@ async fn ensure_download(opts: &Opts, name: &str) -> anyhow::Result<PathBuf> {
     std::fs::create_dir_all(&opts.dir)?;
     let url = format!("{EXPORTS_BASE}/{name}");
     eprintln!("[catalog-seed] downloading {url} -> {}", path.display());
-    let got = download(&url, &path).await?;
+    let got = download(client, &url, &path).await?;
     eprintln!("[catalog-seed] download complete ({} bytes)", got);
     Ok(path)
 }
@@ -271,9 +290,11 @@ async fn main() -> anyhow::Result<()> {
     models::reload_from(&path)?;
     db::ensure_sqlite().map_err(|e| anyhow::anyhow!("migrate: {e}"))?;
 
-    let tags_path = ensure_download(&opts, TAGS_CSV).await?;
-    let aliases_path = ensure_download(&opts, ALIASES_CSV).await?;
-    let implications_path = ensure_download(&opts, IMPLICATIONS_CSV).await?;
+    let client = seed_client()?;
+
+    let tags_path = ensure_download(&client, &opts, TAGS_CSV).await?;
+    let aliases_path = ensure_download(&client, &opts, ALIASES_CSV).await?;
+    let implications_path = ensure_download(&client, &opts, IMPLICATIONS_CSV).await?;
 
     eprintln!("[catalog-seed] ingesting tags from {}", tags_path.display());
     let n = ingest_tags(&tags_path)?;
