@@ -6,12 +6,31 @@ use serde::{Deserialize, Deserializer, Serialize};
 
 // ── Canonical Post model (e621 API v2) ─────────────────────────────────
 
+/// e621 returns `null` timestamps for deleted/hidden posts (they stay in
+/// favourites lists). Map `null` → Unix epoch so a single stale post can't
+/// abort the whole page parse; the epoch sorts before any real date, so
+/// recency filters (`WHERE created_at >= …`) and scoring age
+/// (`now - created_at`) naturally deprioritise such posts.
+pub(crate) fn deserialize_nullable_dt<'de, D: Deserializer<'de>>(
+    d: D,
+) -> Result<DateTime<Utc>, D::Error> {
+    let s = Option::<String>::deserialize(d)?;
+    match s {
+        Some(s) => DateTime::parse_from_rfc3339(&s)
+            .map(|dt| dt.with_timezone(&Utc))
+            .map_err(serde::de::Error::custom),
+        None => Ok(DateTime::UNIX_EPOCH),
+    }
+}
+
 #[derive(Serialize, Deserialize, JsonSchema, Clone)]
 pub struct Post {
     pub id: i64,
     #[schemars(with = "String", description = "RFC3339 timestamp")]
+    #[serde(deserialize_with = "deserialize_nullable_dt")]
     pub created_at: DateTime<Utc>,
     #[schemars(with = "String", description = "RFC3339 timestamp")]
+    #[serde(deserialize_with = "deserialize_nullable_dt")]
     pub updated_at: DateTime<Utc>,
     pub files: Files,
     pub change_seq: f64,
@@ -451,6 +470,25 @@ mod tests {
             description: None,
             tags: Tags::default(),
         }
+    }
+
+    #[test]
+    fn null_post_dates_parse_to_unix_epoch() {
+        // e621 returns null created_at/updated_at for deleted posts kept in
+        // favourites lists; a single such post must not abort the whole page
+        // (regression: "invalid type: null, expected an RFC 3339 formatted
+        // date and time string").
+        let p = post_with(Some("png"), None);
+        let mut v = serde_json::to_value(&p).unwrap();
+        v["created_at"] = serde_json::Value::Null;
+        v["updated_at"] = serde_json::Value::Null;
+        let parsed: Post = serde_json::from_value(v).unwrap();
+        assert_eq!(parsed.created_at, DateTime::UNIX_EPOCH);
+        assert_eq!(parsed.updated_at, DateTime::UNIX_EPOCH);
+        // Normal timestamps still round-trip unchanged.
+        let rt: Post = serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
+        assert_eq!(rt.created_at, p.created_at);
+        assert_eq!(rt.updated_at, p.updated_at);
     }
 
     #[test]

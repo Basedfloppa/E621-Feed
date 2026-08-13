@@ -3,6 +3,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::models::AccountPreferenceProfile;
+use crate::models::deserialize_nullable_dt;
 
 /// Current e621 user API format (as of 2025-07).
 /// e621 now returns a unified user format through /users/{id}.json —
@@ -16,6 +17,7 @@ pub enum UserApiResponse {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct E621User {
     pub id: i32,
+    #[serde(deserialize_with = "deserialize_nullable_dt")]
     pub created_at: DateTime<Utc>,
     pub name: String,
     pub level: i32,
