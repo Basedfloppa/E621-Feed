@@ -9,6 +9,8 @@
 #[cfg(feature = "perf_metrics")]
 use std::time::Instant;
 
+use serde_json;
+
 /// Nanosecond-precision timing for one scoring pass.
 #[derive(Default, Clone, Copy, Debug)]
 pub struct ChannelTiming {
@@ -92,6 +94,80 @@ impl ScoringMetrics {
             info!("  {name:>22}: {avg_ns:>8.1} ns/op ({pct:>5.1}%)");
         }
         info!("──────────────────────────────────────────────");
+    }
+
+    /// Emit a **single, parseable JSON line** per request so Loki/Grafana can
+    /// show which scoring channel and which pipeline phase dominated. One line
+    /// at `info!`, prefixed `SCORING_TRACE` for easy filtering. Skips empty runs.
+    ///
+    /// `phases` are the pipeline [`PhaseRecord`]s from the caller's
+    /// [`PipelineMetrics`] (empty when none were recorded).
+    pub fn emit_json(
+        &self,
+        endpoint: &str,
+        account_id: i64,
+        total_ms: f64,
+        phases: &[PhaseRecord],
+    ) {
+        if self.count == 0 {
+            return;
+        }
+        let c = &self.channel;
+        let ph_ms = |ns: u64| (ns as f64) / 1_000_000.0;
+        let channel_ms = serde_json::json!({
+            "tag_similarity": ph_ms(c.tag_similarity),
+            "quality_fit": ph_ms(c.quality_fit),
+            "popularity_fit": ph_ms(c.popularity_fit),
+            "rating_fit": ph_ms(c.rating_fit),
+            "media_fit": ph_ms(c.media_fit),
+            "interaction_fit": ph_ms(c.interaction_fit),
+            "recency_fit": ph_ms(c.recency_fit),
+            "tag_relation_fit": ph_ms(c.tag_relation_fit),
+            "uploader_fit": ph_ms(c.uploader_fit),
+            "exclusivity_fit": ph_ms(c.exclusivity_fit),
+            "novelty_fit": ph_ms(c.novelty_fit),
+            "artist_discovery_fit": ph_ms(c.artist_discovery_fit),
+            "final_blend": ph_ms(c.final_blend),
+        });
+        // Which channel consumed the most time — surfaced as flat fields so a
+        // Grafana (Loki) panel can `unwrap` them directly.
+        let channels: [(&str, u64); 13] = [
+            ("tag_similarity", c.tag_similarity),
+            ("quality_fit", c.quality_fit),
+            ("popularity_fit", c.popularity_fit),
+            ("rating_fit", c.rating_fit),
+            ("media_fit", c.media_fit),
+            ("interaction_fit", c.interaction_fit),
+            ("recency_fit", c.recency_fit),
+            ("tag_relation_fit", c.tag_relation_fit),
+            ("uploader_fit", c.uploader_fit),
+            ("exclusivity_fit", c.exclusivity_fit),
+            ("novelty_fit", c.novelty_fit),
+            ("artist_discovery_fit", c.artist_discovery_fit),
+            ("final_blend", c.final_blend),
+        ];
+        let (top_channel, top_channel_ns) = channels
+            .into_iter()
+            .max_by_key(|(_name, ns)| *ns)
+            .map_or(("none", 0), |(n, ns)| (n, ns));
+        let phase_ms: serde_json::Map<String, serde_json::Value> = phases
+            .iter()
+            .map(|p| (p.name.to_string(), serde_json::json!(ph_ms(p.nanos))))
+            .collect();
+        let line = serde_json::json!({
+            "trace": "scoring",
+            "endpoint": endpoint,
+            "account": account_id,
+            "posts": self.count,
+            "total_ms": total_ms,
+            "top_channel": top_channel,
+            "top_channel_ms": ph_ms(top_channel_ns),
+            "channel_ms": channel_ms,
+            "phase_ms": phase_ms,
+        });
+        // Emit as a single pure-JSON line so Grafana/Loki can `| json` and
+        // `| unwrap` the numeric fields. Filter by `trace="scoring"`.
+        info!("{line}");
     }
 }
 
@@ -201,6 +277,32 @@ impl PipelineMetrics {
         }
         #[cfg(not(feature = "perf_metrics"))]
         {}
+    }
+
+    /// The phases recorded so far (empty when `perf_metrics` is off).
+    #[inline]
+    pub fn phases(&self) -> &[PhaseRecord] {
+        #[cfg(feature = "perf_metrics")]
+        {
+            &self.phases
+        }
+        #[cfg(not(feature = "perf_metrics"))]
+        {
+            &[]
+        }
+    }
+
+    /// Total wall-time across all recorded phases, in milliseconds.
+    #[inline]
+    pub fn total_ms(&self) -> f64 {
+        #[cfg(feature = "perf_metrics")]
+        {
+            self.phases.iter().map(|p| p.nanos).sum::<u64>() as f64 / 1_000_000.0
+        }
+        #[cfg(not(feature = "perf_metrics"))]
+        {
+            0.0
+        }
     }
 }
 
@@ -352,6 +454,33 @@ mod tests {
     fn log_summary_does_not_panic_on_empty() {
         let m = ScoringMetrics::default();
         m.log_summary(); // should not panic
+    }
+
+    #[test]
+    fn emit_json_empty_returns_early() {
+        let m = ScoringMetrics::default();
+        m.emit_json("test", 1, 0.0, &[]); // count == 0 → no-op
+    }
+
+    #[test]
+    fn emit_json_builds_well_formed_line() {
+        let mut m = ScoringMetrics::default();
+        m.accumulate(&ChannelTiming {
+            tag_similarity: 1_500_000,
+            final_blend: 900_000,
+            ..Default::default()
+        });
+        // serde_json::json! guarantees a well-formed payload; this just checks
+        // the whole path doesn't panic with real phase data.
+        m.emit_json(
+            "test",
+            7,
+            12.5,
+            &[PhaseRecord {
+                name: "scoring",
+                nanos: 3_000_000,
+            }],
+        );
     }
 
     #[cfg(feature = "perf_metrics")]

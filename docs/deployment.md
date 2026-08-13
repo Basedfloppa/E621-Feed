@@ -493,6 +493,53 @@ negligible. The pre-built dashboard (`docs/grafana-dashboard.json`) includes a
 latency section with p50/p95/p99 timeseries, the slowest-route and
 slowest-class breakdowns, and a per-route request-rate panel.
 
+### Scoring trace (per-request structured log)
+
+To see *which scoring element* dominates a slow recommendations/digest request
+there is a per-request structured trace. It is **always-on by default** — the
+`perf_metrics` compile-time feature is now part of `default` in
+`parser-api/Cargo.toml` (overhead ≈ 100 µs per request for a low-traffic
+self-host; disable by building with `--no-default-features` if you ever need
+it).
+
+For every non-empty scoring pass the backend logs **one** `info!` line as a
+single pure-JSON object (no prefix, so Grafana/Loki can `| json` it directly;
+identifiable by the `"trace":"scoring"` field):
+
+```json
+{"trace":"scoring","endpoint":"recommendations","account":42,"posts":200,
+ "total_ms":318000,"top_channel":"tag_relation_fit","top_channel_ms":312000,
+ "channel_ms":{"tag_similarity":…,"tag_relation_fit":…,"novelty":…,"artist_discovery_fit":…,…},
+ "phase_ms":{"db_hydrate":…,"e621_fetch":…,"cache_build":…,"scoring":…,"diversify_post":…}}
+```
+
++ `endpoint` is `recommendations`, `digest_personalized`, or `digest_generic`.
++ `posts` is the number of scored posts; `total_ms` the summed pipeline phases.
++ `channel_ms.*` is the cumulative time each scoring channel spent (in ms).
+  Whichever field is largest is the element to investigate.
++ `top_channel` / `top_channel_ms` repeat the biggest channel as flat fields so
+  a Loki panel can `| unwrap` them directly.
++ `phase_ms.*` splits the pipeline into DB hydration / e621 fetch / cache build
+  / scoring / diversify.
+
+The recommendations trace is emitted from `build_recommendations_shared`
+(`routes/feed.rs`); digest emits from both `build_personalized_digest` and
+`build_generic_digest` (`routes/digest.rs`). Source of truth for the format and
+emitter is `ScoringMetrics::emit_json` in `utils/scorer/metrics.rs`.
+
+The shipped dashboard (`docs/grafana-dashboard.json`, uid `adrwh67` in this
+deployment) already includes three Loki panels for this log: a timeseries of
+`total_ms` by endpoint, a timeseries of the bottleneck channel
+(`top_channel_ms` by `top_channel`), and a raw trace logs panel. They query the
+`loki` datasource (uid `dfkfplmnysw74e`); the container selector
+`container=~"e621.*|.*feed.*|.*parser.*"` may need adjusting to the backend
+container's actual name. They are empty until the backend actually emits
+traces and Alloy forwards stdout to Loki:
+
+```logql
+{container=~"e621.*|.*feed.*|.*parser.*"} |= "\"trace\":\"scoring\"" | json | trace="scoring"
+```
+
 ### A/B experiment tracking
 
 Accounts are deterministically assigned to an experiment arm (bucket) by

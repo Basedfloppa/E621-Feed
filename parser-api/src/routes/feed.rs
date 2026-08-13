@@ -679,6 +679,14 @@ async fn build_recommendations_shared(
     // Drop bucket_name — the caller handles bucket logging.
     let _ = bucket_name;
 
+    // Emit one structured JSON line per request so Loki/Grafana can show which
+    // scoring channel and which pipeline phase dominated (see `emit_json`).
+    // `pipe` is None on auxiliary paths (e.g. "continue") — fall back to empty
+    // phases there, the channel breakdown is still emitted.
+    let phases = pipe.as_ref().map(|p| p.phases()).unwrap_or(&[]);
+    let total_ms = pipe.as_ref().map(|p| p.total_ms()).unwrap_or(0.0);
+    metrics.emit_json(ctx_label, account_id as i64, total_ms, phases);
+
     Ok(scored)
 }
 

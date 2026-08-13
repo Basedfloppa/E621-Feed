@@ -45,7 +45,7 @@ use e621_account_parser_api::db::{
 use e621_account_parser_api::errors::ApiError;
 use e621_account_parser_api::models::{Post, Rating, ScoredPost, cfg};
 use e621_account_parser_api::utils::{
-    CachedPostFeatures, ScoringContext, current_global_relation, current_idf,
+    CachedPostFeatures, ScoringContext, ScoringMetrics, current_global_relation, current_idf,
 };
 use e621_account_parser_api::validation;
 
@@ -350,6 +350,10 @@ async fn build_personalized_digest(
         blacklist_set,
     );
 
+    // Thread-safe per-request scorer-trace accumulator: scoring runs in
+    // parallel rayon closures below, so channels accumulate under a Mutex.
+    let digest_metrics = Mutex::new(ScoringMetrics::default());
+
     // Owned post IDs serve double duty: as a source for the "recent added"
     // stratum below, and (when exclude_saved is on) as the dedup set against
     // every other candidate stream.
@@ -393,7 +397,8 @@ async fn build_personalized_digest(
             .into_par_iter()
             .zip(cached.into_par_iter())
             .map(|(post, cf)| {
-                let (score, breakdown, _) = ctx.score_cached_with_metrics(&cf);
+                let (score, breakdown, timing) = ctx.score_cached_with_metrics(&cf);
+                digest_metrics.lock().unwrap().accumulate(&timing);
                 ScoredPost {
                     post,
                     score,
@@ -439,7 +444,8 @@ async fn build_personalized_digest(
                     &global_relation,
                     Some(&user_relation),
                 );
-                let (s, breakdown, _) = ctx.score_cached_with_metrics(&cf);
+                let (s, breakdown, timing) = ctx.score_cached_with_metrics(&cf);
+                digest_metrics.lock().unwrap().accumulate(&timing);
                 ScoredPost {
                     post,
                     score: s,
@@ -525,6 +531,10 @@ async fn build_personalized_digest(
             .emit_err();
     }
 
+    if let Ok(timing) = digest_metrics.lock() {
+        timing.emit_json("digest_personalized", account_id as i64, 0.0, &[]);
+    }
+
     Ok(digest)
 }
 
@@ -595,11 +605,15 @@ async fn build_generic_digest(
         &global_relation,
     );
 
+    // Thread-safe per-request scorer-trace accumulator (parallel rayon closure).
+    let digest_metrics = Mutex::new(ScoringMetrics::default());
+
     let scored: Vec<ScoredPost> = all_posts
         .into_par_iter()
         .map(|sp| {
             let cf = CachedPostFeatures::from_post(&sp.post, &idf, &global_relation);
-            let (s, breakdown, _) = ctx.score_cached_with_metrics(&cf);
+            let (s, breakdown, timing) = ctx.score_cached_with_metrics(&cf);
+            digest_metrics.lock().unwrap().accumulate(&timing);
             ScoredPost {
                 post: sp.post,
                 score: s,
@@ -608,6 +622,10 @@ async fn build_generic_digest(
             }
         })
         .collect();
+
+    if let Ok(timing) = digest_metrics.lock() {
+        timing.emit_json("digest_generic", account_id as i64, 0.0, &[]);
+    }
 
     Ok(scored)
 }

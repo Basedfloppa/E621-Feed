@@ -34,6 +34,7 @@ tokio = { version = "1", features = ["full"] }
 chrono = { version = ">=0.4.38, <0.5", features = ["serde"] }
 prometheus = { version = "0.13", features = [] }
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 urlencoding = "2"
 anyhow = "1.0.103"
 toml = "0.9"
@@ -61,7 +62,7 @@ url = "2"
 # Without it, `MALLOC_ARENA_MAX=2 MALLOC_TRIM_THRESHOLD_=65536` env vars
 # cut glibc waste ~30-50% without a rebuild.
 [features]
-default = []
+default = ["perf_metrics"]
 jemalloc = ["dep:tikv-jemallocator"]
 perf_metrics = []
 
