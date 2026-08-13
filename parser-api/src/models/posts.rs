@@ -23,6 +23,14 @@ pub(crate) fn deserialize_nullable_dt<'de, D: Deserializer<'de>>(
     }
 }
 
+/// Same tolerance for raw string date fields (e.g. comments): `null` → empty
+/// string, so a deleted/hidden comment can't abort the whole comments page.
+pub(crate) fn deserialize_nullable_string<'de, D: Deserializer<'de>>(
+    d: D,
+) -> Result<String, D::Error> {
+    Ok(Option::<String>::deserialize(d)?.unwrap_or_default())
+}
+
 #[derive(Serialize, Deserialize, JsonSchema, Clone)]
 pub struct Post {
     pub id: i64,
@@ -58,7 +66,7 @@ pub struct Post {
 #[derive(Serialize, Deserialize, JsonSchema, Clone)]
 pub struct Comment {
     pub id: i64,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_nullable_string")]
     pub created_at: String,
     pub post_id: i64,
     #[serde(default)]
@@ -489,6 +497,25 @@ mod tests {
         let rt: Post = serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
         assert_eq!(rt.created_at, p.created_at);
         assert_eq!(rt.updated_at, p.updated_at);
+    }
+
+    #[test]
+    fn comment_null_date_parses_to_empty_string() {
+        // e621 can return null created_at for deleted/hidden comments; the
+        // viewer renders the raw string, so map it to "" (renders nothing)
+        // instead of aborting the comments fetch.
+        let c: Comment =
+            serde_json::from_str(r#"{"id":1,"created_at":null,"post_id":2,"body":"x"}"#).unwrap();
+        assert_eq!(c.created_at, "");
+        // A missing field also defaults to "".
+        let c2: Comment = serde_json::from_str(r#"{"id":1,"post_id":2,"body":"x"}"#).unwrap();
+        assert_eq!(c2.created_at, "");
+        // Normal timestamps pass through unchanged.
+        let c3: Comment = serde_json::from_str(
+            r#"{"id":1,"created_at":"2024-01-01T00:00:00Z","post_id":2,"body":"x"}"#,
+        )
+        .unwrap();
+        assert_eq!(c3.created_at, "2024-01-01T00:00:00Z");
     }
 
     #[test]
