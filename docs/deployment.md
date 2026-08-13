@@ -370,6 +370,9 @@ No external dependencies — uses the pure-Rust `prometheus` crate.
 | `e621_experiment_bucket_accounts` | Gauge | `bucket` (`control` / `exploration` / …) | Current number of accounts per A/B arm |
 | `e621_experiment_bucket_interactions_total` | Counter | `bucket` | Total feed interactions per A/B arm since server start |
 | `e621_upstream_errors_total` | Counter | `class` (`429` / `5xx` / `4xx` / `timeout` / `network` / `decode`) | Outbound e621 request failures — feeds the “high % 429/5xx” alert |
+| `e621_http_requests_total` | Counter | `method`, `route` | Total HTTP requests served, per method + route (long-lived; incremented by the `LatencyFairing`) |
+| `e621_http_request_duration_seconds` | Histogram | `method`, `route` | **Total request handling time** (receipt → response: e621 call + local scoring + serialization). Always-on. Diagnoses “the response takes too long.” |
+| `e621_upstream_request_seconds` | Histogram | `class` (`success` / `429` / `5xx` / `4xx` / `timeout` / `network` / `decode`) | **Latency of each outbound e621 request attempt.** Always-on. The gap vs `e621_http_request_duration_seconds` = local processing time. |
 
 ### Upstream e621 error stream
 
@@ -453,6 +456,42 @@ The dashboard includes panels for:
 | A/B — Hide Rate | Time series | `e621_feed_interactions_total` (hide / impression, by bucket) |
 | A/B — Interactions by Type & Bucket | Time series (stacked) | `e621_feed_interactions_total` by bucket + type |
 | Top-10 Accounts per Feature | Bar gauges | Per-account aggregation |
+| HTTP Response Time (p50/p95/p99) | Time series | `e621_http_request_duration_seconds` (histogram_quantile) |
+| e621 Upstream Latency (p50/p95/p99) | Time series | `e621_upstream_request_seconds` (histogram_quantile) |
+| HTTP p95 by Route | Time series | `e621_http_request_duration_seconds` topk by route |
+| e621 Upstream p95 by Class | Time series | `e621_upstream_request_seconds` by class |
+| HTTP Request Rate by Route | Time series (stacked) | `e621_http_requests_total` by route |
+
+### Latency & performance
+
+The two latency histograms are the primary tool for diagnosing “the response
+takes too long.” **Upstream latency** (`e621_upstream_request_seconds`) is how
+long e621 itself takes to answer; **total handling time**
+(`e621_http_request_duration_seconds`) is the whole response time per route —
+it includes the e621 call, local scoring, and serialization. Their difference
+is roughly the local processing cost.
+
+Find the slowest routes (p95 across all of them):
+
+```promql
+# p95 total handling time, top routes
+sort_desc(topk(8, histogram_quantile(0.95, sum by (le, route) (rate(e621_http_request_duration_seconds_bucket[5m])))))
+
+# p95 e621 latency, by outcome class
+histogram_quantile(0.95, sum by (le, class) (rate(e621_upstream_request_seconds_bucket[5m])))
+```
+
+Quick live check:
+
+```bash
+curl http://localhost:8080/api/metrics | grep -E "upstream_request_seconds|http_request_duration_seconds|http_requests_total"
+```
+
+Both histograms are **always-on** (not gated behind a compile-time feature):
+they use a small, fixed bucket set (~5 ms … 300 s) so the scrape overhead is
+negligible. The pre-built dashboard (`docs/grafana-dashboard.json`) includes a
+latency section with p50/p95/p99 timeseries, the slowest-route and
+slowest-class breakdowns, and a per-route request-rate panel.
 
 ### A/B experiment tracking
 

@@ -20,11 +20,13 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 #[cfg(debug_assertions)]
 use rocket::State;
 use rocket::data::ByteUnit;
+use rocket::fairing::{Fairing, Info, Kind};
 use rocket::futures::lock::Mutex;
 #[cfg(debug_assertions)]
 use rocket::http::Method;
 use rocket::http::{CookieJar, Header, Status};
 use rocket::request::Request;
+use rocket::response::Response;
 use rocket::response::status;
 use rocket::serde::json::{Json, serde_json};
 use rocket::shield::{Policy, Shield};
@@ -63,6 +65,52 @@ impl Policy for Csp {
 
     fn header(&self) -> Header<'static> {
         Header::new(Self::NAME, self.0.clone())
+    }
+}
+
+/// Records per-request wall-clock duration and request count into Prometheus.
+/// Always-on (not perf_metrics-gated). The duration covers the entire request
+/// lifetime — from just after receipt to the response — so it includes the
+/// outbound e621 call, local scoring, and serialization. Pair with
+/// `e621_upstream_request_seconds` to split e621 wait time from local
+/// processing time, which is exactly what diagnoses "the response takes too
+/// long".
+struct LatencyFairing;
+
+#[rocket::async_trait]
+impl Fairing for LatencyFairing {
+    fn info(&self) -> Info {
+        Info {
+            name: "latency-and-request-metrics",
+            kind: Kind::Request | Kind::Response,
+        }
+    }
+
+    async fn on_request(&self, request: &mut Request<'_>, _data: &mut rocket::data::Data<'_>) {
+        // One start timestamp scoped to this request; read back in on_response
+        // (local_cache is keyed by type and survives the request lifecycle).
+        let _ = request.local_cache(std::time::Instant::now);
+    }
+
+    async fn on_response<'r>(&self, request: &'r Request<'_>, _response: &mut Response<'r>) {
+        // local_cache was populated in on_request with an `Instant`. Retrieving
+        // with the same closure type returns the stored timestamp (factory only
+        // runs when absent).
+        let start = *request.local_cache(std::time::Instant::now);
+        let secs = start.elapsed().as_secs_f64();
+        let method = request.method().as_str().to_string();
+        let route = request
+            .route()
+            .map(|r| r.uri.path().to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+        e621_account_parser_api::metrics::METRICS
+            .http_request_duration_seconds
+            .with_label_values(&[&method, &route])
+            .observe(secs);
+        e621_account_parser_api::metrics::METRICS
+            .http_requests_total
+            .with_label_values(&[&method, &route])
+            .inc();
     }
 }
 
@@ -464,6 +512,7 @@ async fn build_rocket() -> rocket::Rocket<rocket::Build> {
         .mount("/api", rocket::routes![routes::get_metrics])
         .register("/api", catchers![catch_404, catch_422, catch_500])
         .attach(shield)
+        .attach(LatencyFairing)
         .attach(DbInit)
         // Serve the embedded frontend (SPA + static assets) on the root path.
         // The `/api` mount is kept separate; Rocket prefers the more specific

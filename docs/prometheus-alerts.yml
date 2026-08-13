@@ -120,3 +120,27 @@ groups:
         annotations:
           summary: "No user-facing traffic detected"
           description: "No feed/digest/browse views for 15m despite {{ $value }} accounts. Possible outage or inactivity — verify app health."
+
+  - name: e621-feed-latency
+    rules:
+      # p95 total request handling time exceeds 5s — users are waiting on slow
+      # response assembly. Pair with the slow-route and upstream-latency panels.
+      - alert: HTTPResponseTimeP95High
+        expr: "histogram_quantile(0.95, sum by (le) (rate(e621_http_request_duration_seconds_bucket[5m]))) > 5"
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "p95 response time > 5s"
+          description: "p95 total response time is {{ $value | humanizeDuration }} over 5m. Check the HTTP p95-by-route panel and upstream e621 latency to find whether the bottleneck is e621 or local processing."
+
+      # e621 itself is slow to answer (p95 upstream latency > 10s) — the
+      # upstream is the bottleneck, not our scoring/serialization.
+      - alert: E621UpstreamP95High
+        expr: "histogram_quantile(0.95, sum by (le) (rate(e621_upstream_request_seconds_bucket[5m]))) > 10"
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "e621 upstream p95 latency > 10s"
+          description: "e621 answers with p95 latency {{ $value | humanizeDuration }}. e621 is slow or rate-limiting us; user-facing reads wait on it. Consider backoff / admin-key budget."

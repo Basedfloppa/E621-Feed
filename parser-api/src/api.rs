@@ -526,6 +526,10 @@ async fn send_with_retry(
             Ok(inner) => inner,
             Err(_elapsed) => {
                 let elapsed = attempt_start.elapsed();
+                METRICS
+                    .upstream_request_seconds
+                    .with_label_values(&["timeout"])
+                    .observe(elapsed.as_secs_f64());
                 if attempt < cfg.max_retries {
                     warn!(
                         "[E621] Request hard-timeout after {:.2}s (budget {:?}) on attempt {}/{} for {}. Retrying in {:?}",
@@ -557,6 +561,19 @@ async fn send_with_retry(
             Ok(resp) => {
                 let status = resp.status();
                 let elapsed = attempt_start.elapsed();
+                let up_class = if status.is_success() {
+                    "success"
+                } else if status == StatusCode::TOO_MANY_REQUESTS {
+                    "429"
+                } else if status.is_server_error() {
+                    "5xx"
+                } else {
+                    "4xx"
+                };
+                METRICS
+                    .upstream_request_seconds
+                    .with_label_values(&[up_class])
+                    .observe(elapsed.as_secs_f64());
                 trace!("HTTP status received: {status}");
 
                 // Feed rate-limit headers back into the monitor.
@@ -619,6 +636,16 @@ async fn send_with_retry(
             Err(e) => {
                 let elapsed = attempt_start.elapsed();
                 let kind = err_kind(&e);
+                let class = match kind {
+                    "timeout" => "timeout",
+                    "connect" | "body" | "request" | "redirect" => "network",
+                    "decode" => "decode",
+                    _ => "network",
+                };
+                METRICS
+                    .upstream_request_seconds
+                    .with_label_values(&[class])
+                    .observe(elapsed.as_secs_f64());
                 if attempt < cfg.max_retries {
                     warn!(
                         "[E621] Request error [{kind}] on attempt {}/{} ({:.2}s) for {}: {}. Retrying in {:?}",
@@ -640,12 +667,6 @@ async fn send_with_retry(
                     url_for_logs,
                     e
                 );
-                let class = match kind {
-                    "timeout" => "timeout",
-                    "connect" | "body" | "request" | "redirect" => "network",
-                    "decode" => "decode",
-                    _ => "network",
-                };
                 record_upstream_failure(class, &url_for_logs, &e.to_string());
                 Err(format!("request failed after retries [{kind}]: {e}"))
             }
