@@ -12,7 +12,6 @@
 # caused the live-site SRI integrity mismatches (see docs/deployment.md).
 tailwind-output.css
 config.toml
-config.js
 
 parser-web/.well-known/security.txt
 */db

@@ -124,10 +124,18 @@ jobs:
           trap cleanup EXIT
           for i in $(seq 1 30); do
             if curl -sf -o /dev/null http://127.0.0.1:18080/; then
-              echo "smoke OK: GET / returned 200"
-              docker rm -f "$cid" >/dev/null 2>&1
-              trap - EXIT
-              exit 0
+              # config.js is required for the frontend to boot (loaded before
+              # the WASM bundle); a CI checkout without parser-web/static/config.js
+              # used to ship images whose UI showed "App configuration failed to
+              # load" while GET / still returned 200.
+              if curl -sf http://127.0.0.1:18080/static/config.js | grep -q 'APP_CONFIG'; then
+                echo "smoke OK: GET / 200 and /static/config.js served"
+                docker rm -f "$cid" >/dev/null 2>&1
+                trap - EXIT
+                exit 0
+              fi
+              echo "smoke FAILED: /static/config.js missing or empty (frontend would not boot)" >&2
+              exit 1
             fi
             sleep 2
           done

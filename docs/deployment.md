@@ -168,6 +168,7 @@ container.
 > mounts fully shadow image content), so production behaviour is unchanged.
 >
 > Startup is also safe against a **fresh/empty database**: the DB (migrations
+>
 > + WAL switch) is initialized before any background worker is spawned, and
 > the writer connection sets `busy_timeout` *before* the `journal_mode = WAL`
 > switch — so a concurrently-starting worker holding a shared lock makes the
@@ -212,6 +213,86 @@ reverse_proxy 127.0.0.1:8080
 
 In both cases do **not** serve `parser-web/dist` as a static root any more —
 the binary owns it.
+
+## Runtime frontend config (`static/config.js`)
+
+The SPA loads a tiny mutable config script **before** the WASM bundle
+(`parser-web/index.html`):
+
+```html
+<script src="./static/config.js"></script>
+```
+
+It sets `window.APP_CONFIG` (read by the frontend via
+`read_config_from_head()`):
+
+```js
+window.APP_CONFIG = Object.freeze({
+    posts_domain: "https://e621.net",  // base for client-side e621 links (post/artist/user/tag pages)
+    backend_domain: "/api",            // backend API base — keep same-origin
+});
+```
+
+**This file is required — the frontend cannot boot without it.** If it is
+missing or unreachable, the home page shows a hard error ("App configuration
+failed to load… check that /static/config.js is reachable"). Make sure your
+reverse proxy forwards `/static/config.js` to the binary and does not block
+or rewrite it.
+
+Key deployment properties:
+
++ **Baked into every image** — `parser-web/static/config.js` is committed to
+  the repo, so the Docker build (including CI) always serves the default
+  (`e621.net` + `/api`) out of the box; the frontend boots with no extra
+  setup. Override it only when you need a different `posts_domain`.
++ **Mutable, never cached** — the binary serves `static/config.js` with
+  `no-store, no-cache` (hashed wasm/css/js assets are `immutable` instead),
+  so a changed value is picked up on the next reload. For the same reason it
+  deliberately carries **no SRI `integrity` attribute** in `index.html`.
++ **Embedded at build time** — the file is baked into the binary via
+  rust-embed, so a Docker bind-mount over `/app/static/config.js` does **not**
+  override what the binary serves. To change it, either
+  1. serve an override from your proxy before the backend pass, e.g. nginx
+     `location = /static/config.js { alias /path/to/config.js; }` (an exact
+     match wins over the generic `location /` proxy);
+  2. or rebuild the frontend with a custom `parser-web/static/config.js` — it
+     flows into `dist/` and the image.
++ **`backend_domain` must stay same-origin (`/api`)** — session auth relies
+  on `SameSite=Lax` cookies; the proxy forwards `/api/*` to the binary (see
+  Reverse proxy above). A cross-origin `backend_domain` breaks auth unless
+  you also configure CORS on the API.
++ **`posts_domain`** is the base for **client-side** links to e621 pages
+  (open post/artist/user/tag links in the browser). It is independent of the
+  server-side `posts_domain` in `config.toml`, which workers use to fetch
+  data — set both when pointing at a mirror instance.
+
+### Overriding it in Docker / docker-compose
+
+The binary serves `config.js` from memory (embedded at build time), so a
+bind mount has **no effect** — do not try
+`./config.js:/app/static/config.js:ro` in compose, the container will still
+serve the baked file. Override it at build time instead:
+
++ **Patch the Dockerfile (recommended)** — add a build arg that rewrites the
+  file before `trunk build`, right after `COPY parser-web/static ./static`:
+
+  ```dockerfile
+  ARG POSTS_DOMAIN=https://e621.net
+  RUN printf 'window.APP_CONFIG = Object.freeze({ posts_domain: "%s", backend_domain: "/api" });\n' \
+      "$POSTS_DOMAIN" > static/config.js
+  ```
+
+  then build with `docker build --build-arg POSTS_DOMAIN=https://e926.net …`.
++ **Custom `parser-web/static/config.js` in your fork** — the existing
+  `COPY parser-web/static ./static` picks it up automatically, no Dockerfile
+  changes needed.
++ **Proxy override** — if your stack has nginx/Caddy in front of the binary
+  (not the stock compose, which maps `8181:8080` directly), serve the file
+  before the backend pass: nginx `location = /static/config.js { alias
+  /path/to/config.js; }`.
+
+The stock docker-compose has no proxy, so for it only the first two options
+apply.
 
 ## Compression
 
