@@ -40,7 +40,8 @@ use tokio::io::AsyncWriteExt as _;
 use e621_account_parser_api::{db, models};
 use models::{TagAlias, TagImplication};
 
-const EXPORTS_BASE: &str = "https://e621.net/db_exports";
+const EXPORTS_INDEX: &str = "https://e621.net/db_exports/";
+const FALLBACK_EXPORTS_BASE: &str = "https://static1.e621.net/data/db_export";
 const DEFAULT_DIR: &str = "db_exports";
 
 const TAGS_CSV: &str = "tags.csv.gz";
@@ -92,9 +93,45 @@ fn seed_client() -> anyhow::Result<reqwest::Client> {
         .context("failed to build e621 download client — check TLS/network config")
 }
 
-async fn download(client: &reqwest::Client, url: &str, dest: &Path) -> anyhow::Result<u64> {
+/// Discover the current static host for the db_exports dumps by parsing the
+/// e621 index page. e621 serves the dumps from rotating `staticN.e621.net`
+/// hosts (old `/db_exports/*` URLs now 404), so we read the live base instead
+/// of hardcoding a static1 host. Falls back to `static1` if parsing fails.
+async fn discover_exports_base(client: &reqwest::Client) -> anyhow::Result<String> {
+    let text = client
+        .get(EXPORTS_INDEX)
+        .send()
+        .await
+        .with_context(|| format!("GET {EXPORTS_INDEX}"))?
+        .error_for_status()
+        .context("e621 db_exports index returned non-OK status")?
+        .text()
+        .await
+        .context("read e621 db_exports index body")?;
+    const MARKER: &str = "https://static";
+    if let Some(i) = text.find(MARKER) {
+        let rest = &text[i..];
+        if let Some(end) = rest.find("/data/db_export") {
+            let base = format!("{}/data/db_export", &rest[..end]);
+            eprintln!("[catalog-seed] db_exports base: {base}");
+            return Ok(base);
+        }
+    }
+    eprintln!(
+        "[catalog-seed] could not discover db_exports base, using fallback {FALLBACK_EXPORTS_BASE}"
+    );
+    Ok(FALLBACK_EXPORTS_BASE.to_string())
+}
+
+async fn download(
+    client: &reqwest::Client,
+    base: &str,
+    url_path: &str,
+    dest: &Path,
+) -> anyhow::Result<u64> {
+    let url = format!("{base}/{url_path}");
     let resp = client
-        .get(url)
+        .get(&url)
         .send()
         .await
         .with_context(|| format!("GET {url}"))?;
@@ -117,6 +154,7 @@ async fn download(client: &reqwest::Client, url: &str, dest: &Path) -> anyhow::R
 
 async fn ensure_download(
     client: &reqwest::Client,
+    base: &str,
     opts: &Opts,
     name: &str,
 ) -> anyhow::Result<PathBuf> {
@@ -135,9 +173,9 @@ async fn ensure_download(
         return Ok(path);
     }
     std::fs::create_dir_all(&opts.dir)?;
-    let url = format!("{EXPORTS_BASE}/{name}");
+    let url = format!("{base}/{name}");
     eprintln!("[catalog-seed] downloading {url} -> {}", path.display());
-    let got = download(client, &url, &path).await?;
+    let got = download(client, base, name, &path).await?;
     eprintln!("[catalog-seed] download complete ({} bytes)", got);
     Ok(path)
 }
@@ -291,10 +329,11 @@ async fn main() -> anyhow::Result<()> {
     db::ensure_sqlite().map_err(|e| anyhow::anyhow!("migrate: {e}"))?;
 
     let client = seed_client()?;
+    let base = discover_exports_base(&client).await?;
 
-    let tags_path = ensure_download(&client, &opts, TAGS_CSV).await?;
-    let aliases_path = ensure_download(&client, &opts, ALIASES_CSV).await?;
-    let implications_path = ensure_download(&client, &opts, IMPLICATIONS_CSV).await?;
+    let tags_path = ensure_download(&client, &base, &opts, TAGS_CSV).await?;
+    let aliases_path = ensure_download(&client, &base, &opts, ALIASES_CSV).await?;
+    let implications_path = ensure_download(&client, &base, &opts, IMPLICATIONS_CSV).await?;
 
     eprintln!("[catalog-seed] ingesting tags from {}", tags_path.display());
     let n = ingest_tags(&tags_path)?;
