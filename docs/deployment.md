@@ -560,6 +560,42 @@ sum(rate(e621_process_runs_total{status="started"}[7d]))
 e621_catalog_posts_total
 ```
 
+## Catalog bootstrap (db_exports)
+
+A fresh install starts with an empty catalog that grows only via the live
+e621 API. To speed up the *global taxonomy*, run the offline `catalog-seed`
+binary once against e621's weekly full-dump CSVs
+(`https://e621.net/db_exports`):
+
++ `tags.csv.gz`             → `tags` table (name + category→`group_type`);
++ `tag_aliases.csv.gz`      → `tag_aliases`;
++ `tag_implications.csv.gz` → `tag_implications`.
+
+The dumps are **not** used to fill posts: they carry no media URLs (only
+`md5`), so every thumbnail/sample would still need a per-post API fetch by
+the media-hydrator — no faster than the normal incremental prefetch. Posts
+and media therefore accumulate through the usual `/process`, prefetch, and
+media-hydrator requests (`Priority::Prefetch` / `Priority::Backfill` below),
+which is the intended steady-state flow of fresh data.
+
+```bash
+# download the three dumps into ./db_exports (if missing), then ingest
+cd parser-api && cargo run --release --bin catalog-seed
+
+# reuse dumps you already downloaded
+cargo run --release --bin catalog-seed -- --dir /path/to/dumps --skip-download
+```
+
+Considerations:
+
++ **Stop the main server first.** The seed grabs the single SQLite writer for
+  the whole run; running it against a live DB will block writes. It is safe
+  to run against a throwaway DB and then start the server on the result.
++ **Idempotent.** All writes are upserts, so re-runs are safe (useful for
+  resuming after an interruption or refreshing taxonomy weekly).
++ The account layer (users, favourites, votes, interactions) is never
+  touched — it stays API-only.
+
 ## Background workers
 
 The server spawns three background workers that share the e621 API adaptive rate gate:

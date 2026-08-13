@@ -53,6 +53,20 @@ with repeatable harnesses:
   hot path (`ScoringContext::score` ≈ 3.5 µs/post on realistic data);
   results under `parser-api/target/criterion/`.
 
+## Offline taxonomy seed — `catalog-seed`
+
+Bootstrapping the global taxonomy (tags / aliases / implications) from e621's
+weekly `db_exports` dumps is an **operational** task — the reasoning,
+setup and runbook live in [deployment.md](deployment.md) under “Catalog
+bootstrap (db_exports)”.
+
+Development notes on the seed internals: `catalog-seed` streams each gz CSV
+into a bounded batch and issues idempotent upserts
+(`db::tags::upsert_catalog_tags`, `db::save_tag_aliases` /
+`db::save_tag_implications`). It deliberately does **not** import posts — the
+dumps carry no media URLs — so posts/media are left to the incremental
+prefetch / `/process` / media-hydrator path.
+
 ## Scoring & calibration internals
 
 - Per-knob "lower vs. higher" guide for every scoring variable:

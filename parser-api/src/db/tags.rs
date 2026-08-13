@@ -508,6 +508,26 @@ pub fn save_tag_implications(implications: &[TagImplication]) -> Result<(), Stri
     save_tag_relations("tag_implications", implications)
 }
 
+/// Bulk-ensure tag (name, group) rows exist, from the db_exports `tags.csv`.
+/// The catalog `tags` table has no `post_count` column (only `df`, which the
+/// post-ingest path recomputes), so this just guarantees the taxonomy rows
+/// are present with the right group before any posts reference them.
+pub fn upsert_catalog_tags(rows: &[(String, String)]) -> Result<(), String> {
+    if rows.is_empty() {
+        return Ok(());
+    }
+    super::with_write_tx(|tx| {
+        let mut stmt = tx
+            .prepare_cached("INSERT OR IGNORE INTO tags (name, group_type) VALUES (?1, ?2)")
+            .map_err(|e| format!("prep tags upsert: {e}"))?;
+        for (name, group) in rows {
+            stmt.execute(params![name, group])
+                .map_err(|e| format!("upsert tag {name}:{group}: {e}"))?;
+        }
+        Ok(())
+    })
+}
+
 /// Resolve a tag through the alias chain to find its canonical name.
 /// E.g. "canyne" -> "canine" (following the `consequent_name` chain).
 pub fn get_alias_consequent(tag: &str) -> Result<Option<String>, String> {

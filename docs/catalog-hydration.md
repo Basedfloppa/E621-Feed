@@ -36,3 +36,11 @@ A repair pass logs its work, for example:
 ```
 
 No log is emitted for an idle scan with no incomplete catalog posts.
+
+## Seeding taxonomy up front
+
+The global **taxonomy** (tag names/categories, aliases, implications) can be
+pre-seeded offline from e621's weekly dumps with the `catalog-seed` binary
+instead of waiting for this worker / `/process` to discover it — see
+[development.md](development.md). This hydrator still handles the media URLs
+the dumps don't ship, on a per-post basis via `get_posts_by_ids`.

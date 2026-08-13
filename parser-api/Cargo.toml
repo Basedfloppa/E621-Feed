@@ -10,6 +10,10 @@ path = "src/bin/calibrate/main.rs"
 name = "seed"
 path = "src/bin/seed.rs"
 
+[[bin]]
+name = "catalog-seed"
+path = "src/bin/catalog_seed.rs"
+
 [package]
 name = "e621-account-parser-api"
 version = "0.1.0"
@@ -20,7 +24,10 @@ refinery = { version = "0.9", features = ["rusqlite"] }
 rusqlite = { version = "0.38", features = ["bundled"] }
 r2d2 = "0.8"
 r2d2_sqlite = "0.32"
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.12", features = ["json", "stream"] }
+flate2 = "1"
+csv = "1"
+futures-util = "0.3"
 rocket = { version = "0.5.1", features = ["json"] }
 rocket_cors = "0.6.0"
 tokio = { version = "1", features = ["full"] }
