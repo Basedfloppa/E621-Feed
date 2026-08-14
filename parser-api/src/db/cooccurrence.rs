@@ -1,4 +1,4 @@
-use rusqlite::params;
+use rusqlite::{Connection, params};
 use std::collections::HashMap;
 
 use crate::models::{TagCount, TagRelationEdge, TagRelationGraphPayload, TagRelationNode};
@@ -426,7 +426,28 @@ pub fn load_account_tag_relation(
     account_id: i32,
     user_tag_counts: &[TagCount],
 ) -> Result<crate::utils::TagRelationGraph, String> {
+    let edge_limit = crate::models::cfg().runtime.user_relation_edge_limit.max(1) as i64;
     let conn = open_db()?;
+    load_account_tag_relation_conn(&conn, account_id, user_tag_counts, edge_limit)
+}
+
+/// Worker behind [`load_account_tag_relation`] with an explicit edge cap.
+/// Only the strongest `edge_limit` account co-occurrence pairs (by
+/// `cooc_count`) feed the MMR user-relation graph; weaker pairs are pruned at
+/// the SQL level. This mirrors `get_account_tag_relation_graph`'s `edge_limit`
+/// (ORDER BY cooc_count DESC LIMIT n) and bounds both the scan and the
+/// per-row `insert_pair` graph build, which previously materialized the entire
+/// account co-occurrence table (hundreds of thousands to millions of rows for
+/// active accounts — the dominant remaining `db_hydrate` cost on large
+/// accounts). A `&Connection` is threaded through so the cap is unit-testable
+/// against an in-memory database.
+pub fn load_account_tag_relation_conn(
+    conn: &Connection,
+    account_id: i32,
+    user_tag_counts: &[TagCount],
+    edge_limit: i64,
+) -> Result<crate::utils::TagRelationGraph, String> {
+    let edge_limit = edge_limit.max(1);
     let total_posts: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM accounts_post WHERE account_id = ?1",
@@ -449,12 +470,14 @@ pub fn load_account_tag_relation(
             SELECT tag1_name, tag1_group, tag2_name, tag2_group, cooc_count
             FROM account_tag_cooccurrence
             WHERE account_id = ?1
+            ORDER BY cooc_count DESC
+            LIMIT ?2
             ",
         )
         .map_err(|e| format!("Failed to prepare account tag cooc query: {e}"))?;
 
     let rows = stmt
-        .query_map(params![account_id], |row| {
+        .query_map(params![account_id, edge_limit], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
@@ -476,4 +499,83 @@ pub fn load_account_tag_relation(
     }
 
     Ok(graph)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mem_conn() -> rusqlite::Connection {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE accounts_post (account_id INTEGER NOT NULL, post_id INTEGER NOT NULL);
+             CREATE TABLE account_tag_cooccurrence (
+                account_id INTEGER NOT NULL,
+                tag1_name TEXT NOT NULL, tag1_group TEXT NOT NULL,
+                tag2_name TEXT NOT NULL, tag2_group TEXT NOT NULL,
+                cooc_count INTEGER NOT NULL
+             );",
+        )
+        .unwrap();
+        conn
+    }
+
+    #[test]
+    fn relation_edge_limit_caps_loaded_pairs_and_keeps_strongest() {
+        let conn = mem_conn();
+        for i in 0..20i64 {
+            conn.execute(
+                "INSERT INTO accounts_post (account_id, post_id) VALUES (1, ?1)",
+                [i + 1],
+            )
+            .unwrap();
+            // pair (artist_{i}, artist_{i+1}) — cooc_count grows with i, so the
+            // top-5 pairs are i = 18..=14 (descending by cooc_count).
+            conn.execute(
+                "INSERT INTO account_tag_cooccurrence (account_id, tag1_name, tag1_group, tag2_name, tag2_group, cooc_count)
+                 VALUES (1, ?1, 'artist', ?2, 'artist', ?3)",
+                rusqlite::params![
+                    format!("a{i}"),
+                    format!("b{i}"),
+                    100 + i * 10
+                ],
+            )
+            .unwrap();
+        }
+        let tags: Vec<TagCount> = Vec::new();
+
+        let g = load_account_tag_relation_conn(&conn, 1, &tags, 5).unwrap();
+        // Only the top `edge_limit` pairs are materialized.
+        assert_eq!(g.n_pairs(), 5, "graph must be capped to edge_limit");
+        // The strongest pair (i=19, cooc 290) must be present.
+        let (a, b) = (
+            g.tag_id(crate::utils::Group::Artist as u8, "a19").unwrap(),
+            g.tag_id(crate::utils::Group::Artist as u8, "b19").unwrap(),
+        );
+        assert!(g.cooc_by_id(a, b) > 0, "strongest pair retained");
+        // The weakest pair (i=0, cooc 100) must have been pruned.
+        let a0 = g.tag_id(crate::utils::Group::Artist as u8, "a0");
+        assert!(a0.is_none(), "weakest pair pruned");
+    }
+
+    #[test]
+    fn relation_with_small_account_loads_all_pairs() {
+        let conn = mem_conn();
+        conn.execute(
+            "INSERT INTO accounts_post (account_id, post_id) VALUES (1, 1)",
+            [],
+        )
+        .unwrap();
+        for i in 0..3i64 {
+            conn.execute(
+                "INSERT INTO account_tag_cooccurrence (account_id, tag1_name, tag1_group, tag2_name, tag2_group, cooc_count)
+                 VALUES (1, ?1, 'artist', ?2, 'artist', ?3)",
+                rusqlite::params![format!("x{i}"), format!("y{i}"), 5],
+            )
+            .unwrap();
+        }
+        let g = load_account_tag_relation_conn(&conn, 1, &[], 100).unwrap();
+        // Fewer rows than the limit: everything still loads (no pruning).
+        assert_eq!(g.n_pairs(), 3);
+    }
 }

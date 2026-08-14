@@ -134,6 +134,13 @@ Values > 1.0 amplify per-user diversity personalisation (a user who co-favourite
 `skeb`+`canine` gets less MMR penalty for those tags together); 0 disables the
 user graph entirely for diversity even when `diversity_semantic_blend > 0`.
 
+> **Load bound (2026-08)** — the personal graph is materialized from SQLite with
+> `load_account_tag_relation`, which now caps the strongest `user_relation_edge_limit`
+> pairs (`ORDER BY cooc_count DESC LIMIT n`, default 250k) instead of loading every
+> account co-occurrence row. Only the weakest pairs are dropped, so PMI-based
+> diversity above the semantic threshold is effectively unchanged. See the
+> `user_relation_edge_limit` row in “Tag-relation graph + Cluster-PMI”.
+
 |Variable|Lower →|Higher →|
 |---|---|---|
 |`diversity_window`|shorter memory; repeats can resurface|longer memory; more variety per page|
@@ -336,3 +343,4 @@ Per-pair PMI values are aggregated into a single channel score via
 |`tag_relation_cooc_ref`|even rare global pairs trusted at full weight|global pairs need more cooc before earning full PMI weight (rare pairs get linearly shrunk toward zero)|
 |`tag_relation_user_cooc_ref`|rare user pairs trusted at full weight|user pairs need more co-occurrences before earning full personal-PMI weight|
 |`tag_relation_max_tags`|more tags enter the O(K²) pairwise loop (slower, more signal)|fewer tags used — O(T²) → O(K²) speedup via Cluster-PMI (default 20, set to 0 for no limit)|
+|`user_relation_edge_limit`|load the entire account co-occurrence table into the user graph|only the strongest N pairs are loaded into the user-relation graph for MMR diversity (default 250k — bounds the per-request graph build for very large accounts; see the hydrate/diversify optimization)|

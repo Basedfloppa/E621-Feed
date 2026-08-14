@@ -195,6 +195,7 @@ local_candidate_limit = 400             # local candidates per recommendations p
 dedup_lookback_days = 14                # live-post deduplication window
 process_fetch_concurrency = 4           # parallel pages during /process import
 drop_cooc_batch_size = 50000            # co-occurrence DELETE batch size
+user_relation_edge_limit = 250000       # max account cooc-pairs loaded into the MMR user graph
 idf_rebuild_cooldown_secs = 15
 idf_bump_drift_threshold = 200          # incremental bumps before a full IDF rebuild
 tag_relation_rebuild_cooldown_secs = 15

@@ -257,6 +257,31 @@ fn seed() {
         drop(ins);
     }
 
+    {
+        // Very-large account (2): ~320k cooc pairs — ABOVE the default
+        // `user_relation_edge_limit` (250k) — to prove `load_account_tag_relation`
+        // is bounded by the edge cap rather than the full table size.
+        tx.execute("INSERT INTO accounts (id, name) VALUES (2, 'big')", [])
+            .expect("insert big account");
+        let mut ins = tx
+            .prepare(
+                "INSERT INTO account_tag_cooccurrence (account_id, tag1_name, tag1_group, tag2_name, tag2_group, cooc_count)
+                 VALUES (2,?1,?2,?3,?4,?5)",
+            )
+            .expect("prep big cooc");
+        for i in 0..320_000i64 {
+            ins.execute(rusqlite::params![
+                format!("big_a{i}"),
+                "artist",
+                format!("big_b{i}"),
+                "artist",
+                i
+            ])
+            .expect("insert big cooc");
+        }
+        drop(ins);
+    }
+
     tx.commit().expect("commit seed");
 }
 
@@ -298,13 +323,32 @@ fn bench_load_user_relation(c: &mut Criterion) {
     let tag_counts = setup.tag_counts.clone();
     let mut group = c.benchmark_group("db_hydrate");
     group.sample_size(50);
-    group.bench_function("load_account_tag_relation (200k pairs)", |b| {
+    group.bench_function("load_account_tag_relation (80k pairs, below cap)", |b| {
         b.iter(|| {
             let g =
                 black_box(db::load_account_tag_relation(1, &tag_counts).expect("load relation"));
             black_box(g.n_posts());
         });
     });
+    group.finish();
+}
+
+fn bench_load_user_relation_large(c: &mut Criterion) {
+    setup();
+    let mut group = c.benchmark_group("db_hydrate");
+    group.sample_size(30);
+    // Account 2 has ~320k cooc rows; the loader caps at `user_relation_edge_limit`
+    // (250k default), so this stays bounded instead of materializing all 320k.
+    group.bench_function(
+        "load_account_tag_relation (large, 320k pairs capped to 250k)",
+        |b| {
+            b.iter(|| {
+                let g =
+                    black_box(db::load_account_tag_relation(2, &[]).expect("load big relation"));
+                black_box(g.n_posts());
+            });
+        },
+    );
     group.finish();
 }
 
@@ -332,6 +376,7 @@ criterion_group!(
     bench_hydrate_posts,
     bench_collect_candidates,
     bench_load_user_relation,
+    bench_load_user_relation_large,
     bench_seen_owned
 );
 criterion_main!(benches);

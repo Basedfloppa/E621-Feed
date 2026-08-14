@@ -91,6 +91,14 @@ pub struct RuntimeConfig {
     /// posts out of the candidate pool.
     #[serde(default = "default_dedup_lookback_days")]
     pub dedup_lookback_days: i64,
+    /// Cap on the number of account co-occurrence pairs materialized into the
+    /// MMR user-relation graph by `load_account_tag_relation`. Only the
+    /// strongest `user_relation_edge_limit` pairs (by `cooc_count`) are loaded,
+    /// mirroring `get_account_tag_relation_graph`. Bounds both the SQLite scan/
+    /// sort and the per-row `insert_pair` graph build for very large accounts
+    /// (TODO §2.2b). Default `250_000`.
+    #[serde(default = "default_user_relation_edge_limit")]
+    pub user_relation_edge_limit: usize,
     /// Parallel pages fetched during /process favourites import.
     #[serde(default = "default_process_fetch_concurrency")]
     pub process_fetch_concurrency: usize,
@@ -265,6 +273,7 @@ impl Default for RuntimeConfig {
         Self {
             local_candidate_limit: default_local_candidate_limit(),
             dedup_lookback_days: default_dedup_lookback_days(),
+            user_relation_edge_limit: default_user_relation_edge_limit(),
             process_fetch_concurrency: default_process_fetch_concurrency(),
             drop_cooc_batch_size: default_drop_cooc_batch_size(),
             idf_rebuild_cooldown_secs: default_rebuild_cooldown_secs(),
@@ -335,6 +344,9 @@ fn default_local_candidate_limit() -> i64 {
 }
 fn default_dedup_lookback_days() -> i64 {
     14
+}
+fn default_user_relation_edge_limit() -> usize {
+    250_000
 }
 fn default_process_fetch_concurrency() -> usize {
     4
