@@ -176,7 +176,7 @@ fn seed() {
         // account 1 + owned posts (first 2000) + quality profile + top tag counts.
         tx.execute("INSERT INTO accounts (id, name) VALUES (1, 'bench')", [])
             .expect("insert account");
-        tx.execute_batch("INSERT INTO accounts_post (post_id, account_id) SELECT id, 1 FROM posts WHERE id <= 2000;")
+        tx.execute_batch("INSERT INTO accounts_post (post_id, account_id) SELECT id, 1 FROM posts WHERE id <= 100000;")
             .expect("insert accounts_post");
         tx.execute(
             "INSERT INTO account_quality_profile (account_id, avg_score_total, avg_fav_count, avg_comment_count, avg_duration)
@@ -219,33 +219,40 @@ fn seed() {
             )
             .expect("prep feed_interactions");
         let now = Utc::now();
-        for i in 1..=5000i64 {
+        for i in 1..=200_000i64 {
             let created = (now - chrono::Duration::days(i % 10))
                 .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-            ins.execute(rusqlite::params![i, format!("s{i}"), created])
-                .expect("insert feed_interaction");
+            ins.execute(rusqlite::params![
+                (i % 100_000) + 1,
+                format!("s{i}"),
+                created
+            ])
+            .expect("insert feed_interaction");
         }
         drop(ins);
     }
 
     {
-        // account_tag_cooccurrence: ~2000 pairs for account 1.
+        // account_tag_cooccurrence: full upper-triangle of 400-artist graph (~80k pairs).
         let mut ins = tx
             .prepare(
                 "INSERT INTO account_tag_cooccurrence (account_id, tag1_name, tag1_group, tag2_name, tag2_group, cooc_count)
                  VALUES (1,?1,?2,?3,?4,?5)",
             )
             .expect("prep cooc");
-        for a in 0..40 {
-            let a2 = (a + 1) % 40;
-            ins.execute(rusqlite::params![
-                format!("artist_{a}"),
-                "artist",
-                format!("artist_{a2}"),
-                "artist",
-                10 + a * 3
-            ])
-            .expect("insert cooc");
+        // Full upper-triangle of the 400-artist graph (~80k unique canonical
+        // pairs) — a realistic heavy-account co-occurrence table.
+        for a in 0..400 {
+            for b in (a + 1)..400 {
+                ins.execute(rusqlite::params![
+                    format!("artist_{a}"),
+                    "artist",
+                    format!("artist_{b}"),
+                    "artist",
+                    10 + (a % 20)
+                ])
+                .expect("insert cooc");
+            }
         }
         drop(ins);
     }
@@ -291,7 +298,7 @@ fn bench_load_user_relation(c: &mut Criterion) {
     let tag_counts = setup.tag_counts.clone();
     let mut group = c.benchmark_group("db_hydrate");
     group.sample_size(50);
-    group.bench_function("load_account_tag_relation", |b| {
+    group.bench_function("load_account_tag_relation (200k pairs)", |b| {
         b.iter(|| {
             let g =
                 black_box(db::load_account_tag_relation(1, &tag_counts).expect("load relation"));
@@ -305,13 +312,13 @@ fn bench_seen_owned(c: &mut Criterion) {
     setup();
     let mut group = c.benchmark_group("db_hydrate");
     group.sample_size(100);
-    group.bench_function("get_recently_seen_post_ids (5000 interactions)", |b| {
+    group.bench_function("get_recently_seen_post_ids (200k interactions)", |b| {
         b.iter(|| {
             let s = black_box(db::get_recently_seen_post_ids(1, 14).expect("recent seen"));
             black_box(s.len());
         });
     });
-    group.bench_function("get_owned_post_ids (2000 owned)", |b| {
+    group.bench_function("get_owned_post_ids (100k owned)", |b| {
         b.iter(|| {
             let s = black_box(db::get_owned_post_ids(1).expect("owned"));
             black_box(s.len());
