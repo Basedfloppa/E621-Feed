@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::models::{FeedInteractionRequest, FeedInteractionType};
 
-use super::open_db;
+use super::{hydrate_cache, open_db};
 
 pub fn record_feed_interaction(
     owner_token: &str,
@@ -110,7 +110,9 @@ pub fn record_feed_interaction(
         }
 
         Ok(())
-    })
+    })?;
+    hydrate_cache::clear_seen(i64::from(interaction.account_id));
+    Ok(())
 }
 
 /// Remove one explicit feedback event and reverse its tag-feedback aggregate.
@@ -154,7 +156,9 @@ pub fn remove_feed_interaction(
             params![impressions, positives, negatives, Utc::now().to_rfc3339(), interaction.account_id, interaction.post_id],
         ).map_err(|e| format!("Failed to reverse tag feedback: {e}"))?;
         Ok(true)
-    })
+    })?;
+    hydrate_cache::clear_seen(i64::from(interaction.account_id));
+    Ok(true)
 }
 
 /// Batch version of `record_feed_interaction`. Processes up to 100
@@ -218,7 +222,7 @@ fn history_row_mapper(
 /// Clear the interaction-derived recommendation state for one account owned by
 /// this device. Favorites, blacklist, profile, and account links are retained.
 pub fn clear_feed_interactions(owner_token: &str, account_id: i32) -> Result<usize, String> {
-    super::with_write_tx(|tx| {
+    let deleted = super::with_write_tx(|tx| {
         let linked: bool = tx
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM account_device_links WHERE owner_token = ?1 AND account_id = ?2)",
@@ -252,7 +256,9 @@ pub fn clear_feed_interactions(owner_token: &str, account_id: i32) -> Result<usi
         )
         .map_err(|e| format!("Failed to clear feed sessions: {e}"))?;
         Ok(deleted)
-    })
+    })?;
+    hydrate_cache::clear_seen(i64::from(account_id));
+    Ok(deleted)
 }
 
 pub fn record_feed_interactions_batch(
@@ -376,7 +382,20 @@ pub fn record_feed_interactions_batch(
         }
 
         Ok(())
-    })
+    })?;
+    {
+        let mut seen_accounts: Vec<i64> = Vec::new();
+        for it in interactions {
+            let a = i64::from(it.account_id);
+            if !seen_accounts.contains(&a) {
+                seen_accounts.push(a);
+            }
+        }
+        for a in seen_accounts {
+            hydrate_cache::clear_seen(a);
+        }
+    }
+    Ok(())
 }
 
 /// Posts the user has already interacted with in any way (qualified
@@ -390,6 +409,10 @@ pub fn record_feed_interactions_batch(
 /// because the user has already seen the post in full and likely
 /// doesn't need it surfaced again so soon.
 pub fn get_recently_seen_post_ids(account_id: i32, days: i64) -> Result<HashSet<i64>, String> {
+    let account_id = i64::from(account_id);
+    if let Some(cached) = hydrate_cache::recent_seen(account_id) {
+        return Ok((*cached).clone());
+    }
     let conn = open_db()?;
     let cutoff = (Utc::now() - chrono::Duration::days(days.max(1))).to_rfc3339();
     let mut stmt = conn
@@ -405,8 +428,10 @@ pub fn get_recently_seen_post_ids(account_id: i32, days: i64) -> Result<HashSet<
     let rows = stmt
         .query_map(params![account_id, cutoff], |r| r.get::<_, i64>(0))
         .map_err(|e| format!("query get_recently_seen_post_ids: {e}"))?;
-    rows.collect::<Result<HashSet<_>, _>>()
-        .map_err(|e| format!("collect get_recently_seen_post_ids: {e}"))
+    let set = rows
+        .collect::<Result<HashSet<_>, _>>()
+        .map_err(|e| format!("collect get_recently_seen_post_ids: {e}"))?;
+    Ok((*hydrate_cache::store_recent_seen(account_id, set)).clone())
 }
 
 /// Long-term seen post IDs (up to `long_days` back). Used in addition to
@@ -417,6 +442,10 @@ pub fn get_long_term_seen_post_ids(
     account_id: i32,
     long_days: i64,
 ) -> Result<HashSet<i64>, String> {
+    let account_id = i64::from(account_id);
+    if let Some(cached) = hydrate_cache::long_term_seen(account_id) {
+        return Ok((*cached).clone());
+    }
     let conn = open_db()?;
     let cutoff = (Utc::now() - chrono::Duration::days(long_days.max(1))).to_rfc3339();
     let mut stmt = conn
@@ -432,13 +461,19 @@ pub fn get_long_term_seen_post_ids(
     let rows = stmt
         .query_map(params![account_id, cutoff], |r| r.get::<_, i64>(0))
         .map_err(|e| format!("query get_long_term_seen_post_ids: {e}"))?;
-    rows.collect::<Result<HashSet<_>, _>>()
-        .map_err(|e| format!("collect get_long_term_seen_post_ids: {e}"))
+    let set = rows
+        .collect::<Result<HashSet<_>, _>>()
+        .map_err(|e| format!("collect get_long_term_seen_post_ids: {e}"))?;
+    Ok((*hydrate_cache::store_long_term_seen(account_id, set)).clone())
 }
 
 /// Posts already in the user's favourites — they don't belong in a "discover"
 /// feed because the user has already curated them.
 pub fn get_owned_post_ids(account_id: i32) -> Result<HashSet<i64>, String> {
+    let account_id = i64::from(account_id);
+    if let Some(cached) = hydrate_cache::owned(account_id) {
+        return Ok((*cached).clone());
+    }
     let conn = open_db()?;
     let mut stmt = conn
         .prepare("SELECT post_id FROM accounts_post WHERE account_id = ?1")
@@ -446,8 +481,10 @@ pub fn get_owned_post_ids(account_id: i32) -> Result<HashSet<i64>, String> {
     let rows = stmt
         .query_map(params![account_id], |r| r.get::<_, i64>(0))
         .map_err(|e| format!("query get_owned_post_ids: {e}"))?;
-    rows.collect::<Result<HashSet<_>, _>>()
-        .map_err(|e| format!("collect get_owned_post_ids: {e}"))
+    let set = rows
+        .collect::<Result<HashSet<_>, _>>()
+        .map_err(|e| format!("collect get_owned_post_ids: {e}"))?;
+    Ok((*hydrate_cache::store_owned(account_id, set)).clone())
 }
 
 /// Posts authored by the user's top-N favourite tags within `group_type`,
@@ -608,6 +645,10 @@ fn local_candidates_recent_popular(
 /// - Recent-popular: looks back 60 days.
 /// - Pool size per stream: `(limit / 3 * 2).max(100)`.
 pub fn collect_local_candidate_ids(account_id: i32, limit: i64) -> Result<Vec<i64>, String> {
+    let cache_key = i64::from(account_id);
+    if let Some(cached) = hydrate_cache::candidates(cache_key) {
+        return Ok((*cached).clone());
+    }
     let conn = open_db()?;
     // Use a larger multiplier per stream so each source contributes a diverse
     // set. Each query samples a pseudo-random rowid window (with an exact
@@ -631,11 +672,12 @@ pub fn collect_local_candidate_ids(account_id: i32, limit: i64) -> Result<Vec<i6
             }
             out.insert(id);
             if out.len() as i64 >= limit {
-                return Ok(out.into_iter().collect());
+                break;
             }
         }
     }
-    Ok(out.into_iter().collect())
+    let result: Vec<i64> = out.into_iter().collect();
+    Ok((*hydrate_cache::store_candidates(cache_key, result)).clone())
 }
 
 /// Given a list of candidate post IDs and blacklisted simple tag names,

@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use crate::models::Post;
 
-use super::{open_db, parse_db_datetime};
+use super::{hydrate_cache, open_db, parse_db_datetime};
 
 /// Delete catalog posts that aren't favourited by anyone and haven't been
 /// re-touched within `retention_secs`. Used by the cache-validator worker
@@ -150,7 +150,9 @@ pub fn drop_account_posts(account_id: i32) -> Result<(), String> {
             }
         }
         Ok(())
-    })
+    })?;
+    hydrate_cache::clear_owned_and_candidates(i64::from(account_id));
+    Ok(())
 }
 
 /// Delete this account's cooccurrence rows in chunks.
@@ -253,7 +255,7 @@ fn delete_by_account_in_batches(
 }
 
 pub fn save_posts(posts: &[Post], account_id: i32) -> Result<(), String> {
-    super::with_write_tx(|tx| {
+    let result = super::with_write_tx(|tx| {
         let mut insert_post = tx
             .prepare_cached(POST_UPSERT_SQL)
             .map_err(|e| format!("Failed to prepare transaction: {e}"))?;
@@ -273,7 +275,9 @@ pub fn save_posts(posts: &[Post], account_id: i32) -> Result<(), String> {
                 .map_err(|e| format!("Failed to execute transaction: {e}"))?;
         }
         Ok(())
-    })
+    });
+    hydrate_cache::clear_owned_and_candidates(i64::from(account_id));
+    result
 }
 
 /// Single source of truth for the posts upsert. Both `save_posts` and
