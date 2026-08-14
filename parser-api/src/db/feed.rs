@@ -453,16 +453,45 @@ pub fn get_owned_post_ids(account_id: i32) -> Result<HashSet<i64>, String> {
 /// Posts authored by the user's top-N favourite tags within `group_type`,
 /// randomized instead of ranked — pulls from a wider pool and shuffles
 /// so the same best posts don't dominate every feed request.
-fn local_candidates_for_top_tags(
+/// Random LOW `rowid` anchor into `posts` so a following
+/// `AND p.rowid >= ? ORDER BY p.rowid LIMIT n` samples a pseudo-random window
+/// without the full `ORDER BY RANDOM()` sort (the dominant `db_hydrate` cost
+/// on large catalogs). Returns `0` when `posts` is empty (callers treat that as
+/// "no window constraint").
+fn random_rowid_anchor(conn: &Connection) -> Result<i64, String> {
+    let anchor: i64 = conn
+        .query_row(
+            "SELECT CASE WHEN (SELECT COALESCE(MAX(rowid),0) FROM posts) > 0
+                         THEN ABS(RANDOM()) % (SELECT COALESCE(MAX(rowid),0) FROM posts) + 1
+                         ELSE 0 END",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(|e| format!("random_rowid_anchor: {e}"))?;
+    Ok(anchor)
+}
+
+/// Run a query that returns a single `id` column, collecting into a `Vec`.
+fn run_id_query(
     conn: &Connection,
-    account_id: i32,
-    group_type: &str,
-    n_tags: i64,
-    limit: i64,
+    sql: &str,
+    p: &[&dyn rusqlite::ToSql],
 ) -> Result<Vec<i64>, String> {
-    let mut stmt = conn
-        .prepare(
-            "
+    let mut stmt = conn.prepare(sql).map_err(|e| format!("prep: {e}"))?;
+    let rows = stmt
+        .query_map(rusqlite::params_from_iter(p.iter().copied()), |r| {
+            r.get::<_, i64>(0)
+        })
+        .map_err(|e| format!("query: {e}"))?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("collect: {e}"))
+}
+
+/// Shared body of `local_candidates_for_top_tags` sql, parameterised as
+/// `?1=account_id ?2=group_type ?3=n_tags ?4=limit`. Two closing variants are
+/// appended by the caller: a fast rowid-window plus the exact `ORDER BY RANDOM()`
+/// fallback used to top up when a sparse window under-fills.
+const TOP_TAGS_BODY: &str = "
             WITH top_tags AS (
                 SELECT tag_name
                 FROM account_tag_counts
@@ -478,18 +507,59 @@ fn local_candidates_for_top_tags(
               AND t.name IN (SELECT tag_name FROM top_tags)
               AND p.is_deleted = 0
               AND p.preview_url IS NOT NULL
-            ORDER BY RANDOM()
-            LIMIT ?4
-            ",
-        )
-        .map_err(|e| format!("prep local_candidates_for_top_tags: {e}"))?;
-    let rows = stmt
-        .query_map(params![account_id, group_type, n_tags, limit], |r| {
-            r.get::<_, i64>(0)
-        })
-        .map_err(|e| format!("query local_candidates_for_top_tags: {e}"))?;
-    rows.collect::<Result<Vec<_>, _>>()
-        .map_err(|e| format!("collect local_candidates_for_top_tags: {e}"))
+";
+
+/// Recent posts above the user's own popularity baseline (`avg_fav_count`).
+/// Randomized instead of ranked — picks from a wider pool to reduce
+/// repetition of the same popular posts across requests.
+const RECENT_POPULAR_BODY: &str = "
+            WITH baseline AS (
+                SELECT MAX(1.0, COALESCE(avg_fav_count, 0.0) * 0.6) AS thresh
+                FROM account_quality_profile
+                WHERE account_id = ?1
+            )
+            SELECT p.id
+            FROM posts p
+            WHERE p.created_at >= ?2
+              AND p.is_deleted = 0
+              AND p.preview_url IS NOT NULL
+              AND p.fav_count >= COALESCE((SELECT thresh FROM baseline), 1.0)
+";
+
+fn local_candidates_for_top_tags(
+    conn: &Connection,
+    account_id: i32,
+    group_type: &str,
+    n_tags: i64,
+    limit: i64,
+) -> Result<Vec<i64>, String> {
+    let anchor = random_rowid_anchor(conn)?;
+    // Fast path: a random rowid window, ordered by rowid — avoids the full
+    // `ORDER BY RANDOM()` sort over every post matching the top tags.
+    let window_sql = format!("{TOP_TAGS_BODY} AND p.rowid >= ?5 ORDER BY p.rowid LIMIT ?4");
+    let base: &[&dyn rusqlite::ToSql] = &[
+        &account_id as &dyn rusqlite::ToSql,
+        &group_type as &dyn rusqlite::ToSql,
+        &n_tags as &dyn rusqlite::ToSql,
+        &limit as &dyn rusqlite::ToSql,
+    ];
+    let mut out = {
+        let with_anchor: Vec<&dyn rusqlite::ToSql> = base
+            .iter()
+            .copied()
+            .chain(std::iter::once(&anchor as &dyn rusqlite::ToSql))
+            .collect();
+        run_id_query(conn, &window_sql, &with_anchor)?
+    };
+    // Fallback: if the random window is sparse, top up with the exact random
+    // sample so the stream still contributes up to `limit` diverse candidates.
+    if (out.len() as i64) < limit {
+        let random_sql = format!("{TOP_TAGS_BODY} ORDER BY RANDOM() LIMIT ?4");
+        let extra = run_id_query(conn, &random_sql, base)?;
+        out.extend(extra);
+    }
+    out.truncate(limit as usize);
+    Ok(out)
 }
 
 /// Recent posts above the user's own popularity baseline (`avg_fav_count`).
@@ -502,47 +572,48 @@ fn local_candidates_recent_popular(
     limit: i64,
 ) -> Result<Vec<i64>, String> {
     let cutoff = (Utc::now() - chrono::Duration::days(recent_days.max(1))).to_rfc3339();
-    let mut stmt = conn
-        .prepare(
-            "
-            WITH baseline AS (
-                SELECT MAX(1.0, COALESCE(avg_fav_count, 0.0) * 0.6) AS thresh
-                FROM account_quality_profile
-                WHERE account_id = ?1
-            )
-            SELECT p.id
-            FROM posts p
-            WHERE p.created_at >= ?2
-              AND p.is_deleted = 0
-              AND p.preview_url IS NOT NULL
-              AND p.fav_count >= COALESCE((SELECT thresh FROM baseline), 1.0)
-            ORDER BY RANDOM()
-            LIMIT ?3
-            ",
-        )
-        .map_err(|e| format!("prep local_candidates_recent_popular: {e}"))?;
-    let rows = stmt
-        .query_map(params![account_id, cutoff, limit], |r| r.get::<_, i64>(0))
-        .map_err(|e| format!("query local_candidates_recent_popular: {e}"))?;
-    rows.collect::<Result<Vec<_>, _>>()
-        .map_err(|e| format!("collect local_candidates_recent_popular: {e}"))
+    let anchor = random_rowid_anchor(conn)?;
+    // Fast path: a random rowid window, ordered by rowid — avoids the full
+    // `ORDER BY RANDOM()` sort over the entire recent set.
+    let window_sql = format!("{RECENT_POPULAR_BODY} AND p.rowid >= ?4 ORDER BY p.rowid LIMIT ?3");
+    let base: &[&dyn rusqlite::ToSql] = &[
+        &account_id as &dyn rusqlite::ToSql,
+        &cutoff as &dyn rusqlite::ToSql,
+        &limit as &dyn rusqlite::ToSql,
+    ];
+    let mut out = {
+        let with_anchor: Vec<&dyn rusqlite::ToSql> = base
+            .iter()
+            .copied()
+            .chain(std::iter::once(&anchor as &dyn rusqlite::ToSql))
+            .collect();
+        run_id_query(conn, &window_sql, &with_anchor)?
+    };
+    if (out.len() as i64) < limit {
+        let random_sql = format!("{RECENT_POPULAR_BODY} ORDER BY RANDOM() LIMIT ?3");
+        let extra = run_id_query(conn, &random_sql, base)?;
+        out.extend(extra);
+    }
+    out.truncate(limit as usize);
+    Ok(out)
 }
 
 /// Three SQL streams (top-artist, top-character, recent-popular) unioned and
 /// capped at `limit`. Caller dedups against seen/owned in memory.
 ///
 /// ## Randomisation
-/// Each stream uses `ORDER BY RANDOM()` so the same best posts don't
-/// dominate every feed request.
+/// Each stream samples a pseudo-random rowid window (with an `ORDER BY
+/// RANDOM()` fallback) so the same best posts don't dominate every feed request.
 /// - Artist/character: pulls from the user's top 20 tags.
 /// - Recent-popular: looks back 60 days.
 /// - Pool size per stream: `(limit / 3 * 2).max(100)`.
 pub fn collect_local_candidate_ids(account_id: i32, limit: i64) -> Result<Vec<i64>, String> {
     let conn = open_db()?;
     // Use a larger multiplier per stream so each source contributes a diverse
-    // set. The ORDER BY RANDOM() inside each query ensures different posts
-    // appear every time. Combined with the HashSet dedup this gives us a
-    // varied pool that still respects the user's taste.
+    // set. Each query samples a pseudo-random rowid window (with an exact
+    // ORDER BY RANDOM() fallback) so different posts appear every time.
+    // Combined with the HashSet dedup this gives us a varied pool that still
+    // respects the user's taste.
     let per_stream = (limit / 3 * 2).max(100);
     let cap_per_stream = (limit as usize / 3 + 1).max(20);
 
@@ -637,5 +708,134 @@ pub(crate) mod tests {
 
         let ids = load_blacklisted_post_ids(&[], &["gore".to_string()]).unwrap();
         assert!(ids.is_empty());
+    }
+
+    #[test]
+    fn random_rowid_anchor_within_range_or_zero() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE posts (id INTEGER PRIMARY KEY, created_at TEXT NOT NULL);",
+        )
+        .unwrap();
+        // Empty table -> anchor 0 (no constraint).
+        assert_eq!(random_rowid_anchor(&conn).unwrap(), 0);
+        for i in 1..=10i64 {
+            conn.execute(
+                "INSERT INTO posts (id, created_at) VALUES (?1, '2026-08-14T00:00:00Z')",
+                [i],
+            )
+            .unwrap();
+        }
+        let a = random_rowid_anchor(&conn).unwrap();
+        assert!((1..=10).contains(&a), "anchor {a} out of [1,10]");
+    }
+
+    #[test]
+    fn recent_popular_samples_only_qualifying() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE posts (
+                id INTEGER PRIMARY KEY,
+                created_at TEXT NOT NULL,
+                score_total INTEGER NOT NULL,
+                fav_count INTEGER NOT NULL,
+                rating TEXT NOT NULL,
+                last_seen_at TEXT NOT NULL,
+                is_deleted INTEGER NOT NULL DEFAULT 0,
+                preview_url TEXT
+             );
+             CREATE TABLE account_quality_profile (
+                account_id INTEGER PRIMARY KEY,
+                avg_score_total REAL NOT NULL DEFAULT 0,
+                avg_fav_count REAL NOT NULL DEFAULT 0,
+                avg_comment_count REAL NOT NULL DEFAULT 0,
+                avg_duration REAL NOT NULL DEFAULT 0
+             );",
+        )
+        .unwrap();
+        let now = chrono::Utc::now();
+        // 100 qualifying + 30 disqualified (deleted / no preview / old / low-fav).
+        for i in 1..=130i64 {
+            let deleted = i > 120;
+            let no_preview = i > 100 && i <= 110;
+            let old = i > 110 && i <= 120;
+            let low_fav = i > 120;
+            let created = if old {
+                (now - chrono::Duration::days(400))
+                    .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+            } else {
+                (now - chrono::Duration::days(i % 10))
+                    .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+            };
+            let fav = if low_fav { 2 } else { 50 };
+            let preview: Option<String> = if no_preview {
+                None
+            } else {
+                Some(format!("p/{i}.jpg"))
+            };
+            conn.execute(
+                "INSERT INTO posts (id, created_at, score_total, fav_count, rating, last_seen_at, is_deleted, preview_url)
+                 VALUES (?1,?2,100,?3,'q',?2,?4,?5)",
+                rusqlite::params![i, created, fav, if deleted {1} else {0}, preview],
+            ).unwrap();
+        }
+        conn.execute(
+            "INSERT INTO account_quality_profile (account_id, avg_fav_count) VALUES (1, 50)",
+            [],
+        )
+        .unwrap();
+
+        let ids = local_candidates_recent_popular(&conn, 1, 60, 100).unwrap();
+        // Only qualifying posts may be returned: non-deleted, preview_url set, recent, fav >= MAX(1,50*0.6=30).
+        assert!(!ids.is_empty());
+        assert!(ids.len() <= 100);
+        for id in &ids {
+            assert!((1..=100).contains(id), "non-qualifying id {id} returned");
+        }
+        // With 100 qualifying posts the window + fallback must fill to the limit.
+        assert_eq!(ids.len(), 100, "expected full fill, got {}", ids.len());
+        // idempotent: repeated calls still respect the guarantee.
+        let ids2 = local_candidates_recent_popular(&conn, 1, 60, 100).unwrap();
+        assert_eq!(ids2.len(), 100);
+    }
+
+    #[test]
+    fn top_tags_sampling_returns_matching_posts() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE posts (
+                id INTEGER PRIMARY KEY, created_at TEXT NOT NULL, score_total INTEGER NOT NULL,
+                fav_count INTEGER NOT NULL, rating TEXT NOT NULL, last_seen_at TEXT NOT NULL,
+                is_deleted INTEGER NOT NULL DEFAULT 0, preview_url TEXT
+             );
+             CREATE TABLE account_tag_counts (
+                account_id INTEGER NOT NULL, tag_name TEXT NOT NULL,
+                group_type TEXT NOT NULL, count INTEGER NOT NULL
+             );
+             CREATE TABLE tags (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, group_type TEXT NOT NULL);
+             CREATE TABLE tags_posts (tag_id INTEGER NOT NULL, post_id INTEGER NOT NULL);",
+        ).unwrap();
+        // tags: ids 1=artist_tag_1, 2=artist_tag_2, 3=general_1.
+        conn.execute_batch(
+            "INSERT INTO tags (name, group_type) VALUES ('artist_tag_1','artist'),('artist_tag_2','artist'),('general_1','general');
+             INSERT INTO account_tag_counts (account_id, tag_name, group_type, count)
+                VALUES (1,'artist_tag_1','artist',100),(1,'artist_tag_2','artist',90);
+             INSERT INTO posts (id, created_at, score_total, fav_count, rating, last_seen_at, preview_url)
+                SELECT column1 AS id, '2026-08-13T00:00:00Z', 50, 5, 'q', '2026-08-13T00:00:00Z', 'p/'||column1||'.jpg'
+                FROM (VALUES (1),(2),(3),(4),(5),(6),(7),(8),(9),(10),(11),(12),(13),(14),(15),(16),(17),(18),(19),(20),(21),(22),(23),(24),(25),(26),(27),(28),(29),(30),(31),(32),(33),(34),(35),(36),(37),(38),(39),(40));",
+        ).unwrap();
+        for i in 1..=40i64 {
+            let tag_id = if i <= 20 { 1 } else { 2 };
+            conn.execute(
+                "INSERT INTO tags_posts (tag_id, post_id) VALUES (?1,?2)",
+                [tag_id, i],
+            )
+            .unwrap();
+        }
+        let ids = local_candidates_for_top_tags(&conn, 1, "artist", 5, 10).unwrap();
+        assert_eq!(ids.len(), 10, "sample fills to limit");
+        for id in &ids {
+            assert!((1..=40).contains(id), "id {id} out of range");
+        }
     }
 }

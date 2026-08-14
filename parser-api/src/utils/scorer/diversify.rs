@@ -38,6 +38,8 @@
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
+use rayon::prelude::*;
+
 use crate::models::{Post, ScoredPost};
 use crate::utils::tag_relation::TagRelationGraph;
 
@@ -252,93 +254,80 @@ fn group_similarity(
     (1.0 - blend) * jac + blend * pmi * pmi_boost
 }
 
-fn max_redundancy_indexed(
-    cand: &DiversityFeatures,
-    selected: &[usize],
-    features: &[DiversityFeatures],
+/// Per-pair diversification redundancy — the weighted sum of the five group
+/// similarities between two posts (no MMR-power applied; that happens on the
+/// window max inside `diversify_indices`). Deterministic given the pair, so it
+/// is safe to memoize in a matrix.
+fn pair_redundancy(
+    a: &DiversityFeatures,
+    b: &DiversityFeatures,
     graph: &TagRelationGraph,
     user_graph: Option<&TagRelationGraph>,
     priors: &Priors,
 ) -> f32 {
-    let window = priors.diversity_window.max(1);
     let blend = priors.diversity_semantic_blend.clamp(0.0, 1.0);
+    if blend <= 0.0 {
+        // Fast path: pure Jaccard — no graph queries needed beyond
+        // what was already done at feature-construction time.
+        return jaccard_hashes(&a.artist, &b.artist) * priors.diversity_w_artist
+            + jaccard_hashes(&a.character, &b.character) * priors.diversity_w_character
+            + jaccard_hashes(&a.copyright, &b.copyright) * priors.diversity_w_copyright
+            + jaccard_hashes(&a.species, &b.species) * priors.diversity_w_species
+            + jaccard_hashes(&a.general, &b.general) * priors.diversity_w_general;
+    }
     let pmi_threshold = priors.diversity_pmi_threshold;
     let user_pmi_weight = priors.diversity_user_pmi_weight;
     let max_tags = priors.diversity_semantic_max_tags.max(1);
-
-    let mut max_sim = 0.0f32;
-    for &i in selected.iter().rev().take(window) {
-        let chosen = &features[i];
-        let sim = if blend <= 0.0 {
-            // Fast path: pure Jaccard — no graph queries needed beyond
-            // what was already done at feature-construction time.
-            jaccard_hashes(&cand.artist, &chosen.artist) * priors.diversity_w_artist
-                + jaccard_hashes(&cand.character, &chosen.character) * priors.diversity_w_character
-                + jaccard_hashes(&cand.copyright, &chosen.copyright) * priors.diversity_w_copyright
-                + jaccard_hashes(&cand.species, &chosen.species) * priors.diversity_w_species
-                + jaccard_hashes(&cand.general, &chosen.general) * priors.diversity_w_general
-        } else {
-            group_similarity(
-                &cand.artist,
-                &chosen.artist,
-                graph,
-                user_graph,
-                blend,
-                pmi_threshold,
-                user_pmi_weight,
-                max_tags,
-            ) * priors.diversity_w_artist
-                + group_similarity(
-                    &cand.character,
-                    &chosen.character,
-                    graph,
-                    user_graph,
-                    blend,
-                    pmi_threshold,
-                    user_pmi_weight,
-                    max_tags,
-                ) * priors.diversity_w_character
-                + group_similarity(
-                    &cand.copyright,
-                    &chosen.copyright,
-                    graph,
-                    user_graph,
-                    blend,
-                    pmi_threshold,
-                    user_pmi_weight,
-                    max_tags,
-                ) * priors.diversity_w_copyright
-                + group_similarity(
-                    &cand.species,
-                    &chosen.species,
-                    graph,
-                    user_graph,
-                    blend,
-                    pmi_threshold,
-                    user_pmi_weight,
-                    max_tags,
-                ) * priors.diversity_w_species
-                + group_similarity(
-                    &cand.general,
-                    &chosen.general,
-                    graph,
-                    user_graph,
-                    blend,
-                    pmi_threshold,
-                    user_pmi_weight,
-                    max_tags,
-                ) * priors.diversity_w_general
-        };
-        if sim > max_sim {
-            max_sim = sim;
-        }
-    }
-    let exp = priors.mmr_redundancy_exp;
-    if (exp - 1.0).abs() < 1e-3 {
-        max_sim
-    } else {
-        max_sim.max(0.0).powf(exp.clamp(0.1, 5.0)).clamp(0.0, 1.0)
-    }
+    group_similarity(
+        &a.artist,
+        &b.artist,
+        graph,
+        user_graph,
+        blend,
+        pmi_threshold,
+        user_pmi_weight,
+        max_tags,
+    ) * priors.diversity_w_artist
+        + group_similarity(
+            &a.character,
+            &b.character,
+            graph,
+            user_graph,
+            blend,
+            pmi_threshold,
+            user_pmi_weight,
+            max_tags,
+        ) * priors.diversity_w_character
+        + group_similarity(
+            &a.copyright,
+            &b.copyright,
+            graph,
+            user_graph,
+            blend,
+            pmi_threshold,
+            user_pmi_weight,
+            max_tags,
+        ) * priors.diversity_w_copyright
+        + group_similarity(
+            &a.species,
+            &b.species,
+            graph,
+            user_graph,
+            blend,
+            pmi_threshold,
+            user_pmi_weight,
+            max_tags,
+        ) * priors.diversity_w_species
+        + group_similarity(
+            &a.general,
+            &b.general,
+            graph,
+            user_graph,
+            blend,
+            pmi_threshold,
+            user_pmi_weight,
+            max_tags,
+        ) * priors.diversity_w_general
 }
 
 /// Index-based MMR re-ranker. Returns indices in their final order.
@@ -348,6 +337,13 @@ fn max_redundancy_indexed(
 /// participate in MMR; everything past that keeps its raw-score
 /// ordering. Pass `head_limit >= entries.len()` for full-list MMR
 /// (legacy behaviour).
+///
+/// Performance: MMR recomputes the redundancy of every candidate against
+/// every previously-selected item in the active window. Because the weighted
+/// group similarity of a pair is deterministic, it is precomputed once into a
+/// symmetric `head_n × head_n` matrix (in parallel), turning repeated
+/// recomputation into O(1) reads. This is behaviour-identical to the previous
+/// per-iteration recompute, but removes the `diversity_window` factor.
 pub fn diversify_indices(
     entries: &[(f32, f32, i64)],
     features: &[DiversityFeatures],
@@ -374,14 +370,34 @@ pub fn diversify_indices(
     if head_n <= 1 {
         return idx_by_score;
     }
+    let head_ids: Vec<usize> = idx_by_score[..head_n].to_vec();
 
-    let mut available: Vec<usize> = idx_by_score[..head_n].to_vec();
+    // Precompute the pairwise redundancy matrix once over the head set.
+    let mut pair_sim: Vec<Vec<f32>> = vec![vec![0.0f32; head_n]; head_n];
+    pair_sim.par_iter_mut().enumerate().for_each(|(pa, row)| {
+        let a = &features[head_ids[pa]];
+        for pb in 0..head_n {
+            if pa == pb {
+                continue;
+            }
+            row[pb] = pair_redundancy(a, &features[head_ids[pb]], graph, user_graph, priors);
+        }
+    });
+    // actual-index → position-in-head lookup (sentinel `head_n` for tail items).
+    let mut pos_of: Vec<usize> = vec![head_n; n];
+    for (pos, &actual) in head_ids.iter().enumerate() {
+        pos_of[actual] = pos;
+    }
+
+    let mut available: Vec<usize> = head_ids;
     let mut selected: Vec<usize> = Vec::with_capacity(head_n);
     let mut top_score = available
         .iter()
         .map(|&i| entries[i].0)
         .fold(f32::MIN, f32::max);
 
+    let window = priors.diversity_window.max(1);
+    let exp = priors.mmr_redundancy_exp;
     let damp = priors.diversity_interaction_damp.clamp(0.0, 1.0);
     let max_penalty = priors.diversity_max_penalty.clamp(0.0, 1.0);
 
@@ -391,15 +407,21 @@ pub fn diversify_indices(
         let mut best_tiebreak = i64::MAX;
 
         for (pos, &i) in available.iter().enumerate() {
+            let pi = pos_of[i];
+            // Max redundancy over the active window of already-selected items.
+            let mut max_sim = 0.0f32;
+            for &sel in selected.iter().rev().take(window) {
+                let v = pair_sim[pi][pos_of[sel]];
+                if v > max_sim {
+                    max_sim = v;
+                }
+            }
+            let redundancy = if (exp - 1.0).abs() < 1e-3 {
+                max_sim
+            } else {
+                max_sim.max(0.0).powf(exp.clamp(0.1, 5.0)).clamp(0.0, 1.0)
+            };
             let (score, interaction, tid) = entries[i];
-            let redundancy = max_redundancy_indexed(
-                &features[i],
-                &selected,
-                features,
-                graph,
-                user_graph,
-                priors,
-            );
             let gap = (top_score - score).max(0.0);
             let penalty = (redundancy * gap * (1.0 - damp * interaction)).clamp(0.0, max_penalty);
             let adj = score - penalty;
@@ -1054,5 +1076,290 @@ mod tests {
         assert!(feats.copyright.is_empty());
         assert!(feats.species.is_empty());
         assert!(feats.general.is_empty());
+    }
+
+    // ── memoized MMR ≡ naive per-iteration recompute ─────────────────────
+
+    /// Reference implementation mirroring the pre-optimisation algorithm:
+    /// recompute each candidate's redundancy against the window from scratch
+    /// on every iteration (no matrix). Used to prove the memoized path
+    /// produces bit-identical ordering (i.e. no quality regression).
+    fn mmr_redundancy_recompute(
+        cand: &DiversityFeatures,
+        selected: &[usize],
+        features: &[DiversityFeatures],
+        graph: &TagRelationGraph,
+        user_graph: Option<&TagRelationGraph>,
+        priors: &Priors,
+    ) -> f32 {
+        let window = priors.diversity_window.max(1);
+        let mut max_sim = 0.0f32;
+        for &i in selected.iter().rev().take(window) {
+            let s = pair_redundancy(cand, &features[i], graph, user_graph, priors);
+            if s > max_sim {
+                max_sim = s;
+            }
+        }
+        let exp = priors.mmr_redundancy_exp;
+        if (exp - 1.0).abs() < 1e-3 {
+            max_sim
+        } else {
+            max_sim.max(0.0).powf(exp.clamp(0.1, 5.0)).clamp(0.0, 1.0)
+        }
+    }
+
+    fn naive_mmr_indices(
+        entries: &[(f32, f32, i64)],
+        features: &[DiversityFeatures],
+        graph: &TagRelationGraph,
+        user_graph: Option<&TagRelationGraph>,
+        priors: &Priors,
+    ) -> Vec<usize> {
+        let n = entries.len();
+        let mut idx_by_score: Vec<usize> = (0..n).collect();
+        idx_by_score.sort_by(|&a, &b| {
+            entries[b]
+                .0
+                .partial_cmp(&entries[a].0)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        let mut available: Vec<usize> = idx_by_score;
+        let mut selected: Vec<usize> = Vec::with_capacity(n);
+        let mut top_score = available
+            .iter()
+            .map(|&i| entries[i].0)
+            .fold(f32::MIN, f32::max);
+        let damp = priors.diversity_interaction_damp.clamp(0.0, 1.0);
+        let max_penalty = priors.diversity_max_penalty.clamp(0.0, 1.0);
+        while !available.is_empty() {
+            let mut best_pos = 0usize;
+            let mut best_value = f32::MIN;
+            let mut best_tiebreak = i64::MAX;
+            for (pos, &i) in available.iter().enumerate() {
+                let (score, interaction, tid) = entries[i];
+                let redundancy = mmr_redundancy_recompute(
+                    &features[i],
+                    &selected,
+                    features,
+                    graph,
+                    user_graph,
+                    priors,
+                );
+                let gap = (top_score - score).max(0.0);
+                let penalty =
+                    (redundancy * gap * (1.0 - damp * interaction)).clamp(0.0, max_penalty);
+                let adj = score - penalty;
+                if adj > best_value || (adj == best_value && tid < best_tiebreak) {
+                    best_value = adj;
+                    best_pos = pos;
+                    best_tiebreak = tid;
+                }
+            }
+            let chosen = available.swap_remove(best_pos);
+            selected.push(chosen);
+            let removed_was_top = (entries[chosen].0 - top_score).abs() < 1e-6;
+            if removed_was_top && !available.is_empty() {
+                top_score = available
+                    .iter()
+                    .map(|&i| entries[i].0)
+                    .fold(f32::MIN, f32::max);
+            }
+        }
+        selected
+    }
+
+    /// Full priors with every field populated (Priors has no `Default`).
+    fn test_priors() -> Priors {
+        let mut p = Priors {
+            now: Utc::now(),
+            recency_tau_days: 10.0,
+            quality_a: 0.50,
+            quality_b: 0.20,
+            quality_log_bias: -3.0,
+            mix_sim: 0.603,
+            mix_quality: 0.017,
+            mix_recency: 0.017,
+            mix_rating: 0.034,
+            mix_media: 0.042,
+            mix_popularity: 0.017,
+            mix_interaction: 0.084,
+            mix_tag_relation: 0.067,
+            mix_uploader: 0.05,
+            mix_exclusivity: 0.02,
+            mix_novelty: 0.02,
+            mix_artist_discovery: 0.03,
+            idf_lambda: 1.0,
+            idf_alpha: 1.05,
+            freq_alpha: 0.95,
+            quality_w_absolute: 0.55,
+            quality_w_relative_score: 0.30,
+            quality_w_relative_comments: 0.15,
+            quality_c: 0.3,
+            popularity_w_fav: 0.80,
+            popularity_w_duration: 0.20,
+            recency_w_global: 0.40,
+            recency_w_personal: 0.60,
+            tag_relation_w_global: 0.4,
+            tag_relation_w_personal: 0.6,
+            tag_relation_pmi_scale: 3.5,
+            tag_relation_min_cooc: 2,
+            tag_relation_user_min_cooc: 1,
+            tag_relation_cooc_ref: 16.0,
+            tag_relation_user_cooc_ref: 5.0,
+            tag_relation_max_tags: 20,
+            tag_relation_pair_aggregator: "mean".to_string(),
+            diversity_window: 8,
+            diversity_w_artist: 0.2,
+            diversity_w_character: 0.2,
+            diversity_w_copyright: 0.2,
+            diversity_w_species: 0.2,
+            diversity_w_general: 0.2,
+            discrete_smoothing_alpha: 1.0,
+            strong_negative_count: 3,
+            strong_negative_penalty: 0.40,
+            strong_negative_wilson_threshold: 0.55,
+            recency_personal_floor_frac: 1.0,
+            recency_log_personal: true,
+            feedback_decay_half_life_days: 90.0,
+            meta_interaction_weight: 0.3,
+            coldstart_n0: 25.0,
+            discrete_pref_floor: 0.05,
+            diversity_max_penalty: 0.45,
+            diversity_interaction_damp: 0.35,
+            df_floor: 0.40,
+            idf_max: 100.0,
+            bm25_k: 2.25,
+            one_sided_ratio_exp: 0.5,
+            coldstart_smoothing_boost: 2.0,
+            interaction_ctr_prior_alpha: 4.0,
+            idf_rsj_smoothing: 0.35,
+            group_w_artist: 2.40,
+            group_w_character: 2.00,
+            group_w_copyright: 1.45,
+            group_w_species: 1.30,
+            group_w_general: 0.60,
+            group_w_lore: 0.40,
+            score_temperature: 0.0,
+            confidence_steepness: 1.0,
+            mmr_redundancy_exp: 1.0,
+            tag_sim_jaccard_blend: 0.0,
+            idf_lambda_meta: f32::NAN,
+            tag_relation_pmi_scale_user: f32::NAN,
+            recency_tau_recent: f32::NAN,
+            recency_split_age_days: 30.0,
+            recency_tau_hot: f32::NAN,
+            recency_split_age_hours: 24.0,
+            exploration_epsilon: 0.0,
+            uploader_n0: 5.0,
+            uploader_w_avg_score: 0.6,
+            uploader_w_avg_fav: 0.4,
+            min_exclusivity_cooc: 2,
+            exclusivity_scale: 0.5,
+            exclusivity_max_tags: 15,
+            exclusivity_cross_group_weight: 0.5,
+            novelty_n0: 3.0,
+            novelty_use_feedback: true,
+            diversity_semantic_blend: 0.05,
+            diversity_pmi_threshold: 0.5,
+            diversity_semantic_max_tags: 10,
+            diversity_user_pmi_weight: 1.0,
+            artist_discovery_n0: 3.0,
+            artist_discovery_novelty_bonus: 0.2,
+        };
+        p.diversity_window = 8;
+        p
+    }
+
+    /// Build features/posts whose tags are registered (with co-occurring pairs)
+    /// in both a global and a user graph so the PMI soft-match path is exercised.
+    type Harness = (
+        Vec<(f32, f32, i64)>,
+        Vec<DiversityFeatures>,
+        TagRelationGraph,
+        TagRelationGraph,
+        Priors,
+    );
+    #[allow(clippy::type_complexity)]
+    fn equivalence_harness(n: i32) -> Harness {
+        let mut global = TagRelationGraph::with_posts(1000);
+        let mut user = TagRelationGraph::with_posts(500);
+        let all_tags: Vec<String> = (0..16).map(|k| format!("tag{k}")).collect();
+        for t in &all_tags {
+            global.set_marginal(4, t, 60);
+            user.set_marginal(4, t, 40);
+        }
+        for k in 0..16i64 {
+            for off in 1..4 {
+                let j = k + off;
+                if j < 16 {
+                    global.insert_pair(4, &format!("tag{k}"), 4, &format!("tag{j}"), 30);
+                    user.insert_pair(4, &format!("tag{k}"), 4, &format!("tag{j}"), 25);
+                }
+            }
+        }
+        let graph = TagRelationGraph::with_posts(0); // unused, keep API identical
+        let mut features = Vec::with_capacity(n as usize);
+        let mut entries = Vec::with_capacity(n as usize);
+        for i in 0..n {
+            let general: Vec<String> = (0..5)
+                .map(|k| format!("tag{}", (i as usize * 7 + k * 3) % 16))
+                .collect();
+            let p = Post {
+                id: i as i64,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+                change_seq: 0.0,
+                files: Files::default(),
+                uploader_id: 0,
+                uploader_name: None,
+                approver_id: None,
+                stats: Stats::default(),
+                flags: crate::models::Flags::default(),
+                has: crate::models::Has::default(),
+                relationships: crate::models::Relationships::default(),
+                pools: vec![],
+                rating: crate::models::Rating::Q,
+                locked_tags: vec![],
+                sources: vec![],
+                description: None,
+                tags: crate::models::Tags {
+                    artist: vec![format!("artist{}", i % 5)],
+                    character: vec![],
+                    copyright: vec![],
+                    species: vec![],
+                    general,
+                    invalid: vec![],
+                    meta: vec![],
+                    lore: vec![],
+                    contributor: vec![],
+                },
+            };
+            features.push(DiversityFeatures::from_post(&p, &user));
+            entries.push(((i as f32) / n as f32, 0.1, i as i64));
+        }
+        (entries, features, graph, user, test_priors())
+    }
+
+    #[test]
+    fn memoized_mmr_ordering_identical_to_naive() {
+        let (entries, features, graph, user, priors) = equivalence_harness(30);
+        let memoized = diversify_indices(
+            &entries,
+            &features,
+            &graph,
+            Some(&user),
+            &priors,
+            entries.len(),
+        );
+        let naive = naive_mmr_indices(&entries, &features, &graph, Some(&user), &priors);
+        assert_eq!(memoized, naive, "memoized MMR must preserve exact ordering");
+        assert!(memoized.len() == entries.len());
+        let mut sorted = memoized.clone();
+        sorted.sort_unstable();
+        assert_eq!(
+            sorted,
+            (0..entries.len()).collect::<Vec<_>>(),
+            "must be a permutation"
+        );
     }
 }
