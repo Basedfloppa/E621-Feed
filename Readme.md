@@ -44,21 +44,21 @@ Requirements: [Rust](https://www.rust-lang.org/tools/install), Node.js
 ### 0. Run the published image (Docker, no toolchain needed)
 
 The prebuilt image is published to **GHCR** —
-[`ghcr.io/basedfloppa/e621-account-parser`](https://github.com/Basedfloppa/E621-Account-Parser/pkgs/container/e621-account-parser)
+[`ghcr.io/basedfloppa/e621-feed`](https://github.com/Basedfloppa/E621-Feed/pkgs/container/e621-feed)
 (`latest` tracks `master`, `v*` tags are published as versions):
 
 ```bash
 mkdir -p ~/e621-feed && cd ~/e621-feed
 # Grab a config skeleton, then fill in admin_user / admin_api (e621 credentials)
 curl -fsSL -o config.toml \
-  https://raw.githubusercontent.com/Basedfloppa/E621-Account-Parser/master/parser-api/config.example.toml
+  https://raw.githubusercontent.com/Basedfloppa/E621-Feed/master/parser-api/config.example.toml
 # edit config.toml …
 touch database.db   # docker only bind-mounts existing files; a missing path becomes a directory
 docker run -d --name e621-feed --restart unless-stopped \
   -p 8181:8080 \
   -v "$PWD/config.toml:/app/config.toml:ro" \
   -v "$PWD/database.db:/app/database.db" \
-  ghcr.io/basedfloppa/e621-account-parser:latest
+  ghcr.io/basedfloppa/e621-feed:latest
 ```
 
 Open <http://localhost:8181>. The container listens on `:8080` (per the

@@ -159,7 +159,7 @@ container.
 > **The runtime image boots out of the box.** The Dockerfile bakes
 > `config.example.toml` → `/app/config.toml` (placeholder e621 creds) and
 > `Rocket.toml` → `/app/Rocket.toml` (binds `0.0.0.0:8080`) into the runtime
-> image, so a bare `docker run ghcr.io/<owner>/e621-account-parser` starts and
+> image, so a bare `docker run ghcr.io/<owner>/e621-feed` starts and
 > serves the embedded SPA even without mounts. These defaults exist because
 > the binary FATALs at startup without a parseable `config.toml` (the config
 > `LazyLock` exits on first access), and Rocket's own default bind is
@@ -325,7 +325,7 @@ block for the same effect (Caddy handles Vary/Accept-Encoding for you).
 
 [`.github/workflows/docker-publish.yml`](../.github/workflows/docker-publish.yml)
 builds the image with BuildKit on GitHub runners and publishes it to **GHCR**
-(`ghcr.io/<owner>/e621-account-parser`):
+(`ghcr.io/<owner>/e621-feed`):
 
 + **push to `master`** → `latest` + `sha-<commit>`;
 + **`v*` git tag** → `v1.2.3`, `1.2.3`, `1.2`, `sha-<commit>`;
@@ -344,7 +344,7 @@ container comes up on a fresh database without external mounts.
 All third-party actions are pinned to commit SHAs; the workflow passes
 `actionlint` and `zizmor` with no findings. To also publish to Docker Hub,
 add a `docker/login-action` step for it and append
-`docker.io/<user>/e621-account-parser` to the metadata `images` list.
+`docker.io/<user>/e621-feed` to the metadata `images` list.
 
 ---
 

@@ -6,16 +6,16 @@
 
 ## Project
 
-- Source: https://github.com/Basedfloppa/e621-Account-Parser
+- Source: https://github.com/Basedfloppa/E621-Feed
 - Live: https://e621feed.zorolin.rs
 - License: MIT-0 (No Attribution)
 
 ## Docs
 
-- Main README: https://github.com/Basedfloppa/e621-Account-Parser/blob/master/Readme.md
-- Scoring knobs reference: https://github.com/Basedfloppa/e621-Account-Parser/blob/master/docs/scoring.md
-- Calibration & backtesting guide: https://github.com/Basedfloppa/e621-Account-Parser/blob/master/docs/calibration.md
-- Production deployment: https://github.com/Basedfloppa/e621-Account-Parser/blob/master/docs/deployment.md
+- Main README: https://github.com/Basedfloppa/E621-Feed/blob/master/Readme.md
+- Scoring knobs reference: https://github.com/Basedfloppa/E621-Feed/blob/master/docs/scoring.md
+- Calibration & backtesting guide: https://github.com/Basedfloppa/E621-Feed/blob/master/docs/calibration.md
+- Production deployment: https://github.com/Basedfloppa/E621-Feed/blob/master/docs/deployment.md
 
 ## API
 
