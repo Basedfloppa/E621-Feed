@@ -98,7 +98,12 @@ impl ScoringMetrics {
 
     /// Emit a **single, parseable JSON line** per request so Loki/Grafana can
     /// show which scoring channel and which pipeline phase dominated. One line
-    /// at `info!`, prefixed `SCORING_TRACE` for easy filtering. Skips empty runs.
+    /// to **stdout via `println!`**, bypassing the `log` facade — Rocket's
+    /// default `log_level` filters out `info!` from non-Rocket crates, so the
+    /// line would otherwise be silently dropped (same reason `audit` uses
+    /// `println!`). Emitted as pure JSON (no prefix) so Loki can `| json` and
+    /// `| unwrap` the flat numeric fields; filter by `trace="scoring"`.
+    /// Skips empty runs.
     ///
     /// `phases` are the pipeline [`PhaseRecord`]s from the caller's
     /// [`PipelineMetrics`] (empty when none were recorded).
@@ -166,8 +171,11 @@ impl ScoringMetrics {
             "phase_ms": phase_ms,
         });
         // Emit as a single pure-JSON line so Grafana/Loki can `| json` and
-        // `| unwrap` the numeric fields. Filter by `trace="scoring"`.
-        info!("{line}");
+        // `| unwrap` the numeric fields. Filter by `trace="scoring"`. Must use
+        // `println!` (not `info!`) so the line reaches stdout: Rocket's logger
+        // drops `info!` from non-Rocket crates, which is why the scoring trace
+        // never made it to Loki.
+        println!("{line}");
     }
 }
 
