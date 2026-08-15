@@ -1428,6 +1428,196 @@ async fn list_accounts_respects_limit_and_offset() {
     );
 }
 
+/// `GET /session/devices` returns every device sharing an account with the
+/// caller, flags the current one, and never leaks raw owner tokens.
+#[tokio::test(flavor = "multi_thread")]
+async fn session_devices_lists_sharing_devices_without_leaking_tokens() {
+    ensure_migrations();
+    let owner_a = "dev_owner_A_token";
+    let owner_b = "dev_owner_B_token";
+    let aid_a = 9_301_001i32;
+    let aid_b = 9_301_002i32;
+
+    // Device A owns accounts 9_301_001 and 9_301_002; device B shares 9_301_002.
+    e621_account_parser_api::db::set_account(owner_a, aid_a, "devA_only", "").unwrap();
+    e621_account_parser_api::db::set_account(owner_a, aid_b, "shared", "").unwrap();
+    e621_account_parser_api::db::set_account(owner_b, aid_b, "shared", "").unwrap();
+
+    let client = Client::tracked(rocket::build().mount(
+        "/api",
+        e621_account_parser_api::routes::integration_test_routes(),
+    ))
+    .await
+    .unwrap();
+    let cookie_a = Cookie::new(
+        e621_account_parser_api::auth::OWNER_TOKEN_COOKIE,
+        owner_a.to_string(),
+    );
+    let response = client
+        .get("/api/session/devices")
+        .cookie(cookie_a)
+        .dispatch()
+        .await;
+    assert_eq!(response.status(), Status::Ok);
+    let body: serde_json::Value = response.into_json().await.unwrap();
+    let devices = body.as_array().expect("devices must be a JSON array");
+    assert_eq!(
+        devices.len(),
+        2,
+        "owner A sees itself + the sharing device B"
+    );
+
+    let current: Vec<&serde_json::Value> = devices
+        .iter()
+        .filter(|d| d["isCurrent"].as_bool().unwrap_or(false))
+        .collect();
+    assert_eq!(current.len(), 1, "exactly one current device");
+    let current = current[0];
+
+    // Device id must be a sha256 hex (64 chars) — never the raw token.
+    let id = current["id"].as_str().expect("current.id");
+    assert_eq!(id.len(), 64, "id is a sha256 hex digest");
+    assert!(id.chars().all(|c| c.is_ascii_hexdigit()));
+
+    // Current (A) device owns both accounts.
+    let cur_accounts: std::collections::HashSet<i64> = current["accounts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| a["accountId"].as_i64().unwrap())
+        .collect();
+    assert!(cur_accounts.contains(&(aid_a as i64)));
+    assert!(cur_accounts.contains(&(aid_b as i64)));
+
+    // The other device (B) shares only the second account and is not current.
+    let other = devices
+        .iter()
+        .find(|d| d["isCurrent"].as_bool() == Some(false))
+        .expect("non-current sharing device present");
+    let other_accounts: Vec<i64> = other["accounts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| a["accountId"].as_i64().unwrap())
+        .collect();
+    assert_eq!(
+        other_accounts,
+        vec![aid_b as i64],
+        "B shares only the second"
+    );
+
+    // No-secret invariant: raw owner tokens must never appear in the payload.
+    let raw = body.to_string();
+    assert!(!raw.contains(owner_a), "raw token A must not leak");
+    assert!(!raw.contains(owner_b), "raw token B must not leak");
+    assert!(
+        current["firstSeenAt"].as_str().is_some()
+            && current["lastSeenAt"].as_str().is_some()
+            && current["active"].is_boolean(),
+        "first/last seen + active present"
+    );
+
+    // Best-effort cleanup so accounts don't linger for sibling tests.
+    let _ = e621_account_parser_api::db::delete_device_link(owner_a, aid_a);
+    let _ = e621_account_parser_api::db::delete_device_link(owner_a, aid_b);
+    let _ = e621_account_parser_api::db::delete_device_link(owner_b, aid_b);
+}
+
+/// `POST /session/revoke` severs another sharing device by its public id,
+/// refuses unknown ids (404), and cannot revoke the current device itself.
+#[tokio::test(flavor = "multi_thread")]
+async fn session_device_revoke_severs_other_device() {
+    ensure_migrations();
+    let owner_a = "revoke_owner_A_token_0001";
+    let owner_b = "revoke_owner_B_token_0001";
+    let aid_a = 9_400_001i32;
+    let aid_b = 9_400_002i32;
+    e621_account_parser_api::db::set_account(owner_a, aid_a, "revA", "").unwrap();
+    e621_account_parser_api::db::set_account(owner_a, aid_b, "shared", "").unwrap();
+    e621_account_parser_api::db::set_account(owner_b, aid_b, "shared", "").unwrap();
+
+    let client = Client::tracked(rocket::build().mount(
+        "/api",
+        e621_account_parser_api::routes::integration_test_routes(),
+    ))
+    .await
+    .unwrap();
+    let cookie_a = Cookie::new(e621_account_parser_api::auth::OWNER_TOKEN_COOKIE, owner_a);
+    let post_revoke = |cookie: Cookie<'static>, device_id: String| {
+        let client = &client;
+        async move {
+            let body = serde_json::json!({ "deviceId": device_id });
+            client
+                .post("/api/session/revoke")
+                .cookie(cookie)
+                .header(rocket::http::ContentType::JSON)
+                .body(body.to_string())
+                .dispatch()
+                .await
+        }
+    };
+
+    // Find B's device id from A's perspective.
+    let list = client
+        .get("/api/session/devices")
+        .cookie(cookie_a.clone())
+        .dispatch()
+        .await;
+    let devices: serde_json::Value = list.into_json().await.unwrap();
+    let other = devices
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["isCurrent"].as_bool() == Some(false))
+        .expect("other sharing device");
+    let b_id = other["id"].as_str().unwrap().to_string();
+
+    // Revoke B: 200 + revoked:true, and B disappears from A's list.
+    let resp = post_revoke(cookie_a.clone(), b_id.clone()).await;
+    assert_eq!(resp.status(), Status::Ok);
+    let v: serde_json::Value = resp.into_json().await.unwrap();
+    assert_eq!(v["revoked"], serde_json::Value::Bool(true));
+
+    let list = client
+        .get("/api/session/devices")
+        .cookie(cookie_a.clone())
+        .dispatch()
+        .await;
+    let devices: serde_json::Value = list.into_json().await.unwrap();
+    assert_eq!(
+        devices.as_array().unwrap().len(),
+        1,
+        "revoked device is severed from the shared account"
+    );
+
+    // Unknown device id -> 404.
+    let resp = post_revoke(cookie_a.clone(), "f".repeat(64)).await;
+    assert_eq!(resp.status(), Status::NotFound);
+
+    // Current device cannot be revoked via this endpoint -> 404.
+    let cur = client
+        .get("/api/session/devices")
+        .cookie(cookie_a.clone())
+        .dispatch()
+        .await;
+    let cur: serde_json::Value = cur.into_json().await.unwrap();
+    let cur_id = cur.as_array().unwrap()[0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let resp = post_revoke(cookie_a.clone(), cur_id).await;
+    assert_eq!(
+        resp.status(),
+        Status::NotFound,
+        "self-revoke via device refused"
+    );
+
+    // Cleanup.
+    let _ = e621_account_parser_api::db::delete_device_link(owner_a, aid_a);
+    let _ = e621_account_parser_api::db::delete_device_link(owner_a, aid_b);
+    let _ = e621_account_parser_api::db::delete_device_link(owner_b, aid_b);
+}
+
 /// Export returns the full snapshot (identity + blacklist + preferred tags +
 /// profile); import restores user-settable fields and returns current state.
 #[tokio::test(flavor = "multi_thread")]
@@ -1536,6 +1726,126 @@ async fn account_export_import_round_trip() {
         .dispatch()
         .await;
     assert_eq!(response.status(), Status::BadRequest);
+}
+
+/// The interaction model is exported with the backup and restored on import:
+/// replayed into `feed_interactions` for the target account, idempotent on
+/// re-import, and refused for an account the token isn't linked to.
+#[tokio::test(flavor = "multi_thread")]
+async fn account_export_import_interactions_round_trip() {
+    use e621_account_parser_api::models::{FeedInteractionRequest, FeedInteractionType};
+
+    let src = TestAccount::new(9_150_001);
+    let dst = TestAccount::new(9_150_002);
+    let owner = src.owner;
+
+    // Seed catalog posts the interaction FKs can reference.
+    let p1 = make_post(12_700_001, make_tags(&["ta"], &["tc"], &["tg1"]), 7);
+    let p2 = make_post(12_700_002, make_tags(&["ta"], &["tc"], &["tg2"]), 7);
+    e621_account_parser_api::db::save_posts(&[p1, p2], src.id).unwrap();
+
+    // Record two interactions on the source account.
+    e621_account_parser_api::db::record_feed_interaction(
+        owner,
+        &FeedInteractionRequest {
+            account_id: src.id,
+            post_id: 12_700_001,
+            event_type: FeedInteractionType::Like,
+            position: 1,
+            session_id: "sess_a".into(),
+        },
+    )
+    .unwrap();
+    e621_account_parser_api::db::record_feed_interaction(
+        owner,
+        &FeedInteractionRequest {
+            account_id: src.id,
+            post_id: 12_700_002,
+            event_type: FeedInteractionType::Hide,
+            position: 2,
+            session_id: "sess_a".into(),
+        },
+    )
+    .unwrap();
+
+    let client = Client::tracked(rocket::build().mount(
+        "/api",
+        e621_account_parser_api::routes::integration_test_routes(),
+    ))
+    .await
+    .unwrap();
+    let cookie = Cookie::new(e621_account_parser_api::auth::OWNER_TOKEN_COOKIE, owner);
+
+    // Export: interactions present and non-empty.
+    let body = client
+        .get(format!("/api/account/{}/export", src.id))
+        .cookie(cookie.clone())
+        .dispatch()
+        .await;
+    assert_eq!(body.status(), Status::Ok);
+    let export: serde_json::Value = body.into_json().await.unwrap();
+    let interactions = export["interactions"]
+        .as_array()
+        .expect("interactions array");
+    assert_eq!(interactions.len(), 2, "both recorded interactions exported");
+    assert!(
+        !export.to_string().contains("sess_a"),
+        "session ids must not leak into the export"
+    );
+
+    // Import the interactions into the destination account.
+    let payload = serde_json::json!({"interactions": interactions.clone()});
+    let resp = client
+        .post(format!("/api/account/{}/import", dst.id))
+        .cookie(cookie.clone())
+        .header(rocket::http::ContentType::JSON)
+        .body(payload.to_string())
+        .dispatch()
+        .await;
+    assert_eq!(resp.status(), Status::Ok);
+
+    let restored =
+        e621_account_parser_api::db::get_account_interactions_for_export(dst.id, 100).unwrap();
+    assert_eq!(
+        restored.len(),
+        2,
+        "interactions restored into destination account"
+    );
+
+    // Idempotent: re-importing the same export must not duplicate rows.
+    client
+        .post(format!("/api/account/{}/import", dst.id))
+        .cookie(cookie.clone())
+        .header(rocket::http::ContentType::JSON)
+        .body(payload.to_string())
+        .dispatch()
+        .await;
+    let restored2 =
+        e621_account_parser_api::db::get_account_interactions_for_export(dst.id, 100).unwrap();
+    assert_eq!(
+        restored2.len(),
+        2,
+        "re-import is idempotent (no duplicates)"
+    );
+
+    // Ownership gate: importing interactions for an account linked to a
+    // DIFFERENT token (not the caller's cookie token) must be refused.
+    let unrelated_id = 9_150_003i32;
+    e621_account_parser_api::db::set_account("other_owner_token_zz", unrelated_id, "other", "")
+        .unwrap();
+    let resp = client
+        .post(format!("/api/account/{unrelated_id}/import"))
+        .cookie(cookie.clone())
+        .header(rocket::http::ContentType::JSON)
+        .body(payload.to_string())
+        .dispatch()
+        .await;
+    assert!(
+        resp.status() != Status::Ok,
+        "unlinked account import must fail, got {:?}",
+        resp.status()
+    );
+    let _ = e621_account_parser_api::db::delete_device_link("other_owner_token_zz", unrelated_id);
 }
 
 /// Interaction history: records an interaction, fetches it back, applies an

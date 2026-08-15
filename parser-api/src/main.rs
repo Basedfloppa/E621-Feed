@@ -431,6 +431,8 @@ async fn build_rocket() -> rocket::Rocket<rocket::Build> {
         routes::account::list_accounts,
         routes::account::get_account_tag_counts,
         routes::account::get_account_profile,
+        routes::account::get_session_devices,
+        routes::account::revoke_device_session,
         routes::account::get_account_id,
         routes::account::get_account_name,
         routes::account::create_account,

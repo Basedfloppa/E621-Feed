@@ -3,6 +3,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::models::AccountPreferenceProfile;
+use crate::models::InteractionHistoryItem;
 use crate::models::deserialize_nullable_dt;
 
 /// Current e621 user API format (as of 2025-07).
@@ -58,6 +59,41 @@ pub struct TruncatedAccount {
     pub id: i32,
     pub name: String,
     pub blacklist: String,
+}
+
+/// A single account link owned by a device (owner token), rendered within
+/// [`DeviceSession`]. Contains no secrets.
+#[derive(Debug, Serialize, Deserialize, Clone, JsonSchema)]
+#[serde(crate = "rocket::serde", rename_all = "camelCase")]
+pub struct DeviceAccountLink {
+    pub account_id: i32,
+    pub name: String,
+    pub linked_at: String,
+    pub last_seen_at: String,
+}
+
+/// A device (owner token) and the accounts it is linked to, as seen from the
+/// requesting token's point of view. `id` is a stable, non-reversible
+/// `sha256` of the owner token — the raw token is never exposed.
+#[derive(Debug, Serialize, Deserialize, Clone, JsonSchema)]
+#[serde(crate = "rocket::serde", rename_all = "camelCase")]
+pub struct DeviceSession {
+    /// Stable, non-reversible device identifier (`sha256` hex of the token).
+    pub id: String,
+    pub is_current: bool,
+    pub first_seen_at: String,
+    pub last_seen_at: String,
+    /// Whether the device was last seen within the active window.
+    pub active: bool,
+    pub accounts: Vec<DeviceAccountLink>,
+}
+
+/// Payload for `POST /session/revoke`: the `deviceId` of another device
+/// (as returned by `GET /session/devices`) to revoke.
+#[derive(Debug, Deserialize, Clone, JsonSchema)]
+#[serde(crate = "rocket::serde", rename_all = "camelCase")]
+pub struct RevokeDeviceRequest {
+    pub device_id: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, JsonSchema)]
@@ -138,10 +174,13 @@ pub struct ExportAccountSummary {
 
 /// Full account data snapshot for backup / migration.
 ///
-/// `profile` is included for archival/diagnostic value but is **not
-/// importable** — it is derived state recomputed by `/process` from the
-/// account's favourites and the local catalog. Import restores only the
-/// user-settable fields (`blacklist`, `preferred_tags`).
+/// `profile` is included for archival/diagnostic value but its non-interaction
+/// parts (rating/media/quality/recency/uploaders) are **not importable** —
+/// they are derived state recomputed by `/process` from the account's
+/// favourites and the local catalog. The interaction model (`interactions`)
+/// IS importable: it is the raw preference signal that rebuilds the account's
+/// tag-feedback on restore. `blacklist` and `preferred_tags` are user-settable
+/// and importable. No secrets (owner-token or API keys) are ever exported.
 #[derive(Debug, Serialize, Deserialize, Clone, JsonSchema)]
 #[serde(crate = "rocket::serde")]
 pub struct AccountDataExport {
@@ -156,13 +195,20 @@ pub struct AccountDataExport {
     #[serde(default)]
     pub experiment_bucket: Option<String>,
     pub profile: AccountPreferenceProfile,
+    /// The account's raw interaction model (open/like/hide/… events).
+    #[serde(default)]
+    pub interactions: Vec<InteractionHistoryItem>,
 }
 
 /// Import payload for `POST /account/<id>/import`.
 ///
-/// Only user-settable fields are accepted; `profile` from an export is
-/// intentionally ignored (recomputed by `/process`). `None` = leave that
-/// field untouched; `Some("")` for blacklist resets to the server default.
+/// Only user-settable fields are accepted; the non-interaction part of
+/// `profile` from an export is intentionally ignored (recomputed by `/process`,
+/// and its non-interaction fields derive from public favourites). `interactions`
+/// IS accepted and restores the interaction model (replayed into
+/// `feed_interactions` + tag-feedback rebuilt), transferring the interaction-
+/// derived part of the profile. `None` = leave that field untouched;
+/// `Some("")` for blacklist resets to the server default.
 #[derive(Debug, Deserialize, Clone, JsonSchema)]
 #[serde(crate = "rocket::serde")]
 pub struct AccountDataImport {
@@ -173,6 +219,9 @@ pub struct AccountDataImport {
     /// Replace the full preferred-tags list. `None` = no change.
     #[serde(default)]
     pub preferred_tags: Option<Vec<PreferredTag>>,
+    /// Restore the interaction model. `None` = no change (empty list = none).
+    #[serde(default)]
+    pub interactions: Option<Vec<InteractionHistoryItem>>,
 }
 
 #[derive(Debug, Deserialize, Clone)]

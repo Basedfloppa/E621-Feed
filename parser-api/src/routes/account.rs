@@ -16,15 +16,18 @@ use e621_account_parser_api::auth::OwnerToken;
 use e621_account_parser_api::{
     api,
     db::{
-        self, get_account_by_id, get_account_by_name, get_account_feed_settings,
+        self, delete_all_device_links_for_token, find_device_token_by_id, get_account_by_id,
+        get_account_by_name, get_account_feed_settings, get_account_interactions_for_export,
         get_account_preference_profile, get_account_tag_relation_graph, get_accounts_for_owner,
-        get_tag_counts, set_account, set_preferred_tags, update_device_blacklist,
+        get_tag_counts, list_device_sessions, restore_feed_interactions, set_account,
+        set_preferred_tags, update_device_blacklist,
     },
     errors::ApiError,
     models::{
         AccountDataExport, AccountDataImport, AccountFeedSettings, AccountFeedSettingsPatch,
-        AccountPreferenceProfile, BlacklistPayload, DeviceScopedAccount, ExportAccountSummary,
-        PreferredTagPayload, TagCount, TagRelationScoring, TruncatedAccount, UserApiResponse, cfg,
+        AccountPreferenceProfile, BlacklistPayload, DeviceScopedAccount, DeviceSession,
+        ExportAccountSummary, PreferredTagPayload, RevokeDeviceRequest, TagCount,
+        TagRelationScoring, TruncatedAccount, UserApiResponse, cfg,
     },
     ratelimit::{self, ClientIp},
     validation,
@@ -39,6 +42,68 @@ fn normalize_optional_blacklist(input: Option<&str>) -> String {
     input
         .map(validation::normalize_blacklist)
         .unwrap_or_default()
+}
+
+/// List the sessions/devices linked to the requesting `owner_token`: every
+/// device sharing any of the token's accounts, with the accounts each device
+/// is linked to. Device ids are `sha256` hex — raw tokens are never exposed.
+#[openapi(tag = "Session")]
+#[get("/session/devices")]
+pub(crate) async fn get_session_devices(
+    owner: OwnerToken,
+) -> Result<Json<Vec<DeviceSession>>, ApiError> {
+    let owner_token = owner.0;
+    ratelimit::check(&format!("read:owner:{owner_token}"), 240, 60)?;
+    let devices = db_blocking(move || {
+        list_device_sessions(&owner_token).map_err(|e| format!("Failed to list devices: {e}"))
+    })
+    .await?;
+    Ok(Json(devices))
+}
+
+/// Revoke another device's session (by the public `sha256` id from
+/// `GET /session/devices`): the target device token is added to the
+/// revocation denylist and its account links are severed. The current
+/// device cannot revoke itself here (use `DELETE /api/session`).
+#[openapi(tag = "Session")]
+#[post("/session/revoke", data = "<payload>")]
+pub(crate) async fn revoke_device_session(
+    owner: OwnerToken,
+    payload: Json<RevokeDeviceRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let owner_token = owner.0;
+    ratelimit::check(&format!("session_revoke:owner:{owner_token}"), 10, 60)?;
+    let revoke_id = payload.into_inner().device_id;
+    let owner_for = owner_token.clone();
+    let revoke_id_for = revoke_id.clone();
+    let device_token = db_blocking(move || {
+        find_device_token_by_id(&owner_for, &revoke_id_for)
+            .map_err(|e| format!("Failed to resolve device session: {e}"))
+    })
+    .await?;
+    let Some(device_token) = device_token else {
+        return Err(ApiError::NotFound("device session not found".into()));
+    };
+
+    // Add the token to the in-memory + persisted revocation denylist.
+    crate::auth::revoke(&device_token)
+        .map_err(|e| ApiError::Internal(format!("Failed to revoke device session: {e}")))?;
+
+    let sever = device_token.clone();
+    let links_removed = db_blocking(move || {
+        delete_all_device_links_for_token(&sever)
+            .map_err(|e| format!("Failed to sever device links: {e}"))
+    })
+    .await?;
+
+    crate::audit::event("session.device_revoked")
+        .field("device_id", revoke_id)
+        .field("links_removed", links_removed as i64)
+        .emit();
+    Ok(Json(serde_json::json!({
+        "revoked": true,
+        "linksRemoved": links_removed
+    })))
 }
 
 #[openapi(tag = "Accounts")]
@@ -639,14 +704,16 @@ pub(crate) async fn export_account(
     let owner_token = owner.0;
     ratelimit::check(&format!("read:owner:{owner_token}"), 240, 60)?;
     let owner_for_auth = owner_token.clone();
-    let (name, settings, profile) = db_blocking(move || {
+    let (name, settings, profile, interactions) = db_blocking(move || {
         let account = get_account_by_id(&owner_for_auth, account_id)
             .map_err(|e| format!("Failed to validate account access: {e}"))?;
         let settings = get_account_feed_settings(&owner_for_auth, account_id)
             .map_err(|e| format!("Failed to get feed settings: {e}"))?;
         let profile = get_account_preference_profile(account_id)
             .map_err(|e| format!("Failed to get profile: {e}"))?;
-        Ok::<_, String>((account.name, settings, profile))
+        let interactions = get_account_interactions_for_export(account_id, 100_000)
+            .map_err(|e| format!("Failed to export interactions: {e}"))?;
+        Ok::<_, String>((account.name, settings, profile, interactions))
     })
     .await?;
 
@@ -659,6 +726,7 @@ pub(crate) async fn export_account(
         preferred_tags: settings.preferred_tags,
         experiment_bucket: settings.experiment_bucket,
         profile,
+        interactions,
     };
     Ok(Json(export))
 }
@@ -716,6 +784,26 @@ pub(crate) async fn import_account(
                 error!("{m}");
                 m
             })
+        })
+        .await?;
+    }
+
+    // Restore the interaction model (open/like/hide/… events). Explicitly
+    // verify ownership first — unlike the blacklist/tags writers, the restore
+    // path writes raw `feed_interactions` rows and must not touch an account
+    // this token isn't linked to.
+    if let Some(interactions) = &import.interactions {
+        let token = owner_token.clone();
+        let interactions = interactions.clone();
+        db_blocking(move || {
+            get_account_by_id(&token, account_id)
+                .map_err(|e| format!("Failed to validate account access for import: {e}"))?;
+            restore_feed_interactions(account_id, &interactions).map_err(|e| {
+                let m = format!("Failed to restore interactions from import: {e}");
+                error!("{m}");
+                m
+            })?;
+            Ok::<_, String>(())
         })
         .await?;
     }

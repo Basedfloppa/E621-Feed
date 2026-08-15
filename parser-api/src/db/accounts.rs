@@ -1,9 +1,170 @@
 use chrono::{NaiveDate, Utc};
 use rusqlite::params;
+use sha2::{Digest, Sha256};
 
-use crate::models::{AccountFeedSettings, PreferredTag, TruncatedAccount, cfg};
+use crate::models::{
+    AccountFeedSettings, DeviceAccountLink, DeviceSession, PreferredTag, TruncatedAccount, cfg,
+};
 
 use super::open_db;
+
+/// A device (owner token) is reported as "active" if it was last seen within
+/// this many days. Linked `last_seen_at` is updated on state changes (link,
+/// blacklist write); reads deliberately don't touch it to avoid writer
+/// contention, so this is a conservative recency signal.
+const DEVICE_ACTIVE_WINDOW_DAYS: i64 = 30;
+
+/// Enumerate every device (owner token) that shares any account with the
+/// requesting `owner_token`, plus the accounts each device is linked to.
+///
+/// The returned [`DeviceSession::id`] is a stable `sha256` hex of the raw
+/// owner token — the token itself is never returned, so the payload carries
+/// no secrets usable to impersonate another device.
+///
+/// The current device is flagged `is_current`; its own token is, of course,
+/// included in the result.
+pub fn list_device_sessions(owner_token: &str) -> Result<Vec<DeviceSession>, String> {
+    let conn = open_db()?;
+    let mut stmt = conn
+        .prepare(
+            r"
+            SELECT adl.owner_token, adl.account_id, a.name, adl.linked_at, adl.last_seen_at
+            FROM account_device_links adl
+            JOIN accounts a ON a.id = adl.account_id
+            WHERE adl.account_id IN (
+                SELECT account_id FROM account_device_links WHERE owner_token = ?1
+            )
+            ORDER BY adl.owner_token ASC, adl.last_seen_at DESC
+            ",
+        )
+        .map_err(|e| format!("Failed to construct device-session query: {e}"))?;
+
+    let rows = stmt
+        .query_map([owner_token], |row| {
+            Ok((
+                row.get::<_, String>(0)?, // owner_token
+                row.get::<_, i32>(1)?,    // account_id
+                row.get::<_, String>(2)?, // account name
+                row.get::<_, String>(3)?, // linked_at
+                row.get::<_, String>(4)?, // last_seen_at
+            ))
+        })
+        .map_err(|e| format!("Failed to query device sessions: {e}"))?;
+
+    let mut devices: Vec<DeviceSession> = Vec::new();
+    let mut index: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+
+    for row in rows {
+        let (token, account_id, name, linked_at, last_seen_at) =
+            row.map_err(|e| format!("Failed to read device-session row: {e}"))?;
+        let pos = match index.get(&token) {
+            Some(&p) => p,
+            None => {
+                let mut hasher = Sha256::new();
+                hasher.update(token.as_bytes());
+                let id = hex(&hasher.finalize());
+                let active = days_since_rfc3339(&last_seen_at) <= DEVICE_ACTIVE_WINDOW_DAYS;
+                devices.push(DeviceSession {
+                    id,
+                    is_current: token == owner_token,
+                    first_seen_at: linked_at.clone(),
+                    last_seen_at: last_seen_at.clone(),
+                    active,
+                    accounts: Vec::new(),
+                });
+                index.insert(token.clone(), devices.len() - 1);
+                devices.len() - 1
+            }
+        };
+        let device = &mut devices[pos];
+        // RFC 3339 timestamps sort lexicographically: pick min/max by string.
+        if linked_at < device.first_seen_at {
+            device.first_seen_at = linked_at.clone();
+        }
+        if last_seen_at > device.last_seen_at {
+            device.last_seen_at = last_seen_at.clone();
+        }
+        device.accounts.push(DeviceAccountLink {
+            account_id,
+            name,
+            linked_at,
+            last_seen_at,
+        });
+    }
+    Ok(devices)
+}
+
+/// Lowercase-hex encoding of a checksum digest.
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Days since an RFC 3339 timestamp; `i64::MAX` when it can't be parsed
+/// (treated as never-seen, i.e. inactive).
+fn days_since_rfc3339(rfc: &str) -> i64 {
+    chrono::DateTime::parse_from_rfc3339(rfc)
+        .map(|dt| (Utc::now() - dt.with_timezone(&Utc)).num_days())
+        .unwrap_or(i64::MAX)
+}
+
+/// Resolve a device's raw owner token from its public `sha256` id, among the
+/// devices sharing any account with `owner_token`. Excludes the current device
+/// itself (revoking your own token is `DELETE /api/session`, not this route).
+///
+/// Never returns another account's unrelated token: only tokens that share an
+/// account with the caller are considered (same reachability as
+/// [`list_device_sessions`]).
+pub fn find_device_token_by_id(
+    owner_token: &str,
+    device_id: &str,
+) -> Result<Option<String>, String> {
+    let conn = open_db()?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT DISTINCT owner_token FROM account_device_links \
+             WHERE account_id IN (\
+                SELECT account_id FROM account_device_links WHERE owner_token = ?1\
+             )",
+        )
+        .map_err(|e| format!("Failed to prepare device-token query: {e}"))?;
+    let tokens: Vec<String> = stmt
+        .query_map([owner_token], |r| r.get::<_, String>(0))
+        .map_err(|e| format!("Failed to query device tokens: {e}"))?
+        .collect::<Result<_, _>>()
+        .map_err(|e| format!("Failed to collect device tokens: {e}"))?;
+    for token in tokens {
+        if token == owner_token {
+            continue;
+        }
+        let mut hasher = Sha256::new();
+        hasher.update(token.as_bytes());
+        if hex(&hasher.finalize()) == device_id {
+            return Ok(Some(token));
+        }
+    }
+    Ok(None)
+}
+
+/// Sever every account link owned by `token`, running the same per-account
+/// teardown cascade as `delete_device_link` (cooc / feed-interactions wipes)
+/// for the last link on each account. Returns the number of links removed.
+pub fn delete_all_device_links_for_token(token: &str) -> Result<usize, String> {
+    let ids: Vec<i32> = {
+        let conn = open_db()?;
+        let mut stmt = conn
+            .prepare("SELECT account_id FROM account_device_links WHERE owner_token = ?1")
+            .map_err(|e| format!("Failed to prepare link-id query: {e}"))?;
+        stmt.query_map([token], |r| r.get::<_, i32>(0))
+            .map_err(|e| format!("Failed to query link ids: {e}"))?
+            .collect::<Result<_, _>>()
+            .map_err(|e| format!("Failed to collect link ids: {e}"))?
+    };
+    let mut removed = 0usize;
+    for id in ids {
+        removed += delete_device_link(token, id)?;
+    }
+    Ok(removed)
+}
 
 /// Visit-activity summary returned by `get_visit_stats`.
 #[derive(Debug, Clone)]

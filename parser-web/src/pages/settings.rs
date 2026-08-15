@@ -1,4 +1,6 @@
-use crate::components::{IconSliders, PostGrid, SavedAccountsSelect, StorageCard};
+use crate::components::{
+    IconSliders, PostGrid, SavedAccountsSelect, SessionDevicesCard, StorageCard,
+};
 use crate::models::{
     api_get, api_patch, humanize_error_body, humanize_network_error, read_config_from_head,
 };
@@ -550,6 +552,11 @@ pub fn settings_page() -> Html {
                     </div>
 
                     <StorageCard />
+
+                    <SessionDevicesCard
+                        backend_url={backend_url.clone()}
+                        selected_account_id={(*selected_user).as_ref().map(|u| u.id)}
+                    />
 
                     <div id="settings-display" class="card bg-base-100 shadow">
                         <div class="card-body text-base-content">

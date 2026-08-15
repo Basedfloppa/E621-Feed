@@ -2,9 +2,14 @@ use chrono::Utc;
 use rusqlite::{Connection, params};
 use std::collections::{HashMap, HashSet};
 
-use crate::models::{FeedInteractionRequest, FeedInteractionType};
+use crate::models::{FeedInteractionRequest, FeedInteractionType, InteractionHistoryItem};
 
 use super::{hydrate_cache, open_db};
+
+/// Fixed `session_id` used when restoring interactions from an export, so the
+/// `UNIQUE(account_id, post_id, event_type, session_id)` constraint keeps a
+/// re-import of the same export idempotent (no duplicate rows across restores).
+const INTERACTION_RESTORE_SESSION: &str = "import-restore";
 
 pub fn record_feed_interaction(
     owner_token: &str,
@@ -216,6 +221,126 @@ fn history_row_mapper(
         event_type,
         position: row.get(2)?,
         created_at: row.get(3)?,
+    })
+}
+
+/// Return the account's full interaction model (open/like/hide/… events),
+/// newest first, up to `limit`. Used by account export/backup so the
+/// interaction-derived part of the taste profile can be transferred.
+///
+/// Does not verify ownership — callers must gate on `owner_token`.
+pub fn get_account_interactions_for_export(
+    account_id: i32,
+    limit: i64,
+) -> Result<Vec<InteractionHistoryItem>, String> {
+    let conn = open_db()?;
+    let limit = limit.clamp(0, 100_000);
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+    let mut stmt = conn
+        .prepare(
+            "SELECT post_id, event_type, position, created_at \
+             FROM feed_interactions \
+             WHERE account_id = ?1 \
+             ORDER BY id DESC LIMIT ?2",
+        )
+        .map_err(|e| format!("Failed to prepare interaction export query: {e}"))?;
+    let rows = stmt
+        .query_map(rusqlite::params![account_id, limit], history_row_mapper)
+        .map_err(|e| format!("Failed to query interaction export: {e}"))?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("Failed to collect interaction export: {e}"))
+}
+
+/// Restore an account's interaction model from an export payload: replay each
+/// event into `feed_interactions` (idempotent `INSERT OR IGNORE` under a fixed
+/// import session), then rebuild the derived per-tag feedback aggregate from the
+/// account's full interaction history so the interaction-derived part of the
+/// taste profile reflects the restored signal.
+///
+/// Returns `(inserted, offered)`. Callers must gate on `owner_token`.
+pub fn restore_feed_interactions(
+    account_id: i32,
+    items: &[InteractionHistoryItem],
+) -> Result<(usize, usize), String> {
+    if items.is_empty() {
+        return Ok((0, 0));
+    }
+    let bucket: Option<String> = crate::models::cfg().pick_bucket(account_id, None).0;
+    let mut inserted = 0usize;
+    super::with_write_tx(|tx| {
+        let mut stmt = tx
+            .prepare_cached(
+                "INSERT OR IGNORE INTO feed_interactions ( \
+                    account_id, post_id, event_type, position, session_id, created_at, experiment_bucket \
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            )
+            .map_err(|e| format!("Failed to prepare interaction restore: {e}"))?;
+        for item in items {
+            let created = if item.created_at.is_empty() {
+                Utc::now().to_rfc3339()
+            } else {
+                item.created_at.clone()
+            };
+            let n = stmt
+                .execute(params![
+                    account_id,
+                    item.post_id,
+                    item.event_type.to_string(),
+                    item.position,
+                    INTERACTION_RESTORE_SESSION,
+                    created,
+                    bucket,
+                ])
+                .map_err(|e| format!("Failed to restore interaction: {e}"))?;
+            if n > 0 {
+                inserted += 1;
+            }
+        }
+        Ok(())
+    })?;
+    rebuild_account_tag_feedback(account_id)?;
+    Ok((inserted, items.len()))
+}
+
+/// Recompute `account_tag_feedback` from the account's full `feed_interactions`
+/// (same event→delta mapping as `record_feed_interaction`). Used after restoring
+/// interactions so the profile's tag-feedback reflects the restored signal.
+fn rebuild_account_tag_feedback(account_id: i32) -> Result<(), String> {
+    super::with_write_tx(|tx| {
+        tx.execute(
+            "DELETE FROM account_tag_feedback WHERE account_id = ?1",
+            params![account_id],
+        )
+        .map_err(|e| format!("Failed to clear tag feedback for rebuild: {e}"))?;
+        tx.execute(
+            r#"
+            INSERT INTO account_tag_feedback (
+                account_id, tag_name, group_type,
+                impression_count, positive_count, negative_count,
+                last_interaction_at, last_decayed_at
+            )
+            SELECT
+                fi.account_id, t.name AS tag_name, t.group_type,
+                SUM(CASE WHEN fi.event_type = 'qualified_impression' THEN 1 ELSE 0 END),
+                SUM(CASE
+                    WHEN fi.event_type IN ('open','like') THEN 1
+                    WHEN fi.event_type = 'strong_like' THEN 3
+                    ELSE 0 END),
+                SUM(CASE WHEN fi.event_type = 'hide' THEN 1 ELSE 0 END),
+                MAX(fi.created_at),
+                MAX(fi.created_at)
+            FROM feed_interactions fi
+            INNER JOIN tags_posts tp ON tp.post_id = fi.post_id
+            INNER JOIN tags t ON t.id = tp.tag_id
+            WHERE fi.account_id = ?1
+            GROUP BY fi.account_id, t.name, t.group_type
+            "#,
+            params![account_id],
+        )
+        .map_err(|e| format!("Failed to rebuild tag feedback: {e}"))?;
+        Ok(())
     })
 }
 
