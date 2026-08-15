@@ -375,6 +375,22 @@ pub(crate) fn prepare_eval_dataset(opts: &GridOptions) -> anyhow::Result<EvalDat
             // Per-account user tag-relation graph (cooccurrence on train_posts).
             // Built before features so each cached tag carries a `user_tid`.
             let mut user_relation = TagRelationGraph::from_train_posts(&train_posts);
+            // Respect the production user-relation edge cap (top-N pairs by
+            // cooc) so calibration measures the SAME behavior as the live
+            // `load_account_tag_relation` — otherwise A/B runs never exercise
+            // `user_relation_edge_limit` (see TODO §2.2b / task c).
+            let edge_limit = cfg().runtime.user_relation_edge_limit as usize;
+            if edge_limit > 0 && user_relation.n_pairs() > edge_limit {
+                let before = user_relation.n_pairs();
+                user_relation.truncate_to_top_pairs(edge_limit);
+                eprintln!(
+                    "[calib] account {}: user_relation pairs {} -> {} (edge_limit={})",
+                    account_id,
+                    before,
+                    user_relation.n_pairs(),
+                    edge_limit
+                );
+            }
             // Drop the heavy train-side `Post` structs early.
             drop(train_posts);
 

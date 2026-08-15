@@ -391,6 +391,33 @@ impl TagRelationGraph {
         }
         g
     }
+
+    /// Keep only the strongest `keep` pairs (by co-occurrence count, ties
+    /// broken by pair key). Mirrors the production `load_account_tag_relation`
+    /// SQL (`ORDER BY cooc_count DESC LIMIT n`) so calibration can measure the
+    /// effect of `user_relation_edge_limit` on NDCG without hitting SQLite.
+    /// Marginals (per-tag counts) are left untouched — same as production, where
+    /// marginals come from the full tag-count profile and only the pair rows are
+    /// capped. Returns the number of pairs retained. Panics if called on a
+    /// frozen graph.
+    pub fn truncate_to_top_pairs(&mut self, keep: usize) -> usize {
+        if keep == 0 {
+            return 0;
+        }
+        match &mut self.pairs {
+            PairStorage::Hot(m) => {
+                if m.len() <= keep {
+                    return m.len();
+                }
+                let mut v: Vec<((TagId, TagId), i64)> = m.drain().collect();
+                v.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+                v.truncate(keep);
+                *m = v.into_iter().collect();
+                m.len()
+            }
+            PairStorage::Frozen(_) => panic!("truncate_to_top_pairs on frozen graph"),
+        }
+    }
 }
 
 static GLOBAL_CACHE: LazyLock<ArcSwap<TagRelationGraph>> =
@@ -610,6 +637,41 @@ mod tests {
         assert_eq!(g.cooc_by_id(id_a, id_f), 3);
         // Order shouldn't matter
         assert_eq!(g.cooc_by_id(id_f, id_a), 3);
+    }
+
+    #[test]
+    fn truncate_to_top_pairs_keeps_strongest_and_preserves_marginals() {
+        let mut g = TagRelationGraph::with_posts(3);
+        // 5 distinct pairs with increasing cooc counts.
+        g.insert_pair(0, "a1", 4, "f1", 1);
+        g.insert_pair(0, "a2", 4, "f2", 2);
+        g.insert_pair(0, "a3", 4, "f3", 3);
+        g.insert_pair(0, "a4", 4, "f4", 4);
+        g.insert_pair(0, "a5", 4, "f5", 5);
+        g.set_marginal(0, "a5", 9);
+        assert_eq!(g.n_pairs(), 5);
+
+        assert_eq!(g.truncate_to_top_pairs(2), 2);
+        assert_eq!(g.n_pairs(), 2, "only the two strongest pairs survive");
+        // Strongest pair (count 5) is retained.
+        let a5 = g.tag_id(0, "a5").unwrap();
+        let f5 = g.tag_id(4, "f5").unwrap();
+        assert_eq!(g.cooc_by_id(a5, f5), 5);
+        // Weakest pair (count 1) is pruned.
+        assert!(
+            g.tag_id(0, "a1").is_none()
+                || g.cooc_by_id(
+                    g.tag_id(0, "a1").unwrap_or(0),
+                    g.tag_id(4, "f1").unwrap_or(0),
+                ) == 0,
+            "weakest pair pruned"
+        );
+        // Marginals are untouched by pair truncation.
+        assert_eq!(g.marginal_by_id(a5), 9);
+        // keep=0 empties; keep>=len is a no-op.
+        assert_eq!(g.truncate_to_top_pairs(100), 2);
+        g.truncate_to_top_pairs(1);
+        assert_eq!(g.n_pairs(), 1);
     }
 
     #[test]

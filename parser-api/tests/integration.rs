@@ -1374,6 +1374,60 @@ async fn authenticated_read_routes_use_seeded_sqlite() {
     }
 }
 
+/// `GET /accounts?limit=&offset=` returns an honest slice: `limit` caps the
+/// page, `offset` advances it, oversized offsets yield an empty page.
+#[tokio::test(flavor = "multi_thread")]
+async fn list_accounts_respects_limit_and_offset() {
+    let owner = "pag_owner_token_0001";
+    for id in [9_200_001i32, 9_200_002, 9_200_003, 9_200_004] {
+        e621_account_parser_api::db::set_account(owner, id, "pg", "").unwrap();
+    }
+    let client = Client::tracked(rocket::build().mount(
+        "/api",
+        e621_account_parser_api::routes::integration_test_routes(),
+    ))
+    .await
+    .unwrap();
+    let cookie = Cookie::new(e621_account_parser_api::auth::OWNER_TOKEN_COOKIE, owner);
+    let get_ids = |q: String| {
+        let cookie = cookie.clone();
+        let client = &client;
+        async move {
+            let resp = client
+                .get(format!("/api/accounts{q}"))
+                .cookie(cookie)
+                .dispatch()
+                .await;
+            assert_eq!(resp.status(), Status::Ok, "get /api/accounts{q}");
+            let v: Vec<serde_json::Value> = resp.into_json().await.unwrap();
+            v.into_iter()
+                .map(|x| x["id"].as_i64().unwrap())
+                .collect::<std::collections::HashSet<i64>>()
+        }
+    };
+
+    let full = get_ids(String::new()).await;
+    assert!(
+        full.len() >= 4,
+        "owner should have >=4 accounts, got {}",
+        full.len()
+    );
+    let p1 = get_ids("?limit=2&offset=0".to_owned()).await;
+    let p2 = get_ids("?limit=2&offset=2".to_owned()).await;
+    assert!(p1.len() <= 2 && p2.len() <= 2, "limit not respected");
+    assert_eq!(
+        p1.intersection(&p2).count(),
+        0,
+        "offset must advance past page 1"
+    );
+    let union: std::collections::HashSet<i64> = p1.union(&p2).copied().collect();
+    assert_eq!(union.len(), 4, "both pages together cover all 4 accounts");
+    assert!(
+        get_ids("?limit=2&offset=9999".to_owned()).await.is_empty(),
+        "far offset -> empty"
+    );
+}
+
 /// Export returns the full snapshot (identity + blacklist + preferred tags +
 /// profile); import restores user-settable fields and returns current state.
 #[tokio::test(flavor = "multi_thread")]

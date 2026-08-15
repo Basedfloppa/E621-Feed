@@ -157,13 +157,21 @@ pub(crate) async fn get_account_id(
 }
 
 #[openapi(tag = "Accounts")]
-#[get("/accounts")]
+#[get("/accounts?<limit>&<offset>")]
 pub(crate) async fn list_accounts(
     owner: OwnerToken,
+    limit: Option<usize>,
+    offset: Option<usize>,
 ) -> Result<Json<Vec<TruncatedAccount>>, ApiError> {
     let owner_token = owner.0;
     ratelimit::check(&format!("read:owner:{owner_token}"), 240, 60)?;
-    let accounts = db_blocking(move || get_accounts_for_owner(&owner_token)).await?;
+    let mut accounts = db_blocking(move || get_accounts_for_owner(&owner_token)).await?;
+    // Pagination: advance past `offset` entries, then return at most `limit`.
+    let skip = offset.unwrap_or(0).min(accounts.len());
+    accounts.drain(..skip);
+    if let Some(lim) = limit {
+        accounts.truncate(lim);
+    }
     Ok(Json(accounts))
 }
 

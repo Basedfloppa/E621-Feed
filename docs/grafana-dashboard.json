@@ -3,7 +3,11 @@
   "__requires": [],
   "title": "E621 Feed — Usage Analytics",
   "description": "Usage metrics for E621 Feed: active users, feature popularity, process health, catalog growth, A/B experiment comparison (control vs exploration), and request/e621 latency. Source: e621-feed /api/metrics",
-  "tags": ["e621-feed", "prometheus", "ab-testing"],
+  "tags": [
+    "e621-feed",
+    "prometheus",
+    "ab-testing"
+  ],
   "timezone": "browser",
   "editable": true,
   "refresh": "30s",
@@ -691,7 +695,8 @@
       "targets": [
         {
           "expr": "e621_process_running_seconds",
-          "legendFormat": "Running"
+          "legendFormat": "Running",
+          "refId": "A"
         }
       ],
       "fieldConfig": {
@@ -719,6 +724,42 @@
           },
           "unit": "s"
         }
+      },
+      "alert": {
+        "alertRuleTags": {},
+        "conditions": [
+          {
+            "evaluator": {
+              "type": "gt",
+              "params": [
+                1800
+              ]
+            },
+            "operator": {
+              "type": "and"
+            },
+            "query": {
+              "params": [
+                "A",
+                "5m",
+                "now"
+              ]
+            },
+            "reducer": {
+              "type": "max",
+              "params": []
+            },
+            "type": "query"
+          }
+        ],
+        "executionErrorState": "alerting",
+        "for": "5m",
+        "frequency": "1m",
+        "handler": 1,
+        "message": "ALERT: /process running >30 min (e621_process_running_seconds>1800).",
+        "name": "Process running > 30 min",
+        "noDataState": "no_data",
+        "notifications": []
       }
     },
     {
@@ -775,7 +816,8 @@
       "targets": [
         {
           "expr": "increase(e621_prefetch_breaker_trips_total[24h])",
-          "legendFormat": "Trips"
+          "legendFormat": "Trips",
+          "refId": "A"
         }
       ],
       "fieldConfig": {
@@ -797,6 +839,42 @@
           },
           "unit": "none"
         }
+      },
+      "alert": {
+        "alertRuleTags": {},
+        "conditions": [
+          {
+            "evaluator": {
+              "type": "gt",
+              "params": [
+                0
+              ]
+            },
+            "operator": {
+              "type": "and"
+            },
+            "query": {
+              "params": [
+                "A",
+                "5m",
+                "now"
+              ]
+            },
+            "reducer": {
+              "type": "max",
+              "params": []
+            },
+            "type": "query"
+          }
+        ],
+        "executionErrorState": "alerting",
+        "for": "5m",
+        "frequency": "1m",
+        "handler": 1,
+        "message": "ALERT: prefetch breaker trips>0 in last 5m.",
+        "name": "Prefetch circuit breaker tripped",
+        "noDataState": "no_data",
+        "notifications": []
       }
     },
     {
@@ -812,7 +890,8 @@
       "targets": [
         {
           "expr": "sum by (class) (rate(e621_upstream_errors_total[5m]))",
-          "legendFormat": "{{class}}"
+          "legendFormat": "{{class}}",
+          "refId": "A"
         }
       ],
       "fieldConfig": {
@@ -824,6 +903,42 @@
           },
           "unit": "req/s"
         }
+      },
+      "alert": {
+        "alertRuleTags": {},
+        "conditions": [
+          {
+            "evaluator": {
+              "type": "gt",
+              "params": [
+                20
+              ]
+            },
+            "operator": {
+              "type": "and"
+            },
+            "query": {
+              "params": [
+                "A",
+                "5m",
+                "now"
+              ]
+            },
+            "reducer": {
+              "type": "max",
+              "params": []
+            },
+            "type": "query"
+          }
+        ],
+        "executionErrorState": "alerting",
+        "for": "5m",
+        "frequency": "1m",
+        "handler": 1,
+        "message": "ALERT: >20% of outbound e621 requests are 429/5xx over 5m.",
+        "name": "High % of e621 429/5xx errors",
+        "noDataState": "no_data",
+        "notifications": []
       }
     },
     {
@@ -1123,6 +1238,191 @@
         "showTime": true,
         "sortOrder": "Descending",
         "enableLogDetails": true
+      }
+    },
+    {
+      "title": "Scoring — phase db_hydrate (ms)",
+      "description": "Per-request `db_hydrate` phase time (ms) from SCORING_TRACE (unwrap phase_db_hydrate).",
+      "type": "timeseries",
+      "datasource": {
+        "type": "loki",
+        "uid": "dfkfplmnysw74e"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 110
+      },
+      "targets": [
+        {
+          "expr": "max_over_time({container=~\"app-jemalloc|e621.*|.*feed.*|.*parser.*\"} |= \"\\\"trace\\\":\\\"scoring\\\"\" | json | trace=\"scoring\" | unwrap phase_db_hydrate [5m]) by (endpoint)",
+          "legendFormat": "{{endpoint}}",
+          "datasource": {
+            "type": "loki",
+            "uid": "dfkfplmnysw74e"
+          },
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10
+          },
+          "unit": "ms",
+          "min": 0
+        }
+      }
+    },
+    {
+      "title": "Scoring — phase diversify_post (ms)",
+      "description": "Per-request `diversify_post` phase time (ms) from SCORING_TRACE (unwrap phase_diversify_post).",
+      "type": "timeseries",
+      "datasource": {
+        "type": "loki",
+        "uid": "dfkfplmnysw74e"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 110
+      },
+      "targets": [
+        {
+          "expr": "max_over_time({container=~\"app-jemalloc|e621.*|.*feed.*|.*parser.*\"} |= \"\\\"trace\\\":\\\"scoring\\\"\" | json | trace=\"scoring\" | unwrap phase_diversify_post [5m]) by (endpoint)",
+          "legendFormat": "{{endpoint}}",
+          "datasource": {
+            "type": "loki",
+            "uid": "dfkfplmnysw74e"
+          },
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10
+          },
+          "unit": "ms",
+          "min": 0
+        }
+      }
+    },
+    {
+      "title": "Scoring — phase e621_fetch (ms)",
+      "description": "Per-request `e621_fetch` phase time (ms) from SCORING_TRACE (unwrap phase_e621_fetch).",
+      "type": "timeseries",
+      "datasource": {
+        "type": "loki",
+        "uid": "dfkfplmnysw74e"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 110
+      },
+      "targets": [
+        {
+          "expr": "max_over_time({container=~\"app-jemalloc|e621.*|.*feed.*|.*parser.*\"} |= \"\\\"trace\\\":\\\"scoring\\\"\" | json | trace=\"scoring\" | unwrap phase_e621_fetch [5m]) by (endpoint)",
+          "legendFormat": "{{endpoint}}",
+          "datasource": {
+            "type": "loki",
+            "uid": "dfkfplmnysw74e"
+          },
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10
+          },
+          "unit": "ms",
+          "min": 0
+        }
+      }
+    },
+    {
+      "title": "Scoring — phase cache_build (ms)",
+      "description": "Per-request `cache_build` phase time (ms) from SCORING_TRACE (unwrap phase_cache_build).",
+      "type": "timeseries",
+      "datasource": {
+        "type": "loki",
+        "uid": "dfkfplmnysw74e"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 118
+      },
+      "targets": [
+        {
+          "expr": "max_over_time({container=~\"app-jemalloc|e621.*|.*feed.*|.*parser.*\"} |= \"\\\"trace\\\":\\\"scoring\\\"\" | json | trace=\"scoring\" | unwrap phase_cache_build [5m]) by (endpoint)",
+          "legendFormat": "{{endpoint}}",
+          "datasource": {
+            "type": "loki",
+            "uid": "dfkfplmnysw74e"
+          },
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10
+          },
+          "unit": "ms",
+          "min": 0
+        }
+      }
+    },
+    {
+      "title": "Scoring — phase scoring (ms)",
+      "description": "Per-request `scoring` phase time (ms) from SCORING_TRACE (unwrap phase_scoring).",
+      "type": "timeseries",
+      "datasource": {
+        "type": "loki",
+        "uid": "dfkfplmnysw74e"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 118
+      },
+      "targets": [
+        {
+          "expr": "max_over_time({container=~\"app-jemalloc|e621.*|.*feed.*|.*parser.*\"} |= \"\\\"trace\\\":\\\"scoring\\\"\" | json | trace=\"scoring\" | unwrap phase_scoring [5m]) by (endpoint)",
+          "legendFormat": "{{endpoint}}",
+          "datasource": {
+            "type": "loki",
+            "uid": "dfkfplmnysw74e"
+          },
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10
+          },
+          "unit": "ms",
+          "min": 0
+        }
       }
     }
   ],

@@ -45,7 +45,8 @@ use e621_account_parser_api::db::{
 use e621_account_parser_api::errors::ApiError;
 use e621_account_parser_api::models::{Post, Rating, ScoredPost, cfg};
 use e621_account_parser_api::utils::{
-    CachedPostFeatures, ScoringContext, ScoringMetrics, current_global_relation, current_idf,
+    CachedPostFeatures, PipelineMetrics, ScoringContext, ScoringMetrics, current_global_relation,
+    current_idf,
 };
 use e621_account_parser_api::validation;
 
@@ -353,6 +354,9 @@ async fn build_personalized_digest(
     // Thread-safe per-request scorer-trace accumulator: scoring runs in
     // parallel rayon closures below, so channels accumulate under a Mutex.
     let digest_metrics = Mutex::new(ScoringMetrics::default());
+    // Real pipeline phase timings (DB reads, scoring, build) so the digest
+    // trace emits a meaningful `phase_ms`/`total_ms` (was 0 -- TODO §2.2a).
+    let mut pipe = PipelineMetrics::new("digest_personalized");
 
     // Owned post IDs serve double duty: as a source for the "recent added"
     // stratum below, and (when exclude_saved is on) as the dedup set against
@@ -375,6 +379,8 @@ async fn build_personalized_digest(
         }
         posts
     };
+
+    pipe.mark("db_hydrate");
 
     // Score all candidates in parallel (rayon).
     let scored: Vec<ScoredPost> = if local_posts.is_empty() {
@@ -414,6 +420,7 @@ async fn build_personalized_digest(
         });
         s
     };
+    pipe.mark("scoring");
 
     let filter_blacklist = |posts: Vec<Post>| -> Vec<Post> {
         posts
@@ -531,8 +538,12 @@ async fn build_personalized_digest(
             .emit_err();
     }
 
+    pipe.mark("build");
+    let phases = pipe.phases();
+    let total_ms = pipe.total_ms();
+    pipe.finish_and_log();
     if let Ok(timing) = digest_metrics.lock() {
-        timing.emit_json("digest_personalized", account_id as i64, 0.0, &[]);
+        timing.emit_json("digest_personalized", account_id as i64, total_ms, phases);
     }
 
     Ok(digest)
@@ -607,6 +618,8 @@ async fn build_generic_digest(
 
     // Thread-safe per-request scorer-trace accumulator (parallel rayon closure).
     let digest_metrics = Mutex::new(ScoringMetrics::default());
+    // Real pipeline phase timings for the digest trace (was 0 -- TODO §2.2a).
+    let mut pipe = PipelineMetrics::new("digest_generic");
 
     let scored: Vec<ScoredPost> = all_posts
         .into_par_iter()
@@ -624,7 +637,12 @@ async fn build_generic_digest(
         .collect();
 
     if let Ok(timing) = digest_metrics.lock() {
-        timing.emit_json("digest_generic", account_id as i64, 0.0, &[]);
+        pipe.mark("db_hydrate");
+        pipe.mark("scoring");
+        let phases = pipe.phases();
+        let total_ms = pipe.total_ms();
+        pipe.finish_and_log();
+        timing.emit_json("digest_generic", account_id as i64, total_ms, phases);
     }
 
     Ok(scored)

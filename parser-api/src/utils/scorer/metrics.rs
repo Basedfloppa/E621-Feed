@@ -117,6 +117,22 @@ impl ScoringMetrics {
         if self.count == 0 {
             return;
         }
+        println!(
+            "{}",
+            self.scoring_trace_json(endpoint, account_id, total_ms, phases)
+        );
+    }
+
+    /// Build the structured scoring-trace JSON line (a single pure-JSON object
+    /// so Grafana/Loki can `| json` and `| unwrap` the numeric fields).
+    /// Exposed separately so tests can assert on the emitted fields.
+    pub fn scoring_trace_json(
+        &self,
+        endpoint: &str,
+        account_id: i64,
+        total_ms: f64,
+        phases: &[PhaseRecord],
+    ) -> serde_json::Value {
         let c = &self.channel;
         let ph_ms = |ns: u64| (ns as f64) / 1_000_000.0;
         let channel_ms = serde_json::json!({
@@ -159,7 +175,15 @@ impl ScoringMetrics {
             .iter()
             .map(|p| (p.name.to_string(), serde_json::json!(ph_ms(p.nanos))))
             .collect();
-        let line = serde_json::json!({
+        // Also surface each phase as a flat `phase_<name>` field so a Grafana
+        // (Loki) panel can `| unwrap phase_<name>` directly — the nested
+        // `phase_ms` object is kept for humans/back-compat but is not
+        // reachable through Loki's nested-json parser.
+        let mut flat_phases: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
+        for (name, val) in &phase_ms {
+            flat_phases.insert(format!("phase_{name}"), val.clone());
+        }
+        let mut obj = serde_json::json!({
             "trace": "scoring",
             "endpoint": endpoint,
             "account": account_id,
@@ -169,13 +193,12 @@ impl ScoringMetrics {
             "top_channel_ms": ph_ms(top_channel_ns),
             "channel_ms": channel_ms,
             "phase_ms": phase_ms,
-        });
-        // Emit as a single pure-JSON line so Grafana/Loki can `| json` and
-        // `| unwrap` the numeric fields. Filter by `trace="scoring"`. Must use
-        // `println!` (not `info!`) so the line reaches stdout: Rocket's logger
-        // drops `info!` from non-Rocket crates, which is why the scoring trace
-        // never made it to Loki.
-        println!("{line}");
+        })
+        .as_object()
+        .cloned()
+        .unwrap_or_default();
+        obj.extend(flat_phases);
+        serde_json::Value::Object(obj)
     }
 }
 
@@ -489,6 +512,26 @@ mod tests {
                 nanos: 3_000_000,
             }],
         );
+        // The same payload returned as JSON must carry a flat `phase_*` field
+        // (so a Loki `| unwrap phase_*` dashboard panel can read it) in
+        // addition to the nested `phase_ms` object.
+        let v = m.scoring_trace_json(
+            "test",
+            7,
+            12.5,
+            &[PhaseRecord {
+                name: "scoring",
+                nanos: 3_000_000,
+            }],
+        );
+        let obj = v.as_object().expect("trace must be an object");
+        assert_eq!(obj["trace"], "scoring");
+        assert!(obj.contains_key("phase_ms"), "nested phase_ms present");
+        assert!(
+            obj.contains_key("phase_scoring"),
+            "flat phase_scoring field present"
+        );
+        assert_eq!(obj["phase_scoring"], serde_json::json!(3.0));
     }
 
     #[cfg(feature = "perf_metrics")]

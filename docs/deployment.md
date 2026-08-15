@@ -355,24 +355,9 @@ No external dependencies — uses the pure-Rust `prometheus` crate.
 
 ### Available metrics
 
-| Metric | Type | Labels | Description |
-|--------|------|--------|-------------|
-| `e621_accounts_total` | Gauge | — | Current number of saved accounts |
-| `e621_accounts_created_total` | Counter | — | Total accounts created since server start |
-| `e621_accounts_deleted_total` | Counter | — | Total accounts deleted since server start |
-| `e621_catalog_posts_total` | Gauge | — | Total posts in the local catalog |
-| `e621_feed_views_total` | Counter | `account_id` | Feed recommendation views |
-| `e621_digest_views_total` | Counter | `account_id` | Daily digest views (cache hit + fresh) |
-| `e621_browse_views_total` | Counter | `source` (`trending` / `favorites`) | Browse page views |
-| `e621_process_runs_total` | Counter | `status` (`started` / `success` / `failed`) | /process pipeline runs |
-| `e621_feed_interactions_total` | Counter | `bucket`, `type` (`qualified_impression` / `open` / `like` / `strong_like` / `hide`) | Per-post feed interactions, split by A/B arm |
-| `e621_feed_interactions_by_type_total` | Counter | `type` | Per-post feed interactions by type (legacy, no bucket split) |
-| `e621_experiment_bucket_accounts` | Gauge | `bucket` (`control` / `exploration` / …) | Current number of accounts per A/B arm |
-| `e621_experiment_bucket_interactions_total` | Counter | `bucket` | Total feed interactions per A/B arm since server start |
-| `e621_upstream_errors_total` | Counter | `class` (`429` / `5xx` / `4xx` / `timeout` / `network` / `decode`) | Outbound e621 request failures — feeds the “high % 429/5xx” alert |
-| `e621_http_requests_total` | Counter | `method`, `route` | Total HTTP requests served, per method + route (long-lived; incremented by the `LatencyFairing`) |
-| `e621_http_request_duration_seconds` | Histogram | `method`, `route` | **Total request handling time** (receipt → response: e621 call + local scoring + serialization). Always-on. Diagnoses “the response takes too long.” |
-| `e621_upstream_request_seconds` | Histogram | `class` (`success` / `429` / `5xx` / `4xx` / `timeout` / `network` / `decode`) | **Latency of each outbound e621 request attempt.** Always-on. The gap vs `e621_http_request_duration_seconds` = local processing time. |
+The full metric reference (names, types, labels, how to read them, alerts,
+`SCORING_TRACE`) lives in **`docs/metrics.md`** — the canonical source.
+Only operational deployment context is kept here.
 
 ### Upstream e621 error stream
 

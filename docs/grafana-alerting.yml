@@ -1,0 +1,69 @@
+# Grafana Unified Alerting — provisioning rules (recommended modern path)
+#
+# Embedded legacy dashboard alerts for the same 3 conditions live in
+# grafana-dashboard.json. These provisioning rules are the preferred way to
+# alert in current Grafana (unified alerting): place this file under
+#   <grafana>/provisioning/alerting/alerts.yml
+# (or mount it there), then restart Grafana. Update `datasourceUid` to the
+# UID of your Prometheus data source.
+#
+# Metrics referenced already exist and are documented in docs/metrics.md:
+#   e621_process_running_seconds, e621_prefetch_breaker_trips_total,
+#   e621_upstream_errors_total, e621_upstream_request_seconds_count
+apiVersion: 1
+groups:
+  - orgId: 1
+    name: e621-core
+    folder: e621
+    interval: 1m
+    rules:
+      - uid: e621-process-wall-time
+        title: /process running > 30 min
+        condition: A
+        data:
+          - refId: A
+            datasourceUid: REPLACE_WITH_PROMETHEUS_UID
+            model:
+              refId: A
+              expr: e621_process_running_seconds > 1800
+              instant: true
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: /process job running for more than 30 minutes
+
+      - uid: e621-prefetch-breaker
+        title: Prefetch circuit breaker tripped
+        condition: A
+        data:
+          - refId: A
+            datasourceUid: REPLACE_WITH_PROMETHEUS_UID
+            model:
+              refId: A
+              expr: rate(e621_prefetch_breaker_trips_total[5m]) > 0
+              instant: true
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: catalog prefetch circuit breaker opened in the last 5m
+
+      - uid: e621-upstream-error-rate
+        title: High % of e621 429/5xx errors
+        condition: A
+        data:
+          - refId: A
+            datasourceUid: REPLACE_WITH_PROMETHEUS_UID
+            model:
+              refId: A
+              expr: |
+                sum(rate(e621_upstream_errors_total{class=~"429|5xx"}[5m]))
+                / clamp_min(sum(rate(e621_upstream_request_seconds_count[5m])), 1)
+                * 100 > 20
+              instant: true
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: more than 20% of outbound e621 requests are failing (429/5xx)
