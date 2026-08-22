@@ -204,8 +204,8 @@ pub fn storage_card() -> Html {
     let on_install_now = Callback::from(move |_| dispatch_pwa_event("pwa-request-install"));
 
     html! {
-        <div id="settings-storage" class="card bg-base-200 border border-base-300 shadow-sm">
-            <div class="card-body">
+        <div id="settings-storage" class="card bg-base-100 shadow">
+            <div class="card-body text-base-content">
                 <h2 class="card-title text-xl">{ "Storage / Offline" }</h2>
                 <p class="text-sm text-base-content/70">
                     { "This app caches data on your device (via a service worker) so pages keep working offline. You can see how much space is used and clear it here." }

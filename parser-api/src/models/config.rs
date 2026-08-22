@@ -15,6 +15,13 @@ use std::{fs, thread};
 pub struct Config {
     pub admin_user: String,
     pub admin_api: String,
+    /// Secret used to derive the AES-256-GCM key that encrypts per-account
+    /// e621 API keys at rest (`crypto::encryption_key`). Leave empty only in
+    /// local/dev — a fixed fallback salt is then used (still AES-GCM, but not
+    /// secret against someone with the binary). Set a strong value in
+    /// production `config.toml`.
+    #[serde(default)]
+    pub e621_key_encryption_secret: String,
     pub tag_blacklist: Vec<String>,
     /// Default per-account blacklist applied at DB write when the client
     /// omits or empties the `blacklist` field. e621-style search syntax;

@@ -38,6 +38,7 @@ pub fn account_creator() -> Html {
     let id = use_state(String::new);
     let name = use_state(String::new);
     let blacklist = use_state(String::new);
+    let key = use_state(String::new);
     let message = use_state(String::new);
     let error = use_state(|| false);
     let loading = use_state(|| false);
@@ -219,6 +220,24 @@ pub fn account_creator() -> Html {
         Callback::from(move |e: Event| {
             let input: HtmlInputElement = e.target_unchecked_into();
             blacklist.set(input.value());
+        })
+    };
+
+    let on_key_change = {
+        let key = key.clone();
+        Callback::from(move |e: Event| {
+            let input: HtmlInputElement = e.target_unchecked_into();
+            // e621 API keys never contain whitespace; strip it as the user
+            // types so the value always passes the server-side validator.
+            let cleaned: String = input
+                .value()
+                .chars()
+                .filter(|c| !c.is_whitespace())
+                .collect();
+            if cleaned != input.value() {
+                input.set_value(&cleaned);
+            }
+            key.set(cleaned);
         })
     };
 
@@ -462,6 +481,7 @@ pub fn account_creator() -> Html {
         let id = id.clone();
         let name = name.clone();
         let blacklist = blacklist.clone();
+        let key = key.clone();
         let message = message.clone();
         let error = error.clone();
         let loading = loading.clone();
@@ -481,6 +501,7 @@ pub fn account_creator() -> Html {
             let raw_id = id.trim().to_string();
             let raw_name = name.trim().to_string();
             let raw_blacklist = blacklist.trim().to_string();
+            let raw_key = key.trim().to_string();
 
             if raw_id.is_empty() || raw_name.is_empty() {
                 message.set("All fields are required".to_string());
@@ -528,18 +549,18 @@ pub fn account_creator() -> Html {
             // the configured default at DB write. Sending `""` explicitly
             // would also be treated as default by the backend, but omitting
             // keeps the request minimal and matches the user-intent contract.
-            let payload = if raw_blacklist.is_empty() {
-                serde_json::json!({
-                    "id": account_id,
-                    "name": raw_name,
-                })
-            } else {
-                serde_json::json!({
-                    "id": account_id,
-                    "name": raw_name,
-                    "blacklist": raw_blacklist,
-                })
-            };
+            let mut payload = serde_json::json!({
+                "id": account_id,
+                "name": raw_name,
+            });
+            if !raw_blacklist.is_empty() {
+                payload["blacklist"] = serde_json::Value::String(raw_blacklist);
+            }
+            if !raw_key.is_empty() {
+                // Optional e621 API key (ownership proof + direct sync). Sent
+                // snake_case to match the server's `DeviceScopedAccount`.
+                payload["api_key"] = serde_json::Value::String(raw_key);
+            }
 
             let message = message.clone();
             let error = error.clone();
@@ -548,6 +569,7 @@ pub fn account_creator() -> Html {
             let id_for_reset = id.clone();
             let name_for_reset = name.clone();
             let blacklist_for_reset = blacklist.clone();
+            let key_for_reset = key.clone();
 
             wasm_bindgen_futures::spawn_local(async move {
                 let response = api_post(&format!("{0}/account", cfg.backend_domain))
@@ -576,6 +598,7 @@ pub fn account_creator() -> Html {
                             id_for_reset.set(String::new());
                             name_for_reset.set(String::new());
                             blacklist_for_reset.set(String::new());
+                            key_for_reset.set(String::new());
                             dispatch_account_list_changed();
                         } else {
                             let status = resp.status();
@@ -850,6 +873,24 @@ pub fn account_creator() -> Html {
                                                 <code>{ default_blacklist.join(", ") }</code>
                                             </span>
                                         }
+                                    </p>
+                                </div>
+
+                                <div class="mb-3">
+                                    <label class="font-semibold text-base-content text-sm mb-1 block">{"e621 API key (optional)"}</label>
+                                    <input
+                                        type="password"
+                                        class="input w-full box-border"
+                                        id="account-api-key"
+                                        value={(*key).clone()}
+                                        onchange={on_key_change}
+                                        placeholder="Paste your e621 API key, or leave empty"
+                                        autocomplete="off"
+                                        spellcheck={false}
+                                        disabled={*loading}
+                                    />
+                                    <p class="text-base-content/80 text-sm mt-1 break-words">
+                                        { "Optional. Adding your key verifies ownership and enables key testing + direct account sync. Leave empty to link without a key." }
                                     </p>
                                 </div>
 

@@ -51,6 +51,12 @@ pub struct E621User {
     pub upload_karma: i32,
     #[serde(default)]
     pub upload_karma_free: bool,
+    /// The account's own private blacklist, exposed only when authenticated
+    /// as that user (direct sync). e621 returns it in `blacklisted_tags` as a
+    /// single `\n`-joined string of filter tags (empty/absent when none set).
+    /// Optional so a missing field can't break parsing.
+    #[serde(default)]
+    pub blacklisted_tags: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, JsonSchema)]
@@ -96,6 +102,42 @@ pub struct RevokeDeviceRequest {
     pub device_id: String,
 }
 
+/// Payload for `PUT /account/<id>/key`: the plaintext e621 API key to store
+/// (encrypted at rest). Never returned by any endpoint.
+#[derive(Debug, Deserialize, Clone, JsonSchema)]
+#[serde(crate = "rocket::serde", rename_all = "camelCase")]
+pub struct SetAccountKeyRequest {
+    pub key: String,
+}
+
+/// State of an account's e621 API key, exposed by `GET /account/<id>/key/state`
+/// (and returned by the mutating key endpoints). Contains NO key material —
+/// only booleans, timestamps and the username.
+#[derive(Debug, Serialize, Clone, JsonSchema)]
+#[serde(crate = "rocket::serde", rename_all = "camelCase")]
+pub struct AccountKeyState {
+    pub account_id: i32,
+    pub has_key: bool,
+    /// RFC 3339 when the current key was set/rotated.
+    pub added_at: Option<String>,
+    /// RFC 3339 of the last successful verification against e621.
+    pub verified_at: Option<String>,
+    /// e621 username this key belongs to (the linked account's name).
+    pub name: String,
+    /// Which e621 operations currently use this key (e.g. `direct_sync`).
+    pub operations: Vec<String>,
+}
+
+/// Result of `POST /account/<id>/key/test`.
+#[derive(Debug, Serialize, Clone, JsonSchema)]
+#[serde(crate = "rocket::serde", rename_all = "camelCase")]
+pub struct KeyVerifyResult {
+    pub valid: bool,
+    pub name: String,
+    /// RFC 3339 of this verification when `valid` is true.
+    pub verified_at: Option<String>,
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone, JsonSchema)]
 #[serde(crate = "rocket::serde")]
 pub struct DeviceScopedAccount {
@@ -108,6 +150,12 @@ pub struct DeviceScopedAccount {
     /// write for backwards-compat with older clients.
     #[serde(default)]
     pub blacklist: Option<String>,
+    /// Optional e621 API key for the claimed account (M2 ownership proof /
+    /// direct-sync enablement). When present, `POST /api/account` verifies it
+    /// against e621 and stores it encrypted at rest; when absent the account is
+    /// linked without a key. Never returned in any response.
+    #[serde(default)]
+    pub api_key: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, JsonSchema)]

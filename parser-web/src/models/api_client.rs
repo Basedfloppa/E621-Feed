@@ -21,3 +21,7 @@ pub fn api_patch(url: &str) -> Request {
 pub fn api_delete(url: &str) -> Request {
     Request::delete(url).credentials(RequestCredentials::Include)
 }
+
+pub fn api_put(url: &str) -> Request {
+    Request::put(url).credentials(RequestCredentials::Include)
+}

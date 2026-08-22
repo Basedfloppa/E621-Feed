@@ -11,4 +11,13 @@ ignore = [
   # the protobuf decoder on untrusted input, so the advisory path is
   # unreachable. No newer prometheus version with updated protobuf dep.
   "RUSTSEC-2024-0437",
+
+  # h2 0.3.27 — unbounded empty DATA frames (DoS). Pulled in transitively
+  # by rocket 0.5.1 → hyper 0.14. The h2 0.3 line is EOL (latest 0.3.27,
+  # 2025-07-11) with no patched release; the advisory is only fixed in
+  # 0.4.16+. We already bumped the reqwest/hyper-1 h2 to 0.4.18; this
+  # entry suppresses only the un-fixable Rocket-path copy. Rocket serves
+  # HTTP/1.1 behind the Caddy TLS terminator, so HTTP/2 (h2) is never
+  # negotiated with untrusted clients.
+  "RUSTSEC-2026-0258",
 ]

@@ -28,6 +28,7 @@ pub mod api;
 pub mod audit;
 pub mod auth;
 pub mod cache_pruner;
+pub mod crypto;
 pub mod db;
 pub mod errors;
 pub mod jobs;
@@ -41,6 +42,7 @@ pub mod prefetch_backfill;
 pub mod ratelimit;
 #[allow(dead_code)] // The binary mounts the full API; integration tests mount a subset.
 pub mod routes;
+pub mod sync;
 pub mod utils;
 pub mod validation;
 

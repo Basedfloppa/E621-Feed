@@ -9,6 +9,10 @@
 # --- Required ---------------------------------------------------------------
 admin_user = "username"
 admin_api = "api_key"
+# Secret used to derive the AES-256-GCM key that encrypts per-account e621 API
+# keys at rest. Set a strong random value in production; leave empty only for
+# local/dev (a fixed fallback salt is then used).
+e621_key_encryption_secret = ""
 
 # --- Top-level ---------------------------------------------------------------
 # SQLite database file path (relative or absolute).

@@ -149,6 +149,12 @@ pub fn validate_device_scoped_account(acc: &DeviceScopedAccount) -> Result<(), A
     if let Some(bl) = acc.blacklist.as_deref() {
         validate_blacklist_text(bl)?;
     }
+    // Ownership proof (M2): if a key is supplied, it must be well-formed.
+    if let Some(k) = acc.api_key.as_deref()
+        && !k.trim().is_empty()
+    {
+        validate_e621_api_key(k)?;
+    }
     Ok(())
 }
 
@@ -218,6 +224,28 @@ pub fn validate_session_token(token: &str) -> Result<(), ApiError> {
     {
         return Err(ApiError::BadRequest(
             "session_token must contain only [A-Za-z0-9_-]".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Validate an e621 API key: non-empty, 8..=128 chars, no whitespace. The key
+/// is stored encrypted and never echoed back; this only bounds its shape.
+pub fn validate_e621_api_key(key: &str) -> Result<(), ApiError> {
+    let len = key.len();
+    if !(8..=128).contains(&len) {
+        return Err(ApiError::BadRequest(format!(
+            "e621 API key length {len} not in 8..=128"
+        )));
+    }
+    if key.trim() != key {
+        return Err(ApiError::BadRequest(
+            "e621 API key must not have leading/trailing whitespace".into(),
+        ));
+    }
+    if key.chars().any(char::is_whitespace) {
+        return Err(ApiError::BadRequest(
+            "e621 API key must not contain whitespace".into(),
         ));
     }
     Ok(())
@@ -462,6 +490,7 @@ mod tests {
             id: 42,
             name: "tester".to_string(),
             blacklist: Some("rating:e".to_string()),
+            api_key: None,
         };
         assert!(validate_device_scoped_account(&ok).is_ok());
 

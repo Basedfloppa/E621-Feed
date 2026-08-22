@@ -222,8 +222,8 @@ pub fn session_devices_card(props: &SessionDevicesCardProps) -> Html {
 
     html! {
         <>
-        <div id="settings-sessions" class="card bg-base-200 border border-base-300 shadow-sm">
-            <div class="card-body">
+        <div id="settings-sessions" class="card bg-base-100 shadow">
+            <div class="card-body text-base-content">
                 <h2 class="card-title text-xl">{ "Devices & sessions" }</h2>
                 <p class="text-sm text-base-content/70">
                     { "Devices that share your linked accounts on this server. You can revoke access for any device other than this one." }
@@ -284,8 +284,8 @@ pub fn session_devices_card(props: &SessionDevicesCardProps) -> Html {
             </ConfirmModal>
         </div>
 
-        <div id="settings-privacy" class="card bg-base-200 border border-base-300 shadow-sm">
-            <div class="card-body">
+        <div id="settings-privacy" class="card bg-base-100 shadow">
+            <div class="card-body text-base-content">
                 <h2 class="card-title text-xl">{ "Privacy" }</h2>
                 <p class="text-sm text-base-content/70">
                     { "Clear the interaction model (your opens / likes / hides) that drives recommendations for the selected account. The account, its favourites, blacklist and links are kept — the profile is rebuilt from fresh data by /process." }

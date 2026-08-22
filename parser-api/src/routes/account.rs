@@ -106,6 +106,235 @@ pub(crate) async fn revoke_device_session(
     })))
 }
 
+// ---------------------------------------------------------------------------
+// Device-scoped e621 API key flow (Settings → Account).
+//
+// Each device/owner_token holds its OWN encrypted key for an account
+// (`db::set_account_e621_key` on `account_device_keys`, keyed by
+// (owner_token, account_id)). A token that links an account without presenting
+// a key has NO key for it, so it cannot test, rotate, revoke, or sync with
+// someone else's key. None of these endpoints ever return key material — only
+// booleans + timestamps via `AccountKeyState`. `key/test` verifies THIS
+// device's configured key against e621 through `api::verify_e621_key` (which
+// uses a per-user rate-limit bucket, separate from the shared admin key).
+// Ownership is enforced at the device level by the existing
+// `account_device_links` check inside the db accessors.
+// ---------------------------------------------------------------------------
+
+/// Verify the requesting owner token actually owns `account_id`, mapping
+/// "not linked" to 404 (don't reveal whether the account exists) and real DB
+/// errors to 500. Prevents key/sync routes from surfacing a 500 for the 404
+/// (unowned-account) case.
+async fn ensure_account_owned(owner_token: &str, account_id: i32) -> Result<(), ApiError> {
+    let token = owner_token.to_string();
+    let linked =
+        db_blocking(move || e621_account_parser_api::db::account_is_linked(&token, account_id))
+            .await?;
+    if linked {
+        Ok(())
+    } else {
+        Err(ApiError::NotFound(
+            "No account found for this device".into(),
+        ))
+    }
+}
+
+/// Shared preamble for key/sync routes: validate the account id, pull the
+/// owner token, apply the route's per-owner rate limit, and confirm this
+/// device actually owns the account. Returns the owner token.
+async fn auth_key_route(
+    owner: &OwnerToken,
+    account_id: i32,
+    bucket: &str,
+    per_min: u32,
+    burst: u32,
+) -> Result<String, ApiError> {
+    validation::validate_account_id(account_id)?;
+    let owner_token = owner.0.clone();
+    ratelimit::check(&format!("{bucket}:owner:{owner_token}"), per_min, burst)?;
+    ensure_account_owned(&owner_token, account_id).await?;
+    Ok(owner_token)
+}
+
+async fn account_key_state(
+    owner_token: &str,
+    account_id: i32,
+) -> Result<Json<e621_account_parser_api::models::AccountKeyState>, ApiError> {
+    let owner_token = owner_token.to_string();
+    db_blocking(move || {
+        let meta = e621_account_parser_api::db::get_account_key_meta(&owner_token, account_id)?;
+        let acc = e621_account_parser_api::db::get_account_by_id(&owner_token, account_id)?;
+        let operations = if meta.has_key {
+            vec!["direct_sync".to_string()]
+        } else {
+            Vec::new()
+        };
+        Ok(e621_account_parser_api::models::AccountKeyState {
+            account_id,
+            has_key: meta.has_key,
+            added_at: meta.added_at,
+            verified_at: meta.verified_at,
+            name: acc.name,
+            operations,
+        })
+    })
+    .await
+    .map(Json)
+    .map_err(ApiError::from)
+}
+
+#[openapi(tag = "Account Key")]
+#[put("/account/<account_id>/key", data = "<payload>")]
+pub(crate) async fn set_account_key(
+    account_id: i32,
+    payload: Json<e621_account_parser_api::models::SetAccountKeyRequest>,
+    owner: OwnerToken,
+) -> Result<Json<e621_account_parser_api::models::AccountKeyState>, ApiError> {
+    let key = payload.into_inner().key;
+    validation::validate_e621_api_key(&key)?;
+    let owner_token = auth_key_route(&owner, account_id, "key_manage", 60, 20).await?;
+    let key_for = key.clone();
+    let token_for = owner_token.clone();
+    db_blocking(move || {
+        e621_account_parser_api::db::set_account_e621_key(&token_for, account_id, &key_for)
+            .map_err(|e| format!("Failed to set e621 key: {e}"))
+    })
+    .await?;
+    crate::audit::event("account.key.set")
+        .field("account_id", account_id)
+        .emit();
+    account_key_state(&owner_token, account_id).await
+}
+
+#[openapi(tag = "Account Key")]
+#[post("/account/<account_id>/key/test")]
+pub(crate) async fn test_account_key(
+    account_id: i32,
+    owner: OwnerToken,
+) -> Result<Json<e621_account_parser_api::models::KeyVerifyResult>, ApiError> {
+    let owner_token = auth_key_route(&owner, account_id, "key_test", 20, 5).await?;
+
+    // Pull the configured key + the e621 username it belongs to, owner-gated.
+    let token_for = owner_token.clone();
+    let (key, name) = db_blocking(move || {
+        let key = e621_account_parser_api::db::get_account_e621_key(&token_for, account_id)?;
+        let acc = e621_account_parser_api::db::get_account_by_id(&token_for, account_id)?;
+        Ok((key, acc.name))
+    })
+    .await?;
+
+    let Some(key) = key else {
+        return Ok(Json(e621_account_parser_api::models::KeyVerifyResult {
+            valid: false,
+            name,
+            verified_at: None,
+        }));
+    };
+
+    match api::verify_e621_key(account_id, &name, &key).await {
+        Ok(api::KeyValidation::Valid { .. }) => {
+            let token_for = owner_token.clone();
+            db_blocking(move || {
+                e621_account_parser_api::db::mark_e621_key_verified(&token_for, account_id)
+            })
+            .await?;
+            crate::audit::event("account.key.verified")
+                .field("account_id", account_id)
+                .emit();
+            Ok(Json(e621_account_parser_api::models::KeyVerifyResult {
+                valid: true,
+                name,
+                verified_at: Some(chrono::Utc::now().to_rfc3339()),
+            }))
+        }
+        Ok(api::KeyValidation::Invalid) => {
+            Ok(Json(e621_account_parser_api::models::KeyVerifyResult {
+                valid: false,
+                name,
+                verified_at: None,
+            }))
+        }
+        Err(e) => Err(ApiError::Upstream(e)),
+    }
+}
+
+#[openapi(tag = "Account Key")]
+#[delete("/account/<account_id>/key")]
+pub(crate) async fn delete_account_key(
+    account_id: i32,
+    owner: OwnerToken,
+) -> Result<Json<e621_account_parser_api::models::AccountKeyState>, ApiError> {
+    let owner_token = auth_key_route(&owner, account_id, "key_manage", 60, 20).await?;
+    let token_for = owner_token.clone();
+    db_blocking(move || {
+        e621_account_parser_api::db::clear_account_e621_key(&token_for, account_id)
+            .map_err(|e| format!("Failed to clear e621 key: {e}"))
+    })
+    .await?;
+    crate::audit::event("account.key.revoked")
+        .field("account_id", account_id)
+        .emit();
+    account_key_state(&owner_token, account_id).await
+}
+
+#[openapi(tag = "Account Key")]
+#[get("/account/<account_id>/key/state")]
+pub(crate) async fn get_account_key_state(
+    account_id: i32,
+    owner: OwnerToken,
+) -> Result<Json<e621_account_parser_api::models::AccountKeyState>, ApiError> {
+    let owner_token = auth_key_route(&owner, account_id, "key_manage", 60, 20).await?;
+    account_key_state(&owner_token, account_id).await
+}
+
+#[openapi(tag = "Account Key")]
+#[post("/account/<account_id>/sync")]
+pub(crate) async fn sync_account_route(
+    account_id: i32,
+    owner: OwnerToken,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let owner_token = auth_key_route(&owner, account_id, "sync", 5, 5).await?;
+    match e621_account_parser_api::sync::sync_account_direct(&owner_token, account_id).await {
+        Ok(summary) => {
+            crate::audit::event("account.synced")
+                .field("account_id", account_id)
+                .emit();
+            Ok(Json(serde_json::json!({
+                "synced": true,
+                "favoritesPersisted": summary.favorites_persisted,
+                "blacklistImported": summary.blacklist_imported,
+                "syncedAt": summary.synced_at,
+            })))
+        }
+        Err(e621_account_parser_api::sync::SyncError::NoKeyConfigured) => {
+            Err(ApiError::BadRequest(
+                "no e621 API key configured for this account; add one first".to_string(),
+            ))
+        }
+        Err(e621_account_parser_api::sync::SyncError::Other(e)) => Err(ApiError::from(e)),
+    }
+}
+
+/// Direct-sync status: whether a key is configured and when the last sync
+/// ran. Read-only, offline-deterministic.
+#[openapi(tag = "Account Key")]
+#[get("/account/<account_id>/sync/status")]
+pub(crate) async fn get_sync_status(
+    account_id: i32,
+    owner: OwnerToken,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let owner_token = auth_key_route(&owner, account_id, "read", 240, 60).await?;
+    let state = db_blocking(move || {
+        e621_account_parser_api::db::get_direct_sync_state(&owner_token, account_id)
+    })
+    .await?;
+    Ok(Json(serde_json::json!({
+        "hasKey": state.has_key,
+        "lastSyncedAt": state.last_synced_at,
+        "datasets": ["favorites", "votes", "profile_tags", "blacklist"],
+    })))
+}
+
 #[openapi(tag = "Accounts")]
 #[get("/account/<account_id>/tag_counts")]
 pub(crate) async fn get_account_tag_counts(
@@ -253,6 +482,21 @@ pub(crate) async fn create_account(
     ratelimit::check(&format!("acct_create:ip:{}", client_ip.0), 5, 5)?;
     ratelimit::check(&format!("acct_create:owner:{owner_token}"), 10, 10)?;
 
+    // Optional ownership proof: claiming/linking an account MAY present the
+    // e621 API key for that account. When given, it is verified against e621
+    // and stored encrypted at rest (this enables key/test and direct sync for
+    // that account); when absent, the account is linked without a key (key
+    // ops and sync report "no key configured"). Ownership is not mandated at
+    // claim time — anyone can still link an account, matching the codebase's
+    // shared-account model. If a key IS provided, it is always checked against
+    // e621 first so a bad key can't be stored.
+    let ownership_key = acc
+        .api_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|k| !k.is_empty())
+        .map(str::to_string);
+
     let resolved = match api::get_user_by_id(acc.id).await {
         Ok(r) => r,
         Err(e) => {
@@ -272,17 +516,47 @@ pub(crate) async fn create_account(
         )));
     }
     let canonical_name = resolved_name;
+
+    // If a key was provided, prove ownership by verifying it authenticates as
+    // this account (independent of the public name lookup above); a mismatch is
+    // rejected before anything is stored.
+    if let Some(verify_key) = ownership_key.as_deref() {
+        let verify_name = canonical_name.clone();
+        match api::verify_e621_key(acc.id, &verify_name, verify_key).await {
+            Ok(api::KeyValidation::Valid { .. }) => {}
+            Ok(api::KeyValidation::Invalid) => {
+                return Err(ApiError::Forbidden(
+                    "e621 API key does not match this account (ownership not proven)".to_string(),
+                ));
+            }
+            Err(e) => {
+                return Err(ApiError::Upstream(format!(
+                    "could not verify account ownership on e621: {e}"
+                )));
+            }
+        }
+    }
+
     // Just normalise; DB layer applies the default if input is empty.
     let normalized_blacklist = normalize_optional_blacklist(acc.blacklist.as_deref());
 
     let acc_id_for_audit = acc.id;
     let name_for_audit = canonical_name.clone();
+    let key_for_store = ownership_key;
     let result = db_blocking(move || {
-        set_account(&owner_token, acc.id, &canonical_name, &normalized_blacklist).map_err(|e| {
-            let m = format!("Failed to set account: {e}");
-            error!("{m}");
-            m
-        })
+        let acc_out = set_account(&owner_token, acc.id, &canonical_name, &normalized_blacklist)
+            .map_err(|e| {
+                let m = format!("Failed to set account: {e}");
+                error!("{m}");
+                m
+            })?;
+        // If a key was provided, persist it encrypted (it already proved
+        // ownership); otherwise the account is linked without one.
+        if let Some(k) = &key_for_store {
+            e621_account_parser_api::db::set_account_e621_key(&owner_token, acc.id, k)
+                .map_err(|e| format!("Failed to store e621 key: {e}"))?;
+        }
+        Ok(acc_out)
     })
     .await?;
     e621_account_parser_api::audit::event("account.set")

@@ -1,11 +1,14 @@
+// pi-lens-ignore: E0432
 use crate::components::{
-    IconSliders, PostGrid, SavedAccountsSelect, SessionDevicesCard, StorageCard,
+    AccountKeyCard, IconSliders, PostCard, SavedAccountsSelect, SessionDevicesCard, StorageCard,
 };
 use crate::models::{
-    api_get, api_patch, humanize_error_body, humanize_network_error, read_config_from_head,
+    Post, Rating, Score, Stats, Tags, api_get, api_patch, humanize_error_body,
+    humanize_network_error, read_config_from_head,
 };
 use crate::pages::UserInfo;
 use serde::{Deserialize, Serialize};
+use std::rc::Rc;
 use web_sys::{HtmlTextAreaElement, window};
 use yew::prelude::*;
 
@@ -456,23 +459,66 @@ pub fn settings_page() -> Html {
 
     let d = (*display).clone();
 
-    // Preview must use the matching endpoint: /browse/search when scoring is
-    // off (returns Vec<Post>), /browse/search_scored when on (Vec<ScoredPost>).
-    let preview_url = selected_user.as_ref().and_then(|user| {
-        if !backend_url.is_empty() {
-            let endpoint = if d.score_results {
-                "search_scored"
-            } else {
-                "search"
-            };
-            Some(format!(
-                "{}/browse/{}/{}?query=order:rank&limit=12",
-                backend_url, endpoint, user.id
-            ))
-        } else {
-            None
-        }
-    });
+    // Static preview: build a few sample `Post`s and render them through the
+    // real `PostCard` (so the preview matches exactly what the feed shows).
+    // Sample posts carry NO file URLs, so `PostCard` renders its placeholder
+    // thumbnail and makes no image request; `static_preview` + empty backend
+    // suppress impression/interaction posts and click navigation.
+    let make_sample = |id: i64, rating: Rating, artist: &[&str], general: &[&str], up: i64| {
+        let p = Post {
+            id,
+            rating,
+            uploader_name: Some("artist_handle".to_string()),
+            tags: Tags {
+                artist: artist.iter().map(|s| s.to_string()).collect(),
+                general: general.iter().map(|s| s.to_string()).collect(),
+                ..Default::default()
+            },
+            stats: Stats {
+                score: Score {
+                    up,
+                    down: up / 5,
+                    total: up + up / 5,
+                },
+                fav_count: up * 3,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        Rc::new(p)
+    };
+    let sample_posts: Vec<(Rc<Post>, f32)> = vec![
+        (
+            make_sample(
+                4_200_123,
+                Rating::S,
+                &["artist_a"],
+                &["canine", "anthro", "fluffy"],
+                214,
+            ),
+            0.92,
+        ),
+        (
+            make_sample(
+                4_199_902,
+                Rating::Q,
+                &["artist_b"],
+                &["feral", "scaly", "night"],
+                97,
+            ),
+            0.71,
+        ),
+        (
+            make_sample(
+                4_198_540,
+                Rating::E,
+                &["artist_c"],
+                &["animated", "riding", "running"],
+                33,
+            ),
+            0.45,
+        ),
+    ];
 
     html! {
         <div id="settings-page">
@@ -554,6 +600,11 @@ pub fn settings_page() -> Html {
                     <StorageCard />
 
                     <SessionDevicesCard
+                        backend_url={backend_url.clone()}
+                        selected_account_id={(*selected_user).as_ref().map(|u| u.id)}
+                    />
+
+                    <AccountKeyCard
                         backend_url={backend_url.clone()}
                         selected_account_id={(*selected_user).as_ref().map(|u| u.id)}
                     />
@@ -670,30 +721,37 @@ pub fn settings_page() -> Html {
                         </div>
                     </div>
 
-                    if let Some(url) = preview_url {
-                        <div class="card bg-base-100 shadow">
-                            <div class="card-body text-base-content">
-                                <h3 class="card-title text-lg">{ "Preview" }</h3>
-                                <PostGrid
-                                    fetch_url={url}
-                                    grid_class={d.grid.grid_class().to_string()}
-                                    scored={d.score_results}
-                                    score_cutoff_pct={if d.score_results { Some(d.score_cutoff_pct) } else { None }}
-                                    backend_url={backend_url}
-                                    account_id={selected_user.as_ref().map(|u| u.id as i32).unwrap_or_default()}
-                                    show_rating={d.show_rating}
-                                    show_affinity={d.show_affinity}
-                                    show_score={d.show_score}
-                                    show_post_number={d.show_post_number}
-                                    show_desc={d.show_desc}
-                                    show_metadata={d.show_metadata}
-                                    show_breakdown={d.show_breakdown}
-                                    show_detailed_breakdown={d.show_detailed_breakdown}
-                                    empty_message={"Preview not available."}
-                                />
+                    <div class="card bg-base-100 shadow">
+                        <div class="card-body text-base-content">
+                            <h3 class="card-title text-lg">{ "Preview" }</h3>
+                            <p class="text-xs text-base-content/60 mb-2">
+                                { "Example cards reflecting your display settings. Static — no data is fetched." }
+                            </p>
+                            <div class={format!("grid gap-3 {}", d.grid.grid_class())}>
+                                { sample_posts.iter().enumerate().map(|(i, (post, affinity))| {
+                                    html! {
+                                        <PostCard
+                                            post={post.clone()}
+                                            affinity={*affinity}
+                                            backend_url={AttrValue::from("")}
+                                            account_id={0}
+                                            session_id={AttrValue::default()}
+                                            position={(i as i32) + 1}
+                                            static_preview={true}
+                                            show_rating={d.show_rating}
+                                            show_affinity={d.show_affinity}
+                                            show_score={d.show_score}
+                                            show_post_number={d.show_post_number}
+                                            show_desc={d.show_desc}
+                                            show_metadata={d.show_metadata}
+                                            show_breakdown={d.show_breakdown}
+                                            show_detailed_breakdown={d.show_detailed_breakdown}
+                                        />
+                                    }
+                                }).collect::<Html>() }
                             </div>
                         </div>
-                    }
+                    </div>
                 </div>
             </div>
         </div>

@@ -1,3 +1,4 @@
+pub mod account_key_card;
 pub mod adult_gate;
 pub mod confirm_modal;
 pub mod error_alert;
@@ -25,6 +26,8 @@ pub mod theme_toggle;
 pub mod user_info_alert;
 pub mod user_search_form;
 
+// pi-lens-ignore: unused_imports
+pub use account_key_card::*;
 pub use adult_gate::*;
 pub use confirm_modal::*;
 pub use error_alert::*;

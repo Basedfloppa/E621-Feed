@@ -305,8 +305,16 @@ mod tests {
         );
     }
 
+    /// Serializes the two tests that mutate the shared global `revoked_set()`:
+    /// they run on parallel threads under `cargo test` and each `clear()`s the
+    /// set, so an interleaving could wipe the other's inserted token mid-assert.
+    static REVOKED_SET_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn is_revoked_known_and_unknown() {
+        let _guard = REVOKED_SET_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let set = revoked_set();
         // Recover from any prior poison and reset.
         let mut g = set
@@ -322,6 +330,9 @@ mod tests {
 
     #[test]
     fn is_revoked_empty_set() {
+        let _guard = REVOKED_SET_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let set = revoked_set();
         match set.write() {
             Ok(mut g) => g.clear(),

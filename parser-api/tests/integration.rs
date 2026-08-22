@@ -276,6 +276,9 @@ fn count_account_cooc(account_id: i32) -> i64 {
 fn ensure_migrations() {
     support::install_isolated_db_config();
     e621_account_parser_api::db::ensure_sqlite().expect("DB migrations failed");
+    // Clear rate-limit buckets at the start of each test: the feebly-bounded
+    // per-owner/per-IP buckets accumulate in the process shared across tests.
+    e621_account_parser_api::ratelimit::reset_for_tests();
 }
 
 // Each test must call ensure_migrations() first or use the helper below.
@@ -2030,4 +2033,450 @@ fn catalog_hydration_scan_selects_only_incomplete_metadata() {
     assert!(db::hydrate_posts_by_ids(&[ids[1]]).unwrap().is_empty());
 
     db::delete_catalog_posts_by_ids(&ids).unwrap();
+}
+
+// ------------------------------------------------------------------
+// Encrypted per-device e621 API key storage (Account Key)
+// ------------------------------------------------------------------
+
+#[test]
+fn e621_key_set_get_roundtrip_encrypted_at_rest() {
+    let id = 8_800_001;
+    ensure_migrations();
+    let owner = "test_key_owner_A_400001";
+    let _ = db::set_account(owner, id, "key_user", "");
+
+    let key = "abc123SECRET-e621-key";
+    db::set_account_e621_key(owner, id, key).expect("set key");
+    assert_eq!(
+        db::get_account_e621_key(owner, id).unwrap().as_deref(),
+        Some(key),
+        "read back the same plaintext key for the owner"
+    );
+    assert!(db::has_account_e621_key(owner, id).unwrap());
+
+    // At rest the DB column must hold AES-GCM ciphertext, never plaintext.
+    if let Ok(conn) = db::open_db_for_calibration() {
+        let stored: Option<String> = conn
+            .query_row(
+                "SELECT e621_api_key_encrypted FROM accounts WHERE id = ?1",
+                rusqlite::params![id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let stored = stored.expect("blob present");
+        assert_ne!(stored, key, "ciphertext must not equal plaintext");
+        assert!(
+            !stored.contains("SECRET-e621"),
+            "plaintext must not appear in the stored blob"
+        );
+    }
+
+    db::clear_account_e621_key(owner, id).expect("clear");
+    assert_eq!(db::get_account_e621_key(owner, id).unwrap(), None);
+    assert!(!db::has_account_e621_key(owner, id).unwrap());
+}
+
+#[test]
+fn e621_key_is_owner_gated() {
+    let id = 8_800_002;
+    ensure_migrations();
+    let owner_a = "test_key_owner_A_400002";
+    let owner_b = "test_key_owner_B_400002"; // NOT linked to the account
+    let _ = db::set_account(owner_a, id, "key_user2", "");
+
+    db::set_account_e621_key(owner_b, id, "sk-other").expect_err("set must refuse non-owner");
+    db::get_account_e621_key(owner_b, id).expect_err("get must refuse non-owner");
+    db::has_account_e621_key(owner_b, id).expect_err("has must refuse non-owner");
+    db::clear_account_e621_key(owner_b, id).expect_err("clear must refuse non-owner");
+    db::mark_e621_key_verified(owner_b, id).expect_err("mark must refuse non-owner");
+
+    // The linked owner can manage the key.
+    db::set_account_e621_key(owner_a, id, "sk-real").unwrap();
+    assert!(db::has_account_e621_key(owner_a, id).unwrap());
+}
+
+#[test]
+fn e621_key_is_shared_across_linked_devices() {
+    let id = 8_800_003;
+    ensure_migrations();
+    let owner_a = "test_key_owner_A_400003";
+    let owner_b = "test_key_owner_B_400003";
+    // Both devices claim the same public account (shared-account model).
+    let _ = db::set_account(owner_a, id, "shared_user", "");
+    let _ = db::set_account(owner_b, id, "shared_user", "");
+
+    // The key is account-scoped: any LINKED device sees the same key (so sync
+    // works from any of them). Device gating only checks the link, not a
+    // per-device copy.
+    db::set_account_e621_key(owner_a, id, "sk-account").unwrap();
+    assert_eq!(
+        db::get_account_e621_key(owner_a, id).unwrap().as_deref(),
+        Some("sk-account"),
+        "A reads the account key"
+    );
+    assert_eq!(
+        db::get_account_e621_key(owner_b, id).unwrap().as_deref(),
+        Some("sk-account"),
+        "B (linked, no key presented) reads the same account key"
+    );
+    assert!(db::has_account_e621_key(owner_b, id).unwrap());
+    assert!(db::get_account_key_meta(owner_b, id).unwrap().has_key);
+
+    // An UNLINKED token is still refused (device gate is about the link).
+    let stranger = "test_key_owner_C_400003";
+    db::get_account_e621_key(stranger, id).expect_err("unlinked token cannot read");
+}
+
+#[rocket::async_test]
+async fn e621_key_not_leaked_in_export_and_state_is_boolean() {
+    let account = TestAccount::new(8_800_004);
+    let owner = account.owner;
+    let aid = account.id;
+    db::set_account_e621_key(owner, aid, "supersecret-e621-key-xyz").unwrap();
+
+    let client = Client::tracked(rocket::build().mount(
+        "/api",
+        e621_account_parser_api::routes::integration_test_routes(),
+    ))
+    .await
+    .unwrap();
+    let cookie = Cookie::new(e621_account_parser_api::auth::OWNER_TOKEN_COOKIE, owner);
+
+    // Export must not contain the key or any key material.
+    let response = client
+        .get(format!("/api/account/{aid}/export"))
+        .cookie(cookie.clone())
+        .dispatch()
+        .await;
+    assert_eq!(response.status(), Status::Ok);
+    let body = response.into_json::<serde_json::Value>().await.unwrap();
+    let dump = serde_json::to_string(&body).unwrap();
+    assert!(
+        !dump.contains("supersecret-e621-key"),
+        "export must not leak the e621 key"
+    );
+    assert!(
+        !dump.contains("e621_api_key_encrypted"),
+        "export must not expose the key column"
+    );
+}
+
+// ------------------------------------------------------------------
+// Per-account e621 API key endpoints (V27 / Account Key)
+// ------------------------------------------------------------------
+
+async fn key_client(
+    id: i32,
+) -> (
+    rocket::local::asynchronous::Client,
+    TestAccount,
+    rocket::http::Cookie<'static>,
+) {
+    let account = TestAccount::new(id);
+    let client = Client::tracked(rocket::build().mount(
+        "/api",
+        e621_account_parser_api::routes::integration_test_routes(),
+    ))
+    .await
+    .unwrap();
+    let cookie = Cookie::new(
+        e621_account_parser_api::auth::OWNER_TOKEN_COOKIE,
+        account.owner,
+    );
+    // Keep `account` alive: TestAccount's `Drop` severs the owner↔account link,
+    // so dropping it here would make subsequent requests report "not linked".
+    (client, account, cookie)
+}
+
+#[rocket::async_test]
+async fn account_key_add_state_rotate_revoke() {
+    let (client, account, cookie) = key_client(8_800_101).await;
+    let owner = account.owner;
+    let aid = account.id;
+
+    // ── Add ───────────────────────────────────────────────────────────
+    let resp = client
+        .put(format!("/api/account/{aid}/key"))
+        .cookie(cookie.clone())
+        .header(rocket::http::ContentType::JSON)
+        .body(serde_json::json!({ "key": "abcdef1234567890-key" }).to_string())
+        .dispatch()
+        .await;
+    assert_eq!(resp.status(), Status::Ok);
+    let state: serde_json::Value = resp.into_json().await.unwrap();
+    assert_eq!(state["hasKey"], serde_json::Value::Bool(true));
+    assert_eq!(state["accountId"], aid);
+    assert!(state["addedAt"].is_string());
+    let ops = state["operations"].as_array().unwrap();
+    assert!(
+        ops.iter().any(|o| o == "direct_sync"),
+        "state lists ops using the key"
+    );
+
+    // ── State ─────────────────────────────────────────────────────────
+    let resp = client
+        .get(format!("/api/account/{aid}/key/state"))
+        .cookie(cookie.clone())
+        .dispatch()
+        .await;
+    assert_eq!(resp.status(), Status::Ok);
+    let state: serde_json::Value = resp.into_json().await.unwrap();
+    assert_eq!(state["hasKey"], serde_json::Value::Bool(true));
+    assert!(
+        !state.to_string().contains("abcdef1234567890"),
+        "state must not leak the key"
+    );
+
+    // ── Rotate ────────────────────────────────────────────────────────
+    let resp = client
+        .put(format!("/api/account/{aid}/key"))
+        .cookie(cookie.clone())
+        .header(rocket::http::ContentType::JSON)
+        .body(serde_json::json!({ "key": "newkey9876543210-rotated" }).to_string())
+        .dispatch()
+        .await;
+    assert_eq!(resp.status(), Status::Ok);
+    assert_eq!(
+        e621_account_parser_api::db::get_account_e621_key(owner, aid)
+            .unwrap()
+            .as_deref(),
+        Some("newkey9876543210-rotated"),
+        "rotate replaces the key"
+    );
+
+    // ── Revoke ────────────────────────────────────────────────────────
+    let resp = client
+        .delete(format!("/api/account/{aid}/key"))
+        .cookie(cookie.clone())
+        .dispatch()
+        .await;
+    assert_eq!(resp.status(), Status::Ok);
+    let state: serde_json::Value = resp.into_json().await.unwrap();
+    assert_eq!(state["hasKey"], serde_json::Value::Bool(false));
+    assert_eq!(
+        e621_account_parser_api::db::get_account_e621_key(owner, aid).unwrap(),
+        None,
+        "revoke removes the stored key"
+    );
+}
+
+#[rocket::async_test]
+async fn account_key_test_returns_invalid_when_no_key() {
+    let (client, account, cookie) = key_client(8_800_102).await;
+    let aid = account.id;
+    let resp = client
+        .post(format!("/api/account/{aid}/key/test"))
+        .cookie(cookie.clone())
+        .dispatch()
+        .await;
+    assert_eq!(resp.status(), Status::Ok);
+    let v: serde_json::Value = resp.into_json().await.unwrap();
+    assert_eq!(v["valid"], serde_json::Value::Bool(false));
+    assert!(
+        v["verifiedAt"].is_null(),
+        "no verification timestamp without a valid key"
+    );
+}
+
+#[rocket::async_test]
+async fn account_key_rejects_bad_payload_and_non_owner() {
+    let (client, account, cookie) = key_client(8_800_103).await;
+    let aid = account.id;
+
+    // Too-short key is rejected with 400 before any DB/e621 work.
+    let resp = client
+        .put(format!("/api/account/{aid}/key"))
+        .cookie(cookie.clone())
+        .header(rocket::http::ContentType::JSON)
+        .body(serde_json::json!({ "key": "short" }).to_string())
+        .dispatch()
+        .await;
+    assert_eq!(resp.status(), Status::BadRequest);
+
+    // An unlinked owner token cannot set a key (owner-gated).
+    let other = Cookie::new(
+        e621_account_parser_api::auth::OWNER_TOKEN_COOKIE,
+        "unlinked_owner_token_9999",
+    );
+    let resp = client
+        .put(format!("/api/account/{aid}/key"))
+        .cookie(other)
+        .header(rocket::http::ContentType::JSON)
+        .body(serde_json::json!({ "key": "owner_a_key_1234567890" }).to_string())
+        .dispatch()
+        .await;
+    assert_ne!(resp.status(), Status::Ok, "non-owner must be refused");
+}
+
+// ------------------------------------------------------------------
+// M2 ownership gate — claim requires the e621 key; reads are owner-gated
+// ------------------------------------------------------------------
+
+#[rocket::async_test]
+async fn create_account_rejects_malformed_key() {
+    let client = Client::tracked(rocket::build().mount(
+        "/api",
+        e621_account_parser_api::routes::integration_test_routes(),
+    ))
+    .await
+    .unwrap();
+    let cookie = Cookie::new(
+        e621_account_parser_api::auth::OWNER_TOKEN_COOKIE,
+        "fresh_owner_token_777001",
+    );
+
+    // A missing key is now ALLOWED (optional ownership proof) and is exercised
+    // against the wiremock suite (it proceeds to a real e621 user lookup), so
+    // this hermetic client only covers the offline shape validation below.
+
+    // Claim with a malformed key → 400 (shape validation, offline).
+    let resp = client
+        .post("/api/account")
+        .cookie(cookie.clone())
+        .header(rocket::http::ContentType::JSON)
+        .body(
+            serde_json::json!({ "id": 8_800_501, "name": "some_user", "api_key": "short" })
+                .to_string(),
+        )
+        .dispatch()
+        .await;
+    assert_eq!(
+        resp.status(),
+        Status::BadRequest,
+        "malformed key must be rejected"
+    );
+}
+
+#[rocket::async_test]
+async fn cross_owner_read_is_refused() {
+    let account = TestAccount::new(8_800_502);
+    let owner = account.owner;
+    let aid = account.id;
+
+    let client = Client::tracked(rocket::build().mount(
+        "/api",
+        e621_account_parser_api::routes::integration_test_routes(),
+    ))
+    .await
+    .unwrap();
+    let owner_cookie = Cookie::new(e621_account_parser_api::auth::OWNER_TOKEN_COOKIE, owner);
+    let other = "other_unlinked_token_777002";
+    let other_cookie = Cookie::new(e621_account_parser_api::auth::OWNER_TOKEN_COOKIE, other);
+
+    // A token that did not prove ownership cannot read this account's data.
+    for path in ["tag_counts", "profile", "export"] {
+        let resp = client
+            .get(format!("/api/account/{aid}/{path}"))
+            .cookie(other_cookie.clone())
+            .dispatch()
+            .await;
+        assert_ne!(
+            resp.status(),
+            Status::Ok,
+            "cross-owner read of {path} must be refused"
+        );
+    }
+
+    // The owner (who proved ownership) can still read their own export.
+    let resp = client
+        .get(format!("/api/account/{aid}/export"))
+        .cookie(owner_cookie.clone())
+        .dispatch()
+        .await;
+    assert_eq!(resp.status(), Status::Ok);
+}
+
+// ------------------------------------------------------------------
+// Read-only direct account sync endpoints (Account Key)
+// ------------------------------------------------------------------
+
+async fn sync_client(
+    id: i32,
+) -> (
+    rocket::local::asynchronous::Client,
+    TestAccount,
+    rocket::http::Cookie<'static>,
+) {
+    let account = TestAccount::new(id);
+    let client = Client::tracked(rocket::build().mount(
+        "/api",
+        e621_account_parser_api::routes::integration_test_routes(),
+    ))
+    .await
+    .unwrap();
+    let cookie = Cookie::new(
+        e621_account_parser_api::auth::OWNER_TOKEN_COOKIE,
+        account.owner,
+    );
+    (client, account, cookie)
+}
+
+#[rocket::async_test]
+async fn sync_status_without_key_reports_no_key() {
+    let (client, account, cookie) = sync_client(8_800_601).await;
+    let resp = client
+        .get(format!("/api/account/{}/sync/status", account.id))
+        .cookie(cookie)
+        .dispatch()
+        .await;
+    assert_eq!(resp.status(), Status::Ok);
+    let v: serde_json::Value = resp.into_json().await.unwrap();
+    assert_eq!(v["hasKey"], serde_json::Value::Bool(false));
+    assert!(v["lastSyncedAt"].is_null());
+    assert_eq!(v["datasets"].as_array().unwrap().len(), 4);
+}
+
+#[rocket::async_test]
+async fn sync_trigger_without_key_is_rejected() {
+    let (client, account, cookie) = sync_client(8_800_602).await;
+    let resp = client
+        .post(format!("/api/account/{}/sync", account.id))
+        .cookie(cookie)
+        .dispatch()
+        .await;
+    assert_eq!(
+        resp.status(),
+        Status::BadRequest,
+        "sync without a key must be rejected clearly"
+    );
+}
+
+#[rocket::async_test]
+async fn sync_status_reflects_last_sync_when_key_present() {
+    let (client, account, cookie) = sync_client(8_800_603).await;
+    let owner = account.owner;
+    let aid = account.id;
+    // Configure a key + record a successful sync (DB-level, offline).
+    e621_account_parser_api::db::set_account_e621_key(owner, aid, "abcdef1234567890-key").unwrap();
+    e621_account_parser_api::db::mark_account_direct_synced(owner, aid).unwrap();
+
+    let resp = client
+        .get(format!("/api/account/{aid}/sync/status"))
+        .cookie(cookie)
+        .dispatch()
+        .await;
+    assert_eq!(resp.status(), Status::Ok);
+    let v: serde_json::Value = resp.into_json().await.unwrap();
+    assert_eq!(v["hasKey"], serde_json::Value::Bool(true));
+    assert!(v["lastSyncedAt"].is_string(), "last sync timestamp present");
+}
+
+#[rocket::async_test]
+async fn sync_status_refused_for_unlinked_token() {
+    let (client, account, _cookie) = sync_client(8_800_604).await;
+    let other = Cookie::new(
+        e621_account_parser_api::auth::OWNER_TOKEN_COOKIE,
+        "other_unlinked_token_8888",
+    );
+    let resp = client
+        .get(format!("/api/account/{}/sync/status", account.id))
+        .cookie(other)
+        .dispatch()
+        .await;
+    assert_ne!(
+        resp.status(),
+        Status::Ok,
+        "unlinked token cannot read sync status"
+    );
 }

@@ -47,6 +47,8 @@ getrandom = "0.2"
 rand = "0.8"
 url = "2"
 sha2 = "0.10"
+base64 = "0.22"
+aes-gcm = "0.10"
 
 # jemalloc — frees pages back to the kernel promptly after cache eviction.
 # Without it, glibc's ptmalloc keeps freed small allocations (HashMap

@@ -1,5 +1,5 @@
 use chrono::{NaiveDate, Utc};
-use rusqlite::params;
+use rusqlite::{OptionalExtension as _, params};
 use sha2::{Digest, Sha256};
 
 use crate::models::{
@@ -500,6 +500,20 @@ pub fn get_account_by_id(owner_token: &str, id: i32) -> Result<TruncatedAccount,
     }
 }
 
+/// Whether `owner_token` is currently linked to `account_id`. Returns a DB
+/// error on failure; `Ok(false)` means the link does not exist (callers map
+/// that to 403/404 rather than a 500).
+pub fn account_is_linked(owner_token: &str, account_id: i32) -> Result<bool, String> {
+    let conn = open_db()?;
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM account_device_links \
+         WHERE owner_token = ?1 AND account_id = ?2)",
+        params![owner_token, account_id],
+        |r| r.get(0),
+    )
+    .map_err(|e| format!("Failed to check account ownership: {e}"))
+}
+
 /// Sever the device → account link, leaving the `accounts` row alone
 /// since other devices may still own it. Returns the number of links
 /// removed; 0 means this device never owned the account (callers should
@@ -826,4 +840,219 @@ pub fn count_accounts_by_bucket() -> Result<std::collections::HashMap<String, u6
         *counts.entry(key).or_insert(0) += 1;
     }
     Ok(counts)
+}
+
+// ---------------------------------------------------------------------------
+// Per-account e621 API key storage (encrypted at rest).
+//
+// ACCOUNT-scoped: an e621 account has ONE canonical API key (the owner's),
+// stored on the `accounts` row so it is available to every linked device for
+// direct sync. Ownership is enforced at ACCESS time via `account_device_links`
+// (`require_device_link`) — a token must be linked to the account to view or
+// manage the key — but the key is a single shared account resource, so sync
+// works from any linked device. (The admin_user account syncs with the shared
+// admin_api and needs no stored key.) The raw key is AES-256-GCM encrypted
+// (`crypto`), never returned over the API, and never exported (the export is
+// built from explicit fields and omits these columns).
+// ---------------------------------------------------------------------------
+
+/// Verify that `owner_token` is linked to `account_id`; errors otherwise.
+/// Shared by every key accessor so the ownership rule lives in one place.
+fn require_device_link(
+    conn: &rusqlite::Connection,
+    owner_token: &str,
+    account_id: i32,
+) -> Result<(), String> {
+    let linked: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM account_device_links \
+             WHERE owner_token = ?1 AND account_id = ?2)",
+            params![owner_token, account_id],
+            |r| r.get(0),
+        )
+        .map_err(|e| format!("Failed to verify account ownership: {e}"))?;
+    if !linked {
+        return Err("Account is not linked to this device token".to_string());
+    }
+    Ok(())
+}
+
+/// Store (or rotate) the plaintext e621 API key for `account_id` (account-wide,
+/// shared by every linked device), encrypting it at rest. Access-gated: only a
+/// linked device may set it. Sets `added_at`; on rotate the previous
+/// `verified_at`/`last_synced_at` are kept (callers refresh them via
+/// [`mark_e621_key_verified`] / [`mark_account_direct_synced`]).
+pub fn set_account_e621_key(owner_token: &str, account_id: i32, key: &str) -> Result<(), String> {
+    let encrypted = crate::crypto::encrypt(key.as_bytes()).map_err(|e| {
+        warn!("set_account_e621_key: failed to encrypt key for {account_id}: {e}");
+        "Failed to encrypt e621 key".to_string()
+    })?;
+    super::with_write_tx(|tx| {
+        require_device_link(tx, owner_token, account_id)?;
+        tx.execute(
+            "UPDATE accounts SET e621_api_key_encrypted = ?1, e621_api_key_added_at = ?2 \
+             WHERE id = ?3",
+            params![encrypted, Utc::now().to_rfc3339(), account_id],
+        )
+        .map_err(|e| format!("Failed to store e621 key: {e}"))?;
+        Ok(())
+    })
+}
+
+/// Read the account's plaintext e621 API key (shared — available to any linked
+/// device for sync/key-test). Access-gated: only a linked device may read it.
+/// Returns `Ok(None)` when the account has no key set. Never returned over the
+/// API except by deliberately-scoped internal callers (key/test, sync).
+pub fn get_account_e621_key(owner_token: &str, account_id: i32) -> Result<Option<String>, String> {
+    let conn = open_db()?;
+    require_device_link(&conn, owner_token, account_id)?;
+    let encrypted: Option<String> = conn
+        .query_row(
+            "SELECT e621_api_key_encrypted FROM accounts WHERE id = ?1",
+            params![account_id],
+            |r| r.get::<_, Option<String>>(0),
+        )
+        .map_err(|e| format!("Failed to read e621 key: {e}"))?;
+    match encrypted {
+        None => Ok(None),
+        Some(blob) => {
+            let plain = crate::crypto::decrypt(&blob).map_err(|e| {
+                warn!("get_account_e621_key: decrypt failed for {account_id}: {e}");
+                "Failed to decrypt e621 key".to_string()
+            })?;
+            Ok(Some(String::from_utf8(plain).map_err(|e| {
+                format!("e621 key is not valid UTF-8: {e}")
+            })?))
+        }
+    }
+}
+
+/// Access-gated existence check — does NOT decrypt the key. Used by the
+/// key/state endpoint and sync/status without exposing any key material.
+pub fn has_account_e621_key(owner_token: &str, account_id: i32) -> Result<bool, String> {
+    let conn = open_db()?;
+    require_device_link(&conn, owner_token, account_id)?;
+    let has: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM accounts \
+             WHERE id = ?1 AND e621_api_key_encrypted IS NOT NULL)",
+            params![account_id],
+            |r| r.get(0),
+        )
+        .map_err(|e| format!("Failed to check e621 key: {e}"))?;
+    Ok(has)
+}
+
+/// Non-decrypting metadata about an account's e621 key. Access-gated; returns
+/// `has_key`, `added_at`, `verified_at` only — never key material. Drives
+/// `GET /account/<id>/key/state`.
+#[derive(Debug, Clone)]
+pub struct AccountKeyMeta {
+    pub has_key: bool,
+    pub added_at: Option<String>,
+    pub verified_at: Option<String>,
+}
+
+pub fn get_account_key_meta(owner_token: &str, account_id: i32) -> Result<AccountKeyMeta, String> {
+    let conn = open_db()?;
+    require_device_link(&conn, owner_token, account_id)?;
+    let row: Option<(bool, Option<String>, Option<String>)> = conn
+        .query_row(
+            "SELECT e621_api_key_encrypted IS NOT NULL, e621_api_key_added_at, \
+             e621_api_key_verified_at FROM accounts WHERE id = ?1",
+            params![account_id],
+            |r| {
+                Ok((
+                    r.get::<_, bool>(0)?,
+                    r.get::<_, Option<String>>(1)?,
+                    r.get::<_, Option<String>>(2)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|e| format!("Failed to read e621 key state: {e}"))?;
+    let (has_key, added_at, verified_at) = match row {
+        Some((true, a, v)) => (true, a, v),
+        // A leftover `added_at` without an encrypted blob would report a key;
+        // coerce to no-key so state stays truthful.
+        _ => (false, None, None),
+    };
+    Ok(AccountKeyMeta {
+        has_key,
+        added_at,
+        verified_at,
+    })
+}
+
+/// Record the last successful verification of the account's key against e621
+/// (used by `key/test` and each sync pass). Access-gated.
+pub fn mark_e621_key_verified(owner_token: &str, account_id: i32) -> Result<(), String> {
+    super::with_write_tx(|tx| {
+        require_device_link(tx, owner_token, account_id)?;
+        tx.execute(
+            "UPDATE accounts SET e621_api_key_verified_at = ?1 WHERE id = ?2",
+            params![Utc::now().to_rfc3339(), account_id],
+        )
+        .map_err(|e| format!("Failed to mark e621 key verified: {e}"))?;
+        Ok(())
+    })
+}
+
+/// Remove the account's e621 API key (revoke). Access-gated — must be a linked
+/// device. Clear is account-wide (a single shared key per account).
+pub fn clear_account_e621_key(owner_token: &str, account_id: i32) -> Result<(), String> {
+    super::with_write_tx(|tx| {
+        require_device_link(tx, owner_token, account_id)?;
+        tx.execute(
+            "UPDATE accounts SET e621_api_key_encrypted = NULL, e621_api_key_added_at = NULL, \
+             e621_api_key_verified_at = NULL WHERE id = ?1",
+            params![account_id],
+        )
+        .map_err(|e| format!("Failed to clear e621 key: {e}"))?;
+        Ok(())
+    })
+}
+
+/// Record a successful direct (user-key) sync for the account. Access-gated.
+/// Sets `last_direct_synced_at` (account-wide); used by sync/status.
+pub fn mark_account_direct_synced(owner_token: &str, account_id: i32) -> Result<(), String> {
+    super::with_write_tx(|tx| {
+        require_device_link(tx, owner_token, account_id)?;
+        tx.execute(
+            "UPDATE accounts SET last_direct_synced_at = ?1 WHERE id = ?2",
+            params![Utc::now().to_rfc3339(), account_id],
+        )
+        .map_err(|e| format!("Failed to mark account direct-synced: {e}"))?;
+        Ok(())
+    })
+}
+
+/// Direct-sync status for the account: whether a key is configured and when the
+/// last sync ran. Access-gated; no key material.
+pub fn get_direct_sync_state(
+    owner_token: &str,
+    account_id: i32,
+) -> Result<DirectSyncState, String> {
+    let conn = open_db()?;
+    require_device_link(&conn, owner_token, account_id)?;
+    let row: Option<(Option<String>, bool)> = conn
+        .query_row(
+            "SELECT last_direct_synced_at, e621_api_key_encrypted IS NOT NULL \
+             FROM accounts WHERE id = ?1",
+            params![account_id],
+            |r| Ok((r.get::<_, Option<String>>(0)?, r.get::<_, bool>(1)?)),
+        )
+        .optional()
+        .map_err(|e| format!("Failed to read direct-sync state: {e}"))?;
+    let (last_synced_at, has_key) = row.unwrap_or((None, false));
+    Ok(DirectSyncState {
+        last_synced_at,
+        has_key,
+    })
+}
+
+#[derive(Debug, Clone)]
+pub struct DirectSyncState {
+    pub last_synced_at: Option<String>,
+    pub has_key: bool,
 }

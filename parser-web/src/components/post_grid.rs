@@ -27,6 +27,20 @@ pub(crate) fn best_dimensions(files: &crate::models::Files) -> (i64, i64) {
     if w > 1 && h > 1 { (w, h) } else { (4, 3) }
 }
 
+/// Maximum media aspect ratio (height ÷ width) a single card may occupy.
+/// Ultra-tall images are height-capped to this ratio (both in the card's
+/// reserved box and in the column-balancing below), so one extremely tall
+/// post can't tower over the grid and unbalance the masonry columns.
+pub(crate) const MAX_CARD_MEDIA_RATIO: f64 = 2.5;
+
+/// The `height / width` ratio actually used for layout — the same capped
+/// value the card reserves, so column balancing matches the rendered height
+/// of every post (including ultra-tall ones). Normal/wide ratios pass through.
+pub(crate) fn card_media_ratio(files: &crate::models::Files) -> f64 {
+    let (w, h) = best_dimensions(files);
+    (h as f64 / w.max(1) as f64).min(MAX_CARD_MEDIA_RATIO)
+}
+
 fn current_column_count(grid_class: &str) -> usize {
     // Determine which Tailwind breakpoints this class references and their
     // corresponding column counts.
@@ -158,14 +172,10 @@ pub fn render_post_grid(
         (0..num_columns).map(|_| Vec::new()).collect();
 
     for (post_index, post) in posts.iter().enumerate() {
-        // Use preview dimensions as the best proxy for the rendered card's
-        // aspect ratio — they always reflect the actual image proportions
-        // even when original/sample sizes are 0x0 (e.g. deleted posts with
-        // fallback preview URLs that have valid dimensions).
-        let (w, h) = best_dimensions(&post.post.files);
-        let width = w.max(1) as f64;
-        let height = h.max(1) as f64;
-        let aspect = height / width;
+        // Use the same capped preview ratio the card reserves, so balancing
+        // matches the actual rendered height — extremely tall posts can no
+        // longer make one column tower over and unbalance the rest.
+        let aspect = card_media_ratio(&post.post.files);
         let shortest = col_heights
             .iter()
             .enumerate()

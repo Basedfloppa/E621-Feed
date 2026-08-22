@@ -39,6 +39,20 @@ static LAST_GC: LazyLock<Mutex<Instant>> = LazyLock::new(|| Mutex::new(Instant::
 
 /// Take one token from the named bucket. Returns `Err(TooManyRequests)`
 /// when none available. Example: `check("acct_create:ip:1.2.3.4", 5, 5)`.
+/// Test-only: clear all rate-limit buckets. Integration tests that exhaust the
+/// shared per-IP `acct_create:ip` bucket across many `POST /api/account` calls
+/// (wiremock create-account tests) call this between tests. Compiled only in
+/// debug/test builds — never shipped in release binaries.
+#[cfg(any(test, debug_assertions))]
+pub fn reset_for_tests() {
+    if let Ok(mut buckets) = BUCKETS.lock() {
+        buckets.clear();
+    }
+    if let Ok(mut last_gc) = LAST_GC.lock() {
+        *last_gc = Instant::now();
+    }
+}
+
 pub fn check(key: &str, per_min: u32, burst: u32) -> Result<(), ApiError> {
     let rate_per_sec = f64::from(per_min) / 60.0;
     let burst_f = f64::from(burst.max(1));

@@ -10,7 +10,7 @@ use crate::{
     audit,
     load_monitor::{AdaptiveGate, E621LoadMonitor, Priority},
     metrics::METRICS,
-    models::{Comment, Post, TruncatedAccount, UserApiResponse, UserSearchResult, cfg},
+    models::{Comment, E621User, Post, TruncatedAccount, UserApiResponse, UserSearchResult, cfg},
     ratelimit,
 };
 
@@ -749,6 +749,108 @@ pub async fn get_favorites(
     Ok(posts)
 }
 
+/// Fetch one favourites page authenticated as the ACCOUNT OWNER via their own
+/// e621 API key (direct sync). Unlike [`get_favorites`] (admin key + shared
+/// `e621:admin-key` budget), this uses the user's credentials and a PER-USER
+/// rate-limit bucket (`e621:user:{account_id}`), so sync traffic can never
+/// throttle the admin key or other owners. Reads never mutate e621 (no
+/// write-back). Responses bypass the shared URL cache (key-specific).
+pub async fn get_favorites_with_key(
+    account: &TruncatedAccount,
+    api_key: &str,
+    page: i32,
+) -> Result<Vec<Post>, FavoritesPageError> {
+    ratelimit::check(&format!("e621:user:{}", account.id), 120, 20).map_err(|_| {
+        FavoritesPageError::Request("per-user e621 sync limit exceeded".to_string())
+    })?;
+
+    let cfg = cfg();
+    let url = build_url(
+        "favorites.json",
+        &[
+            ("user_id", account.id.to_string()),
+            ("limit", cfg.posts_limit.to_string()),
+            ("page", page.to_string()),
+            ("v2", true.to_string()),
+            ("mode", "extended".to_string()),
+        ],
+    );
+    debug!(
+        "[/sync] GET favorites?user_id={}&page={page} (user key)",
+        account.id
+    );
+
+    let req = get_client()
+        .get(&url)
+        .basic_auth(account.name.clone(), Some(api_key));
+    let resp = send_with_retry(req, Priority::Live).await.map_err(|e| {
+        FavoritesPageError::Request(format!(
+            "{}favorites page {page} failed: {e}",
+            crate::errors::UPSTREAM_ERR_MARKER
+        ))
+    })?;
+    if !resp.status().is_success() {
+        return Err(FavoritesPageError::Request(format!(
+            "{}favorites page {page} returned {}",
+            crate::errors::UPSTREAM_ERR_MARKER,
+            resp.status()
+        )));
+    }
+    let body = resp.text().await.map_err(|e| {
+        FavoritesPageError::Request(format!(
+            "{}favorites page {page} body read failed: {e}",
+            crate::errors::UPSTREAM_ERR_MARKER
+        ))
+    })?;
+    let posts = json::from_str::<Vec<Post>>(&body).map_err(|e| {
+        warn!("favorites page {page} (user key) parse failed: {e}");
+        FavoritesPageError::Malformed(format!(
+            "favorites page {page}: malformed 200 response: {e}"
+        ))
+    })?;
+    Ok(posts)
+}
+
+/// Fetch the account's full public+private profile authenticated as the owner
+/// (direct sync). Gives `favorite_count` and the owner's own private blacklist.
+/// Per-user rate-limit; never cached; read-only.
+pub async fn get_user_with_key(
+    account_id: i32,
+    name: &str,
+    api_key: &str,
+) -> Result<E621User, String> {
+    ratelimit::check(&format!("e621:user:{account_id}"), 120, 20)
+        .map_err(|_| "per-user e621 sync limit exceeded".to_string())?;
+    let cfg = cfg();
+    let url = format!("{}/users/{}.json", cfg.posts_domain, account_id);
+    let req = get_client()
+        .get(&url)
+        .basic_auth(name.to_string(), Some(api_key));
+    let resp = send_with_retry(req, Priority::Live).await.map_err(|e| {
+        format!(
+            "{}profile request failed: {e}",
+            crate::errors::UPSTREAM_ERR_MARKER
+        )
+    })?;
+    if !resp.status().is_success() {
+        return Err(format!(
+            "{}profile returned {}",
+            crate::errors::UPSTREAM_ERR_MARKER,
+            resp.status()
+        ));
+    }
+    let body = resp.text().await.map_err(|e| {
+        format!(
+            "{}profile body read failed: {e}",
+            crate::errors::UPSTREAM_ERR_MARKER
+        )
+    })?;
+    match json::from_str::<UserApiResponse>(&body) {
+        Ok(UserApiResponse::FullUser(u)) => Ok(*u),
+        Err(e) => Err(format!("profile parse failed: {e}")),
+    }
+}
+
 pub async fn get_account(account: &TruncatedAccount) -> Result<UserApiResponse, String> {
     info!(
         "Fetching account: id={} name='{}'",
@@ -813,6 +915,71 @@ pub async fn get_user_by_name(name: &str) -> Result<UserApiResponse, String> {
         .await
         .map_err(|e| format!("user-by-name {e}"))?;
     json::from_str::<UserApiResponse>(&body).map_err(|e| format!("user-by-name parse failed: {e}"))
+}
+
+/// Outcome of validating an e621 API key against the upstream.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KeyValidation {
+    /// The key authenticates as the given e621 user account.
+    Valid { id: i32, name: String },
+    /// Credentials were rejected by e621, or the authenticated user did not
+    /// match the claimed account id.
+    Invalid,
+}
+
+/// Verify that `api_key` authenticates `name`'s e621 account (`account_id`).
+///
+/// Uses the user's OWN credentials (HTTP Basic auth: username = e621 login,
+/// password = api key) and a PER-USER rate-limit bucket, entirely separate from
+/// the shared `e621:admin-key` bucket used by admin-authed fetches — so a
+/// broken or rotated user key can never throttle the admin key or other
+/// owners' syncing. Responses are never stored in the shared URL cache
+/// (key-specific) and are fetched bypassing cache.
+pub async fn verify_e621_key(
+    account_id: i32,
+    name: &str,
+    api_key: &str,
+) -> Result<KeyValidation, String> {
+    // Per-user bucket, separate from e621:admin-key.
+    ratelimit::check(&format!("e621:user:{account_id}"), 120, 20)
+        .map_err(|_| "per-user e621 key-verify limit exceeded".to_string())?;
+
+    let cfg = cfg();
+    let url = format!("{}/users/{}.json", cfg.posts_domain, account_id);
+    debug!("[/key/test] verifying e621 key for id={account_id} name={name}");
+
+    let req = get_client().get(&url).basic_auth(name, Some(api_key));
+    let resp = send_with_retry(req, Priority::Live).await.map_err(|e| {
+        format!(
+            "{}verification request failed: {e}",
+            crate::errors::UPSTREAM_ERR_MARKER
+        )
+    })?;
+    let status = resp.status();
+    if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
+        debug!("[/key/test] e621 rejected credentials for {account_id} ({status})");
+        return Ok(KeyValidation::Invalid);
+    }
+    if !status.is_success() {
+        return Err(format!(
+            "{}verification returned {status}",
+            crate::errors::UPSTREAM_ERR_MARKER
+        ));
+    }
+    let body = resp.text().await.map_err(|e| {
+        format!(
+            "{}verification body read failed: {e}",
+            crate::errors::UPSTREAM_ERR_MARKER
+        )
+    })?;
+    match json::from_str::<UserApiResponse>(&body) {
+        Ok(UserApiResponse::FullUser(u)) if u.id == account_id => Ok(KeyValidation::Valid {
+            id: u.id,
+            name: u.name.clone(),
+        }),
+        Ok(_) => Ok(KeyValidation::Invalid),
+        Err(e) => Err(format!("verification parse failed: {e}")),
+    }
 }
 
 /// e621 refuses search queries with more than this many tags (returns 422).

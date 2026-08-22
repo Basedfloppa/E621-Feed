@@ -15,7 +15,7 @@ struct PendingBlacklistRule {
     label: String,
 }
 
-use crate::components::post_grid::best_dimensions;
+use crate::components::post_grid::{MAX_CARD_MEDIA_RATIO, best_dimensions};
 use crate::components::post_viewer::open_post_viewer;
 use crate::components::{ConfirmModal, shared_observer};
 use crate::models::*;
@@ -55,6 +55,10 @@ pub struct PostCardProps {
     /// Show the post number / file-metadata badge on the post card.
     #[prop_or(true)]
     pub show_post_number: bool,
+    /// Render non-interactively for a static preview: skip impression reporting
+    /// and suppress open/link interaction (no network request, no navigation).
+    #[prop_or(false)]
+    pub static_preview: bool,
 }
 
 #[function_component(PostCard)]
@@ -264,11 +268,17 @@ pub fn post_card(props: &PostCardProps) -> Html {
         let position = props.position;
         let post_id = post.id;
         let impression_logged = impression_logged.clone();
+        let static_preview = props.static_preview;
 
         use_effect_with(post.id, move |_| {
             let mut registration: Option<(Element, u64)> = None;
 
-            if !*impression_logged && let Some(el) = root_ref.cast::<Element>() {
+            // Static preview: no impression reporting (and none of the
+            // observer setup), so rendering makes no network request.
+            if !static_preview
+                && !*impression_logged
+                && let Some(el) = root_ref.cast::<Element>()
+            {
                 let is_visible = std::rc::Rc::new(std::cell::Cell::new(false));
                 let is_scheduled = std::rc::Rc::new(std::cell::Cell::new(false));
 
@@ -566,7 +576,15 @@ pub fn post_card(props: &PostCardProps) -> Html {
         let position = props.position;
         let post_id = post.id;
         let post_clone = post.clone();
+        let static_preview = props.static_preview;
         Callback::from(move |e: MouseEvent| {
+            // Static preview: swallow the click so the card neither opens the
+            // in-app viewer nor navigates (no request, no navigation).
+            if static_preview {
+                e.prevent_default();
+                e.stop_propagation();
+                return;
+            }
             send_interaction(
                 backend_url.clone(),
                 FeedInteractionRequest {
@@ -597,7 +615,14 @@ pub fn post_card(props: &PostCardProps) -> Html {
         let position = props.position;
         let post_id = post.id;
         let post_clone = post.clone();
+        let static_preview = props.static_preview;
         Callback::from(move |e: MouseEvent| {
+            // Static preview: swallow middle-click too.
+            if static_preview {
+                e.prevent_default();
+                e.stop_propagation();
+                return;
+            }
             if e.button() == 1 {
                 send_interaction(
                     backend_url.clone(),
@@ -705,16 +730,27 @@ pub fn post_card(props: &PostCardProps) -> Html {
         let media_ready = media_ready.clone();
         Callback::from(move |_e: Event| media_ready.set(true))
     };
-    let media_loading_style = if *media_ready {
+    // Media box. Normal/wide media keep the existing reserve-then-natural
+    // behavior. Ultra-tall media (height/width > MAX_CARD_MEDIA_RATIO) is
+    // height-capped EVEN AFTER LOAD so a single extremely tall post can't
+    // tower over the grid and unbalance the masonry columns — this must match
+    // the capped ratio `render_post_grid` uses for column balancing.
+    let (media_w, media_h) = best_dimensions(&post.files);
+    let media_ratio = media_h as f64 / media_w.max(1) as f64;
+    let media_style = if media_ratio > MAX_CARD_MEDIA_RATIO {
+        format!(
+            "aspect-ratio: 1 / {}; max-height: 70vh; overflow: hidden;",
+            MAX_CARD_MEDIA_RATIO
+        )
+    } else if *media_ready {
         String::new()
     } else {
-        let (w, h) = best_dimensions(&post.files);
-        format!("aspect-ratio: {w} / {h}; min-height: 300px;")
+        format!("aspect-ratio: {media_w} / {media_h}; min-height: 300px;")
     };
 
     let inner: Html = html! {
         <>
-            <div class="relative p-0" style={media_loading_style}>
+            <div class="relative p-0" style={media_style}>
                 {
                     if let Some(url) = img_url {
                         let is_video = matches!(
@@ -1114,6 +1150,11 @@ async fn append_blacklist_rule_one(
 }
 
 fn send_interaction(backend_url: String, payload: FeedInteractionRequest) {
+    // Guard: never POST to an unconfigured/empty base, and never auto-report
+    // impressions for non-interactive (static-preview) renders.
+    if backend_url.trim().is_empty() {
+        return;
+    }
     // Coalesce feed events (impressions + explicit actions) into a single
     // `/interaction/batch` request instead of one POST per event. The backend
     // has a single SQLite writer, so batching removes most write-transaction
@@ -1123,6 +1164,9 @@ fn send_interaction(backend_url: String, payload: FeedInteractionRequest) {
 }
 
 fn undo_interaction(backend_url: String, payload: FeedInteractionRequest) {
+    if backend_url.trim().is_empty() {
+        return;
+    }
     spawn_local(async move {
         let Ok(body) = serde_json::to_string(&payload) else {
             return;
