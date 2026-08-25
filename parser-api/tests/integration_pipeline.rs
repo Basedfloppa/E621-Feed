@@ -60,6 +60,9 @@ fn install_mock_config(mock_uri: &str) -> tempfile::NamedTempFile {
     // admin creds — placeholder values; mock server ignores auth.
     let modified = swap_toml_field(&modified, "admin_user", "\"test_admin\"");
     let modified = swap_toml_field(&modified, "admin_api", "\"test_api_key\"");
+    // /process persists favourites locally, which is gated on
+    // save_favourites/save_all — enable it so the pipeline tests stay valid.
+    let modified = swap_toml_field(&modified, "save_favourites", "true");
 
     let mut file = tempfile::NamedTempFile::new().expect("temp file");
     use std::io::Write;

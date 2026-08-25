@@ -32,7 +32,7 @@ use e621_account_parser_api::{
 ///   so the posts are associated with this account (used for favorites).
 ///
 /// Errors are non-fatal: the response has already been sent to the client.
-fn spawn_browse_persist(
+pub(crate) fn spawn_browse_persist(
     posts: Vec<Post>,
     source: &'static str,
     account_id: i32,
@@ -127,7 +127,7 @@ pub(crate) async fn search_posts(
     let posts = api::get_posts_by_tags(&account.blacklist, query, page, limit, Priority::Live)
         .await
         .map_err(ApiError::from_string)?;
-    spawn_browse_persist(posts.clone(), "search", account_id, false);
+    spawn_browse_persist(posts.clone(), "search", account_id, cfg().catalog.save_all);
     Ok(Json(posts))
 }
 
@@ -175,7 +175,7 @@ pub(crate) async fn search_scored_posts(
     let posts = api::get_posts_by_tags(&account.blacklist, query, page, limit, Priority::Live)
         .await
         .map_err(ApiError::from_string)?;
-    spawn_browse_persist(posts.clone(), "search", account_id, false);
+    spawn_browse_persist(posts.clone(), "search", account_id, cfg().catalog.save_all);
 
     let idf = current_idf();
     let global_relation = current_global_relation();
@@ -259,7 +259,12 @@ pub(crate) async fn get_trending_scored(
         .map_err(ApiError::from_string)?;
 
     // Fire-and-forget persist to catalog (same as get_trending).
-    spawn_browse_persist(posts.clone(), "trending", account_id, false);
+    spawn_browse_persist(
+        posts.clone(),
+        "trending",
+        account_id,
+        cfg().catalog.save_all,
+    );
 
     // Score against the account profile.
     let idf = current_idf();
@@ -349,7 +354,12 @@ pub(crate) async fn get_trending(
 
     // Сохраняем в каталог (без привязки к аккаунту — trending не является
     // явным предпочтением пользователя). Fire-and-forget, не задерживает ответ.
-    spawn_browse_persist(posts.clone(), "trending", account_id, false);
+    spawn_browse_persist(
+        posts.clone(),
+        "trending",
+        account_id,
+        cfg().catalog.save_all,
+    );
 
     Ok(Json(posts))
 }

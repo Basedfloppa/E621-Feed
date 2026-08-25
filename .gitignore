@@ -12,6 +12,7 @@
 # caused the live-site SRI integrity mismatches (see docs/deployment.md).
 tailwind-output.css
 config.toml
+.env
 
 parser-web/.well-known/security.txt
 */db
@@ -19,3 +20,5 @@ parser-api/loadtest/server.log
 parser-api/loadtest/__pycache__/
 parser-api/loadtest/locustfile.py
 .pi**
+**media
+**db_exports

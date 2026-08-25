@@ -142,6 +142,15 @@ pub async fn run_process_with_mode(
     owner_token: String,
     mode: ProcessMode,
 ) -> Result<(), String> {
+    // /process persists favourites into the local catalog; with both
+    // persistence toggles off there is nothing to import it for, so refuse
+    // instead of silently accumulating catalog rows.
+    if !cfg().catalog.persistence_enabled() {
+        return Err(
+            "local catalog is disabled: set [catalog].save_favourites or save_all to run /process"
+                .to_string(),
+        );
+    }
     audit::event("process.start")
         .field("account_id", account_id)
         .field("requested_mode", mode.as_str())

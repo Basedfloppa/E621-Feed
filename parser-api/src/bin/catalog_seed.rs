@@ -96,31 +96,53 @@ fn seed_client() -> anyhow::Result<reqwest::Client> {
 /// Discover the current static host for the db_exports dumps by parsing the
 /// e621 index page. e621 serves the dumps from rotating `staticN.e621.net`
 /// hosts (old `/db_exports/*` URLs now 404), so we read the live base instead
-/// of hardcoding a static1 host. Falls back to `static1` if parsing fails.
-async fn discover_exports_base(client: &reqwest::Client) -> anyhow::Result<String> {
-    let text = client
-        .get(EXPORTS_INDEX)
-        .send()
-        .await
-        .with_context(|| format!("GET {EXPORTS_INDEX}"))?
-        .error_for_status()
-        .context("e621 db_exports index returned non-OK status")?
-        .text()
-        .await
-        .context("read e621 db_exports index body")?;
+/// of hardcoding a static1 host.
+///
+/// This is **never fatal**: e621 may answer the directory listing with a 403 /
+/// Cloudflare anti-bot challenge (which is what breaks naive runs), and the
+/// discovery is only an optimization anyway — the actual dumps on
+/// `staticN.e621.net/data/db_export/*.csv.gz` are static and not behind the
+/// challenge. So any failure here just logs and falls back to `static1`.
+async fn discover_exports_base(client: &reqwest::Client) -> String {
+    let text = match client.get(EXPORTS_INDEX).send().await {
+        Ok(resp) => {
+            let status = resp.status();
+            if !status.is_success() {
+                eprintln!(
+                    "[catalog-seed] db_exports index HTTP {status} ({EXPORTS_INDEX}); using fallback {FALLBACK_EXPORTS_BASE}"
+                );
+                return FALLBACK_EXPORTS_BASE.to_string();
+            }
+            match resp.text().await {
+                Ok(t) => t,
+                Err(e) => {
+                    eprintln!(
+                        "[catalog-seed] read db_exports index: {e}; using fallback {FALLBACK_EXPORTS_BASE}"
+                    );
+                    return FALLBACK_EXPORTS_BASE.to_string();
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!(
+                "[catalog-seed] GET {EXPORTS_INDEX}: {e}; using fallback {FALLBACK_EXPORTS_BASE}"
+            );
+            return FALLBACK_EXPORTS_BASE.to_string();
+        }
+    };
     const MARKER: &str = "https://static";
     if let Some(i) = text.find(MARKER) {
         let rest = &text[i..];
         if let Some(end) = rest.find("/data/db_export") {
             let base = format!("{}/data/db_export", &rest[..end]);
             eprintln!("[catalog-seed] db_exports base: {base}");
-            return Ok(base);
+            return base;
         }
     }
     eprintln!(
         "[catalog-seed] could not discover db_exports base, using fallback {FALLBACK_EXPORTS_BASE}"
     );
-    Ok(FALLBACK_EXPORTS_BASE.to_string())
+    FALLBACK_EXPORTS_BASE.to_string()
 }
 
 async fn download(
@@ -130,15 +152,17 @@ async fn download(
     dest: &Path,
 ) -> anyhow::Result<u64> {
     let url = format!("{base}/{url_path}");
+    eprintln!("[catalog-seed] GET {url}");
     let resp = client
         .get(&url)
         .send()
         .await
         .with_context(|| format!("GET {url}"))?;
+    let status = resp.status();
     anyhow::ensure!(
-        resp.status().is_success(),
-        "download {url}: HTTP {}",
-        resp.status()
+        status.is_success(),
+        "download {url}: HTTP {status} — UA='{}' (e621 403s on missing/blank UA; check `user_agent` in your config)",
+        models::cfg().user_agent,
     );
     let mut file = tokio::fs::File::create(dest).await?;
     let mut stream = resp.bytes_stream();
@@ -329,7 +353,14 @@ async fn main() -> anyhow::Result<()> {
     db::ensure_sqlite().map_err(|e| anyhow::anyhow!("migrate: {e}"))?;
 
     let client = seed_client()?;
-    let base = discover_exports_base(&client).await?;
+    // `base` is only needed for the download step; ingest never uses it. When
+    // the user opts into `--skip-download`, stay fully offline — do not hit the
+    // e621 index (that request is what a network-less run used to fail on).
+    let base = if opts.skip_download {
+        FALLBACK_EXPORTS_BASE.to_string()
+    } else {
+        discover_exports_base(&client).await
+    };
 
     let tags_path = ensure_download(&client, &base, &opts, TAGS_CSV).await?;
     let aliases_path = ensure_download(&client, &base, &opts, ALIASES_CSV).await?;

@@ -311,6 +311,12 @@ pub(crate) async fn sync_account_route(
                 "no e621 API key configured for this account; add one first".to_string(),
             ))
         }
+        Err(e621_account_parser_api::sync::SyncError::CatalogDisabled) => {
+            Err(ApiError::BadRequest(
+                "sync is disabled: enable [catalog].save_favourites or save_all in config.toml"
+                    .to_string(),
+            ))
+        }
         Err(e621_account_parser_api::sync::SyncError::Other(e)) => Err(ApiError::from(e)),
     }
 }
@@ -582,6 +588,13 @@ pub(crate) async fn create_account(
 }
 
 pub(crate) struct IfNoneMatch(Option<String>);
+
+impl IfNoneMatch {
+    /// Raw `If-None-Match` header value, if present.
+    pub(crate) fn header_value(&self) -> Option<&str> {
+        self.0.as_deref()
+    }
+}
 
 #[rocket::async_trait]
 impl<'r> FromRequest<'r> for IfNoneMatch {

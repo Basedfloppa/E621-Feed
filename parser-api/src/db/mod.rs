@@ -8,23 +8,32 @@ use rocket::{
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
+#[cfg(unix)]
+use std::fs::{File, OpenOptions, TryLockError};
+
 mod accounts;
+mod catalog;
 mod cooccurrence;
 mod cooccurrence_backfill;
 mod digest;
 mod feed;
 mod hydrate_cache;
+mod media;
+mod pools;
 mod posts;
 mod profiles;
 mod sessions;
 mod tags;
 
 pub use accounts::*;
+pub use catalog::*;
 pub use cooccurrence::*;
 pub use cooccurrence_backfill::*;
 pub use digest::*;
 pub use feed::*;
 pub use hydrate_cache::*;
+pub use media::*;
+pub use pools::*;
 pub use posts::*;
 pub use profiles::*;
 pub use sessions::*;
@@ -103,9 +112,51 @@ fn pool() -> &'static DbPool {
 /// were seeing under concurrent prefetch + cooc-backfill load.
 static WRITE_CONN: OnceLock<Mutex<rusqlite::Connection>> = OnceLock::new();
 
+/// Static handle that keeps the process-wide DB writer flock alive for the
+/// lifetime of the process. Cross-process only — within one process every
+/// writer already shares the `WRITE_CONN` mutex.
+#[cfg(unix)]
+static DB_WRITER_LOCK: OnceLock<File> = OnceLock::new();
+
+/// Take an exclusive advisory flock on the DB file. **Two OS processes must
+/// never write the same WAL-mode SQLite file at once** — e.g. `catalog_seed`
+/// bulk-importing tags while the server's `tag_relation_importer` writes the
+/// same `tag_implications`/`tag_aliases` tables. That race corrupts the file
+/// and shows up as "database disk image is malformed" on exactly those tables.
+/// flock is automatically released by the kernel on process exit, so a crashed
+/// or finished process frees the lock without manual cleanup.
+#[cfg(unix)]
+fn acquire_db_writer_lock(path: &str) -> Result<(), String> {
+    let f = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true) // create a missing DB file, like Connection::open below
+        .truncate(false) // NEVER truncate an existing DB — we only want the lock
+        .open(path)
+        .map_err(|e| format!("open db for writer lock: {e}"))?;
+    match f.try_lock() {
+        Ok(()) => {
+            // Keep the handle alive for the whole process.
+            let _ = DB_WRITER_LOCK.set(f);
+            Ok(())
+        }
+        Err(TryLockError::WouldBlock) => {
+            Err("database is already being written by another E621 process \
+             (catalog_seed or a running server). Stop that process before starting \
+             another writer — two writers on one SQLite WAL database corrupt it."
+                .to_string())
+        }
+        Err(e) => Err(format!("db writer lock failed: {e}")),
+    }
+}
+
 fn write_conn() -> &'static Mutex<rusqlite::Connection> {
     WRITE_CONN.get_or_init(|| {
         let path = crate::models::cfg().db_path.clone();
+        // Cross-process writer guard: abort this process rather than risk a
+        // second concurrent writer corrupting the WAL database.
+        #[cfg(unix)]
+        acquire_db_writer_lock(&path).expect("acquire db writer lock");
         let conn = rusqlite::Connection::open(&path).expect("open writer connection");
         // Set busy_timeout BEFORE the batch below: the `journal_mode = WAL`
         // switch needs an exclusive lock, and a concurrently-starting worker

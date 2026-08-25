@@ -380,6 +380,13 @@ pub(crate) async fn get_recommendations(
         .feed_views_total
         .inc();
 
+    // `save_all`: persist every post the owner was shown in the feed, so it's
+    // grouped in the catalog and its media is queued for download.
+    if e621_account_parser_api::models::cfg().catalog.save_all {
+        let posts: Vec<Post> = scored.iter().map(|sp| sp.post.clone()).collect();
+        crate::routes::browse::spawn_browse_persist(posts, "feed", account_id, true);
+    }
+
     Ok(Json(scored))
 }
 

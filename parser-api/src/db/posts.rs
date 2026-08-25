@@ -728,7 +728,20 @@ pub fn hydrate_posts_by_ids(ids: &[i64]) -> Result<Vec<Post>, String> {
         }
     }
 
-    Ok(posts.into_values().collect())
+    // Deterministic order: return posts in the same order as the input `ids`.
+    // Callers pass an already-ordered list (e.g. `post_id DESC` for the
+    // catalog, score order for browse); `HashMap::into_values()` iteration is
+    // nondeterministic and would shuffle the page between requests.
+    let mut out: Vec<Post> = Vec::with_capacity(ids.len());
+    for id in ids {
+        if let Some(p) = posts.remove(id) {
+            out.push(p);
+        }
+    }
+    // Rewrite media URLs to the local proxy for posts with a stored original
+    // (docs/offline-catalog.md).
+    crate::media_store::rewrite_local_media_urls(&mut out);
+    Ok(out)
 }
 
 /// Find post IDs similar to `post_id` via tag overlap. Returns candidates

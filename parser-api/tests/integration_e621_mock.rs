@@ -87,6 +87,9 @@ fn install_mock_config(mock_uri: &str) -> tempfile::NamedTempFile {
     modified = swap_toml_field(&modified, "posts_limit", "4");
     modified = swap_toml_field(&modified, "admin_user", &format!("\"{ADMIN_USER}\""));
     modified = swap_toml_field(&modified, "admin_api", &format!("\"{ADMIN_PASS}\""));
+    // Sync persists favourites into the local catalog, which is gated on
+    // save_favourites/save_all — enable it so the sync flow tests stay valid.
+    modified = swap_toml_field(&modified, "save_favourites", "true");
     // No retries and no mandatory inter-request delay → 5xx tests fail fast
     // and the sync loop is not throttled by the per-attempt backoff.
     modified = swap_toml_field(&modified, "max_retries", "0");
@@ -643,6 +646,40 @@ async fn key_test_with_invalid_configured_key_reports_invalid() {
 // ------------------------------------------------------------------
 //  Read-only direct sync — favourites + private blacklist import
 // ------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn sync_trigger_without_key_is_rejected() {
+    let _guard = mock_lock().lock().await;
+    ensure_migrations();
+    let server = MockServer::start().await;
+    let _cfg = install_mock_config(&server.uri());
+
+    let account_id = 8_810_012;
+    let owner = "mock_owner_8810012";
+    db::set_account(owner, account_id, MOCK_NAME, "").unwrap();
+    // No e621 key stored. Catalog persistence is enabled in the mock config,
+    // so the key check is what must reject (not the catalog gate).
+
+    let client = test_client().await;
+    let cookie = owner_cookie(owner);
+    let resp = client
+        .post(format!("/api/account/{account_id}/sync"))
+        .cookie(cookie)
+        .dispatch()
+        .await;
+    assert_eq!(
+        resp.status(),
+        Status::BadRequest,
+        "sync without a key must be rejected clearly, got: {}",
+        resp.status()
+    );
+    let v: serde_json::Value = resp.into_json().await.unwrap();
+    let msg = v["error"].as_str().unwrap_or_default().to_lowercase();
+    assert!(
+        msg.contains("key"),
+        "rejection should mention the missing key, got: {msg}"
+    );
+}
 
 #[tokio::test(flavor = "multi_thread")]
 async fn sync_imports_favorites_and_private_blacklist() {

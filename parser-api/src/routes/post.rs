@@ -12,7 +12,7 @@ use rocket::serde::json::Json;
 use rocket_okapi::openapi;
 
 use e621_account_parser_api::{
-    api,
+    api, db,
     errors::ApiError,
     models::{Comment, Post},
     ratelimit::{self, ClientIp},
@@ -45,6 +45,11 @@ pub(crate) async fn post_comments(
 }
 
 /// Single post by id — used by the viewer for parent/child navigation.
+///
+/// **Local-first**: if the post is already in the local catalog it is served
+/// from the local DB without any e621 request (this is the point of the local
+/// catalog — see docs/offline-catalog.md). Live fetch only for IDs absent
+/// locally.
 #[openapi(tag = "Posts")]
 #[get("/posts/<id>")]
 pub(crate) async fn get_single_post(id: i64, client_ip: ClientIp) -> Result<Json<Post>, ApiError> {
@@ -52,6 +57,10 @@ pub(crate) async fn get_single_post(id: i64, client_ip: ClientIp) -> Result<Json
         return Err(ApiError::BadRequest(
             "post id must be a positive integer".into(),
         ));
+    }
+    // Serve from the local catalog first — no network, no admin-key spend.
+    if let Some(local) = db::get_post_by_id(id).map_err(ApiError::from_string)? {
+        return Ok(Json(local));
     }
     // Per-IP public-viewer budget shared with the other unauthenticated viewer
     // routes — see `post_comments` for the rationale.
@@ -68,6 +77,10 @@ pub(crate) async fn get_single_post(id: i64, client_ip: ClientIp) -> Result<Json
 
 /// Every post in a pool, in pool order — used by the viewer for pool
 /// navigation (the current post's `pools` ids drive the request).
+///
+/// **Local-first**: when `catalog.pool_membership` is on and the pool is known
+/// locally, posts are served from `pool_posts` without e621. Otherwise the pool
+/// is live-fetched, and the membership is persisted for next time.
 #[openapi(tag = "Posts")]
 #[get("/pools/<pool_id>/posts")]
 pub(crate) async fn get_pool_posts(
@@ -79,6 +92,18 @@ pub(crate) async fn get_pool_posts(
             "pool id must be a positive integer".into(),
         ));
     }
+    use e621_account_parser_api::models::cfg;
+    // Local-first: serve from stored pool membership when enabled and present.
+    if cfg().catalog.pool_membership
+        && let Ok(members) = db::get_pool_members(pool_id)
+        && !members.is_empty()
+    {
+        let ids: Vec<i64> = members.iter().map(|(id, _pos)| *id).collect();
+        let hydrated = db::hydrate_posts_by_ids(&ids).map_err(ApiError::from_string)?;
+        if hydrated.len() == ids.len() {
+            return Ok(Json(hydrated));
+        }
+    }
     // Per-IP public-viewer budget; each pool request costs two admin-key
     // tokens (envelope + by-ids hydration), so this must be tighter.
     ratelimit::check(&format!("public-viewer:{}", client_ip.0), 60, 15)?;
@@ -86,5 +111,23 @@ pub(crate) async fn get_pool_posts(
     let posts = api::get_pool_posts(pool_id)
         .await
         .map_err(ApiError::from_string)?;
+    // Persist membership for offline use (opt-in). `pool_posts.post_id` has an
+    // FK to `posts(id)`, so the member posts must already be in the catalog or
+    // `save_pool` fails the FK check and rolls back (silently breaking offline
+    // pool navigation). Upsert the fetched posts first to satisfy the FK.
+    if cfg().catalog.pool_membership {
+        if let Err(e) = db::upsert_catalog_posts(&posts) {
+            warn!("[catalog] pool {pool_id} post persist failed: {e}");
+        } else {
+            let members = posts
+                .iter()
+                .enumerate()
+                .map(|(i, p)| (p.id, i as i64))
+                .collect::<Vec<_>>();
+            if let Err(e) = db::save_pool(pool_id, "", &members) {
+                warn!("[catalog] pool {pool_id} save failed: {e}");
+            }
+        }
+    }
     Ok(Json(posts))
 }

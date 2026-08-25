@@ -1,4 +1,5 @@
 mod account;
+mod catalog;
 mod digest;
 mod favorites;
 mod feed;
@@ -9,6 +10,7 @@ mod settings;
 mod trending;
 
 pub use account::*;
+pub use catalog::*;
 pub use digest::*;
 pub use favorites::*;
 pub use feed::*;

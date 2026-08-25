@@ -2428,17 +2428,29 @@ async fn sync_status_without_key_reports_no_key() {
 }
 
 #[rocket::async_test]
-async fn sync_trigger_without_key_is_rejected() {
+async fn sync_trigger_rejected_when_catalog_disabled() {
     let (client, account, cookie) = sync_client(8_800_602).await;
+    let owner = account.owner;
+    let aid = account.id;
+    // With a key present the only reason to reject is the disabled catalog:
+    // the integration config loads config.example.toml, where save_favourites
+    // and save_all are both off, and the sync is gated on them.
+    e621_account_parser_api::db::set_account_e621_key(owner, aid, "abcdef1234567890-key").unwrap();
     let resp = client
-        .post(format!("/api/account/{}/sync", account.id))
+        .post(format!("/api/account/{aid}/sync"))
         .cookie(cookie)
         .dispatch()
         .await;
     assert_eq!(
         resp.status(),
         Status::BadRequest,
-        "sync without a key must be rejected clearly"
+        "sync must be rejected when catalog persistence is disabled"
+    );
+    let v: serde_json::Value = resp.into_json().await.unwrap();
+    let msg = v["error"].as_str().unwrap_or_default().to_lowercase();
+    assert!(
+        msg.contains("save_favourites") || msg.contains("catalog"),
+        "rejection should name the disabled catalog, got: {msg}"
     );
 }
 

@@ -179,6 +179,17 @@ async fn process_posts(
     // token; cap per-owner and per-IP so click-storms can't lap us.
     ratelimit::check(&format!("process:owner:{owner_token}"), 3, 3)?;
     ratelimit::check(&format!("process:ip:{}", client_ip.0), 5, 5)?;
+    // /process persists favourites locally; refuse synchronously when the
+    // catalog persistence toggles are both off (no job is even registered).
+    if !e621_account_parser_api::models::cfg()
+        .catalog
+        .persistence_enabled()
+    {
+        return Err(ApiError::BadRequest(
+            "process is disabled: enable [catalog].save_favourites or save_all in config.toml"
+                .to_string(),
+        ));
+    }
     let owner_for_check = owner_token.clone();
     db_blocking(move || get_account_by_id(&owner_for_check, account_id).map_err(|e| e.clone()))
         .await?;
@@ -406,6 +417,29 @@ async fn build_rocket() -> rocket::Rocket<rocket::Build> {
             .field("error", e)
             .emit_err();
     }
+
+    // Log the *resolved* (absolute) data locations so an operator can always
+    // see where the DB and media cache actually live. Relative paths in config
+    // resolve against the process working directory (where it was launched).
+    // NB: `log::info!` here is a no-op — Rocket only wires the logger at
+    // launch, so messages logged before launch are dropped. Use eprintln so
+    // these critical startup diagnostics always reach stderr.
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let abs = |p: &str| -> String {
+        let pb = std::path::Path::new(p);
+        if pb.is_absolute() {
+            pb.display().to_string()
+        } else {
+            cwd.join(pb).display().to_string()
+        }
+    };
+    eprintln!("config loaded from {}", path.display());
+    eprintln!("  db_path     -> {}", abs(&cfg().db_path));
+    eprintln!(
+        "  media_cache -> {}",
+        cwd.join(e621_account_parser_api::media_store::cache_dir())
+            .display()
+    );
     let watcher = match start_config_watcher(path) {
         Ok(w) => w,
         Err(e) => {
@@ -461,6 +495,15 @@ async fn build_rocket() -> rocket::Rocket<rocket::Build> {
         routes::browse::get_favorites,
         routes::browse::search_posts,
         routes::browse::search_scored_posts,
+        routes::catalog::get_catalog_search,
+        routes::catalog::get_catalog_tag_suggest,
+        routes::catalog_manage::get_media_queue_status,
+        routes::catalog_manage::pause_media_worker,
+        routes::catalog_manage::resume_media_worker,
+        routes::catalog_manage::kick_media_worker,
+        routes::catalog_manage::get_media_queue,
+        routes::catalog_manage::delete_media_cache,
+        routes::catalog_manage::delete_catalog_post_route,
         get_default_blacklist,
         session_bootstrap,
         session_clear,
@@ -517,7 +560,10 @@ async fn build_rocket() -> rocket::Rocket<rocket::Build> {
             rocket::routes![routes::account::get_account_tag_relations],
         )
         // tag_relations routes are already in openapi_get_routes_spec! above
-        .mount("/api", rocket::routes![routes::get_metrics])
+        .mount(
+            "/api",
+            rocket::routes![routes::get_metrics, routes::media::serve_media],
+        )
         .register("/api", catchers![catch_404, catch_422, catch_500])
         .attach(shield)
         .attach(LatencyFairing)
@@ -549,6 +595,11 @@ async fn build_rocket() -> rocket::Rocket<rocket::Build> {
     prefetch::spawn_prefetch_workers();
     e621_account_parser_api::cache_pruner::spawn_cache_pruner();
     e621_account_parser_api::media_hydrator::spawn_media_hydrator();
+    // Download originals for saved posts in the background. The worker
+    // self-gates on the catalog persistence toggles ([catalog].save_favourites
+    // / save_all): with both off no posts are saved, so nothing would be
+    // queued for download anyway.
+    e621_account_parser_api::media_fetch_worker::spawn_media_fetcher();
     e621_account_parser_api::db::spawn_tag_relation_importer();
 
     // Seed the A/B bucket distribution gauge from the current account table.

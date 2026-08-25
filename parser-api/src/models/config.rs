@@ -87,6 +87,57 @@ pub struct Config {
     /// Calibration / seed binary knobs. Skip in production deployments.
     #[serde(default)]
     pub backtest: BacktestConfig,
+
+    /// Local catalog & offline-serving knobs (TODO §4.1 / docs/offline-catalog.md).
+    /// All fields default off so existing deployments behave exactly as today.
+    #[serde(default)]
+    pub catalog: CatalogConfig,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct CatalogConfig {
+    /// Mode A: persist favourited posts into the local catalog when syncing
+    /// favourites (`/process`, direct sync). Default `false`.
+    #[serde(default = "default_catalog_save_favourites")]
+    pub save_favourites: bool,
+
+    /// Hard cap on the on-disk media folder size (bytes). `0` = unlimited.
+    /// Past this, the oldest originals (by `mtime`) are LRU-evicted. The
+    /// folder itself is hardcoded to `media/` (see `media_store`).
+    #[serde(default = "default_catalog_media_cache_max_bytes")]
+    pub media_cache_max_bytes: u64,
+
+    /// Organize on-disk originals into per-tag folders instead of the numeric
+    /// Persist pool membership locally so `get_pool_posts` works offline.
+    #[serde(default = "default_catalog_pool_membership")]
+    pub pool_membership: bool,
+
+    /// Save **every post the owner encounters** (feed recommendations, browse
+    /// search/trending/favorites) into the owner's catalog (`accounts_post`),
+    /// so each one is grouped and its original media is queued for download by
+    /// the in-server media worker. Off by default — it can grow the catalog
+    /// and media cache a lot. `save_all` is independent from `save_favourites`.
+    #[serde(default)]
+    pub save_all: bool,
+}
+
+fn default_catalog_save_favourites() -> bool {
+    false
+}
+fn default_catalog_media_cache_max_bytes() -> u64 {
+    0
+}
+fn default_catalog_pool_membership() -> bool {
+    false
+}
+
+impl CatalogConfig {
+    /// The local catalog — and everything that feeds it (favourites sync,
+    /// `/process`, the background media worker) — is active when at least one
+    /// persistence toggle is on. With both off, nothing is persisted locally.
+    pub fn persistence_enabled(&self) -> bool {
+        self.save_favourites || self.save_all
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1000,6 +1051,15 @@ pub fn load_config(p: &Path) -> anyhow::Result<Config> {
 }
 
 pub fn default_path() -> anyhow::Result<PathBuf> {
+    // Honor an explicit CONFIG_PATH override first (docker, test harness, or a
+    // user pointing a CLI bin at a specific config). Without this, bins and the
+    // server silently fall back to `./config.toml` in the cwd, which can target
+    // the wrong SQLite database (see CLI bins).
+    if let Ok(p) = std::env::var("CONFIG_PATH")
+        && !p.trim().is_empty()
+    {
+        return Ok(PathBuf::from(p));
+    }
     Ok(PathBuf::from("config.toml"))
 }
 
@@ -1323,6 +1383,40 @@ max_retries = 1
         assert_eq!(bt.calibrate_threads, 0);
     }
 
+    #[test]
+    fn catalog_config_defaults() {
+        // Catalog features are opt-in (false/0) except the media cache folder,
+        // which is hardcoded to `media/` in media_store (no config knob).
+        let c = CatalogConfig::default();
+        assert!(!c.save_favourites);
+        assert_eq!(c.media_cache_max_bytes, 0);
+        assert!(!c.pool_membership);
+        assert!(!c.save_all);
+    }
+
+    #[test]
+    fn catalog_config_parses_from_toml() {
+        let cfg = parse_toml(&format!(
+            "{MINIMAL_TOML}\n\n[catalog]\nsave_favourites = true\nmedia_cache_max_bytes = 1073741824\npool_membership = true\n"
+        ))
+        .unwrap();
+        assert!(cfg.catalog.save_favourites);
+        assert_eq!(cfg.catalog.media_cache_max_bytes, 1_073_741_824);
+        assert!(cfg.catalog.pool_membership);
+        assert!(!cfg.catalog.save_all);
+    }
+
+    #[test]
+    fn catalog_defaults_via_minimal_config() {
+        let cfg = parse_toml(MINIMAL_TOML).unwrap();
+        assert!(!cfg.catalog.save_favourites);
+        assert!(!cfg.catalog.pool_membership);
+        // Without a `[catalog]` section, `CatalogConfig` uses the derived
+        // `Default` (0 / false); field-level serde defaults apply only when the
+        // section is present (covered by the override test above).
+        assert!(!cfg.catalog.save_all);
+    }
+
     // ── merge_priors ───────────────────────────────────────────────────
 
     #[test]
@@ -1540,9 +1634,23 @@ mix_sim = 0.6
     // ── Default path ───────────────────────────────────────────────────
 
     #[test]
-    fn default_path_is_config_toml() {
-        let p = default_path().unwrap();
-        assert_eq!(p, PathBuf::from("config.toml"));
+    fn default_path_honors_config_path_env_and_defaults() {
+        // These two properties are tested together because both mutate the
+        // process env; running them as separate tests would race on the shared
+        // `CONFIG_PATH` under parallel `cargo test`.
+        let prior = std::env::var("CONFIG_PATH").ok();
+        // env override wins ...
+        unsafe { std::env::set_var("CONFIG_PATH", "/srv/my/cfg.toml") };
+        assert_eq!(default_path().unwrap(), PathBuf::from("/srv/my/cfg.toml"));
+        // ... but absent env falls back to config.toml.
+        unsafe { std::env::remove_var("CONFIG_PATH") };
+        assert_eq!(default_path().unwrap(), PathBuf::from("config.toml"));
+        // Restore the caller's environment.
+        if let Some(v) = prior {
+            unsafe { std::env::set_var("CONFIG_PATH", v) };
+        } else {
+            unsafe { std::env::remove_var("CONFIG_PATH") };
+        }
     }
 
     #[test]

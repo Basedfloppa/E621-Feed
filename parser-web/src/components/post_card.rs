@@ -1185,12 +1185,17 @@ fn undo_interaction(backend_url: String, payload: FeedInteractionRequest) {
 fn is_supported_image(url: &str) -> bool {
     const ALLOWED: [&str; 7] = [".gif", ".png", ".jpg", ".jpeg", ".webp", ".avif", ".apng"];
 
+    let lower = url.to_ascii_lowercase();
+    // Local proxy URLs (backend-rewritten `files.*.url` for posts with a
+    // stored original) are always usable: they point at the local full file.
+    if lower.starts_with("/api/media/") {
+        return true;
+    }
     // Require an absolute URL — e621 hands back relative paths such as
     // "/images/download-deleted-preview.png" / ".../download-preview.png"
     // for deleted or preview-less posts, and the browser would resolve
     // those against *our* origin (`/images/...` 404). Anything that
     // isn't an http(s) URL is unusable as a remote thumbnail.
-    let lower = url.to_ascii_lowercase();
     if !(lower.starts_with("http://") || lower.starts_with("https://")) {
         return false;
     }

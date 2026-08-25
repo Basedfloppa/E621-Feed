@@ -17,8 +17,8 @@ services:
       - ./config.toml:/app/config.toml:ro
       - ./Rocket.toml:/app/Rocket.toml:ro
       - ./database.db:/app/database.db
+      - ./media:/app/media
     environment:
-      - CONFIG_PATH=/app/config.toml
       # Under host networking the app binds the host port directly; keep the
       # historical external surface (previously 8181:8080) via ROCKET_PORT.
       - ROCKET_PORT=8181
@@ -39,10 +39,8 @@ services:
       - ./config.toml:/app/config.toml:ro
       - ./Rocket.toml:/app/Rocket.toml:ro
       - ./database.db:/app/database.db
+      - ./media:/app/media
     environment:
-      - CONFIG_PATH=/app/config.toml
-      - ROCKET_PORT=8181
-      # Cap glibc malloc arenas (no-op under jemalloc).
       - MALLOC_ARENA_MAX=2
 
   app-jemalloc:
@@ -59,13 +57,10 @@ services:
       - ./config.toml:/app/config.toml:ro
       - ./Rocket.toml:/app/Rocket.toml:ro
       - ./database.db:/app/database.db
+      - ./media:/app/media
     environment:
-      - CONFIG_PATH=/app/config.toml
-      - ROCKET_PORT=8181
       # Return freed pages to the kernel promptly after cache eviction.
       - MALLOC_CONF=dirty_decay_ms:0,muzzy_decay_ms:0
-      # Cap glibc malloc arenas (no-op under jemalloc).
-      - MALLOC_ARENA_MAX=2
 
   app-full:
     profiles: ["full"]
@@ -81,9 +76,10 @@ services:
       - ./config.toml:/app/config.toml:ro
       - ./Rocket.toml:/app/Rocket.toml:ro
       - ./database.db:/app/database.db
+      - ./media:/app/media
     environment:
-      - CONFIG_PATH=/app/config.toml
-      - ROCKET_PORT=8181
       - MALLOC_CONF=dirty_decay_ms:0,muzzy_decay_ms:0
-      # Cap glibc malloc arenas (no-op under jemalloc).
+      # Cap glibc malloc arenas.
       - MALLOC_ARENA_MAX=2
+
+volumes: {}

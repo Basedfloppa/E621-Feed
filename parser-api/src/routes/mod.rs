@@ -3,8 +3,11 @@
 
 pub(crate) mod account;
 pub(crate) mod browse;
+pub(crate) mod catalog;
+pub(crate) mod catalog_manage;
 pub(crate) mod digest;
 pub(crate) mod feed;
+pub(crate) mod media;
 pub(crate) mod post;
 pub(crate) mod tag_relations;
 pub(crate) mod taste_profile;
@@ -45,5 +48,17 @@ pub fn integration_test_routes() -> Vec<rocket::Route> {
         browse::get_trending,
         browse::get_trending_scored,
         browse::get_favorites,
+        catalog::get_catalog_search,
+        catalog::get_catalog_tag_suggest,
+        catalog_manage::get_media_queue_status,
+        catalog_manage::pause_media_worker,
+        catalog_manage::resume_media_worker,
+        catalog_manage::kick_media_worker,
+        catalog_manage::get_media_queue,
+        catalog_manage::delete_media_cache,
+        catalog_manage::delete_catalog_post_route,
+        post::get_single_post,
+        post::get_pool_posts,
+        media::serve_media,
     ]
 }
