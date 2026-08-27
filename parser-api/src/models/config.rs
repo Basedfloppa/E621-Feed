@@ -35,7 +35,8 @@ pub struct Config {
     pub max_retries: u64,
     /// Set to `true` only when a trusted reverse proxy (nginx/Caddy) sits in
     /// front and rewrites `X-Forwarded-For`. When `false` (the default — direct
-    /// bind, e.g. the shipped docker-compose `8181:8080` mapping), the raw socket
+    /// bind, e.g. the shipped docker-compose with host networking and
+    /// `ROCKET_PORT=8181`), the raw socket
     /// peer IP is used for rate-limit keying so a remote client cannot forge
     /// `X-Forwarded-For` to rotate per-IP buckets:
     ///     X-Forwarded-For: 1.2.3.4

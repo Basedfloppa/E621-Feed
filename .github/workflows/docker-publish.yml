@@ -116,7 +116,7 @@ jobs:
           IMG: ${{ steps.img.outputs.name }}
         run: |
           img="$IMG:sha-$GITHUB_SHA"
-          cid="$(docker run -d -p 18080:8080 "$img")"
+          cid="$(docker run -d -p 18080:8181 "$img")"
           cleanup() {
             docker logs "$cid" 2>&1 | tail -40
             docker rm -f "$cid" >/dev/null 2>&1
@@ -139,5 +139,5 @@ jobs:
             fi
             sleep 2
           done
-          echo "smoke FAILED: image did not answer on :8080 within 60s" >&2
+          echo "smoke FAILED: image did not answer on :8181 within 60s" >&2
           exit 1

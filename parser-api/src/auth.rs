@@ -20,7 +20,7 @@
 //!
 //! `trunk serve` + Rocket on different ports looks cross-origin, so the fix is
 //! **Trunk's proxy** (`Trunk.toml` already configures `[[proxy]]` for `/api/`
-//! → `http://127.0.0.1:8080`). With `backend_domain = ""` in
+//! → `http://127.0.0.1:8181`). With `backend_domain = ""` in
 //! `static/config.js`, all API calls use relative paths — same origin (Strict
 //! attaches), cookie works.
 
@@ -100,8 +100,8 @@ pub(crate) fn csrf_origin_is_allowed(req: &Request<'_>) -> bool {
             origin,
             "http://localhost:8000"
                 | "http://127.0.0.1:8000"
-                | "http://localhost:8080"
-                | "http://127.0.0.1:8080"
+                | "http://localhost:8181"
+                | "http://127.0.0.1:8181"
         );
     }
 

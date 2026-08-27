@@ -368,7 +368,7 @@ fn catch_500(_req: &Request<'_>) -> ApiError {
 fn attach_cors(rocket: rocket::Rocket<rocket::Build>) -> rocket::Rocket<rocket::Build> {
     // Cookie auth needs `credentials: "include"`, which requires an
     // explicit (non-wildcard) origin list. `trunk serve` splits SPA
-    // (:8000) and API (:8080); production has one origin behind nginx.
+    // (:8000) and API (:8181); production has one origin behind nginx.
     let exact = rocket_cors::AllowedOrigins::some_exact(&[
         "http://localhost:8000",
         "http://127.0.0.1:8000",

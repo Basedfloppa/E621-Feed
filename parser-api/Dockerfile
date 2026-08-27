@@ -119,7 +119,7 @@ COPY parser-api/migrations ./migrations
 #   * config.toml      — config.example.toml (placeholder e621 creds). The
 #     binary FATALs on startup without a parseable config.toml (the config
 #     LazyLock exits on first access), so a bare image must ship one.
-#   * Rocket.toml      — binds 0.0.0.0:8080 (Rocket's own defaults are
+#   * Rocket.toml      — binds 0.0.0.0:8181 (Rocket's own defaults are
 #     127.0.0.1:8000, which would make the container unreachable).
 # Both are overridden at runtime by the docker-compose mounts
 # (`./config.toml:/app/config.toml:ro`, `./Rocket.toml:/app/Rocket.toml:ro`).
@@ -128,7 +128,7 @@ COPY parser-api/Rocket.toml /app/Rocket.toml
 
 ENV RUST_BACKTRACE=1
 
-# The binary binds to /app/Rocket.toml's :8080 (the actual listening port).
-EXPOSE 8080
+# The binary binds to /app/Rocket.toml's :8181 (the actual listening port).
+EXPOSE 8181
 
 CMD ["/usr/local/bin/e621-account-parser-api"]

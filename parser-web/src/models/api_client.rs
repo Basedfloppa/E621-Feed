@@ -1,6 +1,6 @@
 //! Thin wrappers around `reqwasm::http::Request` that always send
 //! cookies. `RequestCredentials::Include` is required in `trunk serve`
-//! (SPA :8000, API :8080 are different origins); redundant behind nginx
+//! (SPA :8000, API :8181 are different origins); redundant behind nginx
 //! but keeping the wrapper prevents new endpoints from forgetting it.
 
 use reqwasm::http::Request;

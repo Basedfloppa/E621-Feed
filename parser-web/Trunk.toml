@@ -4,7 +4,7 @@ port = 8000
 
 # Same-origin dev proxy.
 [[proxy]]
-backend = "http://127.0.0.1:8080/api/"
+backend = "http://127.0.0.1:8181/api/"
 rewrite = "/api/"
 
 # Process Tailwind CSS input through the CLI before the build.

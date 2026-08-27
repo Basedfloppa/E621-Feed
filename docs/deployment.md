@@ -16,6 +16,11 @@ shells out to `brotli` and `gzip` for the pre-compression hook:
 sudo apt install brotli gzip
 ```
 
+> **Windows:** skip these — the hook soft-fails when a binary is missing, so
+> `trunk serve` and a plain `trunk build` work without brotli/gzip. The
+> pre-compressed siblings only matter for the release hook, which is not used
+> by the published image anyway.
+
 Both are gated behind `TRUNK_PROFILE=release` and soft-fail (the hook
 logs and skips) if a binary is missing — `trunk serve` and the default
 `trunk build` work without them.
@@ -95,6 +100,11 @@ MALLOC_CONF=dirty_decay_ms:0,muzzy_decay_ms:0 ./target/release/e621-account-pars
 Without jemalloc, `MALLOC_ARENA_MAX=2 MALLOC_TRIM_THRESHOLD_=65536` env
 vars cut glibc waste by ~30–50% without a rebuild.
 
+> **Windows / macOS:** these knobs are Linux/glibc-specific — skip them and
+> build the default binary. `MALLOC_ARENA_MAX` / `MALLOC_TRIM_THRESHOLD_`
+> and `MALLOC_CONF` have no effect outside glibc, and the jemalloc feature
+> build is not supported on all Windows toolchains.
+
 > **Where the memory actually goes**: a measured per-structure breakdown
 > (IDF, tag-relation graph hot vs. frozen, scoring) lives in
 > [`memory-profile.md`](memory-profile.md). At current catalog size the
@@ -132,6 +142,10 @@ vars cut glibc waste by ~30–50% without a rebuild.
 > Verify the caches persist between builds with
 > `docker buildx build --load -t smoke .` run twice — the second run should
 > show `CACHED` layers instead of rebuilding trunk / deps.
+>
+> **Windows:** `install-buildx.sh` is a bash script. Docker Desktop ships
+> BuildKit and `buildx` out of the box — skip the script and check
+> `docker buildx version` directly.
 
 The repo ships a multi-stage [`parser-api/Dockerfile`](../parser-api/Dockerfile)
 plus [`docker-compose.yml`](../parser-api/docker-compose.yml) that:
@@ -151,14 +165,16 @@ docker compose build app                  # or: app-jemalloc / app-perf / app-fu
 docker compose up -d app
 ```
 
-The binary listens on the port from its `Rocket.toml` (default `:8080`) and
+The binary listens on the port from its `Rocket.toml` (default `:8181`) and
 serves the SPA at `/`, static assets under their hashed paths, and the API
-under `/api`. `docker-compose.yml` maps a host port (e.g. `8181`) to the
-container.
+under `/api`. With a plain `docker run` you map a host port to that port
+(e.g. `-p 8181:8181`); the stock `docker-compose.yml` instead uses host
+networking and binds the app directly to the host port via `ROCKET_PORT=8181`
+(no `ports:` mapping).
 
 > **The runtime image boots out of the box.** The Dockerfile bakes
 > `config.example.toml` → `/app/config.toml` (placeholder e621 creds) and
-> `Rocket.toml` → `/app/Rocket.toml` (binds `0.0.0.0:8080`) into the runtime
+> `Rocket.toml` → `/app/Rocket.toml` (binds `0.0.0.0:8181`) into the runtime
 > image, so a bare `docker run ghcr.io/<owner>/e621-feed` starts and
 > serves the embedded SPA even without mounts. These defaults exist because
 > the binary FATALs at startup without a parseable `config.toml` (the config
@@ -166,6 +182,9 @@ container.
 > `127.0.0.1:8000`. docker-compose mounts the real `config.toml` /
 > `Rocket.toml` / `database.db` **over** the baked files at runtime (bind
 > mounts fully shadow image content), so production behaviour is unchanged.
+> The published image is `linux/amd64` only — on ARM Linux hosts build
+> locally (native) or run under QEMU/binfmt; Docker Desktop on Apple Silicon
+> emulates it automatically.
 >
 > Startup is also safe against a **fresh/empty database**: the DB (migrations
 >
@@ -188,7 +207,7 @@ builds but serves `/` with a "Frontend not embedded" message.
 
 The shipped [`nginx-template`](../nginx-template) is now a minimal TLS
 terminator + reverse proxy: it forwards **everything** (SPA, static assets,
-`/api`) to the API binary on `:8080`. Replace `domain.com` with the real
+`/api`) to the API binary on `:8181`. Replace `domain.com` with the real
 hostname, swap the Let's Encrypt cert paths, drop it into
 `/etc/nginx/sites-available/<your-site>`, then:
 
@@ -207,8 +226,8 @@ The repo also ships a [`Caddyfile`](../Caddyfile) with the same idea — TLS
 domain and it works; Caddy handles certificate issuance itself:
 
 ```caddy
-// point reverse_proxy at wherever the binary listens (e.g. :8080)
-reverse_proxy 127.0.0.1:8080
+// point reverse_proxy at wherever the binary listens (e.g. :8181)
+reverse_proxy 127.0.0.1:8181
 ```
 
 In both cases do **not** serve `parser-web/dist` as a static root any more —
@@ -287,7 +306,8 @@ serve the baked file. Override it at build time instead:
   `COPY parser-web/static ./static` picks it up automatically, no Dockerfile
   changes needed.
 + **Proxy override** — if your stack has nginx/Caddy in front of the binary
-  (not the stock compose, which maps `8181:8080` directly), serve the file
+  (not the stock compose, which binds the app directly to the host port via
+  `ROCKET_PORT=8181`), serve the file
   before the backend pass: nginx `location = /static/config.js { alias
   /path/to/config.js; }`.
 
@@ -317,9 +337,10 @@ embedded. If you need Brotli at the edge, enable `ngx_brotli` and turn on
 block for the same effect (Caddy handles Vary/Accept-Encoding for you).
 
 > **Note on ports:** the binary binds to the port in its `Rocket.toml`
-> (default `:8080`). Point the reverse proxy there. The `docker-compose.yml`
-> maps a host port to the container — align both if you run Caddy/nginx on
-> the host alongside the container.
+> (default `:8181`) inside the container — map a host port to it with a plain
+> `docker run` (`-p 8181:8181`). The stock `docker-compose.yml` instead uses
+> host networking and binds the host port directly via `ROCKET_PORT=8181`.
+> Point the reverse proxy at whichever host port the app actually bound.
 
 ## Publishing the image (GitHub Actions)
 
@@ -373,12 +394,21 @@ journalctl -u e621-parser-api -f | grep 'e621.failed'
 docker compose logs -f app | grep 'e621.failed'
 # high 429 share in the last 15 min (PromQL):
 sum(rate(e621_upstream_errors_total{class="429"}[15m])) / clamp_min(sum(rate(e621_upstream_errors_total[15m])), 0.001)
+```
+
+> `journalctl` is Linux-only (systemd). On Windows under Docker Desktop use
+> `docker compose logs -f app | Select-String 'e621.failed'` (PowerShell) or
+> `docker compose logs -f app | findstr e621.failed` (cmd).
 
 ### Quick check
 
 ```bash
-curl http://localhost:8080/api/metrics | head -20
+curl http://localhost:8181/api/metrics | head -20
 ```
+
+> **Windows (PowerShell):** `curl.exe -s http://localhost:8181/api/metrics |
+> Select-Object -First 20` (plain `curl` is an alias for `Invoke-WebRequest`,
+> and `head` does not exist).
 
 Example output:
 
@@ -403,8 +433,8 @@ scrape_configs:
   - job_name: e621-feed
     static_configs:
       - targets:
-          - host.docker.internal:8080   # if Prometheus is in Docker
-          # - 192.168.1.50:8080         # or the host IP directly
+          - host.docker.internal:8181   # if Prometheus is in Docker
+          # - 192.168.1.50:8181         # or the host IP directly
     metrics_path: '/api/metrics'
 ```
 
@@ -469,7 +499,7 @@ histogram_quantile(0.95, sum by (le, class) (rate(e621_upstream_request_seconds_
 Quick live check:
 
 ```bash
-curl http://localhost:8080/api/metrics | grep -E "upstream_request_seconds|http_request_duration_seconds|http_requests_total"
+curl http://localhost:8181/api/metrics | grep -E "upstream_request_seconds|http_request_duration_seconds|http_requests_total"
 ```
 
 Both histograms are **always-on** (not gated behind a compile-time feature):
@@ -672,7 +702,7 @@ location = /api/metrics {
     allow 127.0.0.1;
     allow 10.0.0.0/8;      # docker network
     deny all;
-    proxy_pass http://backend:8080;
+    proxy_pass http://backend:8181;
 }
 ```
 
@@ -684,6 +714,6 @@ Or with Caddy:
     remote_ip 127.0.0.1 10.0.0.0/8
 }
 handle @metrics {
-    reverse_proxy localhost:8080
+    reverse_proxy localhost:8181
 }
 ```
