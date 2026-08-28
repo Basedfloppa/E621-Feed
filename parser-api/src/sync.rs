@@ -42,9 +42,6 @@ pub struct DirectSyncSummary {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SyncError {
     NoKeyConfigured,
-    /// Local catalog persistence is disabled (both `save_favourites` and
-    /// `save_all` off) — the sync refuses to persist favourites.
-    CatalogDisabled,
     Other(String),
 }
 
@@ -52,10 +49,6 @@ impl std::fmt::Display for SyncError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             SyncError::NoKeyConfigured => write!(f, "no e621 API key configured for this account"),
-            SyncError::CatalogDisabled => write!(
-                f,
-                "local catalog is disabled (set [catalog].save_favourites or save_all to enable sync)"
-            ),
             SyncError::Other(e) => write!(f, "{e}"),
         }
     }
@@ -103,12 +96,6 @@ pub async fn sync_account_direct(
     owner_token: &str,
     account_id: i32,
 ) -> Result<DirectSyncSummary, SyncError> {
-    // The sync persists favourites into the local catalog; with both
-    // persistence toggles off there is nothing to import it for, so refuse
-    // outright instead of silently accumulating catalog rows.
-    if !cfg().catalog.persistence_enabled() {
-        return Err(SyncError::CatalogDisabled);
-    }
     let (stored_key, account) = resolve_key_and_account(owner_token, account_id)
         .await
         .map_err(SyncError::Other)?;
@@ -126,20 +113,24 @@ pub async fn sync_account_direct(
         .await
         .map_err(SyncError::Other)?;
 
-    // Import favorites. e621 pages favorites in stable reverse-chronological
+    // Import favorites. e621 pages favourites in stable reverse-chronological
     // order; sync pulls the first pages (most recent) which is what the
-    // personalised feed actually needs.
+    // personalised feed actually needs. Favourites collection is the
+    // `save_favourites` (or `save_all`) scope: with both off the sync still
+    // imports the owner's blacklist below but persists no favourites.
     let mut favorites_persisted = 0usize;
-    let max_pages = ((user.favorite_count as i32 / cfg().posts_limit) + 1).clamp(1, 200);
-    for page in 1..=max_pages {
-        let posts = crate::api::get_favorites_with_key(&account, &key, page)
-            .await
-            .map_err(|e| SyncError::Other(format!("favorites page {page}: {e}")))?;
-        if posts.is_empty() {
-            break;
+    if cfg().catalog.persistence_enabled() {
+        let max_pages = ((user.favorite_count as i32 / cfg().posts_limit) + 1).clamp(1, 200);
+        for page in 1..=max_pages {
+            let posts = crate::api::get_favorites_with_key(&account, &key, page)
+                .await
+                .map_err(|e| SyncError::Other(format!("favorites page {page}: {e}")))?;
+            if posts.is_empty() {
+                break;
+            }
+            let n = persist_favorites(account_id, &account, posts).map_err(SyncError::Other)?;
+            favorites_persisted += n;
         }
-        let n = persist_favorites(account_id, &account, posts).map_err(SyncError::Other)?;
-        favorites_persisted += n;
     }
 
     // Import the owner's real blacklist (private, only visible with their key).

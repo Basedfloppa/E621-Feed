@@ -60,8 +60,8 @@ fn install_mock_config(mock_uri: &str) -> tempfile::NamedTempFile {
     // admin creds — placeholder values; mock server ignores auth.
     let modified = swap_toml_field(&modified, "admin_user", "\"test_admin\"");
     let modified = swap_toml_field(&modified, "admin_api", "\"test_api_key\"");
-    // /process persists favourites locally, which is gated on
-    // save_favourites/save_all — enable it so the pipeline tests stay valid.
+    // /process is the favourites-collection scope — enable save_favourites so
+    // the pipeline persists favourites (collection off would refuse the job).
     let modified = swap_toml_field(&modified, "save_favourites", "true");
 
     let mut file = tempfile::NamedTempFile::new().expect("temp file");
@@ -72,6 +72,42 @@ fn install_mock_config(mock_uri: &str) -> tempfile::NamedTempFile {
 
     e621_account_parser_api::models::reload_from(file.path()).expect("reload config");
     file
+}
+
+/// `/process` is the favourites-collection scope: with both collection
+/// toggles off (`save_favourites` and `save_all`) it must refuse at the
+/// pipeline gate — before any e621 call — with a message naming the toggles.
+#[rocket::async_test]
+async fn process_refused_when_collection_toggles_off() {
+    let _guard = pipeline_lock().lock().await;
+    ensure_migrations();
+    // config.example.toml has save_favourites = false and save_all = false;
+    // keep the isolated test DB path so cfg() points at the right file.
+    let example = std::fs::read_to_string(example_config_path()).expect("read config.example.toml");
+    let modified = swap_toml_field(
+        &example,
+        "db_path",
+        &format!("\"{}\"", e621_account_parser_api::models::cfg().db_path),
+    );
+    let modified = swap_toml_field(&modified, "posts_domain", "\"https://e621.invalid\"");
+    let mut file = tempfile::NamedTempFile::new().expect("temp file");
+    use std::io::Write;
+    file.write_all(modified.as_bytes())
+        .expect("write temp config");
+    file.flush().expect("flush temp config");
+    e621_account_parser_api::models::reload_from(file.path()).expect("reload config");
+
+    let err = pipeline::run_process_with_mode(
+        9_200_999,
+        "pipeline_owner".to_string(),
+        pipeline::ProcessMode::Auto,
+    )
+    .await
+    .expect_err("collection off must refuse /process at the pipeline gate");
+    assert!(
+        err.contains("save_favourites") || err.contains("catalog"),
+        "refusal should name the collection toggles, got: {err}"
+    );
 }
 
 /// Replace `key = ...` line in a TOML doc with `key = new`. Naive — only

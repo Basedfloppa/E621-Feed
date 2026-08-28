@@ -311,12 +311,6 @@ pub(crate) async fn sync_account_route(
                 "no e621 API key configured for this account; add one first".to_string(),
             ))
         }
-        Err(e621_account_parser_api::sync::SyncError::CatalogDisabled) => {
-            Err(ApiError::BadRequest(
-                "sync is disabled: enable [catalog].save_favourites or save_all in config.toml"
-                    .to_string(),
-            ))
-        }
         Err(e621_account_parser_api::sync::SyncError::Other(e)) => Err(ApiError::from(e)),
     }
 }

@@ -1,8 +1,9 @@
-//! Local catalog routes (docs/offline-catalog.md, Mode A).
+//! Local catalog routes (docs/offline-catalog.md).
 //!
-//! The catalog is an **opt-in derived view** over the owner's saved posts
-//! (`accounts_post`), searched directly. Both routes are gated behind the
-//! catalog feature toggle: when disabled they 404.
+//! The catalog is a view over the owner's saved posts (`accounts_post`),
+//! searched directly. Post info is always collected (account sync is never
+//! gated), so these routes are always available; the catalog persistence
+//! toggles only control the local media-cache build (media_fetch_worker).
 
 use rocket::serde::json::Json;
 use rocket_okapi::openapi;
@@ -12,38 +13,20 @@ use e621_account_parser_api::{
     auth::OwnerToken,
     db::{catalog_search_post_ids, catalog_tag_suggest, get_account_by_id, hydrate_posts_by_ids},
     errors::ApiError,
-    models::{Post, cfg},
+    models::Post,
     ratelimit::{self, ClientIp},
     validation,
 };
 
-/// The local catalog is available when either persistence toggle is on:
-/// `save_favourites` (posting sessions/Hydra saves) or `save_all` (every
-/// encountered post). With both off the grouped catalog view is disabled.
-pub(crate) fn catalog_enabled() -> bool {
-    cfg().catalog.persistence_enabled()
-}
-
-/// Shared feature gate used by both catalog route modules: catalog enabled or
-/// `NotFound`. Kept in the same module as `catalog_enabled` so the two stay in
-/// sync.
-pub(crate) fn catalog_gate() -> Result<(), ApiError> {
-    if !catalog_enabled() {
-        return Err(ApiError::NotFound("local catalog is disabled".into()));
-    }
-    Ok(())
-}
-
-/// Shared gate for catalog routes: feature enabled, account id valid,
-/// per-owner + per-IP throttling, and ownership check against the owner token.
+/// Shared guard for catalog routes: account id valid, per-owner + per-IP
+/// throttling, and ownership check against the owner token. No catalog
+/// feature toggle here — post info is always collected, so the view is always
+/// available; the persistence toggles only gate the media-cache worker.
 async fn guard_catalog(
     owner: &OwnerToken,
     client_ip: &ClientIp,
     account_id: i32,
 ) -> Result<(), ApiError> {
-    if !catalog_enabled() {
-        return Err(ApiError::NotFound("local catalog is disabled".into()));
-    }
     validation::validate_account_id(account_id)?;
     let owner_token = owner.0.clone();
     ratelimit::check(&format!("catalog:owner:{owner_token}"), 60, 30)?;

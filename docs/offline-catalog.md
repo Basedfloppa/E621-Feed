@@ -4,8 +4,10 @@ The app can keep a **local copy** of the posts you care about — their metadata
 in SQLite and their full-size media on disk — so the feed, the post viewer and
 actual image/video bytes keep working even with **no e621 network access**.
 
-This page is about *using and configuring* the feature. Everything is opt-in:
-nothing network-related or disk-heavy turns on unless you enable it.
+This page is about *using and configuring* the feature. Collection is opt-in
+and **scoped**: `save_favourites` controls the favourites sources, `save_all`
+additionally the "every post you encounter" sources. The media cache follows
+whatever is collected.
 
 ## The idea in one line
 
@@ -29,32 +31,32 @@ aren't in the local catalog.
 
 ## Enabling
 
-The feature lives in the `[catalog]` section of `config.toml`. It has two
-independent parts, configured separately:
-
-### A. Local catalog (saved posts + search)
-Set `save_favourites = true`:
+The feature lives in the `[catalog]` section of `config.toml`. Two toggles
+control **which sources are collected** into the local DB (posts, tags,
+`accounts_post`); the media cache then follows what was collected:
 
 ```toml
 [catalog]
-save_favourites = true     # expose the saved posts as a searchable local catalog
+save_favourites = true     # collect favourites: /favourites + /process (+ direct sync)
+save_all        = false    # ALSO collect every post the owner encounters: /digest /search /trending (and feed)
+media_cache_max_bytes = 0  # 0 = unlimited; else LRU-evict oldest beyond this many bytes
 ```
 
-When on, the selected account's already-saved posts (favourites, whatever the
-engine keeps) become a browsable list at the `/catalog` page with tag search
-and autocomplete.
+### A. Collection scopes
 
-> ⚠️ `save_favourites` only switches on the **catalog browser**. The underlying
-> storage of favourites in `accounts_post` (which the recommendation engine
-> needs) is always on — you can't turn that off without breaking scoring.
-
-Optionally also:
-
-- **`save_all = true`** — additionally save **every post the owner encounters**
-  (feed recommendations, browse search/trending/favorites) into the catalog, not
-  just favourites. Saves more, grows the disk usage faster.
+* **`save_favourites = true`** — the favourites scope: posts served by
+  `/browse/favorites` and imported by `/process` (and the direct sync) are
+  persisted (posts + `accounts_post` + tags) and become the searchable local
+  catalog.
+* **`save_all = true`** — additionally the encountered scope: posts shown on
+  `/digest`, `/search` and `/trending` (and the feed) are collected too.
+  `save_all` implies the favourites scope.
+* **Both off** — nothing is collected: `/process` refuses with a clear job
+  error, favourites/encountered sources don't persist, and the `/catalog` page
+  stays empty.
 
 ### B. Media cache (download full-size originals)
+
 The media folder is hardcoded to `media/` (relative to the working
 directory) and always enabled — link/symlink it wherever you need it. Only the
 size cap is configurable:
@@ -76,31 +78,26 @@ considered deleted upstream: it is **purged from the local catalog** (the post
 row and its tag/interaction links, via FK cascade) and logged to the audit
 stream (`catalog.media.post_deleted`), so the worker never retries it forever.
 
-Both the sync and `/process` are gated on the same persistence toggles as the
-catalog: with `save_favourites` **and** `save_all` both off they refuse to run
-(HTTP 400), so nothing is persisted and the media worker has nothing to
-download.
-
 ### Full reference
 
 ```toml
 [catalog]
-save_favourites       = false   # A: expose the local catalog browser
-media_cache_max_bytes = 0       #   B: hard size cap (bytes); 0 = unlimited (folder is fixed at media/)
+save_favourites       = false   # favourites scope: collect /favourites + /process (+ direct sync)
+media_cache_max_bytes = 0       # hard size cap (bytes); 0 = unlimited (folder is fixed at media/)
 pool_membership       = false   # store pool membership locally for offline pool navigation
-save_all              = false   # also save every post the account encounters (not just favourites)
+save_all              = false   # additionally collect encountered posts: /digest /search /trending (and feed)
 ```
 
 All fields default to off/0/false. The media folder itself is not
-configurable — it is always `media/` (relative to the working directory). If
-you don't set `[catalog]` at all, nothing changes from a plain deployment.
+configurable — it is always `media/` (relative to the working directory). With
+both toggles off nothing is collected and the media cache stays empty.
 
 ---
 
 ## Using it
 
-Open the **Catalog** page (`/catalog`). All controls are owner-gated and appear
-only when the catalog is enabled.
+Open the **Catalog** page (`/catalog`). All controls are owner-gated and always
+available.
 
 ### Search
 - Type tag terms in the search box (e.g. `wolf rating:s`). Results match
@@ -123,7 +120,7 @@ The toolbar shows the downloader state (`Pending`, `Stored`, bytes on disk) with
 ## API reference
 
 All endpoints are under `/api` and owner-gated (owner-token cookie + per-IP rate
-limits); read endpoints 404 when the catalog is disabled.
+limits).
 
 ### Catalog (search)
 - `GET /catalog/<account_id>/search?query=<tags>&page=&limit=`

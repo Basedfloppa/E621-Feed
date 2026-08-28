@@ -153,7 +153,6 @@ pub fn catalog_page() -> Html {
     let selected_user = use_state(|| Option::<UserInfo>::None);
     let is_loading = use_state(|| false);
     let error = use_state(|| Option::<String>::None);
-    let disabled = use_state(|| false);
     let tick = use_state(|| 0u32);
 
     // Media-queue state.
@@ -179,31 +178,6 @@ pub fn catalog_page() -> Html {
     let backend_url = read_config_from_head()
         .map(|c| c.backend_domain)
         .unwrap_or_default();
-
-    // Detect whether the catalog is enabled (404 when it isn't). Reuses the
-    // media-status probe, which is gated by the same `catalog_enabled()`.
-    {
-        let selected_user = selected_user.clone();
-        let disabled = disabled.clone();
-        let t = *tick;
-        use_effect_with((selected_user, t), move |(user, _)| {
-            let Some(user) = user.as_ref() else { return };
-            let Some(cfg) = read_config_from_head() else {
-                return;
-            };
-            let url = format!("{}/catalog/{}/media/status", cfg.backend_domain, user.id);
-            let disabled = disabled.clone();
-            spawn_local(async move {
-                if let Ok(resp) = api_get(&url).send().await {
-                    if resp.status() == 404 {
-                        disabled.set(true);
-                    } else {
-                        disabled.set(false);
-                    }
-                }
-            });
-        });
-    }
 
     let on_retry = {
         let tick = tick.clone();
@@ -506,7 +480,7 @@ pub fn catalog_page() -> Html {
         <div class="m-4">
             <h1 class="text-2xl font-semibold text-base-content mb-3">{ "Local Catalog" }</h1>
             <p class="text-sm text-base-content/70 mb-3">
-                { "Your saved posts, searchable by tag. Enable \"save favourites\" in the server config to populate this. Media is stored flat in the media/ folder (no per-tag subfolders)." }
+                { "Your saved posts, searchable by tag. Favourites are collected when [catalog].save_favourites is on (and by /process); posts from /search /trending /digest additionally when save_all is on. Full-size media downloads follow what is collected." }
             </p>
 
             // Unified toolbar: account selector + media queue + tag search +
@@ -515,7 +489,7 @@ pub fn catalog_page() -> Html {
                 <div class="card-body p-3 gap-2">
                     <div class="flex flex-wrap items-center gap-3">
                         <SavedAccountsSelect selected_user={selected_user.clone()} is_loading={is_loading.clone()} />
-                        if selected_user.is_some() && !*disabled {
+                        if selected_user.is_some() {
                             <span class="text-sm">
                                 {
                                     if let Some(q) = queue_status.as_ref() {
@@ -540,7 +514,7 @@ pub fn catalog_page() -> Html {
                             <button type="button" class="btn btn-sm btn-outline btn-error" onclick={on_clear_cache}>{ "Clear cache" }</button>
                         }
                     </div>
-                    if selected_user.is_some() && !*disabled {
+                    if selected_user.is_some() {
                         <div class="flex flex-wrap items-center gap-2">
                             <form class="flex-1 min-w-56 max-w-xl" onsubmit={on_submit}>
                                 <div class="join w-full">
@@ -610,11 +584,7 @@ pub fn catalog_page() -> Html {
                 </div>
             </div>
 
-            if *disabled {
-                <p class="text-base-content/70 text-center my-8">
-                    { "The local catalog is disabled on this server. Enable catalog.save_favourites or catalog.save_all in config.toml to use it." }
-                </p>
-            } else if let Some(err) = error.as_ref() {
+            if let Some(err) = error.as_ref() {
                 <ErrorAlert message={err.clone()} on_retry={on_retry} />
             } else if selected_user.is_some() {
                 <>

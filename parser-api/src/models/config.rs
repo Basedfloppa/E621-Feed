@@ -97,8 +97,11 @@ pub struct Config {
 
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct CatalogConfig {
-    /// Mode A: persist favourited posts into the local catalog when syncing
-    /// favourites (`/process`, direct sync). Default `false`.
+    /// Collect favourites into the local catalog: posts served by
+    /// `/browse/favorites` and imported by `/process` (favourites sync) are
+    /// persisted (posts + `accounts_post` + tags), and the background media
+    /// worker downloads their originals. `save_all` implies this scope.
+    /// Default `false`.
     #[serde(default = "default_catalog_save_favourites")]
     pub save_favourites: bool,
 
@@ -113,11 +116,11 @@ pub struct CatalogConfig {
     #[serde(default = "default_catalog_pool_membership")]
     pub pool_membership: bool,
 
-    /// Save **every post the owner encounters** (feed recommendations, browse
-    /// search/trending/favorites) into the owner's catalog (`accounts_post`),
-    /// so each one is grouped and its original media is queued for download by
-    /// the in-server media worker. Off by default — it can grow the catalog
-    /// and media cache a lot. `save_all` is independent from `save_favourites`.
+    /// Additionally collect every post the owner encounters — `/digest`,
+    /// `/search`, `/trending` (and the feed) — into the local catalog, on top
+    /// of the favourites scope (`save_favourites`). Off by default — it can
+    /// grow the catalog and media cache a lot. `save_all` is independent from
+    /// `save_favourites`.
     #[serde(default)]
     pub save_all: bool,
 }
@@ -133,9 +136,10 @@ fn default_catalog_pool_membership() -> bool {
 }
 
 impl CatalogConfig {
-    /// The local catalog — and everything that feeds it (favourites sync,
-    /// `/process`, the background media worker) — is active when at least one
-    /// persistence toggle is on. With both off, nothing is persisted locally.
+    /// Any local collection is active when at least one persistence toggle is
+    /// on. This gates the favourites scope (`/browse/favorites`, `/process`,
+    /// direct sync) and the media-cache worker; with both off nothing is
+    /// collected and the worker idles.
     pub fn persistence_enabled(&self) -> bool {
         self.save_favourites || self.save_all
     }

@@ -31,26 +31,28 @@ async fn owner_check(owner: &OwnerToken, account_id: i32) -> Result<(), ApiError
     Ok(())
 }
 
-/// Read throttle: catalog enabled + ownership + read-bucket rate limits.
+/// Read throttle: ownership + read-bucket rate limits. No catalog feature
+/// gate here — the catalog persistence toggles only control the media-cache
+/// worker (media_fetch_worker), not these control routes.
 async fn read_guard(
     owner: &OwnerToken,
     client_ip: &ClientIp,
     account_id: i32,
 ) -> Result<(), ApiError> {
-    crate::routes::catalog::catalog_gate()?;
     owner_check(owner, account_id).await?;
     ratelimit::check(&format!("catalog-manage-read:{}", owner.0), 120, 30)?;
     ratelimit::check(&format!("catalog-manage-read-ip:{}", client_ip.0), 240, 60)?;
     Ok(())
 }
 
-/// Write throttle: catalog enabled + ownership + write-bucket rate limits.
+/// Write throttle: ownership + write-bucket rate limits. No catalog feature
+/// gate here — the catalog persistence toggles only control the media-cache
+/// worker (media_fetch_worker), not these control routes.
 async fn write_guard(
     owner: &OwnerToken,
     client_ip: &ClientIp,
     account_id: i32,
 ) -> Result<(), ApiError> {
-    crate::routes::catalog::catalog_gate()?;
     owner_check(owner, account_id).await?;
     ratelimit::check(&format!("catalog-manage-write:{}", owner.0), 60, 30)?;
     ratelimit::check(&format!("catalog-manage-write-ip:{}", client_ip.0), 120, 30)?;

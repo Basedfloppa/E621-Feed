@@ -743,6 +743,12 @@ pub(crate) async fn get_daily_digest(
     e621_account_parser_api::metrics::METRICS
         .digest_views_total
         .inc();
+    // Encountered scope (`save_all`): persist the digest's posts into the
+    // local catalog, same as /search, /trending and the feed. Fire-and-forget.
+    if cfg().catalog.save_all {
+        let digest_posts: Vec<Post> = posts.iter().map(|sp| sp.post.clone()).collect();
+        crate::routes::browse::spawn_browse_persist(digest_posts, "digest", account_id, true);
+    }
     cache_set(cache_key, posts.clone());
     Ok(Json(posts))
 }

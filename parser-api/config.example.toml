@@ -248,9 +248,10 @@ seed_owner_token = "calibration-seed"
 calibrate_threads = 0                 # 0 = auto = nproc/2
 
 # --- Local catalog & offline serving (see ../docs/offline-catalog.md) -------
-# All fields are opt-in and default off, so existing deployments are unchanged.
+# Collection is scoped by these toggles; the media cache follows what is
+# collected. With both off, nothing is collected.
 [catalog]
-save_favourites = false            # A: persist favourited posts into the local catalog (also enables favourites sync + /process)
+save_favourites = false            # favourites scope: collect /favourites + /process (+ direct sync)
 media_cache_max_bytes = 0          # 0 = unlimited; else LRU-evict oldest originals beyond this (folder is fixed at media/)
 pool_membership = false            # persist pool membership locally for offline pool navigation
-save_all = false                   # save every encountered post to the owner catalog (grows media cache a lot)
+save_all = false                   # additionally collect encountered posts: /digest /search /trending (and feed)

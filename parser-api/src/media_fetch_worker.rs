@@ -204,18 +204,13 @@ fn err_chain(e: &dyn std::error::Error) -> String {
 }
 
 /// Spawn the background media worker. Called from the server binary
-/// (`main.rs`) at startup. The worker only downloads originals for **saved**
-/// posts (`accounts_post`), so it runs only when at least one catalog
-/// persistence toggle is on (`save_favourites` and/or `save_all`); with both
-/// off there is nothing to download.
+/// (`main.rs`) at startup. The worker always runs, but whether a pass actually
+/// **downloads** originals is gated per-pass on the catalog persistence
+/// toggles (`save_favourites` and/or `save_all`) — the media cache follows
+/// the collection scopes: with both off nothing is collected and the worker
+/// idles. The per-pass check is hot-reload aware, so flipping the toggles at
+/// runtime starts/stops downloads without a restart.
 pub fn spawn_media_fetcher() {
-    let c = &models::cfg().catalog;
-    if !c.persistence_enabled() {
-        info!(
-            "[media-worker] not started: catalog persistence disabled (enable [catalog].save_favourites or save_all)"
-        );
-        return;
-    }
     let ua = models::cfg().user_agent.clone();
     let client = match reqwest::Client::builder()
         .user_agent(ua)
@@ -250,9 +245,10 @@ pub fn spawn_media_fetcher() {
 }
 
 async fn run_pass(client: &reqwest::Client) -> Result<usize, String> {
-    // Config hot-reloads: if both persistence toggles are turned off, no new
-    // posts get saved, so there is nothing to download — idle until one of
-    // them comes back.
+    // The media cache follows the collection scopes: with both toggles off
+    // nothing is collected, so there is nothing to download — idle until a
+    // toggle comes back. Hot-reload aware — flipping the toggles starts or
+    // stops downloads on the next pass.
     let c = &models::cfg().catalog;
     if !c.persistence_enabled() {
         return Ok(0);

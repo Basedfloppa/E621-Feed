@@ -87,8 +87,8 @@ fn install_mock_config(mock_uri: &str) -> tempfile::NamedTempFile {
     modified = swap_toml_field(&modified, "posts_limit", "4");
     modified = swap_toml_field(&modified, "admin_user", &format!("\"{ADMIN_USER}\""));
     modified = swap_toml_field(&modified, "admin_api", &format!("\"{ADMIN_PASS}\""));
-    // Sync persists favourites into the local catalog, which is gated on
-    // save_favourites/save_all — enable it so the sync flow tests stay valid.
+    // Sync persists favourites in the favourites-collection scope — enable
+    // save_favourites so the sync flow tests persist favourites.
     modified = swap_toml_field(&modified, "save_favourites", "true");
     // No retries and no mandatory inter-request delay → 5xx tests fail fast
     // and the sync loop is not throttled by the per-attempt backoff.

@@ -142,12 +142,14 @@ pub async fn run_process_with_mode(
     owner_token: String,
     mode: ProcessMode,
 ) -> Result<(), String> {
-    // /process persists favourites into the local catalog; with both
-    // persistence toggles off there is nothing to import it for, so refuse
-    // instead of silently accumulating catalog rows.
+    // /process is the favourites-collection scope: it persists the account's
+    // favourites into the local catalog only when a collection toggle is on
+    // (`save_favourites` or `save_all`). With both off there is nothing to
+    // import for, so refuse here (job-level, not a route 400) instead of
+    // silently collecting rows the operator asked not to keep.
     if !cfg().catalog.persistence_enabled() {
         return Err(
-            "local catalog is disabled: set [catalog].save_favourites or save_all to run /process"
+            "local catalog collection is disabled: set [catalog].save_favourites (or save_all) to import favourites via /process"
                 .to_string(),
         );
     }

@@ -179,17 +179,6 @@ async fn process_posts(
     // token; cap per-owner and per-IP so click-storms can't lap us.
     ratelimit::check(&format!("process:owner:{owner_token}"), 3, 3)?;
     ratelimit::check(&format!("process:ip:{}", client_ip.0), 5, 5)?;
-    // /process persists favourites locally; refuse synchronously when the
-    // catalog persistence toggles are both off (no job is even registered).
-    if !e621_account_parser_api::models::cfg()
-        .catalog
-        .persistence_enabled()
-    {
-        return Err(ApiError::BadRequest(
-            "process is disabled: enable [catalog].save_favourites or save_all in config.toml"
-                .to_string(),
-        ));
-    }
     let owner_for_check = owner_token.clone();
     db_blocking(move || get_account_by_id(&owner_for_check, account_id).map_err(|e| e.clone()))
         .await?;

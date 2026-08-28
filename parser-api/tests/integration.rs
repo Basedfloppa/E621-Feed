@@ -2428,29 +2428,22 @@ async fn sync_status_without_key_reports_no_key() {
 }
 
 #[rocket::async_test]
-async fn sync_trigger_rejected_when_catalog_disabled() {
-    let (client, account, cookie) = sync_client(8_800_602).await;
-    let owner = account.owner;
-    let aid = account.id;
-    // With a key present the only reason to reject is the disabled catalog:
-    // the integration config loads config.example.toml, where save_favourites
-    // and save_all are both off, and the sync is gated on them.
-    e621_account_parser_api::db::set_account_e621_key(owner, aid, "abcdef1234567890-key").unwrap();
-    let resp = client
-        .post(format!("/api/account/{aid}/sync"))
-        .cookie(cookie)
-        .dispatch()
-        .await;
-    assert_eq!(
-        resp.status(),
-        Status::BadRequest,
-        "sync must be rejected when catalog persistence is disabled"
-    );
-    let v: serde_json::Value = resp.into_json().await.unwrap();
-    let msg = v["error"].as_str().unwrap_or_default().to_lowercase();
+async fn sync_is_not_gated_on_catalog_toggles() {
+    // The integration config loads config.example.toml, where save_favourites
+    // and save_all are both off. Post-info collection (account sync) must NOT
+    // be gated on them anymore — with no key the first error is the missing
+    // key, never a catalog-disabled rejection (which would have fired before
+    // the key check under the old gate).
+    let account = TestAccount::new(8_800_602);
+    let err = e621_account_parser_api::sync::sync_account_direct(account.owner, account.id)
+        .await
+        .expect_err("keyless sync must fail with the missing-key error");
     assert!(
-        msg.contains("save_favourites") || msg.contains("catalog"),
-        "rejection should name the disabled catalog, got: {msg}"
+        matches!(
+            err,
+            e621_account_parser_api::sync::SyncError::NoKeyConfigured
+        ),
+        "expected NoKeyConfigured (catalog gate must not fire), got: {err}"
     );
 }
 

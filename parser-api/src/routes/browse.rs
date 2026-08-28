@@ -1,9 +1,13 @@
 //! Browse routes — proxy e621 search queries for Trending, Favorites, etc.
 //! These bypass our local scoring pipeline and return raw posts.
 //!
-//! Browse responses are progressively persisted to the local catalog:
-//! - `/browse/favorites` saves posts + links them to the account (`accounts_post`)
-//! - `/browse/trending`  saves posts to the catalog only (no account link)
+//! Responses are progressively persisted to the local catalog, gated by the
+//! catalog collection toggles:
+//! - **favourites scope** (`save_favourites` **or** `save_all`):
+//!   `/browse/favorites` saves posts + links them to the account
+//!   (`accounts_post`);
+//! - **encountered scope** (`save_all` only): `/search` and `/trending` also
+//!   save the posts the owner was shown (accounts_post link included).
 
 use chrono::Utc;
 use rocket::serde::json::Json;
@@ -27,9 +31,11 @@ use e621_account_parser_api::{
 
 /// Fire-and-forget persistence of browse posts to the local catalog.
 ///
-/// * `source` — "trending" or "favorites", used for audit-logging.
-/// * `link_to_account` — when `true`, also inserts `accounts_post` rows
-///   so the posts are associated with this account (used for favorites).
+/// * `source` — used for audit-logging ("search", "trending", "favorites",
+///   "feed").
+/// * `link_to_account` — when `true`, also inserts `accounts_post` rows so
+///   the posts are associated with this account. Callers gate collection on
+///   the catalog toggles (`save_favourites`/`save_all`) before calling.
 ///
 /// Errors are non-fatal: the response has already been sent to the client.
 pub(crate) fn spawn_browse_persist(
@@ -127,7 +133,10 @@ pub(crate) async fn search_posts(
     let posts = api::get_posts_by_tags(&account.blacklist, query, page, limit, Priority::Live)
         .await
         .map_err(ApiError::from_string)?;
-    spawn_browse_persist(posts.clone(), "search", account_id, cfg().catalog.save_all);
+    // Encountered scope: only `save_all` collects browse search results.
+    if cfg().catalog.save_all {
+        spawn_browse_persist(posts.clone(), "search", account_id, true);
+    }
     Ok(Json(posts))
 }
 
@@ -175,7 +184,10 @@ pub(crate) async fn search_scored_posts(
     let posts = api::get_posts_by_tags(&account.blacklist, query, page, limit, Priority::Live)
         .await
         .map_err(ApiError::from_string)?;
-    spawn_browse_persist(posts.clone(), "search", account_id, cfg().catalog.save_all);
+    // Encountered scope: only `save_all` collects browse search results.
+    if cfg().catalog.save_all {
+        spawn_browse_persist(posts.clone(), "search", account_id, true);
+    }
 
     let idf = current_idf();
     let global_relation = current_global_relation();
@@ -258,13 +270,10 @@ pub(crate) async fn get_trending_scored(
         .await
         .map_err(ApiError::from_string)?;
 
-    // Fire-and-forget persist to catalog (same as get_trending).
-    spawn_browse_persist(
-        posts.clone(),
-        "trending",
-        account_id,
-        cfg().catalog.save_all,
-    );
+    // Fire-and-forget persist to catalog (encountered scope: `save_all`).
+    if cfg().catalog.save_all {
+        spawn_browse_persist(posts.clone(), "trending", account_id, true);
+    }
 
     // Score against the account profile.
     let idf = current_idf();
@@ -352,14 +361,11 @@ pub(crate) async fn get_trending(
         .await
         .map_err(ApiError::from_string)?;
 
-    // Сохраняем в каталог (без привязки к аккаунту — trending не является
-    // явным предпочтением пользователя). Fire-and-forget, не задерживает ответ.
-    spawn_browse_persist(
-        posts.clone(),
-        "trending",
-        account_id,
-        cfg().catalog.save_all,
-    );
+    // Сохраняем в каталог (encountered scope: `save_all`). Fire-and-forget,
+    // не задерживает ответ.
+    if cfg().catalog.save_all {
+        spawn_browse_persist(posts.clone(), "trending", account_id, true);
+    }
 
     Ok(Json(posts))
 }
@@ -388,9 +394,12 @@ pub(crate) async fn get_favorites(
         .await
         .map_err(ApiError::from_string)?;
 
-    // Сохраняем в каталог И привязываем к аккаунту — это фавориты пользователя.
+    // Сохраняем в каталог И привязываем к аккаунту — это фавориты
+    // пользователя (favourites scope: `save_favourites` или `save_all`).
     // Fire-and-forget, не задерживает ответ.
-    spawn_browse_persist(posts.clone(), "favorites", account_id, true);
+    if cfg().catalog.persistence_enabled() {
+        spawn_browse_persist(posts.clone(), "favorites", account_id, true);
+    }
 
     Ok(Json(posts))
 }
