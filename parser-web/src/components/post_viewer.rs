@@ -425,7 +425,7 @@ fn post_thumb_button(post: &Post, open_post: &Callback<Post>, current_id: Option
                 if url.is_empty() {
                     html! { <span class="flex items-center justify-center w-full h-full text-xs text-base-content/50">{ format!("#{id}") }</span> }
                 } else {
-                    html! { <img class="w-full h-full object-cover" src={url} alt={format!("Post {}", id)} loading="lazy" /> }
+                    html! { <img class="w-full h-full object-cover" src={url} referrerpolicy="origin" alt={format!("Post {}", id)} loading="lazy" /> }
                 }
             }
         </button>
@@ -1196,7 +1196,7 @@ pub fn post_viewer(props: &PostViewerProps) -> Html {
                             };
                             html! {
                                 <div class="relative h-full w-full flex items-center justify-center overflow-hidden">
-                                    <img class="select-none" draggable="false" onclick={stop_click.clone()} style={img_style} ondblclick={toggle_zoom.clone()} src={media_url} alt={format!("Post {}", cur.id)} />
+                                    <img class="select-none" draggable="false" onclick={stop_click.clone()} style={img_style} ondblclick={toggle_zoom.clone()} src={media_url} referrerpolicy="origin" alt={format!("Post {}", cur.id)} />
                                     <div class="absolute bottom-2 left-1/2 -translate-x-1/2 flex items-center gap-1 rounded-full bg-black/70 px-3 py-1 text-base-content" onclick={stop_click.clone()}>
                                         <button type="button" class="btn btn-xs btn-circle btn-ghost" title="Zoom out" onclick={zoom_out.clone()} aria-label="Zoom out">{ "−" }</button>
                                         <span class="text-xs tabular-nums w-12 text-center">{ format!("{:.0}%", (*zoom) * 100.0) }</span>
@@ -1399,7 +1399,7 @@ pub fn post_viewer(props: &PostViewerProps) -> Html {
                                                     {{
                                                         let url = post_thumb_url(&sp.post);
                                                         if !url.is_empty() {
-                                                            html! { <img class="w-full object-cover" style="aspect-ratio: 4/3;" src={url.clone()} alt={format!("Post {}", sp.post.id)} loading="lazy" /> }
+                                                            html! { <img class="w-full object-cover" style="aspect-ratio: 4/3;" src={url.clone()} referrerpolicy="origin" alt={format!("Post {}", sp.post.id)} loading="lazy" /> }
                                                         } else {
                                                             html! { <div class="w-full bg-base-300 flex items-center justify-center text-xs" style="aspect-ratio: 4/3;">{ format!("#{}", sp.post.id) }</div> }
                                                         }

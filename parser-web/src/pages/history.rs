@@ -148,6 +148,7 @@ pub fn history_page() -> Html {
                                     if let Some(url) = post.files.preview.url.clone().or_else(|| post.files.sample.url.clone()) {
                                         <img
                                             src={url}
+                                            referrerpolicy="origin"
                                             alt={format!("Post {}", entry.post_id)}
                                             loading="lazy"
                                             class="w-full object-cover"

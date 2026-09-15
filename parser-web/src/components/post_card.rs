@@ -794,6 +794,7 @@ pub fn post_card(props: &PostCardProps) -> Html {
                                     <img
                                         class="w-full object-cover"
                                         src={url}
+                                        referrerpolicy="origin"
                                         alt={(*alt_text).clone()}
                                         loading="lazy"
                                         decoding="async"
@@ -807,6 +808,7 @@ pub fn post_card(props: &PostCardProps) -> Html {
                                 <img
                                     class="w-full object-cover"
                                     src={url}
+                                    referrerpolicy="origin"
                                     alt={(*alt_text).clone()}
                                     loading="lazy"
                                     decoding="async"
