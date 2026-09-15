@@ -13,7 +13,12 @@
     />
     <meta name="application-name" content="E621 Feed" />
     <meta name="robots" content="index,follow" />
-    <meta name="referrer" content="no-referrer" />
+    <!-- `origin`, not `no-referrer`: e621 answers 403 to cross-site media
+         requests that arrive without a Referer, and Chrome then blocks the
+         HTML error body (ERR_BLOCKED_BY_ORB), so previews and video posters
+         render blank. The same policy is repeated per media element
+         (`referrerpolicy="origin"`) as a safety net. -->
+    <meta name="referrer" content="origin" />
     <link rel="canonical" href="https://e621feed.zorolin.rs/" />
 
     <link data-trunk rel="css" href="src/tailwind-output.css" />
