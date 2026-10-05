@@ -28,11 +28,21 @@ reqwest = { version = "0.12", features = ["json", "stream"] }
 flate2 = "1"
 csv = "1"
 futures-util = "0.3"
-rocket = { version = "0.5.1", features = ["json"] }
+# `rocket`'s only default feature is `http2`, and it is the only thing that pulls
+# hyper 0.14's h2 0.3.x into the graph. That line is EOL (latest 0.3.27) with an
+# open DoS advisory, RUSTSEC-2026-0258, patched only in 0.4.16+ — so the fix is to
+# stop linking it. Nothing here needs h2c: Rocket binds 0.0.0.0:8181 plaintext and
+# Caddy/nginx terminate TLS and proxy over HTTP/1.1. `rocket_cors` and
+# `rocket_okapi` already depend on rocket with `default-features = false`, so this
+# line was the only switch turning HTTP/2 on.
+rocket = { version = "0.5.1", default-features = false, features = ["json"] }
 rocket_cors = "0.6.0"
 tokio = { version = "1", features = ["full"] }
 chrono = { version = ">=0.4.38, <0.5", features = ["serde"] }
-prometheus = { version = "0.13", features = [] }
+# `default-features = false` drops the protobuf encoder — and with it the
+# protobuf 2.x dependency that carries RUSTSEC-2024-0437. `/api/metrics` renders
+# with `TextEncoder` only, so the protobuf path was never used.
+prometheus = { version = "0.14", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 urlencoding = "2"
