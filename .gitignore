@@ -18,7 +18,12 @@ parser-web/.well-known/security.txt
 */db
 parser-api/loadtest/server.log
 parser-api/loadtest/__pycache__/
-parser-api/loadtest/locustfile.py
-.pi**
 **media
 **db_exports
+
+**/.*/**
+# Throwaway configs used by the local e2e/browser checks (config.toml is ignored
+# above; these are the per-run variants that point at a scratch database).
+config.mcp.toml
+config.e2e.toml
+config.*-e2e.toml

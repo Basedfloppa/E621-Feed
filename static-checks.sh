@@ -135,17 +135,26 @@ for PROJ in "${PROJECTS[@]}"; do
   log "═══ project: $(basename "$PROJ") ═══"
 
   # --- 1. clippy -----------------------------------------------------------
+  # `-D warnings` makes the default lint groups (including `clippy::all`) fail
+  # this check, matching the pre-commit hook — previously everything was only
+  # `-W`, so the check could never report a real lint as a failure.
+  #
+  # `--force-warn clippy::nursery` is required, not `-W`: `-D warnings` caps the
+  # whole `warnings` group, and a plain `-W clippy::nursery` does NOT override
+  # that cap — the first attempt turned all ~1700 experimental nursery findings
+  # into hard errors (exit 101). `--force-warn` does override it.
   run_check clippy "$PROJ" cargo \
     cargo clippy --manifest-path "$PROJ/Cargo.toml" --all-targets --message-format=json \
-      -- -W clippy::perf -W clippy::nursery
+      -- -D warnings --force-warn clippy::nursery
 
-  # --- 2. cargo-audit (run once at repo root) ------------------------------
-  # audit is not project-scoped; it reads Cargo.lock. Run only for the first
-  # project to avoid redundant identical scans.
-  if [[ "$PROJ" == "${PROJECTS[0]}" ]]; then
-    run_check audit "$PROJ" cargo-audit \
-      cargo audit --file "$PROJ/Cargo.lock" --json
-  fi
+  # --- 2. cargo-audit (per project) ----------------------------------------
+  # Each crate ships its own `.cargo/audit.toml` with its own accepted
+  # advisories, and cargo-audit resolves that config relative to the CURRENT
+  # DIRECTORY. Running it from the repo root with `--file` silently bypassed
+  # every ignore and reported advisories the crate had already triaged. Hence
+  # `cd@` into the crate, and no `--file` (it reads ./Cargo.lock).
+  run_check audit "$PROJ" cargo-audit \
+    cd@ cargo audit --json
 
   # --- 3. cargo-deny (also repo-scoped, run once) --------------------------
   if [[ "$PROJ" == "${PROJECTS[0]}" ]]; then
@@ -161,8 +170,14 @@ for PROJ in "${PROJECTS[@]}"; do
 
   # --- 4. cargo-outdated ---------------------------------------------------
   # Run per-project since each has its own dependencies.
+  #
+  # `--exclude schemars`: cargo-outdated probes the newest version of every
+  # dependency, and schemars 1.x renamed the `chrono` feature to `chrono04`.
+  # parser-api is pinned to schemars 0.8 by rocket_okapi, so the probe cannot
+  # resolve and the whole run aborts with zero output. Excluding it keeps the
+  # remaining dependencies reportable; schemars 0.8.22 is the newest 0.8.x.
   run_check outdated "$PROJ" cargo-outdated \
-    cargo outdated --manifest-path "$PROJ/Cargo.toml" --format json
+    cargo outdated --manifest-path "$PROJ/Cargo.toml" --exclude schemars --format json
 
   # --- 5. cargo-bloat (only native targets; skip WASM frontend) ------------
   if [[ "$(basename "$PROJ")" != "parser-web" ]]; then
@@ -316,20 +331,21 @@ for PROJ in "${PROJECTS[@]}"; do
   fi
 done
 
-# === audit findings (single run) ==========================================
-# Attach audit results to the first project's output directory.
-AUDIT_PROJ="${PROJECTS[0]}"
-AUDIT_BASE="$(project_out "$AUDIT_PROJ" audit)"
-if [[ -s "${AUDIT_BASE}.raw" ]]; then
-  jq '{
-    vulnerabilities: (.vulnerabilities.count // 0),
-    warnings:        ((.warnings // {} | to_entries | map(.value | length) | add) // 0)
-  }' "${AUDIT_BASE}.raw" > "${AUDIT_BASE}.findings.json" 2>/dev/null \
-    || echo '{}' > "${AUDIT_BASE}.findings.json"
+# === audit findings (per project) =========================================
+for PROJ in "${PROJECTS[@]}"; do
+  base="$(project_out "$PROJ" audit)"
+  if [[ -s "${base}.raw" ]]; then
+    jq '{
+      vulnerabilities: (.vulnerabilities.count // 0),
+      warnings:        ((.warnings // {} | to_entries | map(.value | length) | add) // 0),
+      advisory_ids:    ([.vulnerabilities.list[]?.advisory.id] | sort)
+    }' "${base}.raw" > "${base}.findings.json" 2>/dev/null \
+      || echo '{}' > "${base}.findings.json"
 
-  jq --slurpfile f "${AUDIT_BASE}.findings.json" '. + $f[0]' \
-    "${AUDIT_BASE}.summary.json" > "${AUDIT_BASE}.tmp" && mv "${AUDIT_BASE}.tmp" "${AUDIT_BASE}.summary.json"
-fi
+    jq --slurpfile f "${base}.findings.json" '. + $f[0]' \
+      "${base}.summary.json" > "${base}.tmp" && mv "${base}.tmp" "${base}.summary.json"
+  fi
+done
 
 # === geiger unsafe metrics (per project) ===================================
 for PROJ in "${PROJECTS[@]}"; do
