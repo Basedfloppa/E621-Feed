@@ -68,8 +68,8 @@ The final score is a weighted blend of **12 scoring channels**:
 |`quality_w_relative_comments`|comments barely count|comment volume vs user's norm matters more|
 
 The upvote ratio component (weighted by `quality_c`) is blended into the existing
-three-component score as a fourth weighted term. At `quality_c = 0` (legacy
-default) the behaviour is unchanged. The ratio defaults to 0.5 for posts with
+three-component score as a fourth weighted term. At `quality_c = 0` (disabled)
+the behaviour is unchanged. The ratio defaults to 0.5 for posts with
 zero votes. Uses the `score.up` / `score.down` fields from the e621 API.
 
 ## Popularity channel internals
@@ -99,7 +99,7 @@ Three-piece exponential kernel: hot → recent → days.
 |`recency_split_age_hours`|smaller hot window (hours)|larger hot window (default 24 h; only used when `recency_tau_hot` is not NaN)|
 |`recency_w_global`|personal age profile dominates|newer posts always win regardless of user pattern|
 |`recency_w_personal`|uniform newer-is-better|posts close to user's typical age are favored|
-|`recency_personal_floor_frac`|personal recency window can collapse tight|personal recency always at least this fraction of `recency_tau_days`|
+|`recency_personal_floor_frac`|personal recency window can collapse tight|personal recency always at least this fraction of the active recency τ (`recency_tau_days` by default)|
 |`recency_log_personal`|`false`: personal recency uses linear age — 30→60d gap matters as much as 300→600d|`true` (default): personal recency uses log-age — scale-free, treats those gaps equivalently|
 
 ## Diversity / MMR
@@ -127,12 +127,13 @@ Where `PMI_match_ratio` is the fraction of (tag_a, tag_b) pairs whose pointwise
 mutual information exceeds `diversity_pmi_threshold`, capped at
 `diversity_semantic_max_tags` tags per group per post to bound O(T²) cost.
 
-When `diversity_semantic_blend > 0`, the personal tag-relation graph contributes
-PMI alongside the global graph. `diversity_user_pmi_weight` controls the balance:
-user-graph PMI is multiplied by this factor before blending with global PMI.
-Values > 1.0 amplify per-user diversity personalisation (a user who co-favourites
-`skeb`+`canine` gets less MMR penalty for those tags together); 0 disables the
-user graph entirely for diversity even when `diversity_semantic_blend > 0`.
+When `diversity_semantic_blend > 0` and a per-user graph is available,
+`diversity_user_pmi_weight` switches the PMI source from the global graph to the
+user graph and multiplies the resulting PMI term (`pmi × weight`) before Jaccard
+blending. Values > 1.0 amplify per-user diversity personalisation (a user who
+co-favourites `skeb`+`canine` gets less MMR penalty for those tags together);
+0 disables the user graph entirely for diversity even when
+`diversity_semantic_blend > 0`.
 
 > **Load bound (2026-08)** — the personal graph is materialized from SQLite with
 > `load_account_tag_relation`, which now caps the strongest `user_relation_edge_limit`
@@ -197,8 +198,9 @@ leaves it or the user clicks outside it.
 
 Feedback counts are decayed eagerly at `/process` time. Between refreshes, a
 supplementary decay factor is applied per-tag in `interaction_fit` based on
-`profile_refreshed_at` and `feedback_decay_half_life_days` — the longer since
-the last profile rebuild, the less the interaction signal is trusted.
+each tag's `last_interaction_at` and `feedback_decay_half_life_days` — the
+longer since that tag's last interaction, the less the interaction signal is
+trusted.
 
 |Variable|Lower →|Higher →|
 |---|---|---|
@@ -340,7 +342,7 @@ Per-pair PMI values are aggregated into a single channel score via
 |`tag_relation_pmi_scale_user`|separate PMI scale for user graph (NaN = track `tag_relation_pmi_scale`)|personal PMI amplified independently of global|
 |`tag_relation_min_cooc`|thin pairs contribute global signal (and load into memory)|require more joint occurrences before a pair is trusted; raising this also prunes more rows out of the in-memory graph at load time|
 |`tag_relation_user_min_cooc`|let cooc=1 user pairs contribute|require multiple user-side co-occurrences before a pair contributes (default 1 — user pair samples are an order of magnitude sparser than catalog samples)|
-|`tag_relation_cooc_ref`|even rare global pairs trusted at full weight|global pairs need more cooc before earning full PMI weight (rare pairs get linearly shrunk toward zero)|
+|`tag_relation_cooc_ref`|even rare global pairs trusted at full weight|global pairs need more cooc before earning full PMI weight (rare pairs get logarithmically shrunk toward zero)|
 |`tag_relation_user_cooc_ref`|rare user pairs trusted at full weight|user pairs need more co-occurrences before earning full personal-PMI weight|
 |`tag_relation_max_tags`|more tags enter the O(K²) pairwise loop (slower, more signal)|fewer tags used — O(T²) → O(K²) speedup via Cluster-PMI (default 20, set to 0 for no limit)|
 |`user_relation_edge_limit`|load the entire account co-occurrence table into the user graph|only the strongest N pairs are loaded into the user-relation graph for MMR diversity (default 250k — bounds the per-request graph build for very large accounts; see the hydrate/diversify optimization)|

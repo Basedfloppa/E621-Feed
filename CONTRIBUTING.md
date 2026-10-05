@@ -17,7 +17,10 @@ npm install
 
 ## Enable the pre-commit hook
 
-This repository has no remote CI. Enable its versioned local hook after cloning:
+This repository has no remote quality gate: the only GitHub workflow
+(`.github/workflows/docker-publish.yml`) builds and publishes the image, and runs
+nothing else — no `fmt`, `clippy`, tests, audit or WASM build. Enable the
+versioned local hook after cloning:
 
 ```bash
 git config core.hooksPath .githooks
@@ -62,6 +65,32 @@ cargo test --manifest-path parser-web/Cargo.toml -- --test-threads=1
 ```
 
 To apply Rust formatting, omit `-- --check` from the `cargo fmt` command. For machine-applicable lint fixes, use `cargo clippy --fix --allow-dirty --all-targets`, then inspect the diff and rerun the full checks.
+
+## Static checks (optional tooling)
+
+`static-checks.sh` runs clippy (default lints as errors, `perf`/`nursery` as
+information), `cargo audit`, `cargo-deny`, `cargo-outdated`, `cargo-bloat`,
+`cargo-machete` and `cargo-geiger` per crate, then writes a JSON report to
+`target/static-checks/<UTC-timestamp>/report.json`. Five of those tools are not
+bundled with Cargo:
+
+```bash
+cargo install --locked --root "$PWD/target/tools" \
+  cargo-machete cargo-bloat cargo-outdated cargo-deny cargo-geiger
+export PATH="$PWD/target/tools/bin:$PATH"
+./static-checks.sh
+```
+
+Three things worth knowing before fighting the tooling:
+
+- `--locked` is required for `cargo-outdated` and `cargo-geiger`: without it
+  Cargo resolves a `cargo-util` that needs rustc 1.97, newer than the toolchain
+  used here.
+- `cargo-deny` stays a no-op (`status: "skipped"`) until a `deny.toml` exists —
+  there is none today, so installing the tool alone does not turn the step on.
+- If `~/.cargo` is not writable, point `CARGO_HOME` at a writable directory
+  first (`CARGO_HOME="$PWD/target/cargo-home"`), otherwise every `cargo install`
+  fails even though the registry is reachable.
 
 ## Dependency advisories
 

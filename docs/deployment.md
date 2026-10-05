@@ -17,9 +17,10 @@ sudo apt install brotli gzip
 ```
 
 > **Windows:** skip these — the hook soft-fails when a binary is missing, so
-> `trunk serve` and a plain `trunk build` work without brotli/gzip. The
-> pre-compressed siblings only matter for the release hook, which is not used
-> by the published image anyway.
+> `trunk serve` and a plain `trunk build` work without brotli/gzip. The release
+> image does run the hook (`trunk build --release`), but `parser-api/Dockerfile`
+> deletes the `.br`/`.gz` siblings again right after the build and `build.rs`
+> skips them too, so they never reach the image.
 
 Both are gated behind `TRUNK_PROFILE=release` and soft-fail (the hook
 logs and skips) if a binary is missing — `trunk serve` and the default
@@ -161,7 +162,10 @@ plus [`docker-compose.yml`](../parser-api/docker-compose.yml) that:
 
 ```bash
 cd parser-api
-docker compose build app                  # or: app-jemalloc / app-perf / app-full
+docker compose build app                                 # default feature set
+docker compose --profile jemalloc build app-jemalloc     # jemalloc
+docker compose --profile perf build app-perf             # perf_metrics
+docker compose --profile full build app-full             # jemalloc + perf_metrics
 docker compose up -d app
 ```
 
@@ -221,6 +225,14 @@ and sets its own Cache-Control / Content-Type headers (mirroring the old
 nginx rules: hashed assets + `.wasm` immutable, `config.js` no-store,
 `index.html` no-cache).
 
+Both templates also set the transport/browser security headers: HSTS,
+`Referrer-Policy: strict-origin-when-cross-origin`, `X-Content-Type-Options`,
+`X-Frame-Options: DENY`, `Cross-Origin-Opener-Policy`,
+`Cross-Origin-Resource-Policy` and `Permissions-Policy` (`nginx-template:58-64`,
+`Caddyfile:10-19`). The **CSP is not set by the proxy** — the binary adds
+`Content-Security-Policy` itself through Rocket's `Shield`, built from the
+configured `posts_domain` (`parser-api/src/main.rs:519-558`).
+
 The repo also ships a [`Caddyfile`](../Caddyfile) with the same idea — TLS
 (Let's Encrypt auto) + a clean reverse proxy to the binary. Drop in your
 domain and it works; Caddy handles certificate issuance itself:
@@ -268,8 +280,9 @@ Key deployment properties:
   `no-store, no-cache` (hashed wasm/css/js assets are `immutable` instead),
   so a changed value is picked up on the next reload. For the same reason it
   deliberately carries **no SRI `integrity` attribute** in `index.html`.
-+ **Embedded at build time** — the file is baked into the binary via
-  rust-embed, so a Docker bind-mount over `/app/static/config.js` does **not**
++ **Embedded at build time** — `build.rs` turns every file under
+  `parser-web/dist` into an `include_bytes!` asset table compiled into the
+  binary, so a Docker bind-mount over `/app/static/config.js` does **not**
   override what the binary serves. To change it, either
   1. serve an override from your proxy before the backend pass, e.g. nginx
      `location = /static/config.js { alias /path/to/config.js; }` (an exact
@@ -333,8 +346,9 @@ The old `compress-dist.sh` still runs on `trunk build --release` and writes
 `.br`/`.gz` siblings into `dist`, but **`parser-api/build.rs` deliberately
 excludes those siblings** (they'd double binary size), so they're not
 embedded. If you need Brotli at the edge, enable `ngx_brotli` and turn on
-`brotli on;` on the proxy. With Caddy, add `encode zstd gzip` to the site
-block for the same effect (Caddy handles Vary/Accept-Encoding for you).
+`brotli on;` on the proxy. The shipped [`Caddyfile`](../Caddyfile) already
+enables `encode zstd gzip` — with `application/wasm` explicitly excluded from
+compression — so Caddy handles Vary/Accept-Encoding for you.
 
 > **Note on ports:** the binary binds to the port in its `Rocket.toml`
 > (default `:8181`) inside the container — map a host port to it with a plain
@@ -346,7 +360,8 @@ block for the same effect (Caddy handles Vary/Accept-Encoding for you).
 
 [`.github/workflows/docker-publish.yml`](../.github/workflows/docker-publish.yml)
 builds the image with BuildKit on GitHub runners and publishes it to **GHCR**
-(`ghcr.io/<owner>/e621-feed`):
+(`ghcr.io/<owner>/e621-feed` — the lowercased `${GITHUB_REPOSITORY}`; note that
+`e621-account-parser` is the *binary* name, not the image name):
 
 + **push to `master`** → `latest` + `sha-<commit>`;
 + **`v*` git tag** → `v1.2.3`, `1.2.3`, `1.2`, `sha-<commit>`;
@@ -354,18 +369,21 @@ builds the image with BuildKit on GitHub runners and publishes it to **GHCR**
   inputs (e.g. `jemalloc`).
 
 Build context is the repo root (same as docker-compose's `context: ..`), so
-the root `.dockerignore` applies (it excludes the 71 GB `database.db`). The
+the root `.dockerignore` applies (it excludes the local `parser-api/database.db`
+catalog, which is multi-GB). The
 `type=gha` BuildKit cache keeps the cargo/trunk layers warm between runs.
 
 After pushing, the workflow **smoke-tests the image**: it runs the container
 and requires `GET /` to answer `200` (which also catches the "Frontend not
-embedded" 503 regression). With the baked boot defaults above, the
-container comes up on a fresh database without external mounts.
+embedded" 503 regression) **and** `/static/config.js` to contain `APP_CONFIG`
+(without it the SPA boots into "App configuration failed to load"). With the
+baked boot defaults above, the container comes up on a fresh database without
+external mounts.
 
-All third-party actions are pinned to commit SHAs; the workflow passes
-`actionlint` and `zizmor` with no findings. To also publish to Docker Hub,
-add a `docker/login-action` step for it and append
-`docker.io/<user>/e621-feed` to the metadata `images` list.
+All third-party actions are pinned to commit SHAs. To also publish to Docker Hub,
+add a `docker/login-action` step for it and append `docker.io/<user>/e621-feed`
+to the metadata `images` list (the workflow's own comment still carries the
+legacy `e621-account-parser` name there).
 
 ---
 
@@ -418,7 +436,7 @@ Example output:
 e621_accounts_total 12
 # HELP e621_feed_views_total Feed recommendation views
 # TYPE e621_feed_views_total counter
-e621_feed_views_total{account_id="658288"} 128
+e621_feed_views_total 128
 # HELP e621_catalog_posts_total Total posts in local catalog
 # TYPE e621_catalog_posts_total gauge
 e621_catalog_posts_total 1607
@@ -477,6 +495,10 @@ The dashboard includes panels for:
 | e621 Upstream p95 by Class | Time series | `e621_upstream_request_seconds` by class |
 | HTTP Request Rate by Route | Time series (stacked) | `e621_http_requests_total` by route |
 
+> **Caveat:** the `DAU / WAU / MAU` and `Top-10 Accounts per Feature` panels
+> group by `account_id`, but the view counters carry no such label any more
+> (`parser-api/src/metrics.rs`), so those panels are stale in the shipped JSON.
+
 ### Latency & performance
 
 The two latency histograms are the primary tool for diagnosing “the response
@@ -517,14 +539,15 @@ there is a per-request structured trace. It is **always-on by default** — the
 self-host; disable by building with `--no-default-features` if you ever need
 it).
 
-For every non-empty scoring pass the backend logs **one** `info!` line as a
-single pure-JSON object (no prefix, so Grafana/Loki can `| json` it directly;
-identifiable by the `"trace":"scoring"` field):
+For every non-empty scoring pass the backend prints **one** pure-JSON line to
+**stdout** via `println!` (deliberately bypassing the `log` facade, whose
+`info!` would be filtered out — no prefix, so Grafana/Loki can `| json` it
+directly; identifiable by the `"trace":"scoring"` field):
 
 ```json
 {"trace":"scoring","endpoint":"recommendations","account":42,"posts":200,
  "total_ms":318000,"top_channel":"tag_relation_fit","top_channel_ms":312000,
- "channel_ms":{"tag_similarity":…,"tag_relation_fit":…,"novelty":…,"artist_discovery_fit":…,…},
+ "channel_ms":{"tag_similarity":…,"tag_relation_fit":…,"novelty_fit":…,"artist_discovery_fit":…,…},
  "phase_ms":{"db_hydrate":…,"e621_fetch":…,"cache_build":…,"scoring":…,"diversify_post":…}}
 ```
 
@@ -543,9 +566,10 @@ The recommendations trace is emitted from `build_recommendations_shared`
 emitter is `ScoringMetrics::emit_json` in `utils/scorer/metrics.rs`.
 
 The shipped dashboard (`docs/grafana-dashboard.json`, uid `adrwh67` in this
-deployment) already includes three Loki panels for this log: a timeseries of
+deployment) already includes Loki panels for this log: a timeseries of
 `total_ms` by endpoint, a timeseries of the bottleneck channel
-(`top_channel_ms` by `top_channel`), and a raw trace logs panel. They query the
+(`top_channel_ms` by `top_channel`), one panel per pipeline phase, and a raw
+trace logs panel. They query the
 `loki` datasource (uid `dfkfplmnysw74e`); the container selector
 `container=~"e621.*|.*feed.*|.*parser.*"` may need adjusting to the backend
 container's actual name. They are empty until the backend actually emits
@@ -590,16 +614,6 @@ are noisy. `e621_experiment_bucket_interactions_total` and
 Create a new dashboard in Grafana using the `e621-feed` Prometheus data
 source. Useful panels:
 
-**DAU (Daily Active Users)** — PromQL:
-
-```promql
-count by (account_id) (
-  sum(rate(e621_feed_views_total[24h])) > 0
-    or sum(rate(e621_digest_views_total[24h])) > 0
-    or sum(rate(e621_browse_views_total[24h])) > 0
-)
-```
-
 **Feature usage breakdown** — PromQL:
 
 ```promql
@@ -607,6 +621,10 @@ sum(rate(e621_feed_views_total[24h]))  # Feed
 sum(rate(e621_digest_views_total[24h]))  # Digest
 sum(rate(e621_browse_views_total[24h]))  # Browse
 ```
+
+> These three view counters are **global, with no `account_id` label** (it was
+> removed on purpose — see `parser-api/src/metrics.rs`), so a per-account
+> DAU/WAU/MAU panel cannot be built from `/api/metrics`.
 
 **Process success rate** — PromQL:
 
@@ -673,10 +691,12 @@ active within 48 hours), the **cold** worker runs every 15 minutes
 ### Backfill worker
 
 Runs every 6 hours (configurable via `backfill_interval_secs`). For each
-account that hasn't been backfilled recently, it iterates over **all**
-preferred tags (not just the top-N) and fetches:
+account that hasn't been backfilled recently, it walks the account's preferred
+tags — capped at 10 tags per account per tick — and fetches:
 
-1. **Retro posts** — the last available page (page=9999, oldest posts)
+1. **Retro posts** — the oldest posts, via `order:id_asc` on page 1 (e621 caps
+   `posts.json?page=` at 750 and answers 410 beyond it, so a high "last page"
+   number can never work)
 2. **Fresh posts** — page 1 (newest posts)
 
 Uses `Priority::Backfill` through the adaptive rate gate (base delay
@@ -684,8 +704,9 @@ Uses `Priority::Backfill` through the adaptive rate gate (base delay
 
 + If a live request passed within `backfill_live_window_ms` (default 2s),
   backfill adds extra delay proportional to recency
-+ When `x-ratelimit-remaining` from e621 drops below thresholds, the gate
-  increases delays: 2× at < 200 remaining, 3× at < 100, 5× at < 50
++ When `x-ratelimit-remaining` from e621 drops, the gate scales the base
+  delay: 2× at 101–200 remaining, 3× at 51–100, 5× at ≤ 50 (and 2× while the
+  remaining budget is still unknown)
 
 The backfill has its own circuit breaker (`backfill_breaker_threshold`,
 default 10 consecutive failures) separate from the hot/cold prefetcher's
@@ -693,9 +714,11 @@ breaker.
 
 ### Security note
 
-The `/api/metrics` endpoint exposes `account_id` as label values. The
-endpoint is intentionally unauthenticated so Prometheus can scrape it
-without credentials. In production, restrict access via nginx:
+The `/api/metrics` endpoint is intentionally unauthenticated so Prometheus can
+scrape it without credentials. Account ids are deliberately **not** used as
+metric labels (`parser-api/src/metrics.rs`), but the endpoint still exposes
+operational data (per-route latency, error classes, bucket distribution), so in
+production restrict access via nginx:
 
 ```nginx
 location = /api/metrics {

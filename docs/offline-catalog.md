@@ -37,7 +37,7 @@ control **which sources are collected** into the local DB (posts, tags,
 
 ```toml
 [catalog]
-save_favourites = true     # collect favourites: /favourites + /process (+ direct sync)
+save_favourites = true     # collect favourites: /browse/favorites + /process (+ direct sync)
 save_all        = false    # ALSO collect every post the owner encounters: /digest /search /trending (and feed)
 media_cache_max_bytes = 0  # 0 = unlimited; else LRU-evict oldest beyond this many bytes
 ```
@@ -68,7 +68,7 @@ media_cache_max_bytes = 0         # 0 = unlimited; else LRU-evict oldest beyond 
 
 A background worker downloads the **full-size original** of every saved post
 that doesn't have one yet, in small rate-gated idle batches. A favourites sync
-(`POST /account/<id>/sync`) or `/process` that saves a post automatically
+(`POST /api/account/<id>/sync`) or `/process` that saves a post automatically
 queues its original for download — no manual step. It only ever downloads
 *saved* posts, never the whole recommendation corpus.
 
@@ -82,7 +82,7 @@ stream (`catalog.media.post_deleted`), so the worker never retries it forever.
 
 ```toml
 [catalog]
-save_favourites       = false   # favourites scope: collect /favourites + /process (+ direct sync)
+save_favourites       = false   # favourites scope: collect /browse/favorites + /process (+ direct sync)
 media_cache_max_bytes = 0       # hard size cap (bytes); 0 = unlimited (folder is fixed at media/)
 pool_membership       = false   # store pool membership locally for offline pool navigation
 save_all              = false   # additionally collect encountered posts: /digest /search /trending (and feed)
@@ -119,14 +119,16 @@ The toolbar shows the downloader state (`Pending`, `Stored`, bytes on disk) with
 
 ## API reference
 
-All endpoints are under `/api` and owner-gated (owner-token cookie + per-IP rate
-limits).
+All endpoints are under `/api`. The catalog, queue and delete routes are
+owner-gated (owner-token cookie + per-IP rate limits); the raw-media route is
+deliberately **unauthenticated** so plain `<img>`/`<video>` tags work (see
+[Limitations](#limitations--security-notes)).
 
 ### Catalog (search)
 - `GET /catalog/<account_id>/search?query=<tags>&page=&limit=`
   Posts in the account's saved catalog matching all tag terms (AND,
-  case-insensitive). An empty `query` returns the whole saved catalog. Paginated
-  like browse (`?page=` is 1-based).
+  case-insensitive). `query` is required, but an empty value returns the whole
+  saved catalog. Paginated like browse (`?page=` is 1-based).
 - `GET /catalog/<account_id>/tag/suggest?prefix=&limit=`
   Local tag autocomplete: tag names the account's saved posts carry,
   prefix-matched, ordered by frequency.
@@ -160,7 +162,7 @@ limits).
 - `DELETE /catalog/<account_id>/post/<post_id>` — remove a post from the
   account's catalog. The on-disk original + index row are deleted **only when
   this was the last account** still saving the post — other owners keep the
-  shared file (audit event records `media_removed`).
+  shared file (the `catalog.post.delete` audit event records `media_removed`).
 
 ---
 
@@ -196,10 +198,11 @@ After a **hard kill** (not a clean stop), un-checkpointed pages may still be in
 
 `docker-compose.yml` bind-mounts `./database.db` and `./media` into the
 container, so both persist on the host under `parser-api/`. The container runs
-as the launching host user (uid/gid from `id -u`/`id -g` via `./compose.sh`, or
-from `E621_UID`/`E621_GID` in `.env`) so bind-mounted files stay host-owned.
-The hardcoded `media/` folder resolves inside the container to `/app/media`
-(the mounted host folder).
+as the image's default user (the Dockerfile creates an `app` user but never
+switches to it with `USER`, and the compose file sets no `user:`), so files it
+writes into those mounts are owned by root on the host — `E621_UID`/`E621_GID`
+in `.env` are not consumed by `docker-compose.yml`. The hardcoded `media/`
+folder resolves inside the container to `/app/media` (the mounted host folder).
 
 The config file sets paths (`db_path`, ...), interpreted relative to the
 launch directory. The env overrides that exist are:

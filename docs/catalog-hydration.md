@@ -1,8 +1,9 @@
 # Catalog hydration
 
-The backend runs a background catalog hydrator independently of account
-`/process` jobs. It repairs recommendation candidates that belong to no account
-as well as stale posts imported by older versions.
+The backend runs a background catalog hydrator
+(`parser-api/src/media_hydrator.rs`) independently of account `/process`
+jobs. It repairs recommendation candidates that belong to no account as well
+as stale posts imported by older versions.
 
 ## Schedule and load
 
@@ -20,11 +21,15 @@ An active catalog post is selected when it has any incomplete upstream data:
 - no `tags_posts` rows;
 - missing `uploader_id`.
 
-For returned posts, the hydrator upserts post/media metadata and saves all tag
-relations/categories. If e621 does not return a requested ID, the catalog post
-is removed. Posts already marked `is_deleted = 1` are purged before each scan;
-foreign-key cascades remove related tag, account-link, session, and interaction
-records.
+For returned posts, the hydrator upserts post/media metadata
+(`db::upsert_catalog_posts`) and replaces the post's tag links and categories
+(`db::replace_posts_tags_batch`; `track_cooccurrence` is off, so the
+co-occurrence graph is not updated). If e621 does not return a requested ID,
+the catalog post is removed — but only when the response is provably complete
+(one returned post per requested ID); a truncated response never triggers the
+delete. Posts already marked `is_deleted = 1` are purged before each scan;
+foreign-key cascades remove related tag, account-link, session, and
+interaction records.
 
 ## Logs
 

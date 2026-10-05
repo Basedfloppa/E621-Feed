@@ -4,9 +4,9 @@ Prometheus metrics are exposed at `/api/metrics` (unauthenticated pool).
 All names have the `e621_` prefix. Metrics are lazily registered on first use.
 There is also a Loki structured log `SCORING_TRACE` (not a Prometheus metric) — see the end.
 
-> Observability invariant: counters keyed by `account_id`/`route`/`class` carry
-> potential cardinality. Per-account counters (`feed_interactions_by_type_total`)
-> grow only by `type`, not by id. Histogram buckets are fixed.
+> Observability invariant: counters keyed by `route`/`class` carry potential
+> cardinality. Interaction counters (`feed_interactions_by_type_total`) grow only
+> by `type`, not by id. Histogram buckets are fixed.
 
 ## Account metrics
 
@@ -22,13 +22,13 @@ There is also a Loki structured log `SCORING_TRACE` (not a Prometheus metric) �
 |---|---|---|---|
 | `e621_feed_views_total` | counter | — | feed views |
 | `e621_digest_views_total` | counter | — | digest views |
-| `e621_browse_views_total` | counter | `source`=trending\|favorites | browse page views |
+| `e621_browse_views_total` | counter | `source`=search\|trending\|favorites\|feed\|digest\|trending_scored | browse page views |
 
 ## /process (background profile import)
 
 | Metric | Type | Labels | Read as |
 |---|---|---|---|
-| `e621_process_runs_total` | counter | `status`=started\|success | /process runs (success = success/started) |
+| `e621_process_runs_total` | counter | `status`=started\|success\|failed | /process runs (success = success/started) |
 | `e621_process_running_seconds` | gauge | — | age of the current run; >1800s (30 min) — "stuck" (alert) |
 | `e621_process_last_duration_seconds` | gauge | — | duration of the last /process |
 
@@ -92,7 +92,8 @@ Useful flat fields for `| unwrap`:
 - `total_ms` — total assembly/scoring time of the response
 - `top_channel` / `top_channel_ms` — which channel component took the most time
 - `phase_<name>` — each pipeline phase (flat, for Loki): `phase_db_hydrate`,
-  `phase_e621_fetch`, `phase_cache_build`, `phase_scoring`, `phase_diversify_post`.
+  `phase_e621_fetch`, `phase_cache_build`, `phase_scoring`, `phase_diversify_post`,
+  `phase_build` (digest assembly).
 - `phase_ms` — the same phases as a nested object (for humans/back-compat; Loki cannot read it).
 - `endpoint` / `account` / `posts` — request context.
 

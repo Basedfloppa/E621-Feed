@@ -4,7 +4,8 @@ Manual write-ups of `calibrate grid` runs. The unfiltered `[best]`
 weights from each grid run plus the production defaults distilled from
 them. Drop new files in this folder as you accumulate runs (e.g.
 `v5.4-N1000.md`, `2026-05-10-paired-only.md`); machine-readable TOML
-artifacts continue to land in `calibration_results/` at the repo root.
+artifacts continue to land in `calibration_results/` under the working
+directory `write_grid_log` runs in (normally `parser-api/`).
 
 See [`../calibration.md`](../calibration.md) for the harness, sweep
 modes, knob descriptions, and caveats on holdout artifacts before
@@ -12,12 +13,17 @@ copying numbers into `config.example.toml`.
 
 ## History
 
-The right-most bold column is the live default in
-[`../../parser-api/config.example.toml`](../../parser-api/config.example.toml).
+This file is a **historical record**: each section below is a frozen
+snapshot of the grid runs it names (latest: v5.10, May 2026) and none of
+the numbers are re-measured. They are kept for comparison, not as the
+current defaults — for those, read
+[`../../parser-api/config.example.toml`](../../parser-api/config.example.toml)
+today. In particular the `**v5.9 default**` column is the default as of
+v5.9, and later releases have moved some of it.
 Earlier columns are kept for reference: each `[best]` lists the raw
 grid winner, and the matching `default` column shows what was actually
-copied into prod (typically a partial step toward `[best]` to hedge
-against holdout artifacts described in [`../calibration.md`](../calibration.md)).
+copied into prod at that time (typically a partial step toward `[best]` to
+hedge against holdout artifacts described in [`../calibration.md`](../calibration.md)).
 
 | Knob | v5.5 | v5.7 (rolled back) | post_id best (N=915) | time_causal best (N=915, n=3) | **v5.9 default** |
 |---|---|---|---|---|---|
@@ -76,7 +82,7 @@ Headlines:
   the 1.4+ region. The old clamp was biting, but only modestly.
 - **Diversify barely affects offline metrics.** ΔNDCG@20 between on/off
   is +0.003 (post_id) and +0.001 (random). MMR is a UX feature, not an
-  offline-metric tuning knob — running grids with `--with-diversify`
+  offline-metric tuning knob — running grids with `with-diversify`
   every time is wasted compute (it's ~6–7× slower for 0.3 % gain).
 - **Group weights are highly stable.** `group_w_{artist,character,
   general}` were *identical* across all 4 runs (2.525 / 2.125 / 0.738).

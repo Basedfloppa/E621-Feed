@@ -4,6 +4,12 @@ Measured with `parser-api/examples/memory_profile.rs` (synthetic data at
 approximate production scale) against the real `database.db` (198,794 tags,
 306,888 posts, 2,728,610 co-occurrence pairs with `cooc_count >= 2`).
 
+> **Historical measurements.** The RSS figures below are a point-in-time run
+> of the example (this file last revised 2026-08-01); structure sizes follow
+> the catalog, so re-run the example after catalog growth rather than
+> treating these as current. The commands under [Re-running](#re-running)
+> regenerate them.
+
 > Companion docs: [`load-testing.md`](load-testing.md) measures SQLite
 > concurrency under load; `cargo bench --bench scoring` times the scoring
 > hot path (≈3.5 µs/post).
@@ -97,6 +103,7 @@ catalog size. The rest comes from:
 ## Re-running
 
 ```bash
+cd parser-api
 cargo run --release --features jemalloc --example memory_profile
 # without jemalloc:
 cargo run --release --example memory_profile

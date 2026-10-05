@@ -33,6 +33,11 @@ personalized feed, daily digest, and search.
 - **PWA / offline** — installable as an app (Chromium); works offline with
   cached static assets and your recent data, re-syncs feedback when back
   online, and the installed app refreshes itself in the background
+- **Offline catalog (optional)** — keep a local copy of posts and media, search
+  tags locally without hitting e621, and serve originals from disk
+  ([docs/offline-catalog.md](docs/offline-catalog.md))
+- **Per-account e621 API keys** — stored encrypted at rest, optional ownership
+  proof at claim time, read-only direct sync of favourites
 
 ---
 
@@ -157,7 +162,9 @@ first `/process` import builds your profile.
 | Topic | Where |
 |-------|-------|
 | All config keys (defaults + explanations) | [`parser-api/config.example.toml`](parser-api/config.example.toml) |
+| Local offline catalog & media serving | [docs/offline-catalog.md](docs/offline-catalog.md) |
 | Production deployment (nginx/Caddy, compression, monitoring) | [docs/deployment.md](docs/deployment.md) |
+| Metrics reference (names, labels, how to read) | [docs/metrics.md](docs/metrics.md) |
 | Publishing Docker images to GHCR (GitHub Actions workflow) | [.github/workflows/docker-publish.yml](.github/workflows/docker-publish.yml) |
 | Scoring knobs — "lower vs. higher" guide | [docs/scoring.md](docs/scoring.md) |
 | Offline calibration (`calibrate eval` / `grid`) | [docs/calibration.md](docs/calibration.md) |

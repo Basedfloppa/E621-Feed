@@ -8,18 +8,18 @@
 2. **`calibrate`** builds a holdout-based evaluation harness from those
    favourites: per user, splits favs into train/test. Three split
    strategies:
-   - `split=post_id` (default) — sort by `post_id`, oldest 80% → synthetic
+   - `split=post_id` — sort by `post_id`, oldest 80% → synthetic
      profile, newest 20% → test set. Cheap; biases recency.
    - `split=random` — deterministic uniform-random hold-out. Easier task
      because positives can pre-date training items.
-   - `split=time_causal` — sort favourites by `created_at`, hold the
-     newest 20% as test. Closer to the production "predict next
+   - `split=time_causal` (default) — sort favourites by `created_at`, hold
+     the newest 20% as test. Closer to the production "predict next
      favourite" task and resilient to id-aliasing on imported data.
 
-   Negatives are sampled from the catalog (default: mixed hard-negatives
-   — popularity- and time-matched; switchable to pure-random via
-   `neg=uniform` or hybrid via `neg=hybrid` for 70% mixed + 30%
-   tag-similarity-based hard negatives). Each test fixture also carries a
+   Negatives are sampled from the catalog (default: hybrid hard-negatives
+   — 70% mixed, popularity- and time-matched, plus 30% tag-similarity-based
+   hard negatives; `neg=mixed` drops the hard-mined third and
+   `neg=uniform` switches to pure random). Each test fixture also carries a
    **per-account tag-relation graph** built from `train_posts`
    cooccurrences, so the personal `tag_relation` channel and its
    `*_user_*` knobs see real signal under the synthetic split (added in
@@ -35,21 +35,23 @@
    enum-valued knobs. Reports `[best priors — non-default values]` and a
    clamp-saturation warning if any knob landed at its search boundary.
 
-   As of v5.11 the grid covers ~80 numeric knobs + 1 categorical:
-   - 11 `mix_*` weights (added `mix_uploader`, `mix_exclusivity`, `mix_novelty`)
+   The grid currently covers 85 numeric knobs + 2 categorical:
+   - 12 `mix_*` weights (`mix_uploader`, `mix_exclusivity`, `mix_novelty`,
+     `mix_artist_discovery`)
    - IDF / frequency shaping (8): `df_floor`, `idf_max`, `idf_lambda`,
      `idf_alpha`, `freq_alpha`, `bm25_k`, `one_sided_ratio_exp`,
      `idf_rsj_smoothing`
-   - Quality channel (4): `quality_a/b/log_bias`, `quality_c`,
+   - Quality channel (7): `quality_a/b/log_bias`, `quality_c`,
      `quality_w_absolute/relative_score/relative_comments`
    - Popularity channel (2): `popularity_w_fav/duration`
-   - Recency channel (6): `recency_tau_days`, `recency_tau_recent`,
+   - Recency channel (8): `recency_tau_days`, `recency_tau_recent`,
      `recency_tau_hot`, `recency_split_age_days`, `recency_split_age_hours`,
      `recency_w_global/personal`, `recency_personal_floor_frac`
    - Discrete-pref + cold-start (3): `discrete_smoothing_alpha`,
      `discrete_pref_floor`, `coldstart_n0`
-   - Tag-relation (6): `tag_relation_pmi_scale`, `tag_relation_w_global/personal`,
-     `tag_relation_cooc_ref/user_cooc_ref`, `tag_relation_max_tags`
+   - Tag-relation (8): `tag_relation_pmi_scale`, `tag_relation_w_global/personal`,
+     `tag_relation_cooc_ref/user_cooc_ref`, `tag_relation_max_tags`,
+     `tag_relation_min_cooc`, `tag_relation_user_min_cooc`
    - Cold-start internals (2): `coldstart_smoothing_boost`,
      `interaction_ctr_prior_alpha`
    - Per-group multipliers (6): `group_w_artist/character/copyright/species/general/lore`
@@ -61,18 +63,23 @@
    - Uploader channel (3): `uploader_n0`, `uploader_w_avg_score`, `uploader_w_avg_fav`
    - Exclusivity channel (4): `min_exclusivity_cooc`, `exclusivity_scale`,
      `exclusivity_max_tags`, `exclusivity_cross_group_weight`
-   - Novelty channel (1): `novelty_n0` (`novelty_use_feedback` is bool — not grid-swept)
+   - Novelty channel (1): `novelty_n0` (`novelty_use_feedback` is swept by
+     the categorical registry below)
+   - Artist discovery channel (2): `artist_discovery_n0`,
+     `artist_discovery_novelty_bonus` (its `mix_artist_discovery` weight is
+     listed with the other `mix_*` knobs)
    - Diversity weights (5): `diversity_w_artist/character/copyright/species/general`
    - **Class J — diversity semantic (4):** `diversity_semantic_blend`,
      `diversity_pmi_threshold`, `diversity_semantic_max_tags`,
      `diversity_user_pmi_weight`
-   - Categorical (1): `tag_relation_pair_aggregator` ∈ {mean, max, geomean}
+   - Categorical (2): `tag_relation_pair_aggregator` ∈ {mean, max, geomean};
+     `novelty_use_feedback` ∈ {true, false}
 
    Subsets / flags:
-   - `grid mix-only` — only the 11 mix weights (fastest)
+   - `grid mix-only` — only the 12 mix weights (fastest)
    - `grid pairs-only` — skip the single-knob sweep, only the paired moves
    - `grid no-pairs` — skip the paired sweep
-   - `grid with-diversify` — run `diversify_scored_posts` before NDCG so
+   - `grid with-diversify` — run `diversify_indices` before NDCG so
      `diversity_*` knobs become measurable
    - `verbose` — log every probe (including rejected ones) plus
      per-knob early-exit notices
@@ -199,7 +206,7 @@ not move the same way in a real A/B test:
    `strong_negative_*` — none are in the grid because they have zero
    gradient here. Tune online.
 4. **Diversity knobs (`diversity_*`)** are in the grid only under
-   `--with-diversify` (gated via `diversify_only`). Even there ΔNDCG@20
+   `with-diversify` (gated via `diversify_only`). Even there ΔNDCG@20
    is 0.001–0.003 — MMR is a UX feature, not an offline-metric tuning
    knob. Tune online or measure UX directly.
 5. **Personal `tag_relation` channel** has signal as of v5.7: each
@@ -245,9 +252,13 @@ priors = { mix_sim = 0.48, mix_quality = 0.10, diversity_max_penalty = 0.30 }
 ```
 
 The `priors` field accepts any key from `[priors]` as a JSON inline table
-(e.g. `{ group_w_artist = 2.0, diversity_max_penalty = 0.3 }`). Legacy
-`mix_*` fields take precedence over `priors` when both specify the same
-knob. See `merge_priors()` in
+(e.g. `{ group_w_artist = 2.0, diversity_max_penalty = 0.3 }`). When both
+specify the same knob, **`priors` wins**: `BucketOverride::apply_to` applies the
+legacy `mix_*` fields first and then merges the JSON `priors` over them. The
+merge only overwrites fields that are non-default in the JSON (a numeric field
+left at its default — `0.0`, or the sentinel `NAN` — is ignored), so **a JSON
+`priors` entry cannot force a knob to `0.0`**; use the legacy `mix_*` field for
+that. See `merge_priors()` in
 [`src/models/config.rs`](../parser-api/src/models/config.rs) for the full
 list of overridable fields.
 
@@ -267,7 +278,8 @@ Per-run `[best]` weights and the production defaults distilled from
 them live in [`calibration-results/`](calibration-results/) — drop new
 write-ups there as grid runs accumulate. Machine-readable TOML
 artifacts from `write_grid_log` continue to land in
-`calibration_results/` at the repo root.
+`calibration_results/` under the working directory the run uses
+(normally `parser-api/`).
 
 ## Files
 
@@ -278,7 +290,8 @@ artifacts from `write_grid_log` continue to land in
   - `main.rs` — CLI parsing, mode chaining, dataset hand-off.
   - `dataset.rs` — eligible-account selection, train/test split,
     post hydration, per-post `CachedPostFeatures` build.
-  - `sampling.rs` — train/test split + uniform/mixed-hard negatives.
+  - `sampling.rs` — train/test split + uniform / mixed-hard / hybrid-hard
+    negatives.
   - `metrics.rs` — NDCG / Recall / MRR + uncached `score_with_progress`.
   - `cache.rs` — `ChannelMask`, `ScoreCache`, `score_with_cache` (the
     grid hot path).
@@ -292,7 +305,7 @@ artifacts from `write_grid_log` continue to land in
   identical mirror of their `&Post` counterparts in `channels.rs`.
 - [`parser-api/src/utils/scorer/cached.rs`](../parser-api/src/utils/scorer/cached.rs) —
   `CachedPostFeatures` / `CachedTag`: pre-resolved (group, lc, df_raw,
-  global_tag_id) for every post in the eval set.
+  global_tid, user_tid) for every post in the eval set.
 - [`parser-api/.cargo/config.toml`](../parser-api/.cargo/config.toml) —
   build parallelism cap.
 
@@ -321,7 +334,7 @@ calibrate_threads = 0   # 0 = auto (nproc/2). Set explicitly to e.g. 4 to be mor
 
 2. **Per-channel score cache** ([`bin/calibrate/cache.rs`](../parser-api/src/bin/calibrate/cache.rs)).
    Every `KnobSpec` declares an `invalidates: u16` bitmask naming which of
-   the 9 scoring channels its delta affects. The baseline run computes all
+   the 12 scoring channels its delta affects. The baseline run computes all
    channels and stores them per (account, post). Each subsequent probe
    recomputes only the invalidated channels and reuses the rest from the
    cache; the final mix-blend / temperature / strong-negative-penalty
@@ -329,7 +342,7 @@ calibrate_threads = 0   # 0 = auto (nproc/2). Set explicitly to e.g. 4 to be mor
 
    | Knob class (typical examples) | Channels recomputed | Probe cost vs uncached |
    |---|---|---|
-   | `mix_*` (8) / `score_temperature` / `mmr_redundancy_exp` (no diversify) / `strong_negative_penalty` | none — final blend only | ~3% |
+   | `mix_*` (12) / `score_temperature` / `mmr_redundancy_exp` (no diversify) / `strong_negative_penalty` | none — final blend only | ~3% |
    | `quality_*`, `popularity_*`, `recency_*`, `interaction_ctr_*`, single-channel TR knobs | one channel | ~5–40% |
    | `idf_*`, `df_floor`, `idf_max`, `bm25_k`, `freq_alpha`, `idf_rsj_smoothing`, `tag_sim_jaccard_blend` | sim only | ~30% |
    | `tag_relation_*` (PMI / cooc_ref) | tag_relation only | ~40% |
@@ -348,7 +361,7 @@ calibrate_threads = 0   # 0 = auto (nproc/2). Set explicitly to e.g. 4 to be mor
   the end of each account's hydration so they don't accumulate.
 - `CachedPostFeatures`: ~2 KB / post (avg 25 tags × ~80 B/tag) → ~450 MB
   at N=1000 × ~220 posts/account.
-- `DiversityFeatures` (only when `--with-diversify`): ~120 B / post →
+- `DiversityFeatures` (only when `with-diversify`): ~120 B / post →
   ~25 MB. Skipped on default no-diversify runs.
 - Per-account `user_relation` tag-relation graph (added v5.7): pairs
   stored as a sorted `Vec<(u32,u32,u32)>` after
@@ -383,7 +396,7 @@ field has a default — you only need the section if you want to override.
 | Knob | Default | What it controls |
 |---|---|---|
 | `min_favs` | 100 | Min favourites for an account to enter the eval set. Lower → more accounts (better statistical power), but each account's synthetic profile + holdout become noisier. Accounts with fewer than `min_favs / 2` train posts after the split are also rejected, so going below ~50 stops being useful. |
-| `test_fraction` | 0.20 | Share of each user's favourites held out as test (the newest 20% by post id). Higher → more test items per account (less noisy per-account NDCG), but the synthetic profile is sparser. 0.20 is the standard ML train/test split. |
+| `test_fraction` | 0.20 | Share of each user's favourites held out as test (the newest 20% by `created_at` under the default `time_causal` split; by `post_id` under `split=post_id`). Higher → more test items per account (less noisy per-account NDCG), but the synthetic profile is sparser. 0.20 is the standard ML train/test split. |
 | `negative_ratio` | 10 | Random negatives per held-out positive. Higher → stricter retrieval task (closer to production where most catalog posts aren't favourites). **Dominates cached dataset RAM** at roughly `max_accounts × 256·NEG × 5 KB`. At defaults that's ~2 GB. Push higher only if you have free RAM — exceeding physical memory triggers swap thrashing and per-eval cost balloons ~10×. |
 | `top_k_ndcg` | 20 | Cutoff k for NDCG@k. Smaller k weights only the top of the feed (matches user attention); larger k evaluates a wider slice. 20 ≈ first screen of an infinite-scroll feed. |
 | `top_k_recall` | 50 | Cutoff k for Recall@k. Wider than NDCG cutoff on purpose — recall measures *coverage*, not ranking, so we care whether a held-out positive lands somewhere in the first ~50 results, not at the very top. |

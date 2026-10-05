@@ -4,6 +4,12 @@ Concurrency behaviour of the SQLite-backed API under read/write load,
 measured with [locust](https://locust.io/) against the production
 `database.db` (198k tags, 307k posts, 75 GB file).
 
+> **Historical measurements.** Everything below is a point-in-time run
+> against the developer's then-current `database.db` (this file last
+> revised 2026-08-01); it is not re-measured automatically and the catalog
+> has grown since. Re-run the commands under
+> [Re-running](#re-running) to refresh the numbers.
+
 ## Setup
 
 > Companion docs: [`memory-profile.md`](memory-profile.md) explains where
@@ -15,11 +21,11 @@ measured with [locust](https://locust.io/) against the production
 cd parser-api && cargo build --release
 
 # 2. Load-test config (separate dir so the real config.toml is untouched)
-cd parser-api/loadtest   # config.toml + locustfile.py live here
+cd loadtest   # config.toml + locustfile.py live here; step 1 left us in parser-api/
 ROCKET_PORT=8088 ../target/release/e621-account-parser-api
 
 # 3. Hammer it
-locust -f loadtest/locustfile.py --host http://127.0.0.1:8088 \
+locust -f locustfile.py --host http://127.0.0.1:8088 \
     --headless -u 50 --spawn-rate 10 -t 2m --only-summary
 ```
 
@@ -34,9 +40,13 @@ The locustfile has three user classes:
 - `RecHeavyUser` — the scoring hot path (recommendations)
 - `WriteHeavy` — feedback interactions (feed_interactions inserts)
 
-Auth uses real `owner_token`s from `account_device_links` (cookie
-`owner_token`). POSTs send a same-origin `Origin` header because the
-release build rejects cross-origin unsafe methods (CSRF guard).
+Auth uses `owner_token` cookies supplied at runtime through the
+`OWNER_TOKENS` env var (comma-separated; the committed file ships
+placeholders only — see `loadtest/locustfile.py`). Mint one with
+`POST /api/session/bootstrap` and link it to a real account, or reuse an
+existing linked token from `account_device_links`. POSTs send a
+same-origin `Origin` header because the release build rejects cross-origin
+unsafe methods (CSRF guard).
 
 ## Results
 
