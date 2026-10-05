@@ -7,6 +7,13 @@ use yew::prelude::*;
 use crate::components::{ErrorAlert, PostCard};
 use crate::models::*;
 
+/// Live `IntersectionObserver` plus the closure feeding it. Kept alive together
+/// so the effect destructor can `disconnect()` and drop both.
+type IntersectionObserverHandle = (
+    web_sys::IntersectionObserver,
+    Closure<dyn FnMut(Vec<web_sys::IntersectionObserverEntry>)>,
+);
+
 /// Determine the current number of columns from a `columns-*` / `grid-cols-*`
 /// class string by matching the viewport width against Tailwind breakpoints.
 /// Best-known pixel dimensions for layout calculations.
@@ -395,13 +402,22 @@ pub fn post_grid(props: &PostGridProps) -> Html {
         });
     }
 
-    // IntersectionObserver for infinite scroll (subsequent pages).
+    // Infinite-scroll sentinel observer.
+    //
     // Depend on posts length so the observer re-attaches once the sentinel
     // element is actually in the DOM (after the first page loads).
+    // The observer AND its callback are stored in a `use_mut_ref` so the effect
+    // destructor can `disconnect()` them. The previous version called
+    // `cb.forget()` + `std::mem::forget(o)` with a no-op cleanup: every
+    // `posts_len` change (i.e. every infinite-scroll page) leaked one observer
+    // plus one boxed JS closure holding `UseStateHandle`s, and the still-live
+    // observer kept emitting `fetch_more` after the grid unmounted.
+    let scroll_observer = use_mut_ref(|| None::<IntersectionObserverHandle>);
     {
         let fetch_more = fetch_more.clone();
         let sentinel = scroll_sentinel.clone();
         let posts_len = (*posts).len();
+        let scroll_observer = scroll_observer.clone();
         use_effect_with(posts_len, move |_| {
             let fetch = fetch_more.clone();
             let cb = Closure::<dyn FnMut(Vec<web_sys::IntersectionObserverEntry>)>::new(
@@ -413,15 +429,26 @@ pub fn post_grid(props: &PostGridProps) -> Html {
                     }
                 },
             );
-            let observer = web_sys::IntersectionObserver::new(cb.as_ref().unchecked_ref()).ok();
-            if let Some(o) = observer
-                && let Some(el) = sentinel.cast::<web_sys::Element>()
-            {
-                o.observe(&el);
-                cb.forget();
-                std::mem::forget(o);
+            match web_sys::IntersectionObserver::new(cb.as_ref().unchecked_ref()) {
+                Ok(observer) => {
+                    if let Some(el) = sentinel.cast::<web_sys::Element>() {
+                        observer.observe(&el);
+                        *scroll_observer.borrow_mut() = Some((observer, cb));
+                    }
+                }
+                Err(e) => {
+                    web_sys::console::warn_1(
+                        &format!("post_grid: failed to create IntersectionObserver: {e:?}").into(),
+                    );
+                }
             }
-            || ()
+            // Destructor: drop the previous observer/closure pair and stop it
+            // from observing a node that is about to be replaced.
+            move || {
+                if let Some((observer, _cb)) = scroll_observer.borrow_mut().take() {
+                    observer.disconnect();
+                }
+            }
         });
     }
 

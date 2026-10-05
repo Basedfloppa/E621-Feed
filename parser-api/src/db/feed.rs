@@ -126,7 +126,7 @@ pub fn remove_feed_interaction(
     owner_token: &str,
     interaction: &FeedInteractionRequest,
 ) -> Result<bool, String> {
-    super::with_write_tx(|tx| {
+    let removed = super::with_write_tx(|tx| {
         let linked: bool = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM account_device_links WHERE owner_token = ?1 AND account_id = ?2)",
             params![owner_token, interaction.account_id],
@@ -162,13 +162,12 @@ pub fn remove_feed_interaction(
         ).map_err(|e| format!("Failed to reverse tag feedback: {e}"))?;
         Ok(true)
     })?;
-    hydrate_cache::clear_seen(i64::from(interaction.account_id));
-    Ok(true)
+    if removed {
+        hydrate_cache::clear_seen(i64::from(interaction.account_id));
+    }
+    Ok(removed)
 }
 
-/// Batch version of `record_feed_interaction`. Processes up to 100
-/// interactions in a single write transaction. Ownership is verified
-/// per distinct `account_id` (cheaper than per-interaction).
 /// Fetch the most recent interaction rows for an account, newest first,
 /// optionally filtered to one event type. Used by the interaction-history
 /// page. Does not verify ownership — callers must gate on `owner_token`.

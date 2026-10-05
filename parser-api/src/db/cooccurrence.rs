@@ -17,7 +17,7 @@ const COOC_PAIRS_PER_STATEMENT: usize = 200;
 const COOC_ACCOUNT_PAIRS_PER_STMT: usize = 100;
 
 pub(super) fn upsert_account_cooccurrence_pairs(
-    tx: &rusqlite::Transaction,
+    tx: &rusqlite::Connection,
     account_id: i32,
     tag_ids: &[i64],
     tag_id_to_meta: &std::collections::HashMap<i64, (String, String)>,
@@ -95,7 +95,7 @@ pub(super) fn upsert_account_cooccurrence_pairs(
 }
 
 pub(super) fn upsert_cooccurrence_pairs(
-    tx: &rusqlite::Transaction,
+    tx: &rusqlite::Connection,
     tag_ids: &[i64],
 ) -> Result<(), String> {
     if tag_ids.len() < 2 {

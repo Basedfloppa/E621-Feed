@@ -2485,3 +2485,58 @@ async fn sync_status_refused_for_unlinked_token() {
         "unlinked token cannot read sync status"
     );
 }
+
+/// Regression for the dead digest "wildcards" stratum.
+///
+/// `get_random_posts_by_group` used to run
+/// `SELECT tag_id FROM account_tag_feedback`, but that table has no `tag_id`
+/// column (V6/V11 store `tag_name` + `group_type`). The query therefore failed
+/// with "no such column", the caller swallowed it via `unwrap_or_default()`,
+/// and the stratum silently returned nothing — the digest was permanently
+/// 2 posts short and nobody could tell.
+#[test]
+fn digest_random_posts_by_group_resolves_tag_names() {
+    const ACCOUNT: i32 = 9_900_777; // high id to avoid collisions
+    ensure_migrations();
+    setup_test(ACCOUNT);
+
+    let post_id = 990_777;
+    let tag_name = "wildcard_species_marker";
+    e621_account_parser_api::db::upsert_catalog_posts(&[make_post(
+        post_id,
+        make_tags(&["wild_artist"], &["wild_character"], &[tag_name]),
+        777,
+    )])
+    .expect("seed post");
+    e621_account_parser_api::db::save_posts_tags_batch(
+        &[make_post(
+            post_id,
+            make_tags(&["wild_artist"], &["wild_character"], &[tag_name]),
+            777,
+        )],
+        &HashSet::new(),
+        false,
+        None,
+    )
+    .expect("seed tags");
+
+    let conn = db::open_db_for_calibration().expect("db");
+    conn.execute(
+        "INSERT OR REPLACE INTO account_tag_feedback
+             (account_id, tag_name, group_type, impression_count, positive_count,
+              negative_count, last_interaction_at, last_decayed_at)
+         VALUES (?1, ?2, 'species', 4, 2, 0, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+        rusqlite::params![ACCOUNT, tag_name],
+    )
+    .expect("seed feedback");
+    drop(conn);
+
+    // Must not error, and must actually find the post behind the feedback tag.
+    let found = db::get_random_posts_by_group(ACCOUNT, 5)
+        .expect("wildcard stratum must query successfully (no 'no such column: tag_id')");
+    assert!(
+        found.iter().any(|sp| sp.post.id == post_id),
+        "wildcard stratum should surface the post carrying the feedback tag, got {:?}",
+        found.iter().map(|sp| sp.post.id).collect::<Vec<_>>()
+    );
+}

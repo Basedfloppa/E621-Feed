@@ -568,6 +568,12 @@ pub fn delete_device_link(owner_token: &str, account_id: i32) -> Result<usize, S
 
     // Step 3: the remaining cascade tables are bounded (a few hundred
     // rows per account at most), so finish atomically in one short tx.
+    //
+    // Every statement must succeed: this used to log and CONTINUE on failure,
+    // then return `Ok(removed)` — so a failed child-table delete (or a failed
+    // `DELETE FROM accounts`) was reported to the caller as a successful
+    // unlink, leaving a half-deleted account behind. Propagating instead rolls
+    // the whole transaction back, which keeps the account consistent.
     super::with_write_tx(|tx| {
         for stmt in [
             "DELETE FROM accounts_post WHERE account_id = ?1",
@@ -578,10 +584,8 @@ pub fn delete_device_link(owner_token: &str, account_id: i32) -> Result<usize, S
             "DELETE FROM account_tag_feedback WHERE account_id = ?1",
             "DELETE FROM accounts WHERE id = ?1",
         ] {
-            let _ = tx.execute(stmt, params![account_id]).map_err(|e| {
-                warn!("delete_device_link cascade '{stmt}': {e}");
-                e.to_string()
-            });
+            tx.execute(stmt, params![account_id])
+                .map_err(|e| format!("delete_device_link cascade '{stmt}': {e}"))?;
         }
         Ok(())
     })?;

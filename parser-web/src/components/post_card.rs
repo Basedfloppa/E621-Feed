@@ -939,7 +939,7 @@ pub fn post_card(props: &PostCardProps) -> Html {
             // cards in a grid row have their footer starting at the same Y.
             {
                 if let Some(footer) = footer_content {
-                    html! { <div class="mt-auto bg-base-100 border-и border-base-300">{ footer }</div> }
+                    html! { <div class="mt-auto bg-base-100 border-t border-base-300">{ footer }</div> }
                 } else { html!{} }
             }
         </>

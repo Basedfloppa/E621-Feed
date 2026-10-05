@@ -54,6 +54,9 @@ pub fn replace_posts_tags_batch(posts: &[Post]) -> Result<(), String> {
     if posts.is_empty() {
         return Ok(());
     }
+    // One transaction for the delete AND the re-insert. Splitting them meant a
+    // failure in between left the posts tagless (with `tags.df` stale), and a
+    // concurrent reader could observe a post with zero tags.
     super::with_write_tx(|tx| {
         let mut delete = tx
             .prepare_cached("DELETE FROM tags_posts WHERE post_id = ?1")
@@ -63,12 +66,30 @@ pub fn replace_posts_tags_batch(posts: &[Post]) -> Result<(), String> {
                 .execute(params![post.id])
                 .map_err(|e| format!("clear tags for post {}: {e}", post.id))?;
         }
-        Ok(())
-    })?;
-    save_posts_tags_batch(posts, &HashSet::new(), false, None)
+        drop(delete);
+        save_posts_tags_batch_in_tx(tx, posts, &HashSet::new(), false, None)
+    })
 }
 
 pub fn save_posts_tags_batch(
+    posts: &[Post],
+    blacklist: &HashSet<String>,
+    track_cooccurrence: bool,
+    account_id: Option<i32>,
+) -> Result<(), String> {
+    if posts.is_empty() {
+        return Ok(());
+    }
+    super::with_write_tx(|tx| {
+        save_posts_tags_batch_in_tx(tx, posts, blacklist, track_cooccurrence, account_id)
+    })
+}
+
+/// Body of [`save_posts_tags_batch`], taking an existing connection/transaction
+/// so callers can combine it with other statements atomically
+/// (see [`replace_posts_tags_batch`]).
+pub(super) fn save_posts_tags_batch_in_tx(
+    tx: &rusqlite::Connection,
     posts: &[Post],
     blacklist: &HashSet<String>,
     track_cooccurrence: bool,
@@ -93,7 +114,7 @@ pub fn save_posts_tags_batch(
     // Built at the end of the post loop when account_id is Some.
     let mut tag_id_to_meta: HashMap<i64, (String, &'static str)> = HashMap::new();
 
-    super::with_write_tx(|tx| {
+    {
         // The `DO UPDATE SET name = name` no-op forces RETURNING to fire on
         // the conflict path, so we always get a row back.
         let mut upsert_tag = tx
@@ -223,8 +244,7 @@ pub fn save_posts_tags_batch(
         if !touched_tag_ids.is_empty() {
             recompute_df_for_tags(tx, &touched_tag_ids)?;
         }
-        Ok(())
-    })?;
+    }
 
     // Build the (lowercased name → df_delta) map after commit. The
     // tag_id_cache and df_delta_by_id maps survive past the closure, so
@@ -255,7 +275,7 @@ pub fn save_posts_tags_batch(
 }
 
 pub(super) fn recompute_df_for_tags(
-    tx: &rusqlite::Transaction,
+    tx: &rusqlite::Connection,
     tag_ids: &HashSet<i64>,
 ) -> Result<(), String> {
     if tag_ids.is_empty() {
@@ -651,12 +671,19 @@ static ALIASES_CACHE: LazyLock<Mutex<HashMap<String, String>>> =
 static IMPLICATIONS_CACHE: LazyLock<Mutex<HashMap<String, Vec<String>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
-/// Check whether the cache has been loaded (non-empty signal).
+/// Whether [`load_tag_relation_caches`] has run since the last clear.
+///
+/// This MUST be a separate flag rather than `!map.is_empty()`: an empty
+/// `tag_aliases` table is a legitimate state (import disabled via
+/// `tag_alias_import_interval_secs = 0`, or nothing imported yet), and with
+/// emptiness as the signal every tag-relation/taste-profile request re-scanned
+/// both tables.
+static TAG_RELATION_CACHES_LOADED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Check whether the cache has been loaded.
 fn is_cache_loaded() -> bool {
-    if let Ok(cache) = ALIASES_CACHE.lock() {
-        return !cache.is_empty();
-    }
-    false
+    TAG_RELATION_CACHES_LOADED.load(std::sync::atomic::Ordering::Acquire)
 }
 
 /// Load or refresh the in-memory caches from `SQLite`.
@@ -707,6 +734,10 @@ pub fn load_tag_relation_caches() -> Result<(), String> {
     if let Ok(mut i) = IMPLICATIONS_CACHE.lock() {
         *i = implications;
     }
+    // Publish "loaded" only after both maps are replaced, so a concurrent
+    // reader either sees the old state or the new one — never a half-loaded
+    // pair with the flag already set.
+    TAG_RELATION_CACHES_LOADED.store(true, std::sync::atomic::Ordering::Release);
     info!(
         "[tag_relation_cache] loaded: {} aliases, {} implicators",
         { ALIASES_CACHE.lock().map_or(0, |c| c.len()) },
@@ -724,6 +755,7 @@ pub fn clear_tag_relation_caches() {
     if let Ok(mut i) = IMPLICATIONS_CACHE.lock() {
         i.clear();
     }
+    TAG_RELATION_CACHES_LOADED.store(false, std::sync::atomic::Ordering::Release);
     info!("[tag_relation_cache] cleared");
 }
 

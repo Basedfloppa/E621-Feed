@@ -107,18 +107,20 @@ pub(crate) async fn revoke_device_session(
 }
 
 // ---------------------------------------------------------------------------
-// Device-scoped e621 API key flow (Settings → Account).
+// Account e621 API key (Settings → Account).
 //
-// Each device/owner_token holds its OWN encrypted key for an account
-// (`db::set_account_e621_key` on `account_device_keys`, keyed by
-// (owner_token, account_id)). A token that links an account without presenting
-// a key has NO key for it, so it cannot test, rotate, revoke, or sync with
-// someone else's key. None of these endpoints ever return key material — only
-// booleans + timestamps via `AccountKeyState`. `key/test` verifies THIS
-// device's configured key against e621 through `api::verify_e621_key` (which
-// uses a per-user rate-limit bucket, separate from the shared admin key).
-// Ownership is enforced at the device level by the existing
-// `account_device_links` check inside the db accessors.
+// The key is ACCOUNT-scoped: it is stored encrypted on the `accounts` row
+// (migration V27) and is one canonical key shared by every linked device — that
+// is what lets direct sync run from any of them. There is no per-device key
+// storage and no way to keep a private key for a single device.
+//
+// Ownership is enforced at ACCESS time (`require_device_link`, inside the db
+// accessors), not by scoping the stored key: a token that linked an account
+// without presenting a key can still read/rotate the account's existing key.
+// No endpoint ever returns key material — only booleans + timestamps via
+// `AccountKeyState`. `key/test` verifies against e621 through
+// `api::verify_e621_key`, which uses a per-account rate-limit bucket separate
+// from the shared admin key.
 // ---------------------------------------------------------------------------
 
 /// Verify the requesting owner token actually owns `account_id`, mapping

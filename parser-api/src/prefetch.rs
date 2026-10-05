@@ -125,6 +125,14 @@ async fn run_prefetch_tick(
         return Ok(());
     }
 
+    // Account ids whose queries all completed without an e621 failure. Only
+    // these get stamped below: stamping every target in the tick meant a
+    // target that failed and then had its breaker counter reset by a *later*
+    // target's success was also marked as freshly prefetched, which excluded
+    // it from prefetch for the whole `prefetch_cooldown_secs` (24 h default)
+    // without it ever having been refreshed.
+    let mut succeeded: std::collections::HashSet<i32> = std::collections::HashSet::new();
+
     for target in &targets {
         let mut queries: Vec<String> = Vec::new();
         for q in &target.artist_queries {
@@ -137,6 +145,7 @@ async fn run_prefetch_tick(
             queries.push(q.clone());
         }
 
+        let mut target_clean = true;
         for q in &queries {
             match api::get_posts_by_tags(&target.blacklist, q, Some(1), None, Priority::Prefetch)
                 .await
@@ -170,6 +179,7 @@ async fn run_prefetch_tick(
                 Ok(_) => {}
                 Err(e) => {
                     // Count this failure and bail out of the rest of the tick.
+                    target_clean = false;
                     let n = PREFETCH_CONSECUTIVE_FAILS.fetch_add(1, Ordering::Relaxed) + 1;
                     warn!(
                         "[catalog-prefetch:{name}] e621 fetch failed for account={} q={q} \
@@ -180,14 +190,15 @@ async fn run_prefetch_tick(
                 }
             }
         }
+        if target_clean {
+            succeeded.insert(target.account_id);
+        }
     }
 
-    // Update last_prefetched_at for each target that was successfully
-    // processed (no e621 failure mid-tick).
-    if PREFETCH_CONSECUTIVE_FAILS.load(Ordering::Relaxed) == 0 {
+    // Update last_prefetched_at only for the targets that finished cleanly.
+    if !succeeded.is_empty() {
         let now = Utc::now().to_rfc3339();
-        for target in &targets {
-            let aid = target.account_id;
+        for aid in &succeeded {
             let conn = crate::db::open_db_for_prefetch().ok();
             if let Some(conn) = conn {
                 let _ = conn.execute(
@@ -205,8 +216,6 @@ async fn run_prefetch_tick(
     Ok(())
 }
 
-/// Pick multiple prefetch targets using a recency-weighted random selection.
-///
 /// Pick multiple prefetch targets using a recency-weighted random selection.
 ///
 /// `window_hours` — only accounts with a feed interaction within this many
@@ -382,9 +391,16 @@ pub fn weighted_recency_pick(n: usize, pick_count: usize, rng_seed: u64, picked:
             break;
         }
 
-        // LCG step
+        // LCG step. Shift by 33 to keep the 31 high-quality bits, then scale
+        // them into `[0, total_weight)`. The divisor MUST be the range of the
+        // shifted value (`1 << 31`), not `u64::MAX`: dividing by u64::MAX made
+        // `r` ~1e-10 * total_weight, so `accumulated >= r` always fired on the
+        // first still-unpicked index and the "recency-weighted random pick"
+        // degenerated into picking positions 0..k-1 deterministically — which,
+        // combined with the candidates' `ORDER BY a.id ASC`, pinned the
+        // prefetcher to the lowest account ids forever.
         state = state.wrapping_mul(LCG_A).wrapping_add(LCG_C);
-        let r = (state >> 33) as f64 / (u64::MAX as f64) * total_weight;
+        let r = ((state >> 33) as f64) / f64::from(1u32 << 31) * total_weight;
 
         let mut accumulated = 0.0f64;
         for (i, picked_i) in picked[..n].iter_mut().enumerate() {
@@ -497,6 +513,58 @@ mod tests {
             first_count > last_count,
             "earlier (higher-weight) items should be picked more often: \
              first={first_count}, last={last_count}"
+        );
+    }
+
+    #[test]
+    fn weighted_pick_is_actually_random_across_seeds() {
+        // Regression: `r` used to be scaled by `u64::MAX` instead of the
+        // shifted value's range, making it effectively zero. The weighted walk
+        // then always stopped at the first still-unpicked index, so every seed
+        // returned positions 0..k-1 — deterministic, and (via the candidates'
+        // `ORDER BY a.id ASC`) permanently pinned to the lowest account ids.
+        let mut unions: std::collections::HashSet<usize> = std::collections::HashSet::new();
+        let mut first_picked_with_other = 0usize;
+        for seed in 0..200u64 {
+            let mut picked = vec![false; 20];
+            weighted_recency_pick(20, 5, seed, &mut picked);
+            let chosen: Vec<usize> = (0..20).filter(|&i| picked[i]).collect();
+            assert_eq!(chosen.len(), 5, "seed={seed}");
+            for &i in &chosen {
+                unions.insert(i);
+            }
+            // Any position beyond the first `k` proves the walk did not stop
+            // at the head of the list.
+            if chosen.iter().any(|&i| i >= 5) {
+                first_picked_with_other += 1;
+            }
+        }
+        assert!(
+            unions.len() >= 15,
+            "200 seeds must reach well past the first 5 positions, union={}",
+            unions.len()
+        );
+        assert!(
+            first_picked_with_other >= 40,
+            "most seeds should pick at least one item outside 0..5, got {first_picked_with_other}"
+        );
+    }
+
+    #[test]
+    fn weighted_pick_stays_within_bounds_and_prefers_earlier() {
+        // Statistical sanity: the first position must be selected noticeably
+        // more often than the last, and no index may fall outside 0..n.
+        let (mut first, mut last) = (0usize, 0usize);
+        for seed in 0..1000u64 {
+            let mut picked = vec![false; 4];
+            weighted_recency_pick(4, 2, seed, &mut picked);
+            assert_eq!(picked.iter().filter(|&&p| p).count(), 2, "seed={seed}");
+            first += usize::from(picked[0]);
+            last += usize::from(picked[3]);
+        }
+        assert!(
+            first > last,
+            "position 0 should outweigh position 3: first={first}, last={last}"
         );
     }
 

@@ -8,6 +8,12 @@ use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap};
 use std::rc::Rc;
 
+/// Live `MutationObserver` on `document.body` plus its callback closure.
+type ThemeObserverHandle = (
+    web_sys::MutationObserver,
+    Closure<dyn FnMut(js_sys::Array, MutationObserver)>,
+);
+
 use gloo_timers::callback::Interval;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::Closure;
@@ -308,8 +314,15 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
     let theme_trigger = use_state(|| 0u32);
 
     // Watch for theme changes — re-render SVG with new colours.
+    //
+    // The observer + callback are kept in a `use_mut_ref` so the destructor can
+    // `disconnect()` them. The previous `cb.forget()` + `std::mem::forget(o)`
+    // leaked both and left a live observer on `document.body` holding
+    // `UseStateHandle`s after the card unmounted.
+    let theme_observer = use_mut_ref(|| None::<ThemeObserverHandle>);
     {
         let theme_trigger = theme_trigger.clone();
+        let theme_observer = theme_observer.clone();
         use_effect_with((), move |_| {
             let trigger = theme_trigger.clone();
             let cb = Closure::<dyn FnMut(js_sys::Array, _)>::new(
@@ -334,11 +347,14 @@ pub fn tag_relation_graph_card(props: &TagRelationGraphCardProps) -> Html {
                     let opts = MutationObserverInit::new();
                     opts.set_attributes(true);
                     let _ = o.observe_with_options(&body, &opts);
-                    cb.forget();
-                    std::mem::forget(o);
+                    *theme_observer.borrow_mut() = Some((o, cb));
                 }
             }
-            || ()
+            move || {
+                if let Some((observer, _cb)) = theme_observer.borrow_mut().take() {
+                    observer.disconnect();
+                }
+            }
         });
     }
 

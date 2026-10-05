@@ -12,7 +12,7 @@ use rocket::serde::json::Json;
 use rocket_okapi::openapi;
 
 use e621_account_parser_api::{
-    api, db,
+    api, db, db_blocking,
     errors::ApiError,
     models::{Comment, Post},
     ratelimit::{self, ClientIp},
@@ -59,7 +59,8 @@ pub(crate) async fn get_single_post(id: i64, client_ip: ClientIp) -> Result<Json
         ));
     }
     // Serve from the local catalog first — no network, no admin-key spend.
-    if let Some(local) = db::get_post_by_id(id).map_err(ApiError::from_string)? {
+    // `get_post_by_id` is a pooled SQLite read, so keep it off the async worker.
+    if let Some(local) = db_blocking(move || db::get_post_by_id(id)).await? {
         return Ok(Json(local));
     }
     // Per-IP public-viewer budget shared with the other unauthenticated viewer
@@ -94,13 +95,25 @@ pub(crate) async fn get_pool_posts(
     }
     use e621_account_parser_api::models::cfg;
     // Local-first: serve from stored pool membership when enabled and present.
-    if cfg().catalog.pool_membership
-        && let Ok(members) = db::get_pool_members(pool_id)
-        && !members.is_empty()
-    {
-        let ids: Vec<i64> = members.iter().map(|(id, _pos)| *id).collect();
-        let hydrated = db::hydrate_posts_by_ids(&ids).map_err(ApiError::from_string)?;
-        if hydrated.len() == ids.len() {
+    // Membership lookup + hydration are pooled SQLite reads and used to run
+    // inline on the async worker.
+    let use_local = cfg().catalog.pool_membership;
+    if use_local {
+        let local: Option<Vec<Post>> = db_blocking(move || {
+            let Ok(members) = db::get_pool_members(pool_id) else {
+                return Ok(None);
+            };
+            if members.is_empty() {
+                return Ok(None);
+            }
+            let ids: Vec<i64> = members.iter().map(|(id, _pos)| *id).collect();
+            let hydrated = db::hydrate_posts_by_ids(&ids)?;
+            // Only a complete local set may answer the request; a partial one
+            // would silently drop pool members.
+            Ok((hydrated.len() == ids.len()).then_some(hydrated))
+        })
+        .await?;
+        if let Some(hydrated) = local {
             return Ok(Json(hydrated));
         }
     }
@@ -116,17 +129,23 @@ pub(crate) async fn get_pool_posts(
     // `save_pool` fails the FK check and rolls back (silently breaking offline
     // pool navigation). Upsert the fetched posts first to satisfy the FK.
     if cfg().catalog.pool_membership {
-        if let Err(e) = db::upsert_catalog_posts(&posts) {
-            warn!("[catalog] pool {pool_id} post persist failed: {e}");
-        } else {
-            let members = posts
+        // Two pooled writes (posts upsert + pool membership). Both are
+        // best-effort offline-catalog persistence, so failures stay warnings,
+        // but they must not block the async worker.
+        let posts_for_store = posts.clone();
+        let store = db_blocking(move || -> Result<(), String> {
+            db::upsert_catalog_posts(&posts_for_store)?;
+            let members = posts_for_store
                 .iter()
                 .enumerate()
                 .map(|(i, p)| (p.id, i as i64))
                 .collect::<Vec<_>>();
-            if let Err(e) = db::save_pool(pool_id, "", &members) {
-                warn!("[catalog] pool {pool_id} save failed: {e}");
-            }
+            db::save_pool(pool_id, "", &members).map(|_| ())
+        })
+        .await;
+        match store {
+            Ok(()) => {}
+            Err(e) => warn!("[catalog] pool {pool_id} persist failed: {e}"),
         }
     }
     Ok(Json(posts))

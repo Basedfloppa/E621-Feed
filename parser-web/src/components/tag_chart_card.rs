@@ -8,7 +8,17 @@ use yew::{
     Callback, Html, NodeRef, Properties, classes, function_component, html, use_effect,
     use_effect_with, use_state,
 };
-use yew::{UseStateHandle, use_memo};
+use yew::{UseStateHandle, use_memo, use_mut_ref};
+
+/// Live `MutationObserver` on `document.body` plus its callback closure.
+type ThemeObserverHandle = (
+    MutationObserver,
+    Closure<dyn FnMut(js_sys::Array, MutationObserver)>,
+);
+
+/// The `window` a resize listener was attached to, plus the closure that must
+/// outlive its removal.
+type ResizeListenerHandle = (web_sys::Window, Closure<dyn FnMut()>);
 
 #[derive(Properties, PartialEq)]
 pub struct TagChartCardProps {
@@ -64,11 +74,21 @@ pub fn tag_chart_card(props: &TagChartCardProps) -> Html {
         },
     );
 
+    // Theme observer on `document.body`. The callback is stored NEXT TO the
+    // observer so it is dropped only when the effect is torn down; the previous
+    // `callback.forget()` leaked it on every remount. Panicking DOM lookups were
+    // replaced with early returns — a panic in WASM blanks the whole app.
+    let theme_observer = use_mut_ref(|| None::<ThemeObserverHandle>);
     use_effect({
         let theme_trigger = theme_trigger.clone();
+        let theme_observer = theme_observer.clone();
         move || {
-            let document = web_sys::window().unwrap().document().unwrap();
-            let target = document.body().unwrap();
+            let Some(document) = web_sys::window().and_then(|w| w.document()) else {
+                return Box::new(|| ()) as Box<dyn FnOnce()>;
+            };
+            let Some(target) = document.body() else {
+                return Box::new(|| ()) as Box<dyn FnOnce()>;
+            };
 
             let trigger = theme_trigger.clone();
             let callback = Closure::<dyn FnMut(js_sys::Array, _)>::new(
@@ -88,37 +108,57 @@ pub fn tag_chart_card(props: &TagChartCardProps) -> Html {
                 },
             );
 
-            let observer = MutationObserver::new(callback.as_ref().unchecked_ref()).unwrap();
+            let observer = match MutationObserver::new(callback.as_ref().unchecked_ref()) {
+                Ok(o) => o,
+                Err(e) => {
+                    web_sys::console::warn_1(
+                        &format!("tag_chart: failed to create MutationObserver: {e:?}").into(),
+                    );
+                    return Box::new(|| ()) as Box<dyn FnOnce()>;
+                }
+            };
             let options = MutationObserverInit::new();
             options.set_attributes(true);
-            observer.observe_with_options(&target, &options).unwrap();
+            let _ = observer.observe_with_options(&target, &options);
+            *theme_observer.borrow_mut() = Some((observer, callback));
 
-            // Keep the callback alive for the lifetime of the observer.
-            callback.forget();
-
-            move || {
-                observer.disconnect();
-            }
+            let theme_observer = theme_observer.clone();
+            Box::new(move || {
+                if let Some((observer, _cb)) = theme_observer.borrow_mut().take() {
+                    observer.disconnect();
+                }
+            }) as Box<dyn FnOnce()>
         }
     });
 
+    // Resize listener. The closure must outlive the cleanup that removes it:
+    // the old code dropped `closure` at the end of the effect body and then
+    // called `closure.as_ref()` from the destructor — a use-after-drop.
+    let resize_listener = use_mut_ref(|| None::<ResizeListenerHandle>);
     use_effect({
         let resize_trigger = resize_trigger.clone();
+        let resize_listener = resize_listener.clone();
         move || {
+            let Some(window) = web_sys::window() else {
+                return Box::new(|| ()) as Box<dyn FnOnce()>;
+            };
             let closure = Closure::<dyn FnMut()>::new(move || {
                 resize_trigger.set(*resize_trigger + 1);
             });
-
-            let window = web_sys::window().unwrap();
-            window
+            if window
                 .add_event_listener_with_callback("resize", closure.as_ref().unchecked_ref())
-                .unwrap();
-
-            move || {
-                window
-                    .remove_event_listener_with_callback("resize", closure.as_ref().unchecked_ref())
-                    .unwrap();
+                .is_ok()
+            {
+                *resize_listener.borrow_mut() = Some((window, closure));
             }
+            Box::new(move || {
+                if let Some((window, closure)) = resize_listener.borrow_mut().take() {
+                    let _ = window.remove_event_listener_with_callback(
+                        "resize",
+                        closure.as_ref().unchecked_ref(),
+                    );
+                }
+            }) as Box<dyn FnOnce()>
         }
     });
 

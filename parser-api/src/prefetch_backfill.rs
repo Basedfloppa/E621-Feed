@@ -78,6 +78,10 @@ async fn run_backfill_tick(cooldown_secs: u64) -> Result<(), String> {
         // Limit tags per account per tick to avoid hammering one account.
         let cap = tags.len().min(10);
 
+        // Set when an e621 fetch fails for this account; prevents the
+        // "backfilled" stamp below (see the marking logic after the loop).
+        let mut failed = false;
+
         for (tag_name, _group, _weight) in tags.iter().take(cap) {
             // Check circuit breaker before each tag.
             let fails = BACKFILL_CONSECUTIVE_FAILS.load(Ordering::Relaxed);
@@ -115,6 +119,7 @@ async fn run_backfill_tick(cooldown_secs: u64) -> Result<(), String> {
                     warn!(
                         "[backfill] e621 fetch (retro) failed for account={account_id} tag={tag_name} (consecutive_fails={n}): {e}"
                     );
+                    failed = true;
                     break;
                 }
             }
@@ -139,13 +144,24 @@ async fn run_backfill_tick(cooldown_secs: u64) -> Result<(), String> {
                     warn!(
                         "[backfill] e621 fetch (fresh) failed for account={account_id} tag={tag_name} (consecutive_fails={n}): {e}"
                     );
+                    failed = true;
                     break;
                 }
             }
         }
 
-        // Mark account as backfilled (even if only some tags were processed).
-        db::mark_account_backfilled(*account_id)?;
+        // Mark the account as backfilled only when the tag loop ran to
+        // completion. Marking after a hard e621 failure recorded the account
+        // as done and skipped it for `backfill_cooldown_secs` (24 h) even
+        // though most of its tags were never fetched.
+        if failed {
+            warn!(
+                "[backfill] account={account_id} left unmarked after a fetch failure; \
+                 it will be retried on the next pass"
+            );
+        } else {
+            db::mark_account_backfilled(*account_id)?;
+        }
     }
 
     Ok(())

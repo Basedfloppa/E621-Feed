@@ -526,6 +526,23 @@ async fn build_rocket() -> rocket::Rocket<rocket::Build> {
         .unwrap_or_default();
     if !posts_host.is_empty() {
         let wildcard = format!("https://*.{posts_host}");
+        // `script-src` MUST keep `'unsafe-inline'`, and the reason is not this
+        // repository's markup: Trunk *injects* an inline bootstrap module into
+        // the built `dist/index.html`, e.g.
+        //   <script type="module">
+        //     import init, * as bindings from '/<bundle>.js';
+        //     const wasm = await init({ module_or_path: '/<bundle>_bg.wasm' });
+        //     window.wasmBindings = bindings; …
+        //   </script>
+        // Without `'unsafe-inline'` the browser blocks it (`script-src-elem`)
+        // and the SPA never boots at all. The injected script embeds the
+        // content-hashed bundle name, so its sha256 changes on every frontend
+        // build — a hardcoded hash would break on each deploy, and a nonce
+        // would require serving index.html dynamically instead of from the
+        // embedded asset table. Removing this directive is therefore a
+        // build-pipeline change (rewrite the loader into its own file or emit
+        // a build-time hash), not a one-line CSP edit.
+        // `'wasm-unsafe-eval'` is still required to instantiate the module.
         let csp = format!(
             "default-src 'self'; \
              script-src 'self' 'wasm-unsafe-eval' 'unsafe-inline'; \
@@ -642,7 +659,16 @@ async fn main() {
     }
 
     info!("Server started");
-    let _ = rocket.launch().await;
+    // Do NOT discard this result: on a bind failure (EADDRINUSE, permission
+    // denied, bad Rocket.toml) `launch()` returns `Err`, and swallowing it made
+    // the process log "Shutdown complete" and exit 0 — so systemd's
+    // `Restart=on-failure` and Docker's restart policies never fired and the
+    // outage stayed invisible to the supervisor.
+    if let Err(e) = rocket.launch().await {
+        error!("Server launch failed: {e}");
+        eprintln!("FATAL: server launch failed: {e}");
+        std::process::exit(1);
+    }
     info!("Shutdown complete");
 }
 

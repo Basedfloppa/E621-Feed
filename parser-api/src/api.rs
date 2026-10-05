@@ -85,8 +85,35 @@ fn remove_api_cache_entry(url: &str) {
     map.remove(url);
 }
 
-/// Drop every cache entry past TTL. Called by the periodic worker since
-/// `api_cache_put` only evicts on insert.
+/// Parse a JSON body that came out of the e621 response cache, evicting the
+/// cache entry when the body cannot be deserialized.
+///
+/// Why this exists: `fetch_authed_conditional` caches a 2xx body *before*
+/// anyone parses it. If the body is not the shape we expect — a Cloudflare
+/// interstitial served with status 200, or an upstream schema change — then
+/// without this eviction the unusable body stays pinned for the full TTL and
+/// every retry re-reads it from the cache. For `fetch_tag_relations` that TTL
+/// is 86400s, so one bad response silently disabled the tag-relation import
+/// for a day. `get_favorites` already evicted on parse failure; this makes the
+/// behaviour uniform.
+///
+/// Callers with a fallback shape (see `search_users`) must not evict until
+/// every shape has failed; use [`parse_cached_or_evict`] for the last attempt.
+fn parse_cached_or_evict<T: serde::de::DeserializeOwned>(
+    url: &str,
+    body: &str,
+    what: &str,
+) -> Result<T, String> {
+    match json::from_str::<T>(body) {
+        Ok(parsed) => Ok(parsed),
+        Err(e) => {
+            remove_api_cache_entry(url);
+            warn!("[E621] {what} parse failed for {url}; evicted the cached body: {e}");
+            Err(format!("{what} parse failed: {e}"))
+        }
+    }
+}
+
 /// ETag stored with a cached entry (fresh or stale) — the validator to send
 /// on a conditional revalidation. `None` when the entry has no validator.
 fn api_cache_etag(url: &str) -> Option<String> {
@@ -114,6 +141,8 @@ fn api_cache_refresh_ttl(url: &str) -> bool {
     }
 }
 
+/// Drop every cache entry past TTL. Called by the periodic worker since
+/// `api_cache_put` only evicts on insert.
 pub fn prune_api_cache() -> (usize, usize) {
     let ttl = Duration::from_secs(cfg().e621_cache_ttl_secs);
     if ttl.is_zero() {
@@ -802,12 +831,8 @@ pub async fn get_favorites_with_key(
             crate::errors::UPSTREAM_ERR_MARKER
         ))
     })?;
-    let posts = json::from_str::<Vec<Post>>(&body).map_err(|e| {
-        warn!("favorites page {page} (user key) parse failed: {e}");
-        FavoritesPageError::Malformed(format!(
-            "favorites page {page}: malformed 200 response: {e}"
-        ))
-    })?;
+    let posts = parse_cached_or_evict::<Vec<Post>>(&url, &body, "favorites page (user key)")
+        .map_err(|e| FavoritesPageError::Malformed(format!("favorites page {page}: {e}")))?;
     Ok(posts)
 }
 
@@ -859,11 +884,10 @@ pub async fn get_account(account: &TruncatedAccount) -> Result<UserApiResponse, 
     let cfg = cfg();
     let url = format!("{}/users/{}.json", cfg.posts_domain, account.id);
     debug!("GET (auth) {url}");
-    let body = fetch_authed_text(url, false, 0, Priority::Live)
+    let body = fetch_authed_text(url.clone(), false, 0, Priority::Live)
         .await
         .map_err(|e| format!("account request {e}"))?;
-    let parsed = json::from_str::<UserApiResponse>(&body)
-        .map_err(|e| format!("account parse failed: {e}"))?;
+    let parsed = parse_cached_or_evict::<UserApiResponse>(&url, &body, "account")?;
     info!("Fetched account successfully for id={}", account.id);
     Ok(parsed)
 }
@@ -879,7 +903,7 @@ pub async fn search_users(order: &str, page: i32) -> Result<Vec<UserSearchResult
             ("page", page.to_string()),
         ],
     );
-    let body = fetch_authed_text(url, false, 0, Priority::Live)
+    let body = fetch_authed_text(url.clone(), false, 0, Priority::Live)
         .await
         .map_err(|e| format!("users search {e}"))?;
     // Endpoint returns either `{ "users": [...] }` or a bare array.
@@ -890,8 +914,7 @@ pub async fn search_users(order: &str, page: i32) -> Result<Vec<UserSearchResult
     struct Wrap {
         users: Vec<UserSearchResult>,
     }
-    let wrapped: Wrap =
-        json::from_str(&body).map_err(|e| format!("users search parse failed: {e}"))?;
+    let wrapped: Wrap = parse_cached_or_evict::<Wrap>(&url, &body, "users search")?;
     Ok(wrapped.users)
 }
 
@@ -900,10 +923,10 @@ pub async fn search_users(order: &str, page: i32) -> Result<Vec<UserSearchResult
 pub async fn get_user_by_id(uid: i32) -> Result<UserApiResponse, String> {
     let cfg = cfg();
     let url = format!("{}/users/{}.json", cfg.posts_domain, uid);
-    let body = fetch_authed_text(url, false, 0, Priority::Live)
+    let body = fetch_authed_text(url.clone(), false, 0, Priority::Live)
         .await
         .map_err(|e| format!("user-by-id {e}"))?;
-    json::from_str::<UserApiResponse>(&body).map_err(|e| format!("user-by-id parse failed: {e}"))
+    parse_cached_or_evict::<UserApiResponse>(&url, &body, "user-by-id")
 }
 
 /// Resolve a user by name via `/users/<name>.json`. Lets first-time
@@ -911,10 +934,10 @@ pub async fn get_user_by_id(uid: i32) -> Result<UserApiResponse, String> {
 pub async fn get_user_by_name(name: &str) -> Result<UserApiResponse, String> {
     let cfg = cfg();
     let url = format!("{}/users/{}.json", cfg.posts_domain, encode(name));
-    let body = fetch_authed_text(url, false, 0, Priority::Live)
+    let body = fetch_authed_text(url.clone(), false, 0, Priority::Live)
         .await
         .map_err(|e| format!("user-by-name {e}"))?;
-    json::from_str::<UserApiResponse>(&body).map_err(|e| format!("user-by-name parse failed: {e}"))
+    parse_cached_or_evict::<UserApiResponse>(&url, &body, "user-by-name")
 }
 
 /// Outcome of validating an e621 API key against the upstream.
@@ -1058,11 +1081,10 @@ pub async fn get_posts_by_tags(
         ],
     );
     // Bypass cache — background traffic must not pollute user-facing cache.
-    let body = fetch_authed_text(url, true, 0, priority)
+    let body = fetch_authed_text(url.clone(), true, 0, priority)
         .await
         .map_err(|e| format!("posts request {e}"))?;
-    let posts =
-        json::from_str::<Vec<Post>>(&body).map_err(|e| format!("posts parse failed: {e}"))?;
+    let posts: Vec<Post> = parse_cached_or_evict(&url, &body, "posts")?;
     Ok(posts)
 }
 
@@ -1088,11 +1110,10 @@ pub async fn get_posts_by_ids(ids: &[i64]) -> Result<Vec<Post>, String> {
     // These hydrate user-facing viewer requests (single post, pool navigation,
     // digest hydration), so they must be Live priority — using Prefetch here lets
     // an unauthenticated /posts/<id> burst enqueue ahead of real Live traffic.
-    let body = fetch_authed_text(url, true, 0, Priority::Live)
+    let body = fetch_authed_text(url.clone(), true, 0, Priority::Live)
         .await
         .map_err(|e| format!("posts by ids request: {e}"))?;
-    let posts =
-        json::from_str::<Vec<Post>>(&body).map_err(|e| format!("posts parse failed: {e}"))?;
+    let posts: Vec<Post> = parse_cached_or_evict(&url, &body, "posts by ids")?;
     Ok(posts)
 }
 
@@ -1116,11 +1137,10 @@ struct PoolEnvelope {
 
 pub async fn get_pool_posts(pool_id: i64) -> Result<Vec<Post>, String> {
     let url = build_url(&format!("pools/{pool_id}.json"), &[]);
-    let body = fetch_authed_text(url, true, 0, Priority::Live)
+    let body = fetch_authed_text(url.clone(), true, 0, Priority::Live)
         .await
         .map_err(|e| format!("pool request: {e}"))?;
-    let envelope: PoolEnvelope =
-        json::from_str(&body).map_err(|e| format!("pool parse failed: {e}"))?;
+    let envelope: PoolEnvelope = parse_cached_or_evict::<PoolEnvelope>(&url, &body, "pool")?;
     let posts = get_posts_by_ids(&envelope.post_ids).await?;
     // Reorder to the pool's canonical order (get_posts_by_ids returns by id).
     let by_id: std::collections::HashMap<i64, Post> =
@@ -1145,11 +1165,10 @@ pub async fn get_post_comments(post_id: i64, limit: i64) -> Result<Vec<Comment>,
             ("limit", limit.to_string()),
         ],
     );
-    let body = fetch_authed_text(url, false, 0, Priority::Live)
+    let body = fetch_authed_text(url.clone(), false, 0, Priority::Live)
         .await
         .map_err(|e| format!("comments request: {e}"))?;
-    let comments =
-        json::from_str::<Vec<Comment>>(&body).map_err(|e| format!("comments parse failed: {e}"))?;
+    let comments: Vec<Comment> = parse_cached_or_evict(&url, &body, "comments")?;
     // Drop hidden/deleted comments before they reach the client — the same
     // ones e621 hides, so a viewer would never see them on the site anyway.
     Ok(comments.into_iter().filter(|c| !c.is_hidden).collect())
@@ -1194,14 +1213,13 @@ where
     let limit = crate::models::cfg().posts_limit.to_string();
     let url = build_url(endpoint, &[("limit", limit), ("page", page.to_string())]);
     debug!("GET (auth) /{endpoint} page={page}");
-    let (body, not_modified) = fetch_authed_conditional(url, false, 86400, Priority::Live)
+    let (body, not_modified) = fetch_authed_conditional(url.clone(), false, 86400, Priority::Live)
         .await
         .map_err(|e| format!("{endpoint} request page {page}: {e}"))?;
     if not_modified {
         return Ok((Vec::new(), false));
     }
-    let entries: Vec<T> = rocket::serde::json::from_str(&body)
-        .map_err(|e| format!("{endpoint} parse failed page {page}: {e}"))?;
+    let entries: Vec<T> = parse_cached_or_evict(&url, &body, "tag relations")?;
     Ok((entries, true))
 }
 

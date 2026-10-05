@@ -213,15 +213,19 @@ pub fn get_session_shown_post_ids(
 pub fn prune_expired_sessions() -> Result<usize, String> {
     let cutoff = (Utc::now() - chrono::Duration::minutes(FEED_SESSION_TTL_MIN)).to_rfc3339();
     with_write_tx(|tx| {
-        // Delete orphaned feed_session_posts first (the FK was removed
-        // when session_id became non-unique in V22). Then delete expired
-        // session rows.
-        let _ = tx.execute(
+        // Delete orphaned feed_session_posts first (the FK was removed when
+        // session_id became non-unique in V22). This must NOT be ignored: if it
+        // fails while the session rows below are still deleted, the leftover
+        // `feed_session_posts` rows become permanently unreachable orphans
+        // (`get_session_shown_posts` INNER JOINs `feed_sessions`), so nothing
+        // would ever clean them up.
+        tx.execute(
             "DELETE FROM feed_session_posts \
              WHERE session_id IN (SELECT session_id FROM feed_sessions \
                                   WHERE last_accessed_at < ?1)",
             params![cutoff],
-        );
+        )
+        .map_err(|e| format!("Failed to prune expired session posts: {e}"))?;
         let n = tx
             .execute(
                 "DELETE FROM feed_sessions WHERE last_accessed_at < ?1",

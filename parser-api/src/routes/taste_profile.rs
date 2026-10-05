@@ -51,7 +51,9 @@ pub(crate) async fn get_taste_profile(
     })
     .await?;
 
-    if let Err(e) = load_tag_relation_caches() {
+    // Loading the alias/implication caches scans two catalog tables; keep it
+    // off the async worker.
+    if let Err(e) = db_blocking(load_tag_relation_caches).await {
         error!("Failed to load tag relation caches: {e}");
     }
 
@@ -68,29 +70,35 @@ pub(crate) async fn get_taste_profile(
             .map(|t| t.name.to_ascii_lowercase())
             .collect();
 
+        // A single pooled connection serves every query in this handler.
+        // Previously each block called `open_db_for_calibration().unwrap()`
+        // (four times, two of them concurrently): that multiplied pool pressure
+        // on a route explicitly documented as heavy, and any pool timeout
+        // PANICKED (`unwrap`) instead of returning an error — a 500 with no
+        // diagnostic. One connection also removes the N+1 tag lookups below,
+        // which now run against a prepared statement.
+        let conn = e621_account_parser_api::db::open_db_for_calibration()
+            .map_err(|e| format!("taste profile db connection: {e}"))?;
+
         // Catalog post count for global PMI normalisation
-        let n_catalog_posts: i64 = {
-            let conn = e621_account_parser_api::db::open_db_for_calibration().unwrap();
-            conn.query_row("SELECT COUNT(*) FROM posts", [], |row| row.get(0))
-                .unwrap_or(1)
-        };
+        let n_catalog_posts: i64 = conn
+            .query_row("SELECT COUNT(*) FROM posts", [], |row| row.get(0))
+            .unwrap_or(1);
 
         // User post count for user PMI normalisation
-        let n_user_posts: i64 = {
-            let conn = e621_account_parser_api::db::open_db_for_calibration().unwrap();
-            conn.query_row(
+        let n_user_posts: i64 = conn
+            .query_row(
                 "SELECT COUNT(*) FROM accounts_post WHERE account_id = ?1",
                 rusqlite::params![account_id],
                 |row| row.get(0),
             )
-            .unwrap_or(1)
-        };
+            .unwrap_or(1);
 
         // Build user PMI graph from account_tag_cooccurrence
         let user_graph = {
             let mut g = e621_account_parser_api::utils::TagRelationGraph::with_posts(n_user_posts);
             use rusqlite::params;
-            if let Ok(conn) = e621_account_parser_api::db::open_db_for_calibration() {
+            {
                 // Marginals for general+lore+species
                 for tc in &tag_counts {
                     if matches!(tc.group_type.as_str(), "general" | "lore" | "species") {
@@ -132,24 +140,26 @@ pub(crate) async fn get_taste_profile(
             g
         };
 
-        // Build global co-occurrence map for global PMI
+        // Build global co-occurrence map for global PMI. The per-tag df lookup
+        // reuses one prepared statement instead of re-preparing it inside the
+        // loop.
         let tag_id_df_map: HashMap<String, (i64, i64)> = {
             use rusqlite::params;
-            let conn = e621_account_parser_api::db::open_db_for_calibration().unwrap();
             let mut m = HashMap::new();
+            let mut stmt = conn
+                .prepare("SELECT id, df FROM tags WHERE name = ?1")
+                .map_err(|e| format!("taste profile: prepare tag df lookup: {e}"))?;
             for tc in &tag_counts {
-                if let Ok(mut stmt) = conn.prepare("SELECT id, df FROM tags WHERE name = ?1")
-                    && let Ok(row) = stmt.query_row(params![tc.name.to_ascii_lowercase()], |row| {
-                        Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1).unwrap_or(0)))
-                    }) {
-                        m.insert(tc.name.to_ascii_lowercase(), row);
-                    }
+                if let Ok(row) = stmt.query_row(params![tc.name.to_ascii_lowercase()], |row| {
+                    Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1).unwrap_or(0)))
+                }) {
+                    m.insert(tc.name.to_ascii_lowercase(), row);
+                }
             }
             m
         };
         let mut global_cooc_map: HashMap<String, (i64, i64, i64)> = HashMap::new();
         {
-            let conn = e621_account_parser_api::db::open_db_for_calibration().unwrap();
             let min_g = min_cooc_val.max(1);
             // The profile only uses the selected top-N tags. Restricting both
             // endpoints avoids scanning and materialising unrelated catalog pairs.

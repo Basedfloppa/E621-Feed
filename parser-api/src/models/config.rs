@@ -1135,8 +1135,58 @@ pub fn reload_from(p: &Path) -> anyhow::Result<()> {
     let new = load_config(p)?;
     let arc = Arc::new(new);
     CONFIG.store(arc.clone());
-    debug!("[config] current value:\n{arc:#?}");
+    // Log a REDACTED view: the raw `{:#?}` of `Config` printed `admin_api` and
+    // `e621_key_encryption_secret` in cleartext whenever debug logging was on.
+    debug!(
+        "[config] current value (secrets redacted):\n{:#?}",
+        arc.redacted()
+    );
     Ok(())
+}
+
+/// A `Debug` view of [`Config`] with credentials masked.
+///
+/// Deliberately hand-written instead of logging the derived `Debug`: the raw
+/// `{:#?}` printed `admin_api` and `e621_key_encryption_secret` in cleartext
+/// whenever debug logging was enabled. Use this for any config logging.
+pub struct RedactedSecrets<'a>(&'a Config);
+
+impl std::fmt::Debug for RedactedSecrets<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let shown = |s: &str| {
+            if s.is_empty() {
+                "<empty>".to_string()
+            } else {
+                format!("<redacted, {} chars>", s.chars().count())
+            }
+        };
+        f.debug_struct("Config")
+            .field("admin_user", &self.0.admin_user)
+            .field("admin_api", &shown(&self.0.admin_api))
+            .field(
+                "e621_key_encryption_secret",
+                &shown(&self.0.e621_key_encryption_secret),
+            )
+            .field("posts_domain", &self.0.posts_domain)
+            .field("posts_limit", &self.0.posts_limit)
+            .field("db_path", &self.0.db_path)
+            .field("trust_proxy", &self.0.trust_proxy)
+            .field("e621_cache_ttl_secs", &self.0.e621_cache_ttl_secs)
+            .field("e621_cache_max_entries", &self.0.e621_cache_max_entries)
+            .field("buckets", &self.0.buckets.keys().collect::<Vec<_>>())
+            .field("runtime", &self.0.runtime)
+            .field("catalog", &self.0.catalog)
+            .field("priors", &self.0.priors)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Config {
+    /// Redacted `Debug` view — see [`RedactedSecrets`].
+    #[must_use]
+    pub fn redacted(&self) -> RedactedSecrets<'_> {
+        RedactedSecrets(self)
+    }
 }
 
 #[cfg(test)]

@@ -118,19 +118,42 @@ pub fn get_random_posts_by_group(account_id: i32, limit: usize) -> Result<Vec<Sc
         None => return get_random_posts(limit),
     };
 
-    // Get some tag IDs the user has interacted with in this group.
-    let tag_ids: Vec<i64> = {
+    // Get some tag NAMES the user has interacted with in this group. The
+    // feedback table stores `tag_name` (there is no `tag_id` column — the old
+    // query selected one, failed with "no such column", and was swallowed by
+    // the caller's `unwrap_or_default()`, so this whole stratum was dead).
+    // Resolve ids through `tags` below, reusing the same random selection.
+    let tag_names: Vec<String> = {
         let mut stmt = conn
             .prepare(
-                "SELECT tag_id FROM account_tag_feedback \
+                "SELECT tag_name FROM account_tag_feedback \
                  WHERE account_id = ?1 AND group_type = ?2 AND impression_count > 0 \
                  ORDER BY RANDOM() LIMIT 3",
             )
-            .map_err(|e| format!("get_random_posts_by_group tag_ids prep: {e}"))?;
-        stmt.query_map(params![account_id, group], |r| r.get::<_, i64>(0))
-            .map_err(|e| format!("get_random_posts_by_group tag_ids query: {e}"))?
+            .map_err(|e| format!("get_random_posts_by_group tag_names prep: {e}"))?;
+        stmt.query_map(params![account_id, group], |r| r.get::<_, String>(0))
+            .map_err(|e| format!("get_random_posts_by_group tag_names query: {e}"))?
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| format!("get_random_posts_by_group tag_ids collect: {e}"))?
+            .map_err(|e| format!("get_random_posts_by_group tag_names collect: {e}"))?
+    };
+
+    if tag_names.is_empty() {
+        return get_random_posts(limit);
+    }
+
+    // Resolve the sampled names to tag ids, scoped to the same group so a tag
+    // that exists in several groups cannot widen the stratum.
+    let tag_ids: Vec<i64> = {
+        let mut stmt = conn
+            .prepare("SELECT id FROM tags WHERE name = ?1 AND group_type = ?2")
+            .map_err(|e| format!("get_random_posts_by_group tag_ids prep: {e}"))?;
+        tag_names
+            .iter()
+            .filter_map(|name| {
+                stmt.query_row(params![name, group], |r| r.get::<_, i64>(0))
+                    .ok()
+            })
+            .collect()
     };
 
     if tag_ids.is_empty() {

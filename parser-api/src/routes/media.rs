@@ -30,7 +30,7 @@ use rocket::{Request, response::status::Custom};
 use tokio::io::{AsyncRead, AsyncSeek, AsyncSeekExt as _, ReadBuf, SeekFrom};
 
 use super::account::IfNoneMatch;
-use e621_account_parser_api::{db, media_store, ratelimit::ClientIp};
+use e621_account_parser_api::{db, db_blocking, media_store, ratelimit::ClientIp};
 
 /// Strong ETag derived from the file's (mtime, size). Both change only when
 /// the original is re-downloaded, so the tag is stable across serves and
@@ -323,6 +323,20 @@ fn parse_range(header: &str, total: u64) -> RangeParse {
     }
 }
 
+/// Refresh the media LRU key for `post_id` off the async worker.
+///
+/// `touch_media_entry` is a WRITE (it goes through the single `WRITE_CONN`
+/// mutex) and used to run inline on the tokio worker, so a request that merely
+/// served bytes could block on a contended writer. The LRU hint is
+/// fire-and-forget by design — losing it only costs a slightly less accurate
+/// eviction order — so it is spawned and its error ignored.
+fn spawn_media_touch(post_id: i64) {
+    rocket::tokio::spawn(async move {
+        let _ = db_blocking(move || db::touch_media_entry(post_id, chrono::Utc::now().timestamp()))
+            .await;
+    });
+}
+
 /// Serve one locally-stored original file.
 ///
 /// Deliberately unauthenticated (so plain `<img>`/`<video>` tags work against
@@ -356,34 +370,63 @@ pub(crate) async fn serve_media(
     if post_id <= 0 {
         return Err(not_found("invalid post id"));
     }
-    let entry = match db::get_media_entry(post_id) {
-        Ok(Some(e)) => e,
-        Ok(None) => return Err(not_found("no locally-stored original for this post")),
-        Err(e) => return Err(unavailable(&format!("media index error: {e}"))),
-    };
-    let (rel_path, _mtime) = entry;
-    let path = match media_store::stored_path(post_id, &rel_path) {
-        Some(p) => p,
-        None => return Err(not_found("indexed file missing from disk")),
-    };
-    // Stat BEFORE the conditional check: the ETag is (file_mtime, size), and
-    // the DB `media_entries.mtime` LRU key is intentionally NOT used because
-    // it is bumped on every serve (which would churn the ETag and defeat
-    // caching).
-    let meta = match std::fs::metadata(&path) {
-        Ok(m) => m,
-        Err(e) => return Err(unavailable(&format!("unable to stat media file: {e}"))),
-    };
-    let len = meta.len();
-    let mtime = meta
-        .modified()
-        .ok()
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    if len == 0 {
-        return Err(not_found("stored media file is empty"));
+    // The media index lookup, the path resolution, and the stat are all
+    // blocking work (SQLite pool + filesystem) and used to run inline on the
+    // tokio worker. This is the busiest read route in the offline catalog (one
+    // request per card image), so a slow stat or a contended pool would stall
+    // every other task on that worker.
+    enum Prepared {
+        Ready(std::path::PathBuf, u64, u64),
+        Missing(String),
+        Failed(String),
     }
+    let prepared = db_blocking(move || {
+        let entry = match db::get_media_entry(post_id) {
+            Ok(Some(e)) => e,
+            Ok(None) => {
+                return Ok(Prepared::Missing(
+                    "no locally-stored original for this post".to_owned(),
+                ));
+            }
+            Err(e) => return Ok(Prepared::Failed(format!("media index error: {e}"))),
+        };
+        let (rel_path, _mtime) = entry;
+        let Some(path) = media_store::stored_path(post_id, &rel_path) else {
+            return Ok(Prepared::Missing(
+                "indexed file missing from disk".to_owned(),
+            ));
+        };
+        // Stat BEFORE the conditional check: the ETag is (file_mtime, size), and
+        // the DB `media_entries.mtime` LRU key is intentionally NOT used because
+        // it is bumped on every serve (which would churn the ETag and defeat
+        // caching).
+        let meta = match std::fs::metadata(&path) {
+            Ok(m) => m,
+            Err(e) => {
+                return Ok(Prepared::Failed(format!("unable to stat media file: {e}")));
+            }
+        };
+        let len = meta.len();
+        let mtime = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        if len == 0 {
+            return Ok(Prepared::Missing("stored media file is empty".to_owned()));
+        }
+        Ok(Prepared::Ready(path, len, mtime))
+    })
+    .await
+    // A join/panic failure here means the blocking task itself died; surface it
+    // the same way an index error is surfaced.
+    .map_err(|e| unavailable(&format!("media lookup task failed: {e}")))?;
+    let (path, len, mtime) = match prepared {
+        Prepared::Ready(path, len, mtime) => (path, len, mtime),
+        Prepared::Missing(detail) => return Err(not_found(&detail)),
+        Prepared::Failed(detail) => return Err(unavailable(&detail)),
+    };
     let etag = etag_for(mtime, len);
 
     // Conditional GET: client already has this exact file → 304, no body, no
@@ -403,7 +446,7 @@ pub(crate) async fn serve_media(
                     Err(e) => return Err(unavailable(&format!("unable to open media file: {e}"))),
                 };
                 // Bytes served → the file is clearly in use.
-                let _ = db::touch_media_entry(post_id, chrono::Utc::now().timestamp());
+                spawn_media_touch(post_id);
                 return Ok(MediaBody::Partial(Box::new(RangeFileBody {
                     stream,
                     len: range_len,
@@ -425,7 +468,7 @@ pub(crate) async fn serve_media(
     };
     // Refresh LRU so frequently-viewed posts are evicted last (bytes served,
     // so the file is clearly in use).
-    let _ = db::touch_media_entry(post_id, chrono::Utc::now().timestamp());
+    spawn_media_touch(post_id);
     Ok(MediaBody::File(Box::new(FileBody {
         file,
         len,
