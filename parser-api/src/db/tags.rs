@@ -1,5 +1,5 @@
 use rusqlite::params;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{LazyLock, Mutex};
 
 use crate::models::{Post, TagCount};
@@ -437,14 +437,74 @@ pub fn get_tags_df() -> rusqlite::Result<HashMap<String, i64>> {
 
 use crate::models::{TagAlias, TagImplication};
 
-/// Bulk upsert tag aliases from e621 API. Uses INSERT OR REPLACE so
-/// existing rows are overwritten with fresh status/dates.
-/// Bulk upsert tag relation entries (aliases or implications).
-/// Both tables share the same schema: (`antecedent_name`, `consequent_name`, status, `created_at`, `updated_at`).
+/// Statuses the `tag_aliases` / `tag_implications` schema declares.
+const DECLARED_RELATION_STATUSES: [&str; 7] = [
+    "active",
+    "deleted",
+    "processing",
+    "queued",
+    "retired",
+    "error",
+    "pending",
+];
+
+/// Fold an upstream `status` onto the declared set.
+///
+/// e621 keeps a free-form message in this column for every relation whose
+/// validation failed (`"error: Validation failed: …"`), so what arrives is not
+/// the seven-value enum the migration declares and the `CHECK` constraint
+/// rejects it. Anything unrecognised is folded into `error`: never aborting the
+/// batch it arrived in, and never reading as `active` — the only status any
+/// reader filters on. The second element is the raw text when it was not
+/// declared, so the caller can report what upstream actually sent.
+fn canonical_relation_status(raw: &str) -> (&'static str, Option<&str>) {
+    for declared in DECLARED_RELATION_STATUSES {
+        if declared == raw {
+            return (declared, None);
+        }
+    }
+    ("error", Some(raw))
+}
+
+/// Bulk upsert tag relation entries (aliases or implications) with
+/// `INSERT OR REPLACE`, so existing rows are overwritten with fresh
+/// status/dates. Both tables share the same schema:
+/// (`antecedent_name`, `consequent_name`, status, `created_at`, `updated_at`).
 pub fn save_tag_relations(table: &str, entries: &[impl TagRelationEntry]) -> Result<(), String> {
     if entries.is_empty() {
         return Ok(());
     }
+    // Every entry shares one transaction, so a single value the CHECK
+    // constraint rejects rolls back the whole page — that is how one upstream
+    // row froze the entire import. Resolve the statuses up front and report
+    // anything that was not the declared shape.
+    let mut folded_messages: usize = 0;
+    let mut unrecognised: BTreeMap<&str, usize> = BTreeMap::new();
+    let statuses: Vec<&'static str> = entries
+        .iter()
+        .map(|entry| {
+            let (status, raw) = canonical_relation_status(entry.status());
+            if let Some(raw) = raw {
+                // `error: <message>` is e621's documented shape for a relation
+                // whose validation failed; every other value is news.
+                if raw.starts_with("error") {
+                    folded_messages += 1;
+                } else {
+                    *unrecognised.entry(raw).or_insert(0) += 1;
+                }
+            }
+            status
+        })
+        .collect();
+    if folded_messages > 0 {
+        debug!("[{table}] folded {folded_messages} 'error: …' status(es) to 'error'");
+    }
+    if !unrecognised.is_empty() {
+        warn!(
+            "[{table}] unrecognised upstream status value(s) folded to 'error': {unrecognised:?}"
+        );
+    }
+
     let sql = format!(
         "INSERT OR REPLACE INTO {table}
          (antecedent_name, consequent_name, status, created_at, updated_at)
@@ -454,11 +514,11 @@ pub fn save_tag_relations(table: &str, entries: &[impl TagRelationEntry]) -> Res
         let mut stmt = tx
             .prepare_cached(&sql)
             .map_err(|e| format!("prep {table} upsert: {e}"))?;
-        for entry in entries {
+        for (entry, status) in entries.iter().zip(&statuses) {
             stmt.execute(params![
                 entry.antecedent_name().to_ascii_lowercase(),
                 entry.consequent_name().to_ascii_lowercase(),
-                entry.status(),
+                *status,
                 entry.created_at().unwrap_or(""),
                 entry.updated_at().unwrap_or(""),
             ])
@@ -931,4 +991,76 @@ async fn run_full_import() -> Result<(), String> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DECLARED_RELATION_STATUSES, canonical_relation_status};
+
+    /// The exact table the migration creates, so the CHECK constraint under
+    /// test is the one production has.
+    fn relation_table() -> rusqlite::Connection {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE tag_implications (
+                 antecedent_name TEXT NOT NULL,
+                 consequent_name TEXT NOT NULL,
+                 status TEXT NOT NULL CHECK (status IN ('active','deleted','processing','queued','retired','error','pending')),
+                 created_at TEXT,
+                 updated_at TEXT,
+                 PRIMARY KEY(antecedent_name, consequent_name)
+             ) STRICT;",
+        )
+        .unwrap();
+        conn
+    }
+
+    fn insert(conn: &rusqlite::Connection, status: &str) -> rusqlite::Result<usize> {
+        conn.execute(
+            "INSERT OR REPLACE INTO tag_implications
+             (antecedent_name, consequent_name, status, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params!["dango_(food)", "food", status, "", ""],
+        )
+    }
+
+    #[test]
+    fn the_value_e621_actually_sends_is_the_one_the_schema_rejects() {
+        // Production shape (implication id 75979): e621 writes the validation
+        // failure into `status`, so the declared enum is not what arrives.
+        // Pin both halves — the raw value must fail the constraint, otherwise
+        // this test would pass even if the fold were a no-op.
+        let raw = "error: Validation failed: dango_(food) already implies food through another implication";
+        let conn = relation_table();
+        assert!(
+            insert(&conn, raw).is_err(),
+            "the raw upstream status must be rejected for this test to mean anything"
+        );
+        let (folded, report) = canonical_relation_status(raw);
+        assert_eq!(folded, "error");
+        assert_eq!(report, Some(raw));
+        insert(&conn, folded).expect("the folded status must satisfy the constraint");
+    }
+
+    #[test]
+    fn declared_statuses_pass_through_unchanged() {
+        for declared in DECLARED_RELATION_STATUSES {
+            assert_eq!(canonical_relation_status(declared), (declared, None));
+            insert(&relation_table(), declared)
+                .expect("declared status must satisfy the constraint");
+        }
+    }
+
+    #[test]
+    fn unknown_statuses_are_folded_instead_of_aborting_the_batch() {
+        // A status e621 adds later must never read as `active` and must never
+        // roll back the page it arrived in. Case is significant on purpose:
+        // readers compare `status = 'active'` exactly.
+        for raw in ["approved", "ACTIVE", ""] {
+            let (folded, report) = canonical_relation_status(raw);
+            assert_eq!(folded, "error", "{raw:?} must not become an active status");
+            assert_eq!(report, Some(raw));
+            insert(&relation_table(), folded).expect("folded status must satisfy the constraint");
+        }
+    }
 }
