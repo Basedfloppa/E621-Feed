@@ -229,7 +229,7 @@ Both templates also set the transport/browser security headers: HSTS,
 `Referrer-Policy: strict-origin-when-cross-origin`, `X-Content-Type-Options`,
 `X-Frame-Options: DENY`, `Cross-Origin-Opener-Policy`,
 `Cross-Origin-Resource-Policy` and `Permissions-Policy` (`nginx-template:58-64`,
-`Caddyfile:10-19`). The **CSP is not set by the proxy** — the binary adds
+`Caddyfile:15-24`). The **CSP is not set by the proxy** — the binary adds
 `Content-Security-Policy` itself through Rocket's `Shield`, built from the
 configured `posts_domain` (`parser-api/src/main.rs:519-558`).
 
@@ -347,8 +347,15 @@ The old `compress-dist.sh` still runs on `trunk build --release` and writes
 excludes those siblings** (they'd double binary size), so they're not
 embedded. If you need Brotli at the edge, enable `ngx_brotli` and turn on
 `brotli on;` on the proxy. The shipped [`Caddyfile`](../Caddyfile) already
-enables `encode zstd gzip` — with `application/wasm` explicitly excluded from
-compression — so Caddy handles Vary/Accept-Encoding for you.
+enables `encode zstd gzip`, so Caddy handles Vary/Accept-Encoding for you. Its
+default response matcher compresses `text/*` and `application/wasm*` — the same
+set the nginx template lists in `gzip_types` — and skips images, video and
+archives. Response matchers support **only** `status` and `header`, so
+`match { not header Content-Type application/wasm }` is not valid Caddyfile
+(`not` exists for *request* matchers); Caddy refuses to load such a config with
+`unrecognized response matcher not`. To narrow encoding by request, declare a
+matcher outside the directive (`@notwasm not path *.wasm`) and pass it in
+(`encode @notwasm zstd gzip`) — that keeps the default response matcher.
 
 > **Note on ports:** the binary binds to the port in its `Rocket.toml`
 > (default `:8181`) inside the container — map a host port to it with a plain
