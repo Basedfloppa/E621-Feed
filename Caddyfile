@@ -1,41 +1,67 @@
 domain.com {
-    # Compression
-    encode zstd gzip
+	# Compression. No `match` block on purpose: Caddy's default response
+	# matcher already covers `text/*` and `application/wasm*` and skips
+	# images/video/archives, and it skips responses that already carry a
+	# Content-Encoding.
+	#
+	# `match { not header Content-Type ... }` is NOT valid: response matchers
+	# only understand `status` and `header` — `not` is a *request* matcher.
+	# To narrow encoding by request, declare a matcher and pass it in:
+	#     @notwasm not path *.wasm
+	#     encode @notwasm zstd gzip
+	encode zstd gzip
 
-    # Reverse proxy
-    reverse_proxy 127.0.0.1:8181 {
-        header_up Host {host}
-        header_up X-Real-IP {remote_host}
-        header_up X-Forwarded-For {remote_host}
-        transport http {
-            read_timeout  300s
-            write_timeout 300s
-        }
-    }
+	# Security headers
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Cross-Origin-Opener-Policy "same-origin"
+		Cross-Origin-Resource-Policy "same-origin"
+		Permissions-Policy "geolocation=(), microphone=(), camera=(), payment=(), usb=(), interest-cohort=()"
+		-Server
+	}
 
-    #OPTIONS preflight
-    @options_site {
-        method OPTIONS
-        not path /api/*
-    }
-    respond @options_site 204
+	# Reverse proxy
+	reverse_proxy 127.0.0.1:8181 {
+		header_up Host {host}
+		header_up X-Real-IP {remote_host}
+		# Deliberately no `header_up X-Forwarded-For`. Caddy already replaces
+		# the client-supplied value with the socket peer, and only *appends*
+		# when the caller is a configured `trusted_proxies` source. Pinning it
+		# to `{remote_host}` would strip that chain, and with `trust_proxy =
+		# true` the analyzer keys rate limits on the leftmost value — so such a
+		# line would make every client look like the proxy (src/ratelimit.rs).
+		transport http {
+			read_timeout 300s
+			write_timeout 300s
+		}
+	}
 
-    # Block Swagger / OpenAPI
-    @blocked {
-        path /api/swagger-ui* /api/openapi.json
-    }
-    respond @blocked 404
+	#OPTIONS preflight
+	@options_site {
+		method OPTIONS
+		not path /api/*
+	}
+	respond @options_site 204
 
-    request_body {
-        max_size 50MB
-    }
+	# Block Swagger / OpenAPI
+	@blocked {
+		path /api/swagger-ui* /api/openapi.json
+	}
+	respond @blocked 404
 
-    log {
-        output file /var/log/caddy/parser.access.log
-    }
+	request_body {
+		max_size 50MB
+	}
+
+	log {
+		output file /var/log/caddy/parser.access.log
+	}
 }
 
 # www
 www.domain.com {
-    redir https://domain.com{uri}
+	redir https://domain.com{uri}
 }
