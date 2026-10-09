@@ -129,7 +129,7 @@ exploration_epsilon = 0.0   # ε-greedy exploration bonus; 0 = disabled (default
 idf_lambda_meta = 0.40
 recency_tau_recent = 4.0
 recency_split_age_days = 30.0
-# tag_relation_pmi_scale_user = 2.0
+# tag_relation_pmi_scale_user = 2.0        # NaN (default) = falls back to tag_relation_pmi_scale
 # Optional hot recency kernel for posts younger than recency_split_age_hours.
 # recency_tau_hot             = 2.0        # NaN (default) = disabled
 recency_split_age_hours = 24.0
@@ -196,6 +196,42 @@ diversity_semantic_blend = 0.05  # [0-1]; 0 = disabled (pure Jaccard), >0 enable
 diversity_pmi_threshold = 0.5    # minimum PMI for a soft match; pairs with PMI above this count as semantically related
 diversity_semantic_max_tags = 10 # top-K tags per group for the O(T²) PMI loop
 diversity_user_pmi_weight = 1.0  # amplify user-graph PMI over global in MMR (1.0 = no boost, >1 = personalized diversity)
+
+# --- Priors buckets (optional) ----------------------------------------------
+# With at least one `[buckets.<name>]` table each account is assigned to exactly
+# one bucket: the bucket stored explicitly on the account when it names a
+# configured table, otherwise `account_id % bucket_count` over the sorted table
+# names (Config::pick_bucket). The bucket's overrides are applied on top of the
+# `[priors]` table above; with no `[buckets.*]` table at all every account runs
+# on those priors. The block below stays commented out so copying this file
+# keeps all accounts on the default priors.
+#
+# A bucket table accepts the eight legacy `mix_*` fields plus `priors`, an
+# arbitrary inline table of `[priors]` keys. Legacy fields are applied first and
+# `priors` is merged on top, so `priors` wins per key. Caveat: the merge skips
+# values equal to a field's default (0 / NaN), so those cannot be forced through
+# `priors`.
+#
+# [buckets.control]
+# mix_sim = 0.603
+# mix_quality = 0.017
+# mix_recency = 0.017
+# mix_rating = 0.034
+# mix_media = 0.042
+# mix_popularity = 0.017
+# mix_interaction = 0.084
+# mix_tag_relation = 0.067
+# priors = { group_w_artist = 2.0, diversity_max_penalty = 0.3 }
+#
+# [buckets.exploration]
+# mix_sim = 0.30
+# mix_quality = 0.05
+# mix_recency = 0.05
+# mix_rating = 0.04
+# mix_media = 0.04
+# mix_popularity = 0.02
+# mix_interaction = 0.10
+# mix_tag_relation = 0.06
 
 # --- Runtime and worker tuning ----------------------------------------------
 [runtime]

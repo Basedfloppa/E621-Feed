@@ -326,7 +326,7 @@ calibrate_threads = 0   # 0 = auto (nproc/2). Set explicitly to e.g. 4 to be mor
 
 1. **Pre-resolved post tags** ([`scorer/cached.rs`](../parser-api/src/utils/scorer/cached.rs)).
    At hydration time each post's tags are walked once and stored as a flat
-   `Vec<CachedTag>` carrying `(group, lc, df_raw, global_tag_id)` already
+   `Vec<CachedTag>` carrying `(group, lc, df_raw, global_tid, user_tid)` already
    resolved. The hot scoring loop then skips two HashMap-by-string probes
    per tag per post per probe (`IdfIndex::df_for` and
    `TagRelationGraph::tag_id`), which on a full grid is the difference
@@ -338,7 +338,9 @@ calibrate_threads = 0   # 0 = auto (nproc/2). Set explicitly to e.g. 4 to be mor
    channels and stores them per (account, post). Each subsequent probe
    recomputes only the invalidated channels and reuses the rest from the
    cache; the final mix-blend / temperature / strong-negative-penalty
-   shape is always reapplied. Effects on common probe categories:
+   shape is always reapplied by the shared `final_blend` — the same
+   function the production `score` / `score_cached` paths call, so cached
+   and uncached scores cannot drift. Effects on common probe categories:
 
    | Knob class (typical examples) | Channels recomputed | Probe cost vs uncached |
    |---|---|---|
@@ -347,6 +349,7 @@ calibrate_threads = 0   # 0 = auto (nproc/2). Set explicitly to e.g. 4 to be mor
    | `idf_*`, `df_floor`, `idf_max`, `bm25_k`, `freq_alpha`, `idf_rsj_smoothing`, `tag_sim_jaccard_blend` | sim only | ~30% |
    | `tag_relation_*` (PMI / cooc_ref) | tag_relation only | ~40% |
    | `coldstart_n0` / `confidence_steepness` (drives personal_confidence) | rating + media + recency + tag_relation | ~50% |
+   | `coldstart_smoothing_boost` (also seeds `preferred_tags` into the base) | sim + rating + media | ~30–45% |
    | `group_w_*` | sim + interaction + tag_relation | ~80% |
    | `with-diversify` (any knob) | full rebuild forced | 100% |
 
@@ -354,6 +357,17 @@ calibrate_threads = 0   # 0 = auto (nproc/2). Set explicitly to e.g. 4 to be mor
    [`knobs.rs`](../parser-api/src/bin/calibrate/knobs.rs); if a knob's
    semantics shift (e.g. quality_a starts depending on group_wts), update
    the mask there.
+
+   Masks also have to respect the base cache: any knob folded into
+   `context_fingerprint` forces `ContextBase` to be rebuilt, so every
+   channel that reads the rebuilt base must be listed in its mask even
+   when the knob nominally belongs to another channel.
+   `coldstart_smoothing_boost` is the case in point — it looks like a
+   rating/media knob, but it also seeds `preferred_tags` into the
+   `user` / `u_norm` vector, so its mask is
+   `M_BOOST = M_SIM | M_DISCRETE`. Adding the field to the fingerprint
+   without widening the mask would rebuild the base while reusing a `sim`
+   computed from the previous vector.
 
 ### Dataset memory budget (calibrate-only)
 

@@ -48,8 +48,10 @@ pub struct ScoringContext<'a> {
 /// or group weights can skip rebuilding the `user` / `feedback` maps.
 ///
 /// `fingerprint` is a hash of the priors fields that affect the base:
-/// IDF parameters, group weights, `freq_alpha`, `coldstart_n0`, and
-/// `confidence_steepness`. If the fingerprint matches the current probe's
+/// IDF parameters, group weights, `freq_alpha`, `coldstart_n0`,
+/// `confidence_steepness`, and `coldstart_smoothing_boost` (the latter
+/// only through the preferred-tag synthetic tf, but that still lands in
+/// the `user` vector). If the fingerprint matches the current probe's
 /// priors, the base can be reused; otherwise it must be rebuilt.
 ///
 /// All fields are `pub(super)` — the calibrate binary accesses the struct
@@ -104,6 +106,11 @@ pub fn context_fingerprint(p: &Priors) -> u64 {
     // Confidence params (M_CONFIDENCE_DERIVED)
     mix!(p.coldstart_n0.to_bits());
     mix!(p.confidence_steepness.to_bits());
+    // Preferred-tag synthetic tf: only bites for accounts that have
+    // `preferred_tags`, but it feeds `user` / `u_norm` directly, so a
+    // changed boost must invalidate the cached base. The calibrate knob
+    // that sweeps it therefore also invalidates M_SIM (see `M_BOOST`).
+    mix!(p.coldstart_smoothing_boost.to_bits());
     h
 }
 
@@ -519,8 +526,8 @@ mod tests {
     use super::*;
     use crate::models::{
         AccountMediaStat, AccountPreferenceProfile, AccountQualityProfile, AccountRatingStat,
-        AccountRecencyProfile, AccountTagFeedback, Files, Flags, Has, Post, Rating, Relationships,
-        Score, Stats, TagCount, Tags,
+        AccountRecencyProfile, AccountTagFeedback, Files, Flags, Has, Post, PreferredTag, Rating,
+        Relationships, Score, Stats, TagCount, Tags,
     };
     use crate::utils::idf::IdfIndex;
     use crate::utils::scorer::priors::Priors;
@@ -762,6 +769,19 @@ mod tests {
         );
     }
 
+    #[test]
+    fn fingerprint_differs_on_coldstart_smoothing_boost() {
+        let mut p1 = default_priors();
+        let mut p2 = default_priors();
+        p1.coldstart_smoothing_boost = 1.0;
+        p2.coldstart_smoothing_boost = 5.0;
+        assert_ne!(
+            context_fingerprint(&p1),
+            context_fingerprint(&p2),
+            "changing coldstart_smoothing_boost should change fingerprint"
+        );
+    }
+
     // ==================================================================
     //  ContextBase — construction
     // ==================================================================
@@ -812,6 +832,40 @@ mod tests {
         );
         assert!(base.u_norm > 0.0, "u_norm should be positive");
         assert!(base.fingerprint != 0, "fingerprint should not be zero");
+    }
+
+    #[test]
+    fn context_base_preferred_tag_weight_tracks_smoothing_boost() {
+        // Regression guard for the fingerprint bug: the synthetic tf of a
+        // preferred tag comes from `coldstart_smoothing_boost`, so a probe
+        // that changes the boost must both move the fingerprint and change
+        // the user vector — otherwise the cached base would keep the old
+        // weight while rating/media pick up the new boost.
+        let idf = build_idf();
+        let mut profile = minimal_profile();
+        profile.preferred_tags = vec![PreferredTag {
+            tag: "skeb".to_string(),
+            group: "general".to_string(),
+            weight: 1.0,
+        }];
+
+        let mut p_low = default_priors();
+        p_low.coldstart_smoothing_boost = 0.5;
+        let mut p_high = default_priors();
+        p_high.coldstart_smoothing_boost = 8.0;
+
+        let low = ContextBase::new(&empty_counts(), &p_low, &idf, &profile);
+        let high = ContextBase::new(&empty_counts(), &p_high, &idf, &profile);
+
+        assert_eq!(low.user_tag_count, 1, "preferred tag must enter user map");
+        assert_eq!(high.user_tag_count, 1);
+        assert_ne!(low.fingerprint(), high.fingerprint());
+        assert!(
+            !close(low.u_norm, high.u_norm),
+            "higher boost must raise the preferred-tag weight: {} vs {}",
+            low.u_norm,
+            high.u_norm
+        );
     }
 
     #[test]

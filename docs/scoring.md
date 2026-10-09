@@ -217,8 +217,20 @@ estimate keeps the score conservative.
 |Variable|Lower →|Higher →|
 |---|---|---|
 |`discrete_smoothing_alpha`|rating/media prefs react sharply to small samples|cold-start profiles stay near neutral longer|
-|`coldstart_smoothing_boost`|less extra smoothing below `coldstart_n0`|more aggressive smoothing for cold profiles|
+|`coldstart_smoothing_boost`|less extra smoothing below `coldstart_n0`; preferred tags enter the profile vector with a smaller synthetic weight|more aggressive smoothing for cold profiles; preferred tags weigh more heavily into `sim`|
 |`discrete_pref_floor`|ratings/media-types with zero samples get near-zero score|minimum score floor for unseen categories|
+
+`coldstart_smoothing_boost` has a second role beyond rating/media
+smoothing: for an account with `preferred_tags`, each preferred tag that is
+not already in the profile is seeded into the profile vector with a
+synthetic term frequency equal to this value (floored at 0.1, BM25-
+saturated, then shaped by `freq_alpha` and scaled by group weight, IDF and
+the preference weight —
+`ContextBase::new` in
+[`scorer/context.rs`](../parser-api/src/utils/scorer/context.rs)). It
+therefore moves the `sim` channel as well, and in `calibrate` it
+invalidates sim + rating + media (see the invalidation table in
+[calibration.md](calibration.md)).
 
 ## Uploader channel
 

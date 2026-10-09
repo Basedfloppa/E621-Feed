@@ -19,8 +19,8 @@
 use e621_account_parser_api::utils::Priors;
 
 use crate::cache::{
-    M_ARTIST_DISCOVERY, M_CONFIDENCE_DERIVED, M_DISCRETE, M_EXCLUSIVITY, M_GROUP_W, M_INTERACTION,
-    M_NONE, M_NOVELTY, M_RATIO_EXP, M_RECENCY, M_SIM, M_TAG_RELATION, M_UPLOADER,
+    M_ARTIST_DISCOVERY, M_BOOST, M_CONFIDENCE_DERIVED, M_DISCRETE, M_EXCLUSIVITY, M_GROUP_W,
+    M_INTERACTION, M_NONE, M_NOVELTY, M_RATIO_EXP, M_RECENCY, M_SIM, M_TAG_RELATION, M_UPLOADER,
 };
 
 /// One tunable parameter for the grid search. `apply` mutates the trial
@@ -517,7 +517,7 @@ pub(crate) const GRID_KNOBS: &[KnobSpec] = &[
             p.coldstart_smoothing_boost = (p.coldstart_smoothing_boost + v).clamp(0.0, 10.0);
         },
         probes: PROBES_BOOST,
-        invalidates: M_DISCRETE,
+        invalidates: M_BOOST,
         diversify_only: false,
     },
     KnobSpec {

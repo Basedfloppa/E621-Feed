@@ -77,9 +77,15 @@ pub(crate) const M_ALL: u16 = M_SIM
 /// `coldstart_n0` / `confidence_steepness` change `personal_confidence`,
 /// which is consumed by rating / media / recency / `tag_relation`.
 pub(crate) const M_CONFIDENCE_DERIVED: u16 = M_RATING | M_MEDIA | M_RECENCY | M_TAG_RELATION;
-/// `discrete_smoothing_alpha` / `discrete_pref_floor` /
-/// `coldstart_smoothing_boost` change rating + media smoothing only.
+/// `discrete_smoothing_alpha` / `discrete_pref_floor` change rating + media
+/// smoothing only.
 pub(crate) const M_DISCRETE: u16 = M_RATING | M_MEDIA;
+/// `coldstart_smoothing_boost` changes rating + media smoothing and, for
+/// accounts with `preferred_tags`, the synthetic tf those tags get in
+/// `ContextBase`. The base is keyed by fingerprint, so a changed boost
+/// rebuilds `user` / `u_norm` — and the similarity channel reading that
+/// vector must be recomputed too, not reused from the previous probe.
+pub(crate) const M_BOOST: u16 = M_SIM | M_DISCRETE;
 /// `one_sided_ratio_exp` changes both quality and popularity ratios.
 pub(crate) const M_RATIO_EXP: u16 = M_QUALITY | M_POPULARITY;
 /// `group_w_*` change the per-group weight vector → `sim+interaction+tag_relation`.
