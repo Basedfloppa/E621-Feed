@@ -357,9 +357,12 @@ impl<'a> ScoringContext<'a> {
     }
 
     /// Apply the final mix+temperature+veto blend to a set of per-channel
-    /// scores. Used by the calibrate cache path: channels can be reused
-    /// across probes that don't invalidate them, and only this final step
-    /// is rerun under the new mix/temperature/penalty priors.
+    /// scores. Single source of truth for the blend: every scoring path
+    /// (`score`, `score_cached`, the calibrate cache) must route through it.
+    /// The calibrate cache path reuses per-channel values across probes and
+    /// reruns only this step under the new mix/temperature/penalty priors, so
+    /// an inlined second copy of the formula would silently diverge from the
+    /// cached scores.
     #[allow(clippy::too_many_arguments)]
     #[must_use]
     pub fn final_blend(
@@ -392,6 +395,7 @@ impl<'a> ScoringContext<'a> {
             + mix.novelty * novelty
             + mix.artist_discovery * artist_discovery;
         let mut score = raw.clamp(0.0, 1.0);
+        // Class C v5.3: optional sigmoid sharpening on the final blend.
         let temp = self.priors.score_temperature;
         if temp > 1e-3 {
             score = sigmoid((score - 0.5) * temp).clamp(0.0, 1.0);
@@ -418,28 +422,21 @@ impl<'a> ScoringContext<'a> {
         let novelty = self.novelty_fit(post);
         let artist_discovery = self.artist_discovery_fit(post);
 
-        let mix = self.mix;
-        let raw = mix.sim * sim
-            + mix.quality * quality
-            + mix.recency * recency
-            + mix.rating * rating
-            + mix.media * media
-            + mix.popularity * popularity
-            + mix.interaction * interaction
-            + mix.tag_relation * tag_relation
-            + mix.uploader * uploader
-            + mix.exclusivity * exclusivity
-            + mix.novelty * novelty
-            + mix.artist_discovery * artist_discovery;
-        let mut score = raw.clamp(0.0, 1.0);
-        // Class C v5.3: optional sigmoid sharpening on the final blend.
-        let temp = self.priors.score_temperature;
-        if temp > 1e-3 {
-            score = sigmoid((score - 0.5) * temp).clamp(0.0, 1.0);
-        }
-        if veto {
-            score *= 1.0 - self.priors.strong_negative_penalty.clamp(0.0, 1.0);
-        }
+        let score = self.final_blend(
+            sim,
+            quality,
+            recency,
+            rating,
+            media,
+            popularity,
+            interaction,
+            tag_relation,
+            uploader,
+            exclusivity,
+            novelty,
+            artist_discovery,
+            veto,
+        );
 
         let breakdown = ScoreBreakdown {
             tag_similarity: sim,
@@ -455,7 +452,7 @@ impl<'a> ScoringContext<'a> {
             novelty_fit: novelty,
             artist_discovery_fit: artist_discovery,
         };
-        (score.clamp(0.0, 1.0), breakdown)
+        (score, breakdown)
     }
 
     /// Cached counterpart of [`Self::score`]: takes pre-resolved
@@ -522,7 +519,8 @@ mod tests {
     use super::*;
     use crate::models::{
         AccountMediaStat, AccountPreferenceProfile, AccountQualityProfile, AccountRatingStat,
-        AccountRecencyProfile, AccountTagFeedback, TagCount,
+        AccountRecencyProfile, AccountTagFeedback, Files, Flags, Has, Post, Rating, Relationships,
+        Score, Stats, TagCount, Tags,
     };
     use crate::utils::idf::IdfIndex;
     use crate::utils::scorer::priors::Priors;
@@ -663,6 +661,52 @@ mod tests {
 
     fn empty_counts() -> Vec<TagCount> {
         vec![]
+    }
+
+    fn make_post(tags: Tags) -> Post {
+        Post {
+            id: 1,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            change_seq: 0.0,
+            files: Files::default(),
+            uploader_id: 0,
+            uploader_name: None,
+            approver_id: None,
+            stats: Stats {
+                score: Score {
+                    up: 100,
+                    down: 0,
+                    total: 100,
+                },
+                fav_count: 50,
+                comment_count: 5,
+                ..Default::default()
+            },
+            flags: Flags::default(),
+            has: Has::default(),
+            relationships: Relationships::default(),
+            pools: vec![],
+            rating: Rating::S,
+            locked_tags: vec![],
+            sources: vec![],
+            description: None,
+            tags,
+        }
+    }
+
+    fn make_empty_tags() -> Tags {
+        Tags {
+            general: vec![],
+            artist: vec![],
+            copyright: vec![],
+            character: vec![],
+            species: vec![],
+            invalid: vec![],
+            meta: vec![],
+            lore: vec![],
+            contributor: vec![],
+        }
     }
 
     // ==================================================================
@@ -968,6 +1012,65 @@ mod tests {
             0.2, 0.8, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, false,
         );
         assert!(close(s, 0.5), "expected 0.5 got {s}");
+    }
+
+    /// Pins the invariant that `score` routes through `final_blend` instead of
+    /// re-deriving the mix inline. The calibrate cache path reuses per-channel
+    /// values and reruns only `final_blend`, so a second copy of the formula
+    /// would silently diverge from cached scores.
+    #[test]
+    fn score_is_bit_identical_to_final_blend() {
+        let mut p = default_priors();
+        // Every channel gets a distinct non-zero weight, so a dropped or
+        // reordered term changes the result bits rather than only its scale.
+        p.mix_sim = 0.90;
+        p.mix_quality = 0.80;
+        p.mix_recency = 0.70;
+        p.mix_rating = 0.60;
+        p.mix_media = 0.50;
+        p.mix_popularity = 0.40;
+        p.mix_interaction = 0.30;
+        p.mix_tag_relation = 0.20;
+        p.mix_uploader = 0.15;
+        p.mix_exclusivity = 0.10;
+        p.mix_novelty = 0.05;
+        p.mix_artist_discovery = 0.03;
+
+        let idf = build_idf();
+        let graph = build_graph();
+        let profile = minimal_profile();
+        let counts = empty_counts();
+        let ctx = ScoringContext::new(&counts, &p, &idf, &profile, &graph, &graph);
+
+        let mut tags = make_empty_tags();
+        tags.artist.push("skeb".to_string());
+        tags.character.push("cat".to_string());
+        tags.general.push("furry".to_string());
+        let post = make_post(tags);
+
+        let (score, bd) = ctx.score(&post);
+        let via_blend = ctx.final_blend(
+            bd.tag_similarity,
+            bd.quality_fit,
+            bd.recency_fit,
+            bd.rating_fit,
+            bd.media_fit,
+            bd.popularity_fit,
+            bd.interaction_fit,
+            bd.tag_relation_fit,
+            bd.uploader_fit,
+            bd.exclusivity_fit,
+            bd.novelty_fit,
+            bd.artist_discovery_fit,
+            // `minimal_profile` carries no feedback, so `interaction_fit`
+            // cannot reach the strong-negative veto threshold here.
+            false,
+        );
+        assert_eq!(
+            score.to_bits(),
+            via_blend.to_bits(),
+            "score={score} must be exactly final_blend(...)={via_blend}"
+        );
     }
 
     // ==================================================================
