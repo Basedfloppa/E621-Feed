@@ -500,7 +500,7 @@ on the strength of the offline numbers alone — put it behind the
 #### Harness note: `calibrate_threads` does not bound dataset prep
 
 `prepare_eval_dataset` fans out over accounts with a bare
-`into_par_iter()` ([`dataset.rs:219`](../parser-api/src/bin/calibrate/dataset.rs#L219)),
+`into_par_iter()` ([`dataset.rs:229`](../parser-api/src/bin/calibrate/dataset.rs#L229)),
 i.e. on the **global** rayon pool, not the `calibrate_threads` pool built
 by `metrics::pool()`. On a 24-core box that is 24 concurrent consumers
 against a 16-connection SQLite pool
