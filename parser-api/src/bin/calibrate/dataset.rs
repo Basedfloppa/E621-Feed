@@ -17,6 +17,7 @@ use e621_account_parser_api::utils::{
     CachedPostFeatures, DiversityFeatures, IdfIndex, ScoringContext, TagRelationGraph,
 };
 
+use crate::metrics::pool;
 use crate::options::{GridOptions, NegMode, SplitStrategy};
 use crate::sampling::{
     sample_hard_pool, sample_negatives_mixed, sample_negatives_uniform, split_train_test,
@@ -135,7 +136,10 @@ pub(crate) fn load_catalog_index() -> anyhow::Result<CatalogIndex> {
     })
 }
 
-pub(crate) fn prepare_eval_dataset(opts: &GridOptions) -> anyhow::Result<EvalDataset> {
+pub(crate) fn prepare_eval_dataset(
+    opts: &GridOptions,
+    now: DateTime<Utc>,
+) -> anyhow::Result<EvalDataset> {
     let cfg_arc = cfg();
     let bt = &cfg_arc.backtest;
     let min_favs = bt.min_favs;
@@ -215,7 +219,13 @@ pub(crate) fn prepare_eval_dataset(opts: &GridOptions) -> anyhow::Result<EvalDat
     let posts_counter = AtomicUsize::new(0);
     let t_start = std::time::Instant::now();
 
-    let fixtures: Vec<AccountFixture> = account_ids
+    // Every parallel section of the harness must run inside the bounded
+    // `calibrate_threads` pool. A bare `into_par_iter` escapes to the global
+    // rayon pool, which on a many-core box runs more concurrent SQLite
+    // consumers than r2d2 has connections (16) and turns hydration into
+    // `timed out waiting for connection` for a large share of accounts.
+    let fixtures: Vec<AccountFixture> = pool().install(|| {
+        account_ids
         .into_par_iter()
         .filter_map(|account_id| {
             let (train_ids, test_ids) = if matches!(opts.split, SplitStrategy::TimeCausal) {
@@ -265,7 +275,7 @@ pub(crate) fn prepare_eval_dataset(opts: &GridOptions) -> anyhow::Result<EvalDat
                 return None;
             }
 
-            let profile = build_profile(&train_posts);
+            let profile = build_profile(&train_posts, now);
             let tags = build_tag_counts(&train_posts);
 
             let target_negs = test_posts.len() * negative_ratio;
@@ -367,6 +377,22 @@ pub(crate) fn prepare_eval_dataset(opts: &GridOptions) -> anyhow::Result<EvalDat
             // Safety filter: sampling functions should already exclude train+test,
             // but this catches any edge-case leaks (e.g. when target exceeds catalog size).
             candidate_ids.retain(|id| !excluded_ids.contains(id));
+            // Canonical order.
+            //
+            // The `NegMode::Hybrid` hard pool is ranked by a full-pipeline
+            // score, and that score carries low-bit nondeterminism: `tags`
+            // (see `build_tag_counts`) is collected out of a `HashMap`, whose
+            // iteration order is randomised per process, and it feeds the user
+            // vector whose f32 norm is accumulated in that order. The *set* of
+            // hard negatives is stable across runs — measured over three runs
+            // with an order-insensitive hash — but the order is not, and the
+            // channel cache is positional, so an unsorted list made the cache
+            // key miss on every run.
+            //
+            // Sorting makes the dataset a pure function of the pinned clock.
+            // It changes tie-breaking in the scorer's stable sort once, which
+            // is why this landed together with `CALIBRATE_NOW`.
+            candidate_ids.sort_unstable();
             let neg_posts = db::hydrate_posts_by_ids(&candidate_ids).unwrap_or_default();
             let test_count = test_posts.len();
 
@@ -463,7 +489,8 @@ pub(crate) fn prepare_eval_dataset(opts: &GridOptions) -> anyhow::Result<EvalDat
                 test_count,
             })
         })
-        .collect();
+        .collect()
+    });
 
     eprintln!(
         "[prep] DONE: {} accounts hydrated, {} posts cached in memory, {:.1}s total",
@@ -511,14 +538,26 @@ pub(crate) fn prepare_eval_dataset(opts: &GridOptions) -> anyhow::Result<EvalDat
     })
 }
 
-fn build_profile(train_posts: &[Post]) -> AccountPreferenceProfile {
+/// `now` is the run's clock, threaded in rather than read here.
+///
+/// This used to call `Utc::now()` locally, and that single line made the whole
+/// harness non-reproducible: the profile's age statistics feed `quality` /
+/// `rating` / `media`, which feed the **full-pipeline score used to rank hard
+/// negatives** (see the `NegMode::Hybrid` arm below). A different wall-clock
+/// second therefore selected a different eval set — three runs of the same
+/// command produced three different dataset fingerprints while the positives
+/// stayed byte-identical.
+///
+/// Reading the clock at the run boundary (`main`) instead makes the dataset a
+/// pure function of the clock, so pinning the clock (`CALIBRATE_NOW`) pins the
+/// dataset.
+fn build_profile(train_posts: &[Post], now: DateTime<Utc>) -> AccountPreferenceProfile {
     let mut rating_counts: HashMap<String, i64> = HashMap::new();
     let mut media_counts: HashMap<&'static str, i64> = HashMap::new();
     let mut score_total_sum = 0.0f32;
     let mut fav_sum = 0.0f32;
     let mut comment_sum = 0.0f32;
     let mut duration_sum = 0.0f32;
-    let now = Utc::now();
     let mut ages = Vec::with_capacity(train_posts.len());
 
     for p in train_posts {
@@ -644,4 +683,35 @@ fn account_favorite_ids_with_ts(account_id: i32) -> anyhow::Result<Vec<(i64, i64
         out.push((id, ts));
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    /// `calibrate_threads` is authoritative only if every parallel section of
+    /// the harness runs inside the bounded pool. A bare parallel iterator
+    /// silently escapes to the *global* rayon pool, which is how dataset
+    /// preparation ended up running one SQLite consumer per core against an
+    /// r2d2 pool of 16 — surfacing as `timed out waiting for connection` for a
+    /// large share of accounts.
+    ///
+    /// Needles are assembled at runtime and deliberately never written out in
+    /// full anywhere in this module, so the scanner does not count the test's
+    /// own text. Keep it that way when editing the comments and messages here.
+    #[test]
+    fn every_parallel_section_runs_inside_the_bounded_pool() {
+        let src = include_str!("dataset.rs");
+        let installs = src.matches(concat!("pool()", ".install(")).count();
+        let pars = src.matches(concat!(".into", "_par_iter(")).count()
+            + src.matches(concat!(".par", "_iter(")).count();
+        assert!(
+            pars > 0,
+            "expected at least one parallel section in dataset.rs — did the scanner rot?"
+        );
+        assert!(
+            installs >= pars,
+            "dataset.rs has {pars} parallel section(s) but only {installs} wrapped in \
+             the bounded-pool helper: a bare parallel iterator escapes to the global \
+             rayon pool and oversubscribes the SQLite connection pool"
+        );
+    }
 }

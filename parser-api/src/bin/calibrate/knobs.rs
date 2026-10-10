@@ -24,7 +24,11 @@ use crate::cache::{
 };
 
 /// One tunable parameter for the grid search. `apply` mutates the trial
-/// Priors in-place; `probes` are absolute deltas added to the current value.
+/// Priors in-place; `probes` are deltas, applied by each knob's own `apply`.
+/// Most are absolute (added to the current value); the `mix_*` blend weights
+/// are relative (`w *= 1 + v`) because the scorer L1-normalises that block, so
+/// an absolute step there is a step in a meaningless unit — see
+/// [`PROBES_MIX_REL`].
 /// `invalidates` is the per-channel cache mask (see [`crate::cache`]).
 /// `diversify_only` knobs only enter scoring under `--with-diversify`;
 /// the grid filters them out otherwise so they don't waste probes on a
@@ -86,7 +90,16 @@ pub(crate) const PAIRED_KNOBS: &[(&str, &str)] = &[
 /// in pass 1 then refines in pass 2/3.
 pub(crate) const PASS_SCALES: &[f32] = &[1.0, 0.5, 0.25];
 
-const PROBES_MIX: &[f32] = &[-0.10, -0.05, 0.05, 0.10];
+/// Blend weights are ratio-valued: the scorer L1-normalises the whole `mix_*`
+/// block against its own total (`MixWeights::from_priors`), so only shares
+/// matter and an absolute step is meaningless. On the shipped defaults
+/// (0.017–0.10) the old `-0.10` probe clamped a channel straight to zero on its
+/// very first try, so the grid only ever compared "keep the default" against
+/// "turn it off" and never measured the interior — every `mix_*` knob was
+/// accepted exactly once, at the clamp. These probes are *relative*
+/// (`w *= 1 + v`), fine-to-coarse and sign-alternating, so a single miss never
+/// blocks the opposite direction; `-1.0` is the exact-off option.
+const PROBES_MIX_REL: &[f32] = &[-0.25, 0.25, -0.5, 0.5, -1.0, 1.0];
 const PROBES_FRACTION: &[f32] = &[-0.10, -0.05, 0.05, 0.10];
 const PROBES_SMALL_FRACTION: &[f32] = &[-0.05, -0.02, 0.02, 0.05];
 const PROBES_WEIGHT: &[f32] = &[-0.20, -0.10, 0.10, 0.20];
@@ -125,89 +138,89 @@ const M_QUALITY: u16 = crate::cache::M_QUALITY;
 const M_POPULARITY: u16 = crate::cache::M_POPULARITY;
 
 pub(crate) const GRID_KNOBS: &[KnobSpec] = &[
-    // -- mix_* (8) — final blend only, no channel recompute --
+    // -- mix_* (12) — final blend only, no channel recompute --
     KnobSpec {
         name: "mix_sim",
-        apply: |p, v| p.mix_sim = (p.mix_sim + v).max(0.0),
-        probes: PROBES_MIX,
+        apply: |p, v| p.mix_sim = (p.mix_sim * (1.0 + v)).max(0.0),
+        probes: PROBES_MIX_REL,
         invalidates: M_NONE,
         diversify_only: false,
     },
     KnobSpec {
         name: "mix_quality",
-        apply: |p, v| p.mix_quality = (p.mix_quality + v).max(0.0),
-        probes: PROBES_MIX,
+        apply: |p, v| p.mix_quality = (p.mix_quality * (1.0 + v)).max(0.0),
+        probes: PROBES_MIX_REL,
         invalidates: M_NONE,
         diversify_only: false,
     },
     KnobSpec {
         name: "mix_recency",
-        apply: |p, v| p.mix_recency = (p.mix_recency + v).max(0.0),
-        probes: PROBES_MIX,
+        apply: |p, v| p.mix_recency = (p.mix_recency * (1.0 + v)).max(0.0),
+        probes: PROBES_MIX_REL,
         invalidates: M_NONE,
         diversify_only: false,
     },
     KnobSpec {
         name: "mix_rating",
-        apply: |p, v| p.mix_rating = (p.mix_rating + v).max(0.0),
-        probes: PROBES_MIX,
+        apply: |p, v| p.mix_rating = (p.mix_rating * (1.0 + v)).max(0.0),
+        probes: PROBES_MIX_REL,
         invalidates: M_NONE,
         diversify_only: false,
     },
     KnobSpec {
         name: "mix_media",
-        apply: |p, v| p.mix_media = (p.mix_media + v).max(0.0),
-        probes: PROBES_MIX,
+        apply: |p, v| p.mix_media = (p.mix_media * (1.0 + v)).max(0.0),
+        probes: PROBES_MIX_REL,
         invalidates: M_NONE,
         diversify_only: false,
     },
     KnobSpec {
         name: "mix_popularity",
-        apply: |p, v| p.mix_popularity = (p.mix_popularity + v).max(0.0),
-        probes: PROBES_MIX,
+        apply: |p, v| p.mix_popularity = (p.mix_popularity * (1.0 + v)).max(0.0),
+        probes: PROBES_MIX_REL,
         invalidates: M_NONE,
         diversify_only: false,
     },
     KnobSpec {
         name: "mix_interaction",
-        apply: |p, v| p.mix_interaction = (p.mix_interaction + v).max(0.0),
-        probes: PROBES_MIX,
+        apply: |p, v| p.mix_interaction = (p.mix_interaction * (1.0 + v)).max(0.0),
+        probes: PROBES_MIX_REL,
         invalidates: M_NONE,
         diversify_only: false,
     },
     KnobSpec {
         name: "mix_tag_relation",
-        apply: |p, v| p.mix_tag_relation = (p.mix_tag_relation + v).max(0.0),
-        probes: PROBES_MIX,
+        apply: |p, v| p.mix_tag_relation = (p.mix_tag_relation * (1.0 + v)).max(0.0),
+        probes: PROBES_MIX_REL,
         invalidates: M_NONE,
         diversify_only: false,
     },
     KnobSpec {
         name: "mix_uploader",
-        apply: |p, v| p.mix_uploader = (p.mix_uploader + v).max(0.0),
-        probes: PROBES_MIX,
+        apply: |p, v| p.mix_uploader = (p.mix_uploader * (1.0 + v)).max(0.0),
+        probes: PROBES_MIX_REL,
         invalidates: M_NONE,
         diversify_only: false,
     },
     KnobSpec {
         name: "mix_exclusivity",
-        apply: |p, v| p.mix_exclusivity = (p.mix_exclusivity + v).max(0.0),
-        probes: PROBES_MIX,
+        apply: |p, v| p.mix_exclusivity = (p.mix_exclusivity * (1.0 + v)).max(0.0),
+        probes: PROBES_MIX_REL,
         invalidates: M_NONE,
         diversify_only: false,
     },
     KnobSpec {
         name: "mix_novelty",
-        apply: |p, v| p.mix_novelty = (p.mix_novelty + v).max(0.0),
-        probes: PROBES_MIX,
+        apply: |p, v| p.mix_novelty = (p.mix_novelty * (1.0 + v)).max(0.0),
+        probes: PROBES_MIX_REL,
         invalidates: M_NONE,
         diversify_only: false,
     },
     // -- Artist discovery knob (only mix weight here — other priors below) --
     KnobSpec {
         name: "mix_artist_discovery",
-        apply: |p, v| p.mix_artist_discovery = (p.mix_artist_discovery + v).max(0.0),
-        probes: PROBES_MIX,
+        apply: |p, v| p.mix_artist_discovery = (p.mix_artist_discovery * (1.0 + v)).max(0.0),
+        probes: PROBES_MIX_REL,
         invalidates: M_NONE,
         diversify_only: false,
     },
@@ -824,85 +837,85 @@ pub(crate) const GRID_KNOBS: &[KnobSpec] = &[
 pub(crate) const MIX_ONLY_KNOBS: &[KnobSpec] = &[
     KnobSpec {
         name: "mix_sim",
-        apply: |p, v| p.mix_sim = (p.mix_sim + v).max(0.0),
-        probes: PROBES_MIX,
+        apply: |p, v| p.mix_sim = (p.mix_sim * (1.0 + v)).max(0.0),
+        probes: PROBES_MIX_REL,
         invalidates: M_NONE,
         diversify_only: false,
     },
     KnobSpec {
         name: "mix_quality",
-        apply: |p, v| p.mix_quality = (p.mix_quality + v).max(0.0),
-        probes: PROBES_MIX,
+        apply: |p, v| p.mix_quality = (p.mix_quality * (1.0 + v)).max(0.0),
+        probes: PROBES_MIX_REL,
         invalidates: M_NONE,
         diversify_only: false,
     },
     KnobSpec {
         name: "mix_recency",
-        apply: |p, v| p.mix_recency = (p.mix_recency + v).max(0.0),
-        probes: PROBES_MIX,
+        apply: |p, v| p.mix_recency = (p.mix_recency * (1.0 + v)).max(0.0),
+        probes: PROBES_MIX_REL,
         invalidates: M_NONE,
         diversify_only: false,
     },
     KnobSpec {
         name: "mix_rating",
-        apply: |p, v| p.mix_rating = (p.mix_rating + v).max(0.0),
-        probes: PROBES_MIX,
+        apply: |p, v| p.mix_rating = (p.mix_rating * (1.0 + v)).max(0.0),
+        probes: PROBES_MIX_REL,
         invalidates: M_NONE,
         diversify_only: false,
     },
     KnobSpec {
         name: "mix_media",
-        apply: |p, v| p.mix_media = (p.mix_media + v).max(0.0),
-        probes: PROBES_MIX,
+        apply: |p, v| p.mix_media = (p.mix_media * (1.0 + v)).max(0.0),
+        probes: PROBES_MIX_REL,
         invalidates: M_NONE,
         diversify_only: false,
     },
     KnobSpec {
         name: "mix_popularity",
-        apply: |p, v| p.mix_popularity = (p.mix_popularity + v).max(0.0),
-        probes: PROBES_MIX,
+        apply: |p, v| p.mix_popularity = (p.mix_popularity * (1.0 + v)).max(0.0),
+        probes: PROBES_MIX_REL,
         invalidates: M_NONE,
         diversify_only: false,
     },
     KnobSpec {
         name: "mix_interaction",
-        apply: |p, v| p.mix_interaction = (p.mix_interaction + v).max(0.0),
-        probes: PROBES_MIX,
+        apply: |p, v| p.mix_interaction = (p.mix_interaction * (1.0 + v)).max(0.0),
+        probes: PROBES_MIX_REL,
         invalidates: M_NONE,
         diversify_only: false,
     },
     KnobSpec {
         name: "mix_tag_relation",
-        apply: |p, v| p.mix_tag_relation = (p.mix_tag_relation + v).max(0.0),
-        probes: PROBES_MIX,
+        apply: |p, v| p.mix_tag_relation = (p.mix_tag_relation * (1.0 + v)).max(0.0),
+        probes: PROBES_MIX_REL,
         invalidates: M_NONE,
         diversify_only: false,
     },
     KnobSpec {
         name: "mix_uploader",
-        apply: |p, v| p.mix_uploader = (p.mix_uploader + v).max(0.0),
-        probes: PROBES_MIX,
+        apply: |p, v| p.mix_uploader = (p.mix_uploader * (1.0 + v)).max(0.0),
+        probes: PROBES_MIX_REL,
         invalidates: M_NONE,
         diversify_only: false,
     },
     KnobSpec {
         name: "mix_exclusivity",
-        apply: |p, v| p.mix_exclusivity = (p.mix_exclusivity + v).max(0.0),
-        probes: PROBES_MIX,
+        apply: |p, v| p.mix_exclusivity = (p.mix_exclusivity * (1.0 + v)).max(0.0),
+        probes: PROBES_MIX_REL,
         invalidates: M_NONE,
         diversify_only: false,
     },
     KnobSpec {
         name: "mix_novelty",
-        apply: |p, v| p.mix_novelty = (p.mix_novelty + v).max(0.0),
-        probes: PROBES_MIX,
+        apply: |p, v| p.mix_novelty = (p.mix_novelty * (1.0 + v)).max(0.0),
+        probes: PROBES_MIX_REL,
         invalidates: M_NONE,
         diversify_only: false,
     },
     KnobSpec {
         name: "mix_artist_discovery",
-        apply: |p, v| p.mix_artist_discovery = (p.mix_artist_discovery + v).max(0.0),
-        probes: PROBES_MIX,
+        apply: |p, v| p.mix_artist_discovery = (p.mix_artist_discovery * (1.0 + v)).max(0.0),
+        probes: PROBES_MIX_REL,
         invalidates: M_NONE,
         diversify_only: false,
     },
@@ -926,3 +939,131 @@ pub(crate) const CATEGORICAL_KNOBS: &[CategoricalKnob] = &[
         invalidates: M_NOVELTY,
     },
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The values the grid actually starts from (`config.toml`), used here so
+    /// the regression below is measured against shipped numbers rather than
+    /// `Priors::default()`, which ships three of these at zero.
+    fn shipped_priors() -> Priors {
+        Priors {
+            mix_sim: 0.603,
+            mix_quality: 0.017,
+            mix_recency: 0.017,
+            mix_rating: 0.034,
+            mix_media: 0.042,
+            mix_popularity: 0.017,
+            mix_interaction: 0.084,
+            mix_tag_relation: 0.067,
+            mix_uploader: 0.05,
+            mix_exclusivity: 0.02,
+            mix_novelty: 0.02,
+            mix_artist_discovery: 0.03,
+            ..Priors::default()
+        }
+    }
+
+    fn mix_value(p: &Priors, name: &str) -> f32 {
+        match name {
+            "mix_sim" => p.mix_sim,
+            "mix_quality" => p.mix_quality,
+            "mix_recency" => p.mix_recency,
+            "mix_rating" => p.mix_rating,
+            "mix_media" => p.mix_media,
+            "mix_popularity" => p.mix_popularity,
+            "mix_interaction" => p.mix_interaction,
+            "mix_tag_relation" => p.mix_tag_relation,
+            "mix_uploader" => p.mix_uploader,
+            "mix_exclusivity" => p.mix_exclusivity,
+            "mix_novelty" => p.mix_novelty,
+            "mix_artist_discovery" => p.mix_artist_discovery,
+            other => panic!("{other} is not a mix_* knob"),
+        }
+    }
+
+    /// Both registries, mix knobs only.
+    fn mix_knobs() -> Vec<&'static KnobSpec> {
+        GRID_KNOBS
+            .iter()
+            .chain(MIX_ONLY_KNOBS.iter())
+            .filter(|k| k.name.starts_with("mix_"))
+            .collect()
+    }
+
+    #[test]
+    fn both_registries_still_expose_all_twelve_mix_knobs() {
+        assert_eq!(
+            mix_knobs().len(),
+            24,
+            "12 in GRID_KNOBS + 12 in MIX_ONLY_KNOBS"
+        );
+    }
+
+    /// The regression this change is about. With the old absolute probe set the
+    /// gentlest `mix_*` probe was `-0.10` — larger than every shipped weight
+    /// (0.017 … 0.084) — so the very first probe clamped the channel to zero.
+    /// The grid then only ever compared "keep the default" against "turn it
+    /// off", accepted the clamp, moved on, and never measured the interior:
+    /// every `mix_*` knob was accepted exactly once, at the floor.
+    #[test]
+    fn the_gentlest_probe_never_zeroes_a_shipped_mix_weight() {
+        let gentlest = PROBES_MIX_REL[0] * PASS_SCALES[0];
+        assert!(gentlest < 0.0, "the gentlest probe shrinks, got {gentlest}");
+        for k in mix_knobs() {
+            let mut p = shipped_priors();
+            let before = mix_value(&p, k.name);
+            assert!(before > 0.0, "{} ships at zero", k.name);
+            (k.apply)(&mut p, gentlest);
+            let after = mix_value(&p, k.name);
+            assert!(
+                after > 0.0,
+                "{} was clamped to zero by the gentlest probe ({before} -> {after})",
+                k.name
+            );
+            assert!(
+                after < before,
+                "{} should shrink under a negative probe ({before} -> {after})",
+                k.name
+            );
+        }
+    }
+
+    #[test]
+    fn no_mix_knob_still_uses_the_absolute_probe_set() {
+        for k in mix_knobs() {
+            assert_eq!(k.probes, PROBES_MIX_REL, "{} uses stale probes", k.name);
+        }
+    }
+
+    /// Only the explicit `-1.0` probe may reach zero. Every other probe has to
+    /// leave the weight strictly positive, so no single relative step can be
+    /// the whole "on or off" decision the way the old `-0.10` was.
+    #[test]
+    fn only_the_explicit_off_probe_can_reach_zero() {
+        for k in mix_knobs() {
+            for &probe in k.probes {
+                if probe == -1.0 {
+                    continue;
+                }
+                let mut p = shipped_priors();
+                (k.apply)(&mut p, probe);
+                assert!(
+                    mix_value(&p, k.name) > 0.0,
+                    "{} reached zero on probe {probe}",
+                    k.name
+                );
+            }
+        }
+    }
+
+    /// The first two probes go opposite ways, so the grid's "2 consecutive
+    /// misses" early exit cannot fire after a single rejection and starve the
+    /// opposite direction.
+    #[test]
+    fn the_two_gentlest_probes_go_opposite_ways() {
+        assert!(PROBES_MIX_REL[0] < 0.0, "gentlest probe shrinks");
+        assert!(PROBES_MIX_REL[1] > 0.0, "second probe grows");
+    }
+}

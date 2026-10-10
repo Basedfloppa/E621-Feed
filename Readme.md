@@ -161,7 +161,7 @@ first `/process` import builds your profile.
 
 | Topic | Where |
 |-------|-------|
-| All config keys (defaults + explanations) | [`parser-api/config.example.toml`](parser-api/config.example.toml) |
+| All config keys (calibrated values + explanations) | [`parser-api/config.example.toml`](parser-api/config.example.toml) |
 | Local offline catalog & media serving | [docs/offline-catalog.md](docs/offline-catalog.md) |
 | Production deployment (nginx/Caddy, compression, monitoring) | [docs/deployment.md](docs/deployment.md) |
 | Metrics reference (names, labels, how to read) | [docs/metrics.md](docs/metrics.md) |

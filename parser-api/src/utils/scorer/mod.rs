@@ -65,3 +65,4 @@ pub use context::{ContextBase, ScoringContext, context_fingerprint};
 pub use diversify::{DiversityFeatures, diversify_indices, diversify_scored_posts};
 pub use metrics::{ChannelTiming, PhaseRecord, PipelineMetrics, ScoringMetrics};
 pub use priors::Priors;
+pub use util::{BLEND_CHANNEL_COUNT, BLEND_CHANNEL_NAMES, blend_score, normalised_mix_weights};

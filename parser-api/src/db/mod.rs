@@ -93,6 +93,8 @@ fn pool() -> &'static DbPool {
                 PRAGMA synchronous  = NORMAL;
                 PRAGMA busy_timeout = 60000;
                 PRAGMA temp_store   = MEMORY;
+                PRAGMA cache_size   = -65536;
+                PRAGMA mmap_size    = 268435456;
                 ",
             )
         });
@@ -166,15 +168,30 @@ fn write_conn() -> &'static Mutex<rusqlite::Connection> {
         // "init writer connection: database is locked" at startup.
         conn.busy_timeout(std::time::Duration::from_secs(60))
             .expect("set writer busy_timeout");
-        conn.execute_batch(
+        // `SQLite`'s default page cache is 2 MiB, orders of magnitude below the
+        // working set of the tag-cooccurrence build — its three btrees reach
+        // ~4 GiB, so at the default every upsert faults a page and the build
+        // crawls at ~65k pairs/s. This connection does every bulk write
+        // (`seed`, `calibrate graph`, `/process`), so it takes the large cache;
+        // the pool above stays small because its connections are readers.
+        // `E621_DB_CACHE_MB` overrides the size on memory-constrained hosts.
+        let cache_kib = std::env::var("E621_DB_CACHE_MB")
+            .ok()
+            .and_then(|v| v.parse::<i64>().ok())
+            .filter(|mb| *mb >= 16)
+            .unwrap_or(8192)
+            * 1024;
+        conn.execute_batch(&format!(
             "
             PRAGMA foreign_keys = ON;
             PRAGMA journal_mode = WAL;
             PRAGMA synchronous  = NORMAL;
             PRAGMA busy_timeout = 60000;
             PRAGMA temp_store   = MEMORY;
+            PRAGMA cache_size   = -{cache_kib};
+            PRAGMA mmap_size    = 8589934592;
             ",
-        )
+        ))
         .expect("init writer connection");
         Mutex::new(conn)
     })

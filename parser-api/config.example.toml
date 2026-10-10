@@ -1,10 +1,13 @@
-# Example config showing every supported key with its default value.
+# Example config showing every supported key with a working value.
 # Copy to `config.toml`, set the secrets at the top, and override only
 # the knobs you actually want to change — everything else is optional.
 #
-# This file is the source of truth for default values referenced in
-# `../Readme.md` and `../docs/calibration.md`. Keep it in sync with the
-# `default_*` functions in `src/models/config.rs`.
+# The scoring values below are the *calibrated* operating set, not the
+# compile-time defaults (latest: `calibrate grid` 2026-10-10, N=676,
+# NDCG@20 0.6803; see `../docs/calibration.md`). Where this file and the
+# code disagree, the code wins: the authority for a true default is the
+# `default_*` function in `src/models/config.rs`, and `Priors::default`
+# in `src/utils/scorer/priors.rs`. A recalibration rewrites this file.
 
 # --- Required ---------------------------------------------------------------
 admin_user = "username"
@@ -69,7 +72,24 @@ quality_a = 0.50
 quality_b = 0.20
 quality_log_bias = -3.0
 
-mix_sim = 0.603
+# Final blend weights. The scorer normalises this block by its L1 norm before
+# use (`MixWeights::from_priors`), so only the ratios matter: `mix_sim = 2.261`
+# is a 0.850 share, not an out-of-range weight. Negative weights are allowed.
+#
+# Only `mix_sim` comes from the 2026-10-10 offline grid. The five small channels
+# keep their pre-calibration values on purpose: the grid drove them to 0, but
+# the offline evidence for them is confounded — `recency` and `popularity` are
+# scored relative to statistics derived from the very favourites the eval treats
+# as labels, the split is `time_causal`, and the hard negatives are mined with
+# the incumbent weights (docs/calibration.md). That decision belongs to the
+# online bucket A/B, not to this pass.
+#
+# The harness's preference for the zeroed block is measured, not assumed: it is
+# worth +0.069 NDCG@20 (paired, SE 0.002616, one matrix, `eval --fit-mix=<file>`
+# — see "Run 2026-10-10" in docs/calibration.md). That is the size of the bet
+# this pass declines to take, so treat the five values below as *deliberately
+# uncalibrated* rather than as a null result.
+mix_sim = 2.261
 mix_quality = 0.017
 mix_recency = 0.017
 mix_rating = 0.034
@@ -97,22 +117,22 @@ artist_discovery_n0 = 3.0            # new artists needed for 50% confidence
 artist_discovery_novelty_bonus = 0.2 # serendipity boost for low-confidence discoveries
 
 # IDF and frequency shaping.
-df_floor = 0.40           # minimum document frequency
+df_floor = 0.100           # minimum document frequency
 idf_max = 100.0           # maximum IDF value
 idf_lambda = 1.00         # global IDF weight
 idf_alpha = 1.05          # IDF shaping exponent
 freq_alpha = 0.95         # frequency shaping exponent
 bm25_k = 2.25             # BM25 saturation parameter
 one_sided_ratio_exp = 0.5 # quality/popularity overshoot exponent
-idf_rsj_smoothing = 0.35  # RSJ smoothing factor
+idf_rsj_smoothing = 0.250  # RSJ smoothing factor
 
 # Per-group score multipliers.
 group_w_artist = 2.40
-group_w_character = 2.00
-group_w_copyright = 1.45
-group_w_species = 1.30
-group_w_general = 0.60
-group_w_lore = 0.40
+group_w_character = 1.850
+group_w_copyright = 1.050
+group_w_species = 0.900
+group_w_general = 0.500
+group_w_lore = 0.375
 
 # Cold-start and Bayesian priors.
 coldstart_smoothing_boost = 2.0
@@ -126,8 +146,11 @@ tag_sim_jaccard_blend = 0.0 # 0 = pure cosine; small >0 hedges sparse profiles
 exploration_epsilon = 0.0   # ε-greedy exploration bonus; 0 = disabled (default)
 
 # Optional point splits. NaN disables a split and follows the parent value.
-idf_lambda_meta = 0.40
-recency_tau_recent = 4.0
+# Kept commented so that copying this file engages no split, matching the
+# calibrated set: the 2026-10-10 grid ran with both disabled, and the code
+# defaults are NaN. Uncomment to opt in.
+# idf_lambda_meta = 0.40
+# recency_tau_recent = 4.0
 recency_split_age_days = 30.0
 # tag_relation_pmi_scale_user = 2.0        # NaN (default) = falls back to tag_relation_pmi_scale
 # Optional hot recency kernel for posts younger than recency_split_age_hours.
@@ -196,6 +219,16 @@ diversity_semantic_blend = 0.05  # [0-1]; 0 = disabled (pure Jaccard), >0 enable
 diversity_pmi_threshold = 0.5    # minimum PMI for a soft match; pairs with PMI above this count as semantically related
 diversity_semantic_max_tags = 10 # top-K tags per group for the O(T²) PMI loop
 diversity_user_pmi_weight = 1.0  # amplify user-graph PMI over global in MMR (1.0 = no boost, >1 = personalized diversity)
+
+# Production MMR head budget. The diversifier builds a pairwise-redundancy
+# matrix over the candidates, which is O(head²); `/recommendations` scores the
+# whole merged candidate pool (live + local, several hundred posts), so this is
+# the dominant cost of the diversity pass. Posts past the head keep their
+# raw-score order. 0 = the whole list (historical behaviour); a value in the
+# low hundreds bounds the matrix without touching the top of the page, which is
+# all a caller ever returns. Only this production path reads it — the offline
+# grid derives its own head from top-K.
+diversity_head_limit = 0
 
 # --- Priors buckets (optional) ----------------------------------------------
 # With at least one `[buckets.<name>]` table each account is assigned to exactly

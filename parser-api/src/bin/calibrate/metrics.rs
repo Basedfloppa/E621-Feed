@@ -64,6 +64,76 @@ impl Metrics {
     }
 }
 
+/// Mean and standard error of the **paired** per-account difference
+/// `candidate - incumbent`.
+///
+/// The grid compares two configurations on the *same* accounts, so the
+/// between-account spread (some accounts are intrinsically harder to
+/// rank) cancels in the difference. Returns `None` when the vectors are
+/// not comparable, so the caller can fall back to the unpaired
+/// one-sample test.
+pub(crate) fn paired_mean_se(candidate: &[f64], incumbent: &[f64]) -> Option<(f64, f64)> {
+    if candidate.len() != incumbent.len() || candidate.len() < 2 {
+        return None;
+    }
+    let deltas: Vec<f64> = candidate
+        .iter()
+        .zip(incumbent.iter())
+        .map(|(a, b)| a - b)
+        .collect();
+    let mean = deltas.iter().sum::<f64>() / deltas.len() as f64;
+    Some((mean, se_of_mean(&deltas)))
+}
+
+/// Upper-tail 0.95 quantile of Student's t with `df` degrees of freedom.
+///
+/// A fixed 1.645 (normal) quantile is wrong in the regime this grid
+/// actually runs in: the eligible-account count is small (51 accounts
+/// carry ≥100 favourites in the 2026-10-09 prod snapshot, and hydration
+/// losses cut that further), and t(15)=1.753 is 6.5% wider than the
+/// normal quantile. Values are tabulated and linearly interpolated
+/// between rows, converging to 1.6449 above df=120.
+pub(crate) fn t_quantile_95(df: usize) -> f64 {
+    const TABLE: &[(usize, f64)] = &[
+        (1, 6.3138),
+        (2, 2.9200),
+        (3, 2.3534),
+        (4, 2.1318),
+        (5, 2.0150),
+        (6, 1.9432),
+        (7, 1.8946),
+        (8, 1.8595),
+        (9, 1.8331),
+        (10, 1.8125),
+        (12, 1.7823),
+        (15, 1.7531),
+        (20, 1.7247),
+        (30, 1.6973),
+        (60, 1.6706),
+        (120, 1.6577),
+    ];
+    // A degenerate 0-account sample still has to produce a finite
+    // threshold; `se_of_mean` returns 0 there, so the caller's 1e-4
+    // floor is what actually decides.
+    let df = df.max(1);
+    if df > 120 {
+        return 1.6449;
+    }
+    let mut prev = TABLE[0];
+    for &(d, t) in TABLE {
+        if d == df {
+            return t;
+        }
+        if d > df {
+            // Linear interpolation between the surrounding tabulated rows.
+            let frac = (df - prev.0) as f64 / (d - prev.0) as f64;
+            return prev.1 + frac * (t - prev.1);
+        }
+        prev = (d, t);
+    }
+    1.6449
+}
+
 /// Standard error of the sample mean. Clamps n=0/1 to 0.
 fn se_of_mean(xs: &[f64]) -> f64 {
     let n = xs.len();
@@ -113,8 +183,14 @@ fn bootstrap_ci_95(xs: &[f64], n_resamples: usize) -> (f64, f64) {
     )
 }
 
-/// Bounded rayon pool. `0 = auto = nproc/2`, configurable via
-/// `backtest.calibrate_threads`. Built once on first call.
+/// Bounded rayon pool for the **database-backed** parallel sections —
+/// account hydration in `dataset`. `0 = auto = nproc/2`, configurable via
+/// `backtest.calibrate_threads`.
+///
+/// Deliberately smaller than the core count: this pool drives the r2d2
+/// reader pool in `db`, which holds 16 connections. More consumers than
+/// that turns hydration into `timed out waiting for connection` for a
+/// large share of accounts. Built once on first call.
 pub(crate) fn pool() -> &'static ThreadPool {
     static POOL: OnceLock<ThreadPool> = OnceLock::new();
     POOL.get_or_init(|| {
@@ -125,12 +201,40 @@ pub(crate) fn pool() -> &'static ThreadPool {
         } else {
             configured.min(cores).max(1)
         };
-        eprintln!("[score_with] rayon pool sized at {n_threads} threads (of {cores} cores)");
+        eprintln!("[prep] rayon pool sized at {n_threads} threads (of {cores} cores)");
         rayon::ThreadPoolBuilder::new()
             .num_threads(n_threads)
             .thread_name(|i| format!("calibrate-{i}"))
             .build()
-            .expect("build rayon pool")
+            .expect("build calibrate pool")
+    })
+}
+
+/// Rayon pool for the scoring loops ([`score_with_progress`] and
+/// [`crate::cache::score_with_cache`]). `0 = auto = nproc`, configurable
+/// via `backtest.calibrate_score_threads`.
+///
+/// Those loops read the fully in-memory dataset and never acquire a
+/// SQLite connection, so the reader-pool ceiling that pins [`pool`] does
+/// not apply — they can use every core. Kept separate precisely because
+/// the two phases have different bottlenecks; a single knob cannot serve
+/// both without either starving hydration or idling the machine.
+pub(crate) fn score_pool() -> &'static ThreadPool {
+    static POOL: OnceLock<ThreadPool> = OnceLock::new();
+    POOL.get_or_init(|| {
+        let cores = std::thread::available_parallelism().map_or(4, std::num::NonZero::get);
+        let configured = cfg().backtest.calibrate_score_threads;
+        let n_threads = if configured == 0 {
+            cores.max(1)
+        } else {
+            configured.min(cores).max(1)
+        };
+        eprintln!("[score] scoring pool sized at {n_threads} threads (of {cores} cores)");
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(n_threads)
+            .thread_name(|i| format!("score-{i}"))
+            .build()
+            .expect("build scoring pool")
     })
 }
 
@@ -179,7 +283,7 @@ fn score_with_opts(
     let report_every = (total / 10).max(20);
     let t0 = std::time::Instant::now();
 
-    let per_account: Vec<(f64, f64, f64)> = pool().install(|| {
+    let per_account: Vec<(f64, f64, f64)> = score_pool().install(|| {
         dataset
             .accounts
             .par_iter()
@@ -336,4 +440,121 @@ fn mrr(ranked: &[(i64, f32, bool)]) -> f64 {
         }
     }
     0.0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn paired_mean_se_cancels_account_difficulty() {
+        // Two accounts worth of intrinsic spread; the candidate lifts
+        // both by the same amount, so the paired SE collapses to zero
+        // while the level SE stays large.
+        let incumbent = [0.10, 0.90, 0.20, 0.80];
+        let candidate = [0.15, 0.95, 0.25, 0.85];
+        let (mean, se) = paired_mean_se(&candidate, &incumbent).expect("comparable vectors");
+        assert!((mean - 0.05).abs() < 1e-12, "mean delta={mean}");
+        assert!(se.abs() < 1e-12, "paired SE={se} should be 0");
+        let level_se = se_of_mean(&candidate);
+        assert!(
+            level_se > 0.15,
+            "level SE={level_se} is dominated by the account spread"
+        );
+    }
+
+    #[test]
+    fn paired_mean_se_rejects_incomparable_vectors() {
+        assert!(
+            paired_mean_se(&[1.0, 2.0], &[1.0]).is_none(),
+            "length mismatch"
+        );
+        assert!(paired_mean_se(&[1.0], &[1.0]).is_none(), "single account");
+        assert!(paired_mean_se(&[], &[]).is_none(), "empty");
+    }
+
+    #[test]
+    fn paired_mean_se_is_signed() {
+        let (mean, _) = paired_mean_se(&[0.1, 0.2], &[0.3, 0.4]).unwrap();
+        assert!((mean + 0.2).abs() < 1e-12, "mean={mean}");
+    }
+
+    #[test]
+    fn t_quantile_95_hits_tabulated_values_and_converges() {
+        assert!((t_quantile_95(1) - 6.3138).abs() < 1e-9);
+        assert!((t_quantile_95(4) - 2.1318).abs() < 1e-9);
+        assert!((t_quantile_95(15) - 1.7531).abs() < 1e-9);
+        assert!((t_quantile_95(120) - 1.6577).abs() < 1e-9);
+        // Above the table it converges to the normal quantile.
+        assert!((t_quantile_95(500) - 1.6449).abs() < 1e-9);
+        // df=0 is clamped rather than panicking.
+        assert!((t_quantile_95(0) - 6.3138).abs() < 1e-9);
+    }
+
+    #[test]
+    fn t_quantile_95_interpolates_and_is_monotone() {
+        // 13 and 14 sit between the tabulated 12 and 15.
+        let (t12, t13, t14, t15) = (
+            t_quantile_95(12),
+            t_quantile_95(13),
+            t_quantile_95(14),
+            t_quantile_95(15),
+        );
+        assert!(
+            t12 > t13 && t13 > t14 && t14 > t15,
+            "must be decreasing in df"
+        );
+        assert!(t13 > t15 && t13 < t12, "t13={t13} interpolates");
+        // Strictly wider than the normal quantile for realistic small N.
+        assert!(t_quantile_95(16) > 1.6449);
+    }
+
+    /// The two calibration phases have different bottlenecks, so they get
+    /// different pools. Hydration (`dataset.rs`) drives the r2d2 reader
+    /// pool, which holds 16 connections, and must stay narrower than the
+    /// core count. Scoring (`metrics.rs`, `cache.rs`) runs entirely off the
+    /// in-memory dataset and touches no SQLite, so it may use every core.
+    ///
+    /// Collapsing them back into one knob either starves hydration or idles
+    /// the machine — and both have happened: a single `calibrate_threads`
+    /// set to `nproc` produced `timed out waiting for connection` on nine
+    /// accounts, while the `nproc/2` default leaves half a 24-core box idle
+    /// for the multi-hour grid that is 97% of the wall clock.
+    ///
+    /// Needles are assembled at runtime so the scanner does not count its
+    /// own text — same convention as the guard in `dataset.rs`.
+    #[test]
+    fn scoring_and_hydration_use_separate_pools() {
+        let scoring_install = concat!("score", "_pool()", ".install(");
+        let scoring_any = concat!("score", "_pool()");
+        let pars = |src: &str| {
+            src.matches(concat!(".par", "_iter(")).count()
+                + src.matches(concat!(".par", "_iter_mut(")).count()
+                + src.matches(concat!(".into", "_par_iter(")).count()
+        };
+
+        for (name, src) in [
+            ("metrics.rs", include_str!("metrics.rs")),
+            ("cache.rs", include_str!("cache.rs")),
+        ] {
+            let installs = src.matches(scoring_install).count();
+            let n_par = pars(src);
+            assert!(
+                n_par > 0,
+                "{name}: no parallel section found — did the scanner rot?"
+            );
+            assert!(
+                installs >= n_par,
+                "{name} has {n_par} parallel section(s) but only {installs} wrapped in the \
+                 scoring pool: a bare parallel iterator escapes to the global rayon pool"
+            );
+        }
+
+        let prep = include_str!("dataset.rs");
+        assert!(
+            !prep.contains(scoring_any),
+            "dataset.rs must use the DB-safe pool, not the scoring pool: hydration runs one \
+             SQLite consumer per thread against an r2d2 pool of 16 connections"
+        );
+    }
 }

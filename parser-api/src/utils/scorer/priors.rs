@@ -1,14 +1,16 @@
-//! Scoring priors loaded from `[priors]` in `config.toml`. Every numeric
-//! field carries a `#[serde(default)]` so the section can be partial; the
-//! default values reproduce the legacy production behaviour.
+//! Scoring priors loaded from `[priors]` in `config.toml`. The struct carries
+//! `#[serde(default)]`, so the section may be partial: any field left out —
+//! whether in `[priors]` or in a `[buckets.*] priors = { … }` override — takes
+//! [`Priors::default`], whose values reproduce the legacy production behaviour.
 //!
 //! Knob classes added in v5.2 / v5.3 are grouped at the end with inline
 //! markers (`Class A` … `Class E`) so calibrate's grid is easy to mirror.
 
 use chrono::{DateTime, Utc};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default)]
 pub struct Priors {
     pub now: DateTime<Utc>,
     pub recency_tau_days: f32,
@@ -278,6 +280,131 @@ pub struct Priors {
     /// even when `diversity_semantic_blend > 0`.
     #[serde(default = "default_diversity_user_pmi_weight")]
     pub diversity_user_pmi_weight: f32,
+
+    // ---- Class L: production MMR head budget ----
+    /// How many top-by-score posts take part in the O(n²) MMR pass.
+    /// `0` (the default) keeps the legacy behaviour: the whole candidate
+    /// list. Everything past the head keeps its raw-score order, so the
+    /// bound only trims the pairwise-redundancy matrix, which dominates the
+    /// cost of the production diversity pass.
+    ///
+    /// Only `diversify_scored_posts` (the `/recommendations` path) reads
+    /// this. The offline grid derives its own head from top-K so that probes
+    /// stay comparable across grid widths.
+    #[serde(default = "default_diversity_head_limit")]
+    pub diversity_head_limit: usize,
+}
+
+/// Every field's default, in one place. The per-field `#[serde(default = …)]`
+/// attributes take precedence where they exist; this impl fills the fields that
+/// have none, and is what makes a partial override deserialisable at all —
+/// `BucketOverride::priors` hands a bare `{ knob = value }` object to
+/// `serde_json::from_value::<Priors>`, and before this the 25 fields without an
+/// attribute (starting with `now`) made every such override fail to parse and
+/// get dropped.
+///
+/// `now` is the evaluation clock rather than a knob: it defaults to
+/// deserialisation time so a config that omits it still works.
+impl Default for Priors {
+    fn default() -> Self {
+        Self {
+            now: Utc::now(),
+            recency_tau_days: 10.0,
+            quality_a: 0.5,
+            quality_b: 0.2,
+            quality_log_bias: -3.0,
+            mix_sim: 0.72,
+            mix_quality: 0.02,
+            mix_recency: 0.02,
+            mix_rating: 0.04,
+            mix_media: 0.05,
+            mix_popularity: 0.02,
+            mix_interaction: 0.10,
+            mix_tag_relation: 0.08,
+            mix_uploader: 0.05,
+            mix_exclusivity: 0.0,
+            mix_novelty: 0.0,
+            idf_lambda: 1.0,
+            idf_alpha: 1.05,
+            freq_alpha: 0.95,
+            df_floor: 0.4,
+            idf_max: 100.0,
+            bm25_k: 2.25,
+            idf_rsj_smoothing: 0.35,
+            one_sided_ratio_exp: 0.5,
+            quality_w_absolute: 0.55,
+            quality_w_relative_score: 0.30,
+            quality_w_relative_comments: 0.15,
+            quality_c: 0.3,
+            recency_w_global: 0.4,
+            recency_w_personal: 0.6,
+            recency_personal_floor_frac: 1.0,
+            recency_log_personal: true,
+            popularity_w_fav: 0.8,
+            popularity_w_duration: 0.2,
+            tag_relation_w_global: 0.4,
+            tag_relation_w_personal: 0.6,
+            tag_relation_pmi_scale: 3.5,
+            tag_relation_min_cooc: 2,
+            tag_relation_user_min_cooc: 1,
+            tag_relation_cooc_ref: 16.0,
+            tag_relation_user_cooc_ref: 5.0,
+            tag_relation_max_tags: 20,
+            group_w_artist: 2.4,
+            group_w_character: 2.0,
+            group_w_copyright: 1.45,
+            group_w_species: 1.3,
+            group_w_general: 0.7,
+            group_w_lore: 0.4,
+            coldstart_smoothing_boost: 2.0,
+            interaction_ctr_prior_alpha: 4.0,
+            coldstart_n0: 25.0,
+            discrete_pref_floor: 0.05,
+            diversity_window: 32,
+            diversity_w_artist: 0.22,
+            diversity_w_character: 0.16,
+            diversity_w_copyright: 1.8,
+            diversity_w_species: 1.5,
+            diversity_w_general: 0.08,
+            diversity_max_penalty: 0.45,
+            diversity_interaction_damp: 0.35,
+            strong_negative_count: 3,
+            strong_negative_penalty: 0.4,
+            strong_negative_wilson_threshold: 0.55,
+            discrete_smoothing_alpha: 1.0,
+            feedback_decay_half_life_days: 90.0,
+            meta_interaction_weight: 0.3,
+            tag_relation_pair_aggregator: "mean".to_string(),
+            score_temperature: 0.0,
+            confidence_steepness: 1.0,
+            mmr_redundancy_exp: 1.0,
+            tag_sim_jaccard_blend: 0.0,
+            idf_lambda_meta: f32::NAN,
+            tag_relation_pmi_scale_user: f32::NAN,
+            recency_tau_recent: f32::NAN,
+            recency_split_age_days: 30.0,
+            recency_tau_hot: f32::NAN,
+            recency_split_age_hours: 24.0,
+            exploration_epsilon: 0.0,
+            uploader_n0: 5.0,
+            uploader_w_avg_score: 0.6,
+            uploader_w_avg_fav: 0.4,
+            min_exclusivity_cooc: 2,
+            exclusivity_scale: 0.5,
+            exclusivity_max_tags: 15,
+            novelty_n0: 3.0,
+            novelty_use_feedback: true,
+            diversity_semantic_blend: 0.0,
+            diversity_pmi_threshold: 0.0,
+            diversity_semantic_max_tags: 10,
+            diversity_user_pmi_weight: 1.0,
+            diversity_head_limit: 0,
+            exclusivity_cross_group_weight: 0.5,
+            mix_artist_discovery: 0.0,
+            artist_discovery_n0: 3.0,
+            artist_discovery_novelty_bonus: 0.2,
+        }
+    }
 }
 
 fn default_quality_log_bias() -> f32 {
@@ -486,4 +613,38 @@ fn default_artist_discovery_n0() -> f32 {
 }
 fn default_artist_discovery_novelty_bonus() -> f32 {
     0.2
+}
+
+// ---- Class L defaults ----
+fn default_diversity_head_limit() -> usize {
+    0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Priors;
+
+    /// `Priors::default()` and the per-field `#[serde(default = …)]` attributes
+    /// are two encodings of the same defaults. An empty override is
+    /// deserialised through the attributes (and through `Default` for the
+    /// fields that have none), so comparing the two serialised forms proves
+    /// they agree on every field at once. Drift here is how a bucket override
+    /// silently stops matching `merge_priors`' expectations.
+    #[test]
+    fn serde_defaults_match_priors_default() {
+        let from_serde: Priors =
+            serde_json::from_value(serde_json::json!({})).expect("empty object is a valid Priors");
+        // `now` is the evaluation clock: each path captured it at a different
+        // instant, so only this field is allowed to differ.
+        let from_default = Priors {
+            now: from_serde.now,
+            ..Priors::default()
+        };
+
+        assert_eq!(
+            serde_json::to_value(&from_serde).unwrap(),
+            serde_json::to_value(&from_default).unwrap(),
+            "Priors::default() must agree with the serde defaults"
+        );
+    }
 }

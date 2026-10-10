@@ -272,3 +272,14 @@ would produce a worse production feed. Standing rule: when 4/4 runs
 agree on a knob (e.g. group weights in v5.5), step ~75 % of the gap;
 when runs disagree (e.g. `df_floor`, recency knobs across splits),
 hold or move ≤ 25 % of the gap.
+
+**Quantified 2026-10-10.** That hedge is no longer of unknown size. Re-scoring
+the 2026-10-10 grid result against the shipped config **on a single matrix** —
+the only valid comparison, since `eval` re-samples its candidate set from the
+live database on every run — puts the zeroed block **+0.069 NDCG@20** ahead
+(paired, `SE=0.002616`, threshold 0.004303, **+26 SE**). So the partial-step
+rule above is paying a price of that order, and paying it deliberately: the
+biases described in [`../calibration.md`](../calibration.md) are precisely about
+these channels, and the reference vector is the output of a search those biases
+drove. Full record under *Run 2026-10-10* in
+[`../calibration.md`](../calibration.md#run-2026-10-10--what-the-zeroed-block-is-worth).

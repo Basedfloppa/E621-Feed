@@ -55,6 +55,16 @@ The final score is a weighted blend of **12 scoring channels**:
 |`mix_novelty`|novelty channel disabled|unseen-before tags boost the final score|
 |`mix_artist_discovery`|artist discovery channel disabled|posts from new artists matching the user's profile boost the final score|
 
+The twelve weights are **L1-normalised** by `MixWeights::from_priors`, so only
+their ratios matter and the values in `config.example.toml` are shares rather
+than a bounded range. A weight may be **negative**, in which case the channel is
+subtracted — for that row, "Lower →" means *penalised* rather than merely
+*disabled*. Whether the small channels should be negative is an open question:
+the offline harness prefers five of them at 0 by a wide margin (+0.069 NDCG@20,
+26 SE), but its evidence for exactly those channels is confounded — see
+[Caveats](calibration.md#caveats--dont-blindly-copy-best-priors-into-prod) and
+[Run 2026-10-10](calibration.md#run-2026-10-10--what-the-zeroed-block-is-worth).
+
 ## Quality channel internals
 
 |Variable|Lower →|Higher →|
@@ -111,6 +121,35 @@ diversity-quota pass guarantees minimum variety in the top 20:
 - **Artist quota** — at least 2 different artists
 - **Character quota** — at least 3 different characters
 
+### The redundancy penalty
+
+Each step of the pass picks the remaining post with the highest adjusted score
+`score − penalty`:
+
+```
+penalty = clamp(redundancy × gap × (1 − diversity_interaction_damp × interaction_fit),
+                0, diversity_max_penalty)
+gap     = reference_score − score
+```
+
+`reference_score` is the best score in the head and stays **fixed for the whole
+pass**; `redundancy` is the highest weighted group similarity to the posts
+already picked inside `diversity_window`. Because the penalty only scales a
+post's distance below that reference, the best post is never demoted, while a
+redundant one is pushed down until a dissimilar post overtakes it.
+
+This is what makes `diversity_*` a live knob. If the reference is re-based to the
+best *remaining* candidate after every pick instead, `gap` collapses to zero for
+the candidate that is about to win, every penalty vanishes and the pass
+degenerates into a plain sort by score — the knobs change nothing about the
+order.
+
+Because the penalty grows with `gap`, it can only demote a redundant post past a
+dissimilar one that lands within `redundancy × gap × (1 − damp × interaction)` of
+it. Identical scores carry `gap == 0` and are ordered by post id; near-identical
+variants of one poster that also sit within a hair of each other in score keep
+their order as well — that case is what the quota pass above separates, not MMR.
+
 ### Semantic similarity (v5.11)
 
 By default MMR uses **Jaccard similarity** on exact tag-name hashes — two posts
@@ -142,6 +181,22 @@ co-favourites `skeb`+`canine` gets less MMR penalty for those tags together);
 > diversity above the semantic threshold is effectively unchanged. See the
 > `user_relation_edge_limit` row in “Tag-relation graph + Cluster-PMI”.
 
+### MMR head budget (`diversity_head_limit`)
+
+The diversifier builds a **pairwise-redundancy matrix** over the posts it
+re-ranks, so its cost is O(head²) in time and memory. `/recommendations` feeds it
+the whole merged candidate pool — the live page plus local candidates, several
+hundred posts — which makes this matrix the dominant cost of the diversity pass.
+
+`diversity_head_limit` caps how many top-by-score posts take part: everything
+past the head is appended untouched, in raw-score order. `0` (the default) is
+the historical behaviour — the whole list. A value in the low hundreds bounds
+the matrix while still covering every position a caller returns.
+
+Only this production path reads the knob. `calibrate` derives its own head from
+top-K (`max(2 × max(top_k_ndcg, top_k_recall), 50)`) so probes stay comparable
+across grid widths.
+
 |Variable|Lower →|Higher →|
 |---|---|---|
 |`diversity_window`|shorter memory; repeats can resurface|longer memory; more variety per page|
@@ -156,6 +211,7 @@ co-favourites `skeb`+`canine` gets less MMR penalty for those tags together);
 |`diversity_pmi_threshold`|more pairs count as semantic matches|only strongly-associated pairs (PMI above this) count|
 |`diversity_semantic_max_tags`|fewer tags in O(T²) loop (faster)|more tags per group considered (slower, more signal)|
 |`diversity_user_pmi_weight`|global PMI dominates diversity signal|per-user tag co-occurrence patterns drive diversity personalisation; 0 = disable user graph|
+|`diversity_head_limit`|MMR runs over the whole candidate pool — the historical behaviour, kept at 0|MMR runs over the top N by score only; the tail keeps raw-score order and the O(N²) redundancy matrix shrinks to N²|
 
 ## Search result scoring
 

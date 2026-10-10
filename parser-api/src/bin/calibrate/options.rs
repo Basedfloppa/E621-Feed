@@ -55,6 +55,19 @@ pub(crate) struct GridOptions {
     /// improved baseline. Useful for post-hoc analysis of why a knob
     /// did/didn't move. Set via the `verbose` CLI keyword.
     pub(crate) verbose: bool,
+    /// Reuse the channel matrix persisted by a previous run when it still
+    /// matches the dataset and priors (see `cache_file`). Set via the
+    /// `no-cache` CLI keyword.
+    pub(crate) channel_cache: bool,
+    /// After the `eval` pass has built the in-memory channel matrix, solve the
+    /// twelve `mix_*` weights analytically from it and report the same paired
+    /// gate the grid uses (TODO §2.7). Set via `--fit-mix` / `fit-mix`.
+    ///
+    /// Costs no extra scoring pass by construction: the fit runs on the cache
+    /// `run_eval_into_cache` already produced. It does force the eval through
+    /// that cache-building path even without a following `grid`, because the
+    /// production-scorer path discards the per-channel matrix.
+    pub(crate) fit_mix: bool,
 }
 
 impl Default for GridOptions {
@@ -66,6 +79,8 @@ impl Default for GridOptions {
             split: SplitStrategy::TimeCausal, // post_id biases recency (test posts always newer)
             neg_mode: NegMode::Hybrid { hard_ratio: 0.3 },
             verbose: false,
+            channel_cache: true,
+            fit_mix: false,
         }
     }
 }

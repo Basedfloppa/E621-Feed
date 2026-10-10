@@ -2,9 +2,9 @@
 //!
 //! Each grid probe applies a small delta to one knob; most probes affect
 //! only a single scoring channel (e.g. `quality_a` only changes
-//! `quality_fit`). Without caching we recompute all 9 channels for every
-//! (account, post) on every probe — ~624 probes × 1000 accounts × ~220
-//! posts × 9 channels = the bulk of the 8-hour run.
+//! `quality_fit`). Without caching we recompute all 12 channels for every
+//! (account, post) on every probe — up to 921 probes × 676 accounts × ~220
+//! posts × 12 channels = the bulk of the run.
 //!
 //! With this cache:
 //!   1. The baseline eval runs every channel and stores the result
@@ -22,18 +22,20 @@
 //! Knob → mask wiring lives in [`crate::knobs`]; if a knob's invalidation
 //! shape changes, update both the bit and the comment there.
 //!
-//! The cache itself is per-grid-run scratch — never persisted across
-//! `run_grid` calls.
+//! The cache is per-grid-run scratch in memory. It can also outlive the
+//! process: [`crate::cache_file`] persists the channel matrix and reloads it
+//! on a later invocation when the dataset and priors still match.
 
 use chrono::{DateTime, Utc};
 use rayon::prelude::*;
 
 use e621_account_parser_api::utils::{
-    CachedPostFeatures, ContextBase, Priors, ScoringContext, context_fingerprint, diversify_indices,
+    BLEND_CHANNEL_COUNT, CachedPostFeatures, ContextBase, Priors, ScoringContext,
+    context_fingerprint, diversify_indices,
 };
 
 use crate::dataset::EvalDataset;
-use crate::metrics::{Metrics, mrr_pub, ndcg_at_k_pub, pool, recall_at_k_pub};
+use crate::metrics::{Metrics, mrr_pub, ndcg_at_k_pub, recall_at_k_pub, score_pool};
 
 // ---- ChannelMask -----------------------------------------------------------
 //
@@ -110,6 +112,30 @@ pub(crate) struct ChannelScores {
     pub(crate) veto: bool,
 }
 
+impl ChannelScores {
+    /// Flatten to the [`BLEND_CHANNEL_COUNT`] order `blend_score` expects.
+    ///
+    /// Kept as a method rather than free-standing so adding a channel to the
+    /// struct breaks this function to compile, instead of the analytic fit
+    /// quietly scoring a blend one channel short of the scorer's.
+    pub(crate) fn values(&self) -> [f32; BLEND_CHANNEL_COUNT] {
+        [
+            self.sim,
+            self.quality,
+            self.recency,
+            self.rating,
+            self.media,
+            self.popularity,
+            self.interaction,
+            self.tag_relation,
+            self.uploader,
+            self.exclusivity,
+            self.novelty,
+            self.artist_discovery,
+        ]
+    }
+}
+
 /// Per-account ranked entries. Keeps post ids / positives parallel to
 /// channel scores so a partial-mask probe can reblend them without
 /// re-reading the dataset.
@@ -118,8 +144,15 @@ pub(crate) struct ChannelScores {
 /// `HashMaps`) from the prior probe. If the current probe's priors have the
 /// same fingerprint, the base can be reused via [`ScoringContext::from_base`]
 /// instead of rebuilding the expensive hashmaps from scratch.
+///
+/// `n_test` is the number of **positive** candidates: index `i < n_test` is a
+/// favourite, everything after is a sampled negative. It is stored per account
+/// because the analytic mix fit (TODO §2.7) consumes a bare channel matrix and
+/// would otherwise be unable to tell which columns are relevant. It equals
+/// `AccountFixture::test_count`, which is what the recall metric divides by.
 pub(crate) struct AccountChannelCache {
     pub(crate) channels: Vec<ChannelScores>,
+    pub(crate) n_test: usize,
     pub(crate) context_base: Option<ContextBase>,
 }
 
@@ -214,6 +247,13 @@ pub(crate) fn score_with_cache(
 
     let effective_mask = if prev.is_none() { M_ALL } else { mask };
     let total = dataset.accounts.len();
+    // A full rebuild is the one call per run that takes ~60s with nothing else
+    // on stdout — the baseline, and the final `[best]` verification. The
+    // incremental probes are sub-second, so reporting there would be noise.
+    let report_progress = prev.is_none();
+    let scored_so_far = std::sync::atomic::AtomicUsize::new(0);
+    let report_every = (total / 10).max(1);
+    let t_score = std::time::Instant::now();
     let head_limit = if diversify {
         diversify_head_limit(top_k_ndcg, top_k_recall)
     } else {
@@ -221,7 +261,7 @@ pub(crate) fn score_with_cache(
     };
 
     let fp = context_fingerprint(priors);
-    let per_account: Vec<(AccountChannelCache, (f64, f64, f64))> = pool().install(|| {
+    let per_account: Vec<(AccountChannelCache, (f64, f64, f64))> = score_pool().install(|| {
         dataset
             .accounts
             .par_iter()
@@ -334,9 +374,20 @@ pub(crate) fn score_with_cache(
                         ContextBase::new(&fx.tags, priors, &dataset.idf, &fx.profile)
                     });
 
+                if report_progress {
+                    let done = scored_so_far.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                    if done.is_multiple_of(report_every) || done == total {
+                        eprintln!(
+                            "[score]   {done}/{total} accounts scored ({:.1}s elapsed)",
+                            t_score.elapsed().as_secs_f32()
+                        );
+                    }
+                }
+
                 (
                     AccountChannelCache {
                         channels: next_channels,
+                        n_test,
                         context_base: Some(new_base),
                     },
                     metrics_tuple,

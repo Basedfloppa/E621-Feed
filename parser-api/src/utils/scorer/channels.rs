@@ -572,9 +572,10 @@ impl ScoringContext<'_> {
     #[must_use]
     pub fn exclusivity_fit(&self, post: &Post) -> f32 {
         let p = self.priors;
-        if p.mix_exclusivity <= 0.0 {
-            return 0.0;
-        }
+        // Not gated on `mix_exclusivity`: the weight is applied in `blend_score`,
+        // and the calibrate cache must record the channel's real value even at
+        // weight 0 — otherwise a zeroed channel is indistinguishable from an
+        // unidentifiable one.
         let min_cooc = p.min_exclusivity_cooc.max(1) as f32;
         let scale = p.exclusivity_scale.max(0.01);
         let max_tags = p.exclusivity_max_tags;
@@ -706,9 +707,9 @@ impl ScoringContext<'_> {
     #[must_use]
     pub fn artist_discovery_fit(&self, post: &Post) -> f32 {
         let p = &self.priors;
-        if p.mix_artist_discovery <= 0.0 {
-            return 0.0;
-        }
+        // Not gated on `mix_artist_discovery`: the weight is applied in
+        // `blend_score`, so computing the channel unconditionally keeps the
+        // calibrate cache weight-independent.
 
         // Early exit: no artist tags → no discovery signal.
         if post.tags.artist.is_empty() {
@@ -813,9 +814,10 @@ impl ScoringContext<'_> {
     #[must_use]
     pub fn novelty_fit(&self, post: &Post) -> f32 {
         let p = self.priors;
-        if p.mix_novelty <= 0.0 {
-            return 0.0;
-        }
+        // Not gated on `mix_novelty`: zeroing the weight used to make this
+        // channel return a literal 0.0 for every candidate, which the analytic
+        // fit then reported as "unidentifiable" — a circular verdict, since the
+        // channel was constant only because the config had switched it off.
         let n0 = p.novelty_n0.max(0.5);
 
         let groups: [(Group, &Vec<String>); 7] = [
@@ -1170,6 +1172,7 @@ mod tests {
             diversity_pmi_threshold: 0.0,
             diversity_semantic_max_tags: 10,
             diversity_user_pmi_weight: 1.0,
+            diversity_head_limit: 0,
             exclusivity_cross_group_weight: 0.5,
             mix_artist_discovery: 0.0,
             artist_discovery_n0: 3.0,

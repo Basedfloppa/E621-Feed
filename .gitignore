@@ -5,6 +5,7 @@
 */node_modules
 
 *.db*
+*.bin*
 # NOTE: Cargo.lock / package-lock.json are deliberately NOT ignored — the
 # wasm-bindgen version pinned in parser-web/Cargo.lock determines the JS glue
 # and wasm bytes served to browsers, and parser-web/package-lock.json is

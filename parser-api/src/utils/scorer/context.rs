@@ -11,7 +11,7 @@ use crate::utils::tag_relation::TagRelationGraph;
 
 use super::priors::Priors;
 use super::util::{
-    CompactFeedback, MixWeights, PairAggregator, confidence, normalize_tag, sigmoid,
+    CompactFeedback, MixWeights, PairAggregator, blend_score, confidence, normalize_tag,
 };
 use super::{GROUP_COUNT, Group};
 use crate::db::parse_db_datetime;
@@ -370,6 +370,10 @@ impl<'a> ScoringContext<'a> {
     /// reruns only this step under the new mix/temperature/penalty priors, so
     /// an inlined second copy of the formula would silently diverge from the
     /// cached scores.
+    ///
+    /// The arithmetic itself lives in [`blend_score`] so the analytic mix fit
+    /// (`bin/calibrate/fit.rs`), which has no `ScoringContext` to call, scores
+    /// candidates with the same formula instead of a re-implementation.
     #[allow(clippy::too_many_arguments)]
     #[must_use]
     pub fn final_blend(
@@ -388,29 +392,26 @@ impl<'a> ScoringContext<'a> {
         artist_discovery: f32,
         veto: bool,
     ) -> f32 {
-        let mix = self.mix;
-        let raw = mix.sim * sim
-            + mix.quality * quality
-            + mix.recency * recency
-            + mix.rating * rating
-            + mix.media * media
-            + mix.popularity * popularity
-            + mix.interaction * interaction
-            + mix.tag_relation * tag_relation
-            + mix.uploader * uploader
-            + mix.exclusivity * exclusivity
-            + mix.novelty * novelty
-            + mix.artist_discovery * artist_discovery;
-        let mut score = raw.clamp(0.0, 1.0);
-        // Class C v5.3: optional sigmoid sharpening on the final blend.
-        let temp = self.priors.score_temperature;
-        if temp > 1e-3 {
-            score = sigmoid((score - 0.5) * temp).clamp(0.0, 1.0);
-        }
-        if veto {
-            score *= 1.0 - self.priors.strong_negative_penalty.clamp(0.0, 1.0);
-        }
-        score.clamp(0.0, 1.0)
+        blend_score(
+            self.mix.as_array(),
+            [
+                sim,
+                quality,
+                recency,
+                rating,
+                media,
+                popularity,
+                interaction,
+                tag_relation,
+                uploader,
+                exclusivity,
+                novelty,
+                artist_discovery,
+            ],
+            self.priors.score_temperature,
+            self.priors.strong_negative_penalty,
+            veto,
+        )
     }
 
     #[must_use]
@@ -631,6 +632,7 @@ mod tests {
             diversity_pmi_threshold: 0.0,
             diversity_semantic_max_tags: 10,
             diversity_user_pmi_weight: 1.0,
+            diversity_head_limit: 0,
             exclusivity_cross_group_weight: 0.5,
             mix_artist_discovery: 0.0,
             artist_discovery_n0: 3.0,

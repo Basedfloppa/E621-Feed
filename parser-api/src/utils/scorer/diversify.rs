@@ -391,7 +391,13 @@ pub fn diversify_indices(
 
     let mut available: Vec<usize> = head_ids;
     let mut selected: Vec<usize> = Vec::with_capacity(head_n);
-    let mut top_score = available
+    // Reference score for the `gap` term: the best score of the whole head,
+    // fixed for the entire pass. Rebasing it to the best *remaining* candidate
+    // after every pick drives `gap` to zero for the candidate that is about to
+    // win, so every penalty vanishes and the pass degenerates into a stable
+    // sort by score — which is how all `diversity_*` knobs lost any effect on
+    // the order. See `mmr_penalty_pushes_a_redundant_post_below_a_dissimilar_one`.
+    let reference_score = available
         .iter()
         .map(|&i| entries[i].0)
         .fold(f32::MIN, f32::max);
@@ -422,7 +428,7 @@ pub fn diversify_indices(
                 max_sim.max(0.0).powf(exp.clamp(0.1, 5.0)).clamp(0.0, 1.0)
             };
             let (score, interaction, tid) = entries[i];
-            let gap = (top_score - score).max(0.0);
+            let gap = (reference_score - score).max(0.0);
             let penalty = (redundancy * gap * (1.0 - damp * interaction)).clamp(0.0, max_penalty);
             let adj = score - penalty;
             if adj > best_value || (adj == best_value && tid < best_tiebreak) {
@@ -433,14 +439,7 @@ pub fn diversify_indices(
         }
 
         let chosen_idx = available.swap_remove(best_pos);
-        let removed_was_top = (entries[chosen_idx].0 - top_score).abs() < 1e-6;
         selected.push(chosen_idx);
-        if removed_was_top && !available.is_empty() {
-            top_score = available
-                .iter()
-                .map(|&i| entries[i].0)
-                .fold(f32::MIN, f32::max);
-        }
     }
 
     selected.extend(idx_by_score[head_n..].iter().copied());
@@ -448,11 +447,10 @@ pub fn diversify_indices(
 }
 
 /// Owning re-rank used by the production `/recommendations` route.
-/// Builds [`DiversityFeatures`] on the fly and runs MMR over the whole
-/// list (no top-K cutoff) to preserve historical behaviour.
-/// Owning re-rank used by the production `/recommendations` route.
-/// Builds [`DiversityFeatures`] on the fly and runs MMR over the whole
-/// list (no top-K cutoff) to preserve historical behaviour.
+/// Builds [`DiversityFeatures`] on the fly and runs MMR over the head of
+/// the list: `priors.diversity_head_limit` top-by-score posts, or the whole
+/// list when the knob is `0` (the default, and the historical behaviour).
+/// Posts past the head keep their raw-score order.
 ///
 /// When `user_graph` is provided, PMI-based soft similarity (controlled
 /// by `diversity_semantic_blend`) uses the user's tag co-occurrence
@@ -495,7 +493,12 @@ pub fn diversify_scored_posts(
         })
         .collect();
 
-    let order = diversify_indices(&entries, &features, graph, user_graph, priors, posts.len());
+    let head_limit = if priors.diversity_head_limit == 0 {
+        posts.len()
+    } else {
+        priors.diversity_head_limit
+    };
+    let order = diversify_indices(&entries, &features, graph, user_graph, priors, head_limit);
 
     let mut slots: Vec<Option<ScoredPost>> = posts.into_iter().map(Some).collect();
     let mut out: Vec<ScoredPost> = Vec::with_capacity(slots.len());
@@ -1082,8 +1085,9 @@ mod tests {
 
     /// Reference implementation mirroring the pre-optimisation algorithm:
     /// recompute each candidate's redundancy against the window from scratch
-    /// on every iteration (no matrix). Used to prove the memoized path
-    /// produces bit-identical ordering (i.e. no quality regression).
+    /// on every iteration (no matrix), with the same fixed `reference_score`
+    /// the memoized path uses. Used to prove the memoized path produces
+    /// bit-identical ordering (i.e. no quality regression).
     fn mmr_redundancy_recompute(
         cand: &DiversityFeatures,
         selected: &[usize],
@@ -1125,7 +1129,7 @@ mod tests {
         });
         let mut available: Vec<usize> = idx_by_score;
         let mut selected: Vec<usize> = Vec::with_capacity(n);
-        let mut top_score = available
+        let reference_score = available
             .iter()
             .map(|&i| entries[i].0)
             .fold(f32::MIN, f32::max);
@@ -1145,7 +1149,7 @@ mod tests {
                     user_graph,
                     priors,
                 );
-                let gap = (top_score - score).max(0.0);
+                let gap = (reference_score - score).max(0.0);
                 let penalty =
                     (redundancy * gap * (1.0 - damp * interaction)).clamp(0.0, max_penalty);
                 let adj = score - penalty;
@@ -1157,13 +1161,6 @@ mod tests {
             }
             let chosen = available.swap_remove(best_pos);
             selected.push(chosen);
-            let removed_was_top = (entries[chosen].0 - top_score).abs() < 1e-6;
-            if removed_was_top && !available.is_empty() {
-                top_score = available
-                    .iter()
-                    .map(|&i| entries[i].0)
-                    .fold(f32::MIN, f32::max);
-            }
         }
         selected
     }
@@ -1263,6 +1260,7 @@ mod tests {
             diversity_pmi_threshold: 0.5,
             diversity_semantic_max_tags: 10,
             diversity_user_pmi_weight: 1.0,
+            diversity_head_limit: 0,
             artist_discovery_n0: 3.0,
             artist_discovery_novelty_bonus: 0.2,
         };
@@ -1360,6 +1358,145 @@ mod tests {
             sorted,
             (0..entries.len()).collect::<Vec<_>>(),
             "must be a permutation"
+        );
+    }
+
+    /// MMR must be able to move a redundant post below a dissimilar one.
+    ///
+    /// `gap` (the score distance to the reference score) scales the penalty, so
+    /// the case that exposes a degenerate reference is a *close* redundant pair
+    /// and a dissimilar post just behind it: A(1.0) and B(0.9) share the only
+    /// group that carries weight, C(0.85) shares nothing. With `gap` measured
+    /// from the fixed head maximum, B pays `1.0 × 0.1 × (1 − 0.35 × 0.5) =
+    /// 0.0825` and drops to 0.8175 — below C — giving `[A, C, B]`. If the
+    /// reference is rebased to the best *remaining* candidate after every pick,
+    /// B's `gap` becomes zero, its penalty vanishes and the pass reproduces raw
+    /// score order `[A, B, C]`.
+    #[test]
+    fn mmr_penalty_pushes_a_redundant_post_below_a_dissimilar_one() {
+        let graph = TagRelationGraph::empty();
+        let mut priors = test_priors();
+        // Concentrate all redundancy weight on the artist group so that
+        // "shares the artist" alone means `redundancy == 1.0`.
+        priors.diversity_w_artist = 1.0;
+        priors.diversity_w_character = 0.0;
+        priors.diversity_w_copyright = 0.0;
+        priors.diversity_w_species = 0.0;
+        priors.diversity_w_general = 0.0;
+
+        // Quota pass needs a top-20 window of at least 4; three posts keep it
+        // out of the way.
+        let posts = vec![
+            ScoredPost {
+                score: 1.0,
+                ..scored(1, &["shared"], &[])
+            },
+            ScoredPost {
+                score: 0.9,
+                ..scored(2, &["shared"], &[])
+            },
+            ScoredPost {
+                score: 0.85,
+                ..scored(3, &["other"], &[])
+            },
+        ];
+
+        assert_eq!(
+            ids(&diversify_scored_posts(posts, &graph, None, &priors)),
+            vec![1, 3, 2],
+            "the redundant post must fall below the dissimilar one"
+        );
+    }
+
+    /// Characterises the limit of a gap-scaled penalty: two posts that are both
+    /// near-identical *and* near-equal in score keep their score order, because
+    /// the penalty `redundancy × gap` shrinks together with the gap it has to
+    /// overcome. Variants of one poster scoring 1.00 and 0.99 therefore stay
+    /// adjacent unless a dissimilar post lands inside the (here 0.008) band
+    /// between them — the `enforce_diversity_quota` pass, not MMR, is what
+    /// separates that particular case.
+    ///
+    /// If the penalty is ever made independent of `gap` (or `gap` is measured
+    /// from the bottom of the head instead of the top), this test must fail:
+    /// then the "redundancy penalty" section of `docs/scoring.md` needs
+    /// rewriting along with it.
+    #[test]
+    fn mmr_leaves_near_identical_near_ties_in_score_order() {
+        let graph = TagRelationGraph::empty();
+        let mut priors = test_priors();
+        priors.diversity_w_artist = 1.0;
+        priors.diversity_w_character = 0.0;
+        priors.diversity_w_copyright = 0.0;
+        priors.diversity_w_species = 0.0;
+        priors.diversity_w_general = 0.0;
+
+        let posts = vec![
+            ScoredPost {
+                score: 1.0,
+                ..scored(1, &["shared"], &[])
+            },
+            ScoredPost {
+                score: 0.99,
+                ..scored(2, &["shared"], &[])
+            },
+            ScoredPost {
+                score: 0.9,
+                ..scored(3, &["other"], &[])
+            },
+        ];
+
+        assert_eq!(
+            ids(&diversify_scored_posts(posts, &graph, None, &priors)),
+            vec![1, 2, 3],
+            "a 0.008 penalty band cannot lift a 0.9 post over a 0.99 duplicate"
+        );
+    }
+
+    /// The production head knob: `0` keeps the historical full-list pass, a
+    /// positive value bounds it, and posts past the bound are appended
+    /// untouched in raw-score order.
+    ///
+    /// Equal scores are deliberate: with `gap == 0` every penalty is zero, so
+    /// MMR reduces to its `tid` tie-break and the only thing the output can
+    /// show is which posts took part in the pass at all — inside the head the
+    /// tie-break is `tid`, past the head the raw order survives.
+    #[test]
+    fn diversity_head_limit_bounds_the_mmr_pass() {
+        let graph = TagRelationGraph::empty();
+
+        // Post ids descend with the input index, so `tid` order is the
+        // reverse of the input order. Unique artist/character per post keeps
+        // `enforce_diversity_quota` (which runs on top of MMR) a no-op.
+        let make = |n: usize| -> Vec<ScoredPost> {
+            (0..n)
+                .map(|i| {
+                    let artist = format!("artist{i}");
+                    let character = format!("char{i}");
+                    ScoredPost {
+                        post: post((n - i) as i64, &[&artist], &[&character]),
+                        score: 1.0,
+                        breakdown: None,
+                        reasons: Vec::new(),
+                    }
+                })
+                .collect()
+        };
+        let ids = |v: Vec<ScoredPost>| -> Vec<i64> { v.into_iter().map(|p| p.post.id).collect() };
+        let mut priors = test_priors();
+
+        // 0 = whole list → MMR over all five, tie-break by ascending tid.
+        priors.diversity_head_limit = 0;
+        assert_eq!(
+            ids(diversify_scored_posts(make(5), &graph, None, &priors)),
+            vec![1, 2, 3, 4, 5]
+        );
+
+        // 2 = only the two best by score take part; the tail — ids 3, 2, 1 —
+        // is appended in raw-score order, so their tie-break is untouched.
+        priors.diversity_head_limit = 2;
+        assert_eq!(
+            ids(diversify_scored_posts(make(5), &graph, None, &priors)),
+            vec![4, 5, 3, 2, 1]
         );
     }
 }

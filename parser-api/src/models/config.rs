@@ -560,13 +560,29 @@ pub struct BacktestConfig {
     #[serde(default = "default_seed_owner_token")]
     pub seed_owner_token: String,
 
-    /// Threads in the rayon pool used by `calibrate`'s per-account
-    /// parallel scoring. `0` = auto = `nproc / 2`, matching the
-    /// `.cargo/config.toml` build-jobs cap so a multi-hour grid leaves
-    /// half the box free for other work. Set higher (up to `nproc`) to
-    /// finish faster at the cost of saturating the machine.
+    /// Threads in the bounded rayon pool used by `calibrate`'s
+    /// **database-backed** parallel sections (account hydration during
+    /// dataset preparation).
+    ///
+    /// `0` = auto = `nproc / 2`, matching the `.cargo/config.toml`
+    /// build-jobs cap so a multi-hour grid leaves half the box free.
+    ///
+    /// This pool must stay below the r2d2 reader pool size — `db::pool`
+    /// hardcodes 16 — or hydration starts failing with `timed out
+    /// waiting for connection` for a large share of accounts. That
+    /// coupling, not caution, is why the default is half the cores.
+    /// Scoring is not bound that way; see `calibrate_score_threads`.
     #[serde(default = "default_calibrate_threads")]
     pub calibrate_threads: usize,
+
+    /// Threads in the rayon pool used by the **scoring** loops
+    /// (`metrics::score_with_progress`, `cache::score_with_cache`).
+    ///
+    /// Those loops run entirely off the in-memory dataset and never
+    /// touch SQLite, so they are not bound by the connection pool and
+    /// may use every core. `0` = auto = `nproc`.
+    #[serde(default = "default_calibrate_score_threads")]
+    pub calibrate_score_threads: usize,
 }
 
 impl Default for BacktestConfig {
@@ -581,6 +597,7 @@ impl Default for BacktestConfig {
             max_pages_per_user: default_max_pages_per_user(),
             seed_owner_token: default_seed_owner_token(),
             calibrate_threads: default_calibrate_threads(),
+            calibrate_score_threads: default_calibrate_score_threads(),
         }
     }
 }
@@ -610,6 +627,9 @@ fn default_seed_owner_token() -> String {
     "calibration-seed".to_string()
 }
 fn default_calibrate_threads() -> usize {
+    0
+}
+fn default_calibrate_score_threads() -> usize {
     0
 }
 
@@ -675,323 +695,417 @@ impl BucketOverride {
             p.mix_tag_relation = v;
         }
         // Apply generic priors overrides via JSON merge.
-        if let Some(json) = &self.priors
-            && let Ok(overrides) = serde_json::from_value::<Priors>(json.clone())
-        {
-            merge_priors(p, &overrides);
+        if let Some(json) = &self.priors {
+            // `Priors` only deserialises when a `now` timestamp is present, and
+            // an override legitimately carries knobs — never the evaluation
+            // clock. Without injecting the base's own clock the deserialisation
+            // fails on the missing field and the whole override is dropped.
+            let now = p.now;
+            let mut value = json.clone();
+            if let Some(obj) = value.as_object_mut() {
+                obj.entry("now").or_insert_with(|| serde_json::json!(now));
+            }
+            match serde_json::from_value::<Priors>(value) {
+                Ok(overrides) => merge_priors(p, &overrides),
+                // Never swallow a malformed override: a silently ignored bucket
+                // is indistinguishable from a bucket with no effect.
+                Err(err) => warn!("ignoring [buckets.*] priors override: {err}"),
+            }
         }
     }
 }
 
-/// Merge non-default values from `overrides` into `base`. The Priors default
-/// for every numeric field is either 0.0 or a sentinel like `f32::NAN`; we
-/// overwrite base fields when the override carries a non-default value.
+/// The `Priors` field defaults, frozen once. `Priors::default()` is the single
+/// source of truth for them; its `now` (the evaluation clock) is not compared
+/// anywhere in `merge_priors`.
+fn priors_field_defaults() -> &'static Priors {
+    static DEFAULTS: LazyLock<Priors> = LazyLock::new(Priors::default);
+    &DEFAULTS
+}
+
+/// Whether an override carries a value, given the field's default. The float
+/// defaults include `NaN` sentinels meaning "this knob is off", and `NaN != NaN`
+/// is true — the naive comparison would call every override set and a sentinel
+/// could never be written back.
+fn override_set_f32(value: f32, default: f32) -> bool {
+    if default.is_nan() {
+        !value.is_nan()
+    } else {
+        value != default
+    }
+}
+
+/// Merge non-default values from `overrides` into `base`. "Non-default" means
+/// "differs from this field's value in `Priors::default()`" — the comparisons
+/// below read the defaults from there instead of repeating them as literals.
+/// A literal is a second copy of a default that nothing updates, and a stale
+/// one changes which overrides count as set (that is how `diversity_head_limit`,
+/// `diversity_user_pmi_weight` and `exclusivity_cross_group_weight` were dead).
 /// This avoids requiring every field to be `Option<T>` in Priors itself.
 fn merge_priors(base: &mut Priors, overrides: &Priors) {
+    // Field defaults come from one place, frozen once. Rebuilding a
+    // `Priors` per call would also read the clock (`now` defaults to
+    // `Utc::now()`), which nothing here compares.
+    let d = priors_field_defaults();
     // --- mix weights ---
-    if overrides.mix_sim != 0.0 {
+    if override_set_f32(overrides.mix_sim, d.mix_sim) {
         base.mix_sim = overrides.mix_sim;
     }
-    if overrides.mix_quality != 0.0 {
+    if override_set_f32(overrides.mix_quality, d.mix_quality) {
         base.mix_quality = overrides.mix_quality;
     }
-    if overrides.mix_recency != 0.0 {
+    if override_set_f32(overrides.mix_recency, d.mix_recency) {
         base.mix_recency = overrides.mix_recency;
     }
-    if overrides.mix_rating != 0.0 {
+    if override_set_f32(overrides.mix_rating, d.mix_rating) {
         base.mix_rating = overrides.mix_rating;
     }
-    if overrides.mix_media != 0.0 {
+    if override_set_f32(overrides.mix_media, d.mix_media) {
         base.mix_media = overrides.mix_media;
     }
-    if overrides.mix_popularity != 0.0 {
+    if override_set_f32(overrides.mix_popularity, d.mix_popularity) {
         base.mix_popularity = overrides.mix_popularity;
     }
-    if overrides.mix_interaction != 0.0 {
+    if override_set_f32(overrides.mix_interaction, d.mix_interaction) {
         base.mix_interaction = overrides.mix_interaction;
     }
-    if overrides.mix_tag_relation != 0.08 {
+    if override_set_f32(overrides.mix_tag_relation, d.mix_tag_relation) {
         base.mix_tag_relation = overrides.mix_tag_relation;
     }
-    if overrides.mix_uploader != 0.05 {
+    if override_set_f32(overrides.mix_uploader, d.mix_uploader) {
         base.mix_uploader = overrides.mix_uploader;
     }
-    if overrides.mix_exclusivity != 0.0 {
+    if override_set_f32(overrides.mix_exclusivity, d.mix_exclusivity) {
         base.mix_exclusivity = overrides.mix_exclusivity;
     }
-    if overrides.mix_novelty != 0.0 {
+    if override_set_f32(overrides.mix_novelty, d.mix_novelty) {
         base.mix_novelty = overrides.mix_novelty;
     }
 
     // --- IDF / freq ---
-    if overrides.idf_lambda != 1.0 {
+    if override_set_f32(overrides.idf_lambda, d.idf_lambda) {
         base.idf_lambda = overrides.idf_lambda;
     }
-    if overrides.idf_alpha != 1.0 {
+    if override_set_f32(overrides.idf_alpha, d.idf_alpha) {
         base.idf_alpha = overrides.idf_alpha;
     }
-    if overrides.freq_alpha != 0.95 {
+    if override_set_f32(overrides.freq_alpha, d.freq_alpha) {
         base.freq_alpha = overrides.freq_alpha;
     }
-    if overrides.df_floor != 0.4 {
+    if override_set_f32(overrides.df_floor, d.df_floor) {
         base.df_floor = overrides.df_floor;
     }
-    if overrides.idf_max != 100.0 {
+    if override_set_f32(overrides.idf_max, d.idf_max) {
         base.idf_max = overrides.idf_max;
     }
-    if overrides.bm25_k != 2.25 {
+    if override_set_f32(overrides.bm25_k, d.bm25_k) {
         base.bm25_k = overrides.bm25_k;
     }
-    if overrides.idf_rsj_smoothing != 0.35 {
+    if override_set_f32(overrides.idf_rsj_smoothing, d.idf_rsj_smoothing) {
         base.idf_rsj_smoothing = overrides.idf_rsj_smoothing;
     }
-    if overrides.one_sided_ratio_exp != 0.5 {
+    if override_set_f32(overrides.one_sided_ratio_exp, d.one_sided_ratio_exp) {
         base.one_sided_ratio_exp = overrides.one_sided_ratio_exp;
     }
-    if !overrides.idf_lambda_meta.is_nan() {
+    if override_set_f32(overrides.idf_lambda_meta, d.idf_lambda_meta) {
         base.idf_lambda_meta = overrides.idf_lambda_meta;
     }
 
     // --- quality channel ---
-    if overrides.quality_a != 0.5 {
+    if override_set_f32(overrides.quality_a, d.quality_a) {
         base.quality_a = overrides.quality_a;
     }
-    if overrides.quality_b != 0.2 {
+    if override_set_f32(overrides.quality_b, d.quality_b) {
         base.quality_b = overrides.quality_b;
     }
-    if overrides.quality_log_bias != -3.0 {
+    if override_set_f32(overrides.quality_log_bias, d.quality_log_bias) {
         base.quality_log_bias = overrides.quality_log_bias;
     }
-    if overrides.quality_w_absolute != 0.55 {
+    if override_set_f32(overrides.quality_w_absolute, d.quality_w_absolute) {
         base.quality_w_absolute = overrides.quality_w_absolute;
     }
-    if overrides.quality_w_relative_score != 0.3 {
+    if override_set_f32(
+        overrides.quality_w_relative_score,
+        d.quality_w_relative_score,
+    ) {
         base.quality_w_relative_score = overrides.quality_w_relative_score;
     }
-    if overrides.quality_w_relative_comments != 0.15 {
+    if override_set_f32(
+        overrides.quality_w_relative_comments,
+        d.quality_w_relative_comments,
+    ) {
         base.quality_w_relative_comments = overrides.quality_w_relative_comments;
     }
-    if overrides.quality_c != 0.3 {
+    if override_set_f32(overrides.quality_c, d.quality_c) {
         base.quality_c = overrides.quality_c;
     }
 
     // --- recency channel ---
-    if overrides.recency_tau_days != 10.0 {
+    if override_set_f32(overrides.recency_tau_days, d.recency_tau_days) {
         base.recency_tau_days = overrides.recency_tau_days;
     }
-    if overrides.recency_w_global != 0.4 {
+    if override_set_f32(overrides.recency_w_global, d.recency_w_global) {
         base.recency_w_global = overrides.recency_w_global;
     }
-    if overrides.recency_w_personal != 0.6 {
+    if override_set_f32(overrides.recency_w_personal, d.recency_w_personal) {
         base.recency_w_personal = overrides.recency_w_personal;
     }
-    if overrides.recency_personal_floor_frac != 1.0 {
+    if override_set_f32(
+        overrides.recency_personal_floor_frac,
+        d.recency_personal_floor_frac,
+    ) {
         base.recency_personal_floor_frac = overrides.recency_personal_floor_frac;
     }
-    if !overrides.recency_log_personal {
+    if overrides.recency_log_personal != d.recency_log_personal {
         base.recency_log_personal = overrides.recency_log_personal;
     }
-    if !overrides.recency_tau_hot.is_nan() {
+    if override_set_f32(overrides.recency_tau_hot, d.recency_tau_hot) {
         base.recency_tau_hot = overrides.recency_tau_hot;
     }
-    if !overrides.recency_tau_recent.is_nan() {
+    if override_set_f32(overrides.recency_tau_recent, d.recency_tau_recent) {
         base.recency_tau_recent = overrides.recency_tau_recent;
     }
-    if overrides.recency_split_age_hours != 24.0 {
+    if override_set_f32(overrides.recency_split_age_hours, d.recency_split_age_hours) {
         base.recency_split_age_hours = overrides.recency_split_age_hours;
     }
-    if overrides.recency_split_age_days != 30.0 {
+    if override_set_f32(overrides.recency_split_age_days, d.recency_split_age_days) {
         base.recency_split_age_days = overrides.recency_split_age_days;
     }
 
     // --- popularity channel ---
-    if overrides.popularity_w_fav != 0.8 {
+    if override_set_f32(overrides.popularity_w_fav, d.popularity_w_fav) {
         base.popularity_w_fav = overrides.popularity_w_fav;
     }
-    if overrides.popularity_w_duration != 0.2 {
+    if override_set_f32(overrides.popularity_w_duration, d.popularity_w_duration) {
         base.popularity_w_duration = overrides.popularity_w_duration;
     }
 
     // --- tag relation channel ---
-    if overrides.tag_relation_w_global != 0.4 {
+    if override_set_f32(overrides.tag_relation_w_global, d.tag_relation_w_global) {
         base.tag_relation_w_global = overrides.tag_relation_w_global;
     }
-    if overrides.tag_relation_w_personal != 0.6 {
+    if override_set_f32(overrides.tag_relation_w_personal, d.tag_relation_w_personal) {
         base.tag_relation_w_personal = overrides.tag_relation_w_personal;
     }
-    if overrides.tag_relation_pmi_scale != 3.5 {
+    if override_set_f32(overrides.tag_relation_pmi_scale, d.tag_relation_pmi_scale) {
         base.tag_relation_pmi_scale = overrides.tag_relation_pmi_scale;
     }
-    if overrides.tag_relation_min_cooc != 2 {
+    if overrides.tag_relation_min_cooc != d.tag_relation_min_cooc {
         base.tag_relation_min_cooc = overrides.tag_relation_min_cooc;
     }
-    if overrides.tag_relation_user_min_cooc != 1 {
+    if overrides.tag_relation_user_min_cooc != d.tag_relation_user_min_cooc {
         base.tag_relation_user_min_cooc = overrides.tag_relation_user_min_cooc;
     }
-    if overrides.tag_relation_cooc_ref != 16.0 {
+    if override_set_f32(overrides.tag_relation_cooc_ref, d.tag_relation_cooc_ref) {
         base.tag_relation_cooc_ref = overrides.tag_relation_cooc_ref;
     }
-    if overrides.tag_relation_user_cooc_ref != 5.0 {
+    if override_set_f32(
+        overrides.tag_relation_user_cooc_ref,
+        d.tag_relation_user_cooc_ref,
+    ) {
         base.tag_relation_user_cooc_ref = overrides.tag_relation_user_cooc_ref;
     }
-    if !overrides.tag_relation_pmi_scale_user.is_nan() {
+    if override_set_f32(
+        overrides.tag_relation_pmi_scale_user,
+        d.tag_relation_pmi_scale_user,
+    ) {
         base.tag_relation_pmi_scale_user = overrides.tag_relation_pmi_scale_user;
     }
-    if overrides.tag_relation_pair_aggregator != "mean" {
+    if overrides.tag_relation_pair_aggregator != d.tag_relation_pair_aggregator {
         base.tag_relation_pair_aggregator
             .clone_from(&overrides.tag_relation_pair_aggregator);
     }
-    if overrides.tag_relation_max_tags != 20 {
+    if overrides.tag_relation_max_tags != d.tag_relation_max_tags {
         base.tag_relation_max_tags = overrides.tag_relation_max_tags;
     }
 
     // --- group weights ---
-    if overrides.group_w_artist != 2.4 {
+    if override_set_f32(overrides.group_w_artist, d.group_w_artist) {
         base.group_w_artist = overrides.group_w_artist;
     }
-    if overrides.group_w_character != 2.0 {
+    if override_set_f32(overrides.group_w_character, d.group_w_character) {
         base.group_w_character = overrides.group_w_character;
     }
-    if overrides.group_w_copyright != 1.45 {
+    if override_set_f32(overrides.group_w_copyright, d.group_w_copyright) {
         base.group_w_copyright = overrides.group_w_copyright;
     }
-    if overrides.group_w_species != 1.3 {
+    if override_set_f32(overrides.group_w_species, d.group_w_species) {
         base.group_w_species = overrides.group_w_species;
     }
-    if overrides.group_w_general != 0.7 {
+    if override_set_f32(overrides.group_w_general, d.group_w_general) {
         base.group_w_general = overrides.group_w_general;
     }
-    if overrides.group_w_lore != 0.4 {
+    if override_set_f32(overrides.group_w_lore, d.group_w_lore) {
         base.group_w_lore = overrides.group_w_lore;
     }
 
     // --- interaction / feedback ---
-    if overrides.interaction_ctr_prior_alpha != 4.0 {
+    if override_set_f32(
+        overrides.interaction_ctr_prior_alpha,
+        d.interaction_ctr_prior_alpha,
+    ) {
         base.interaction_ctr_prior_alpha = overrides.interaction_ctr_prior_alpha;
     }
-    if overrides.meta_interaction_weight != 0.3 {
+    if override_set_f32(overrides.meta_interaction_weight, d.meta_interaction_weight) {
         base.meta_interaction_weight = overrides.meta_interaction_weight;
     }
-    if overrides.feedback_decay_half_life_days != 90.0 {
+    if override_set_f32(
+        overrides.feedback_decay_half_life_days,
+        d.feedback_decay_half_life_days,
+    ) {
         base.feedback_decay_half_life_days = overrides.feedback_decay_half_life_days;
     }
-    if overrides.strong_negative_count != 3 {
+    if overrides.strong_negative_count != d.strong_negative_count {
         base.strong_negative_count = overrides.strong_negative_count;
     }
-    if overrides.strong_negative_penalty != 0.4 {
+    if override_set_f32(overrides.strong_negative_penalty, d.strong_negative_penalty) {
         base.strong_negative_penalty = overrides.strong_negative_penalty;
     }
-    if overrides.strong_negative_wilson_threshold != 0.55 {
+    if override_set_f32(
+        overrides.strong_negative_wilson_threshold,
+        d.strong_negative_wilson_threshold,
+    ) {
         base.strong_negative_wilson_threshold = overrides.strong_negative_wilson_threshold;
     }
 
     // --- cold-start / smoothing ---
-    if overrides.discrete_smoothing_alpha != 1.0 {
+    if override_set_f32(
+        overrides.discrete_smoothing_alpha,
+        d.discrete_smoothing_alpha,
+    ) {
         base.discrete_smoothing_alpha = overrides.discrete_smoothing_alpha;
     }
-    if overrides.discrete_pref_floor != 0.05 {
+    if override_set_f32(overrides.discrete_pref_floor, d.discrete_pref_floor) {
         base.discrete_pref_floor = overrides.discrete_pref_floor;
     }
-    if overrides.coldstart_smoothing_boost != 2.0 {
+    if override_set_f32(
+        overrides.coldstart_smoothing_boost,
+        d.coldstart_smoothing_boost,
+    ) {
         base.coldstart_smoothing_boost = overrides.coldstart_smoothing_boost;
     }
-    if overrides.coldstart_n0 != 25.0 {
+    if override_set_f32(overrides.coldstart_n0, d.coldstart_n0) {
         base.coldstart_n0 = overrides.coldstart_n0;
     }
 
     // --- diversity / MMR ---
-    if overrides.diversity_window != 32 {
+    if overrides.diversity_window != d.diversity_window {
         base.diversity_window = overrides.diversity_window;
     }
-    if overrides.diversity_w_artist != 0.22 {
+    if override_set_f32(overrides.diversity_w_artist, d.diversity_w_artist) {
         base.diversity_w_artist = overrides.diversity_w_artist;
     }
-    if overrides.diversity_w_character != 0.16 {
+    if override_set_f32(overrides.diversity_w_character, d.diversity_w_character) {
         base.diversity_w_character = overrides.diversity_w_character;
     }
-    if overrides.diversity_w_copyright != 1.8 {
+    if override_set_f32(overrides.diversity_w_copyright, d.diversity_w_copyright) {
         base.diversity_w_copyright = overrides.diversity_w_copyright;
     }
-    if overrides.diversity_w_species != 1.5 {
+    if override_set_f32(overrides.diversity_w_species, d.diversity_w_species) {
         base.diversity_w_species = overrides.diversity_w_species;
     }
-    if overrides.diversity_w_general != 0.08 {
+    if override_set_f32(overrides.diversity_w_general, d.diversity_w_general) {
         base.diversity_w_general = overrides.diversity_w_general;
     }
-    if overrides.diversity_max_penalty != 0.45 {
+    if override_set_f32(overrides.diversity_max_penalty, d.diversity_max_penalty) {
         base.diversity_max_penalty = overrides.diversity_max_penalty;
     }
-    if overrides.diversity_interaction_damp != 0.35 {
+    if override_set_f32(
+        overrides.diversity_interaction_damp,
+        d.diversity_interaction_damp,
+    ) {
         base.diversity_interaction_damp = overrides.diversity_interaction_damp;
     }
+    // v5.12 Class L: production-only MMR head bound. 0 = whole list.
+    if overrides.diversity_head_limit != d.diversity_head_limit {
+        base.diversity_head_limit = overrides.diversity_head_limit;
+    }
     // --- v5.11 Class J: diversity semantic similarity ---
-    if overrides.diversity_semantic_blend != 0.0 {
+    if override_set_f32(
+        overrides.diversity_semantic_blend,
+        d.diversity_semantic_blend,
+    ) {
         base.diversity_semantic_blend = overrides.diversity_semantic_blend;
     }
-    if overrides.diversity_pmi_threshold != 0.0 {
+    if override_set_f32(overrides.diversity_pmi_threshold, d.diversity_pmi_threshold) {
         base.diversity_pmi_threshold = overrides.diversity_pmi_threshold;
     }
-    if overrides.diversity_semantic_max_tags != 10 {
+    if overrides.diversity_semantic_max_tags != d.diversity_semantic_max_tags {
         base.diversity_semantic_max_tags = overrides.diversity_semantic_max_tags;
+    }
+    if override_set_f32(
+        overrides.diversity_user_pmi_weight,
+        d.diversity_user_pmi_weight,
+    ) {
+        base.diversity_user_pmi_weight = overrides.diversity_user_pmi_weight;
     }
 
     // --- uploader channel ---
-    if overrides.uploader_n0 != 5.0 {
+    if override_set_f32(overrides.uploader_n0, d.uploader_n0) {
         base.uploader_n0 = overrides.uploader_n0;
     }
-    if overrides.uploader_w_avg_score != 0.6 {
+    if override_set_f32(overrides.uploader_w_avg_score, d.uploader_w_avg_score) {
         base.uploader_w_avg_score = overrides.uploader_w_avg_score;
     }
-    if overrides.uploader_w_avg_fav != 0.4 {
+    if override_set_f32(overrides.uploader_w_avg_fav, d.uploader_w_avg_fav) {
         base.uploader_w_avg_fav = overrides.uploader_w_avg_fav;
     }
 
     // --- exclusivity channel ---
-    if overrides.min_exclusivity_cooc != 2 {
+    if overrides.min_exclusivity_cooc != d.min_exclusivity_cooc {
         base.min_exclusivity_cooc = overrides.min_exclusivity_cooc;
     }
-    if overrides.exclusivity_scale != 0.5 {
+    if override_set_f32(overrides.exclusivity_scale, d.exclusivity_scale) {
         base.exclusivity_scale = overrides.exclusivity_scale;
     }
-    if overrides.exclusivity_max_tags != 15 {
+    if overrides.exclusivity_max_tags != d.exclusivity_max_tags {
         base.exclusivity_max_tags = overrides.exclusivity_max_tags;
+    }
+    if override_set_f32(
+        overrides.exclusivity_cross_group_weight,
+        d.exclusivity_cross_group_weight,
+    ) {
+        base.exclusivity_cross_group_weight = overrides.exclusivity_cross_group_weight;
     }
 
     // --- novelty channel ---
-    if overrides.novelty_n0 != 3.0 {
+    if override_set_f32(overrides.novelty_n0, d.novelty_n0) {
         base.novelty_n0 = overrides.novelty_n0;
     }
-    if !overrides.novelty_use_feedback {
+    if overrides.novelty_use_feedback != d.novelty_use_feedback {
         base.novelty_use_feedback = overrides.novelty_use_feedback;
     }
 
     // --- artist discovery channel ---
-    if overrides.mix_artist_discovery != 0.0 {
+    if override_set_f32(overrides.mix_artist_discovery, d.mix_artist_discovery) {
         base.mix_artist_discovery = overrides.mix_artist_discovery;
     }
-    if overrides.artist_discovery_n0 != 3.0 {
+    if override_set_f32(overrides.artist_discovery_n0, d.artist_discovery_n0) {
         base.artist_discovery_n0 = overrides.artist_discovery_n0;
     }
-    if overrides.artist_discovery_novelty_bonus != 0.2 {
+    if override_set_f32(
+        overrides.artist_discovery_novelty_bonus,
+        d.artist_discovery_novelty_bonus,
+    ) {
         base.artist_discovery_novelty_bonus = overrides.artist_discovery_novelty_bonus;
     }
 
     // --- algorithmic shape ---
-    if overrides.score_temperature != 0.0 {
+    if override_set_f32(overrides.score_temperature, d.score_temperature) {
         base.score_temperature = overrides.score_temperature;
     }
-    if overrides.confidence_steepness != 1.0 {
+    if override_set_f32(overrides.confidence_steepness, d.confidence_steepness) {
         base.confidence_steepness = overrides.confidence_steepness;
     }
-    if overrides.mmr_redundancy_exp != 1.0 {
+    if override_set_f32(overrides.mmr_redundancy_exp, d.mmr_redundancy_exp) {
         base.mmr_redundancy_exp = overrides.mmr_redundancy_exp;
     }
-    if overrides.tag_sim_jaccard_blend != 0.0 {
+    if override_set_f32(overrides.tag_sim_jaccard_blend, d.tag_sim_jaccard_blend) {
         base.tag_sim_jaccard_blend = overrides.tag_sim_jaccard_blend;
     }
 
     // --- exploration ---
-    if overrides.exploration_epsilon != 0.0 {
+    if override_set_f32(overrides.exploration_epsilon, d.exploration_epsilon) {
         base.exploration_epsilon = overrides.exploration_epsilon;
     }
 }
@@ -1244,103 +1358,13 @@ diversity_w_general    = 0.08
 
     // ── load_config tests ──────────────────────────────────────────────
 
-    /// Priors with all fields at their default values.
+    /// Priors with all fields at their default values. The `now` field is
+    /// pinned so fixtures stay deterministic; everything else comes from
+    /// `Priors::default()`, which is the single source of truth for defaults.
     fn make_default_priors() -> Priors {
         Priors {
             now: "2025-01-01T00:00:00Z".parse().unwrap(),
-            recency_tau_days: 10.0,
-            quality_a: 0.5,
-            quality_b: 0.2,
-            quality_log_bias: -3.0,
-            mix_sim: 0.72,
-            mix_quality: 0.02,
-            mix_recency: 0.02,
-            mix_rating: 0.04,
-            mix_media: 0.05,
-            mix_popularity: 0.02,
-            mix_interaction: 0.10,
-            mix_tag_relation: 0.08,
-            mix_uploader: 0.05,
-            mix_exclusivity: 0.0,
-            mix_novelty: 0.0,
-            idf_lambda: 1.0,
-            idf_alpha: 1.05,
-            freq_alpha: 0.95,
-            df_floor: 0.4,
-            idf_max: 100.0,
-            bm25_k: 2.25,
-            idf_rsj_smoothing: 0.35,
-            one_sided_ratio_exp: 0.5,
-            quality_w_absolute: 0.55,
-            quality_w_relative_score: 0.30,
-            quality_w_relative_comments: 0.15,
-            quality_c: 0.3,
-            recency_w_global: 0.4,
-            recency_w_personal: 0.6,
-            recency_personal_floor_frac: 1.0,
-            recency_log_personal: true,
-            popularity_w_fav: 0.8,
-            popularity_w_duration: 0.2,
-            tag_relation_w_global: 0.4,
-            tag_relation_w_personal: 0.6,
-            tag_relation_pmi_scale: 3.5,
-            tag_relation_min_cooc: 2,
-            tag_relation_user_min_cooc: 1,
-            tag_relation_cooc_ref: 16.0,
-            tag_relation_user_cooc_ref: 5.0,
-            tag_relation_max_tags: 20,
-            group_w_artist: 2.4,
-            group_w_character: 2.0,
-            group_w_copyright: 1.45,
-            group_w_species: 1.3,
-            group_w_general: 0.7,
-            group_w_lore: 0.4,
-            coldstart_smoothing_boost: 2.0,
-            interaction_ctr_prior_alpha: 4.0,
-            coldstart_n0: 25.0,
-            discrete_pref_floor: 0.05,
-            diversity_window: 32,
-            diversity_w_artist: 0.22,
-            diversity_w_character: 0.16,
-            diversity_w_copyright: 1.8,
-            diversity_w_species: 1.5,
-            diversity_w_general: 0.08,
-            diversity_max_penalty: 0.45,
-            diversity_interaction_damp: 0.35,
-            strong_negative_count: 3,
-            strong_negative_penalty: 0.4,
-            strong_negative_wilson_threshold: 0.55,
-            discrete_smoothing_alpha: 1.0,
-            feedback_decay_half_life_days: 90.0,
-            meta_interaction_weight: 0.3,
-            tag_relation_pair_aggregator: "mean".into(),
-            score_temperature: 0.0,
-            confidence_steepness: 1.0,
-            mmr_redundancy_exp: 1.0,
-            tag_sim_jaccard_blend: 0.0,
-            idf_lambda_meta: f32::NAN,
-            tag_relation_pmi_scale_user: f32::NAN,
-            recency_tau_recent: f32::NAN,
-            recency_split_age_days: 30.0,
-            recency_tau_hot: f32::NAN,
-            recency_split_age_hours: 24.0,
-            exploration_epsilon: 0.0,
-            uploader_n0: 5.0,
-            uploader_w_avg_score: 0.6,
-            uploader_w_avg_fav: 0.4,
-            min_exclusivity_cooc: 2,
-            exclusivity_scale: 0.5,
-            exclusivity_max_tags: 15,
-            novelty_n0: 3.0,
-            novelty_use_feedback: true,
-            diversity_semantic_blend: 0.0,
-            diversity_pmi_threshold: 0.0,
-            diversity_semantic_max_tags: 10,
-            diversity_user_pmi_weight: 1.0,
-            exclusivity_cross_group_weight: 0.5,
-            mix_artist_discovery: 0.0,
-            artist_discovery_n0: 3.0,
-            artist_discovery_novelty_bonus: 0.2,
+            ..Priors::default()
         }
     }
 
@@ -1355,6 +1379,18 @@ diversity_w_general    = 0.08
         assert_eq!(cfg.attempt_timeout_secs, default_attempt_timeout_secs());
         assert_eq!(cfg.db_path, default_db_path());
         assert_eq!(cfg.e621_cache_ttl_secs, default_e621_cache_ttl_secs());
+    }
+
+    #[test]
+    fn diversity_head_limit_defaults_to_the_whole_list() {
+        // Absent from MINIMAL_TOML → 0 → the pre-existing full-list MMR.
+        let cfg = parse_toml(MINIMAL_TOML).expect("minimal config");
+        assert_eq!(cfg.priors.diversity_head_limit, 0);
+
+        // An explicit bound is honoured.
+        let toml = format!("{MINIMAL_TOML}\ndiversity_head_limit = 128\n");
+        let cfg = parse_toml(&toml).expect("config with head limit");
+        assert_eq!(cfg.priors.diversity_head_limit, 128);
     }
 
     #[test]
@@ -1619,6 +1655,153 @@ mix_quality = 0.1
             name.as_deref(),
             Some("control"),
             "falls back to hash-based when explicit name not found"
+        );
+    }
+
+    /// A bucket override is the documented way to A/B a priors change
+    /// (`[buckets.x] priors = { … }`, see `BucketOverride::priors`). It must
+    /// actually reach `Priors`: the JSON is handed to
+    /// `serde_json::from_value::<Priors>`, and `Priors` carries a required `now`
+    /// field that no override would ever spell out.
+    #[test]
+    fn bucket_priors_json_override_reaches_priors() {
+        let toml = format!(
+            r#"{MINIMAL_TOML}
+[buckets.experiment]
+priors = {{ diversity_head_limit = 128, diversity_user_pmi_weight = 2.0, exclusivity_cross_group_weight = 0.9 }}
+"#
+        );
+        let cfg = parse_toml(&toml).expect("config with a priors override");
+        let (name, priors) = cfg.pick_bucket(42, Some("experiment"));
+        assert_eq!(name.as_deref(), Some("experiment"));
+        assert_eq!(
+            priors.diversity_head_limit, 128,
+            "diversity_head_limit override must reach Priors"
+        );
+        assert!(
+            (priors.diversity_user_pmi_weight - 2.0).abs() < 1e-6,
+            "diversity_user_pmi_weight override must reach Priors"
+        );
+        assert!(
+            (priors.exclusivity_cross_group_weight - 0.9).abs() < 1e-6,
+            "exclusivity_cross_group_weight override must reach Priors"
+        );
+    }
+
+    /// Every knob of `Priors` has to be copied by `merge_priors`, otherwise
+    /// `[buckets.x] priors = { … }` silently ignores it — which is exactly how
+    /// `diversity_head_limit`, `diversity_user_pmi_weight` and
+    /// `exclusivity_cross_group_weight` were dead. This scans the sources so a
+    /// field added later cannot slip through again. `now` is the evaluation
+    /// clock rather than a knob and is deliberately not merged.
+    #[test]
+    fn merge_priors_covers_every_priors_field() {
+        let priors_src = include_str!("../utils/scorer/priors.rs");
+        let struct_body = priors_src
+            .split_once("pub struct Priors {")
+            .expect("Priors struct declaration")
+            .1
+            .split_once("\n}")
+            .expect("end of the Priors struct")
+            .0;
+        let fields: Vec<&str> = struct_body
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix("pub "))
+            .filter_map(|line| line.split_once(':').map(|(name, _)| name))
+            .collect();
+        assert!(
+            fields.len() > 80,
+            "sanity check: parsed only {} Priors fields",
+            fields.len()
+        );
+
+        let config_src = include_str!("config.rs");
+        let merge_body = config_src
+            .split_once("fn merge_priors(")
+            .expect("merge_priors declaration")
+            .1
+            .split_once("\n}\n")
+            .expect("end of merge_priors")
+            .0;
+        let handled: Vec<&str> = merge_body
+            .match_indices("overrides.")
+            .map(|(start, needle)| {
+                let rest = &merge_body[start + needle.len()..];
+                let end = rest
+                    .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                    .unwrap_or(rest.len());
+                &rest[..end]
+            })
+            .collect();
+
+        let missing: Vec<&str> = fields
+            .iter()
+            .copied()
+            .filter(|field| *field != "now")
+            .filter(|field| !handled.contains(field))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "merge_priors does not copy: {missing:?}"
+        );
+    }
+
+    /// The defaults `merge_priors` compares against must come from
+    /// `Priors::default()`, never from literals: a literal is a second copy of a
+    /// default that nothing updates, so changing the default in `priors.rs`
+    /// would silently leave the old value treated as "unset". This scans the
+    /// body so a literal cannot come back. The body is flattened first, because
+    /// `rustfmt` wraps long `override_set_f32(…)` calls across lines.
+    #[test]
+    fn merge_priors_compares_against_priors_default() {
+        let config_src = include_str!("config.rs");
+        let body = config_src
+            .split_once("fn merge_priors(")
+            .expect("merge_priors declaration")
+            .1
+            .split_once("\n}\n")
+            .expect("end of merge_priors")
+            .0;
+        let flat = body.split_whitespace().collect::<Vec<_>>().join(" ");
+
+        assert!(
+            flat.contains("let d = priors_field_defaults();"),
+            "merge_priors must take its defaults from `Priors::default()`"
+        );
+        assert!(
+            !flat.contains("is_nan"),
+            "NaN sentinels belong to `override_set_f32`, not to inline comparisons"
+        );
+
+        // Every `!=` must compare against `d.<field>`.
+        let mut rest = flat.as_str();
+        while let Some(pos) = rest.find("!= ") {
+            let after = &rest[pos + 3..];
+            assert!(
+                after.starts_with("d."),
+                "merge_priors compares against a literal: != {}",
+                &after[..after.len().min(40)]
+            );
+            rest = after;
+        }
+
+        // Every `override_set_f32(…)` must receive `overrides.<field>` and the
+        // matching `d.<field>`.
+        let mut calls = 0;
+        let mut rest = flat.as_str();
+        while let Some(pos) = rest.find("override_set_f32(") {
+            let after = &rest[pos + "override_set_f32(".len()..];
+            let call = after[..after.find(')').unwrap_or(after.len())].trim();
+            assert!(
+                call.starts_with("overrides.") && call.contains(", d."),
+                "override_set_f32 must receive the field default from `d`: {call}"
+            );
+            calls += 1;
+            rest = after;
+        }
+        assert!(
+            calls > 70,
+            "sanity check: only {calls} override_set_f32 calls found, the scan is broken"
         );
     }
 
