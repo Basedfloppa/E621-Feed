@@ -909,6 +909,18 @@ fn local_candidates_recent_popular(
     let anchor = random_rowid_anchor(conn)?;
     // Fast path: a random rowid window, ordered by rowid — avoids the full
     // `ORDER BY RANDOM()` sort over the entire recent set.
+    //
+    // It is still a walk, though: `EXPLAIN QUERY PLAN` shows
+    // `SEARCH p USING INTEGER PRIMARY KEY (rowid>?)` with every other predicate
+    // evaluated per row, so the statement reads until it has collected `limit`
+    // qualifying posts. Measured on the production DB (6.77 M posts, 23 931 of
+    // them inside the 30-day window, `fav_count >= 6` matching 23 318): **86–144
+    // ms** per call, the largest single term of the cold `db_hydrate` phase
+    // (242.7 ms for an account with no taste profile at all). Driving the same
+    // predicate from `idx_posts_created_at` returns 400 ids in **0.3 ms**, but
+    // it would return the *newest* 400 every time, and the window exists to
+    // sample uniformly across the recent set — so replacing it is a change to
+    // design deliberately, not a swap.
     let window_sql = format!("{RECENT_POPULAR_BODY} AND p.rowid >= ?4 ORDER BY p.rowid LIMIT ?3");
     let base: &[&dyn rusqlite::ToSql] = &[
         &cutoff as &dyn rusqlite::ToSql,
@@ -1035,6 +1047,16 @@ fn load_candidate_pool_input(
     // `idx_atc_account_cooc(account_id, cooc_count)` rather than a full table
     // walk, and both directions of a pair are folded together because the
     // table's ordering is not guaranteed to be canonical.
+    //
+    // The index does not make the *aggregate* cheap: measured on the production
+    // DB, accounts holding 2.6–2.7 M co-occurrence rows take **1.25–1.64 s**
+    // here, because `cooc_count >= 2` admits nearly every row, so both
+    // `UNION ALL` branches feed ~5.5 M rows into a temp B-tree `GROUP BY` (see
+    // `EXPLAIN QUERY PLAN`: `USE TEMP B-TREE FOR GROUP BY` + `FOR ORDER BY`).
+    // That is the shape of the original ~2.7 s `db_hydrate` figure, and it is
+    // query cost, not any writer-lock wait — reads never touch `WRITE_CONN`.
+    // Accounts with no co-occurrence rows (and no `account_tag_counts`, which
+    // is the whole local DB today) measure 0 ms here.
     let mut stmt = conn
         .prepare(
             "SELECT partner, SUM(c) AS total
