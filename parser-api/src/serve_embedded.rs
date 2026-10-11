@@ -163,6 +163,15 @@ pub fn files(path: Segments<'_, Path>) -> EmbeddedFile {
         return not_found();
     }
 
+    // `/metrics` is not a route. Prometheus scrapes `/api/metrics` (mounted
+    // with the API routes above). Without this guard the SPA fallback answered
+    // `/metrics` with `index.html` and status 200, so a scraper pointed at the
+    // wrong path silently collected HTML while reporting the target as up.
+    // Answering 404 makes that misconfiguration loud.
+    if raw == "metrics" {
+        return not_found();
+    }
+
     if let Some(asset) = lookup(&raw) {
         let ct = content_type_for(asset.path);
         let immutable = is_immutable_hash(asset.path);
