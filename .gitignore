@@ -13,6 +13,9 @@
 # caused the live-site SRI integrity mismatches (see docs/deployment.md).
 tailwind-output.css
 config.toml
+# ...but the cargo configuration is repository infrastructure, not a local
+# override — `config.toml` above matches it at any depth.
+!.cargo/config.toml
 .env
 
 parser-web/.well-known/security.txt
@@ -25,7 +28,16 @@ parser-api/run-logs/
 **media
 **db_exports
 
-**/.*/**
+# Local scratch / tooling directories. This used to be a blanket `**/.*/**`,
+# which also silently ignored *new* files under `.github/`, `.cargo/` and
+# `.githooks/` — the very directories this repo keeps its own infrastructure
+# in. Already-tracked files were unaffected (git only consults .gitignore for
+# untracked paths), so the trap only surfaced when adding a file: a new
+# workflow or cargo config simply never showed up in `git status`.
+# Enumerated explicitly instead.
+**/.tmp/
+**/.tools/
+**/.npm-cache/
 # Throwaway configs used by the local e2e/browser checks (config.toml is ignored
 # above; these are the per-run variants that point at a scratch database).
 config.mcp.toml
