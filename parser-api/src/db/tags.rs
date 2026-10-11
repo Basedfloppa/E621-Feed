@@ -57,7 +57,7 @@ pub fn replace_posts_tags_batch(posts: &[Post]) -> Result<(), String> {
     // One transaction for the delete AND the re-insert. Splitting them meant a
     // failure in between left the posts tagless (with `tags.df` stale), and a
     // concurrent reader could observe a post with zero tags.
-    super::with_write_tx(|tx| {
+    let effects = super::with_write_tx(|tx| {
         let mut delete = tx
             .prepare_cached("DELETE FROM tags_posts WHERE post_id = ?1")
             .map_err(|e| format!("prep replace post tags: {e}"))?;
@@ -68,7 +68,9 @@ pub fn replace_posts_tags_batch(posts: &[Post]) -> Result<(), String> {
         }
         drop(delete);
         save_posts_tags_batch_in_tx(tx, posts, &HashSet::new(), false, None)
-    })
+    })?;
+    effects.apply();
+    Ok(())
 }
 
 pub fn save_posts_tags_batch(
@@ -80,9 +82,11 @@ pub fn save_posts_tags_batch(
     if posts.is_empty() {
         return Ok(());
     }
-    super::with_write_tx(|tx| {
+    let effects = super::with_write_tx(|tx| {
         save_posts_tags_batch_in_tx(tx, posts, blacklist, track_cooccurrence, account_id)
-    })
+    })?;
+    effects.apply();
+    Ok(())
 }
 
 /// Upsert posts (with their `accounts_post` link) **and** their tag postings in
@@ -114,7 +118,7 @@ pub fn save_posts_with_tags(
     // Mirrors `save_posts`: the posts themselves changed, so owned-post and
     // candidate hydration for this account is stale regardless of the outcome.
     super::hydrate_cache::clear_owned_and_candidates(i64::from(link_account_id));
-    result
+    result.map(TagBatchEffects::apply)
 }
 
 /// Catalog-only counterpart of [`save_posts_with_tags`] for callers that must
@@ -123,24 +127,58 @@ pub fn upsert_catalog_posts_with_tags(posts: &[Post]) -> Result<(), String> {
     if posts.is_empty() {
         return Ok(());
     }
-    super::with_write_tx(|tx| {
+    let effects = super::with_write_tx(|tx| {
         super::posts::upsert_catalog_posts_in_tx(tx, posts)?;
         save_posts_tags_batch_in_tx(tx, posts, &HashSet::new(), false, None)
-    })
+    })?;
+    effects.apply();
+    Ok(())
+}
+
+/// In-memory follow-ups of a tag batch, handed back to the caller so they run
+/// only **after** its transaction commits.
+///
+/// The SQL half recomputes `tags.df` inside the transaction, but the in-memory
+/// IDF index and the relation-graph dirty flag are process state with no
+/// rollback: bumping them for a batch whose COMMIT then fails (busy timeout,
+/// deferred constraint) leaves the index claiming postings the database never
+/// accepted. Applying them from the caller, past the `with_write_tx` result,
+/// is what keeps those two in step.
+#[derive(Default)]
+pub(super) struct TagBatchEffects {
+    df_delta_by_name: HashMap<String, i64>,
+    cooc_dirty: bool,
+}
+
+impl TagBatchEffects {
+    pub(super) fn apply(self) {
+        if !self.df_delta_by_name.is_empty() {
+            // n_posts_delta = 0: catalog growth shifts every IDF by a tiny
+            // fraction, and the periodic full rebuild reconciles the absolute
+            // level.
+            crate::utils::bump_idf(self.df_delta_by_name, 0);
+        }
+        if self.cooc_dirty {
+            crate::utils::mark_global_relation_dirty();
+        }
+    }
 }
 
 /// Body of [`save_posts_tags_batch`], taking an existing connection/transaction
 /// so callers can combine it with other statements atomically
 /// (see [`replace_posts_tags_batch`] and [`save_posts_with_tags`]).
+///
+/// Returns the side effects for the caller to [`TagBatchEffects::apply`] once
+/// the transaction has committed.
 pub(super) fn save_posts_tags_batch_in_tx(
     tx: &rusqlite::Connection,
     posts: &[Post],
     blacklist: &HashSet<String>,
     track_cooccurrence: bool,
     account_id: Option<i32>,
-) -> Result<(), String> {
+) -> Result<TagBatchEffects, String> {
     if posts.is_empty() {
-        return Ok(());
+        return Ok(TagBatchEffects::default());
     }
 
     let mut cooc_dirty = false;
@@ -292,9 +330,8 @@ pub(super) fn save_posts_tags_batch_in_tx(
         }
     }
 
-    // Build the (lowercased name → df_delta) map after commit. The
-    // tag_id_cache and df_delta_by_id maps survive past the closure, so
-    // we still have everything we need to bump the in-memory IDF index.
+    // Translate the tag-id deltas into tag names here, while `tag_id_cache`
+    // is still in hand; the caller owns applying them once the commit lands.
     let df_delta_by_name: HashMap<String, i64> = if df_delta_by_id.is_empty() {
         HashMap::new()
     } else {
@@ -308,16 +345,10 @@ pub(super) fn save_posts_tags_batch_in_tx(
             .collect()
     };
 
-    // n_posts_delta = 0: catalog growth shifts every IDF by a tiny fraction,
-    // and the periodic full rebuild reconciles the absolute level.
-    if !df_delta_by_name.is_empty() {
-        crate::utils::bump_idf(df_delta_by_name, 0);
-    }
-
-    if cooc_dirty {
-        crate::utils::mark_global_relation_dirty();
-    }
-    Ok(())
+    Ok(TagBatchEffects {
+        df_delta_by_name,
+        cooc_dirty,
+    })
 }
 
 pub(super) fn recompute_df_for_tags(
