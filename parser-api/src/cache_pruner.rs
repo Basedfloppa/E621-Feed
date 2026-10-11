@@ -166,10 +166,22 @@ pub fn spawn_cache_pruner() {
                     match db::cleanup_orphan_accounts() {
                         Ok(n) if n > 0 => {
                             info!("[account-cleanup] dropped {n} orphan accounts");
+                            // Orphan cleanup deletes rows without going through
+                            // the delete handler, so the counter must be told
+                            // here or `created - deleted` stops explaining
+                            // `accounts_total`.
+                            METRICS.accounts_deleted_total.inc_by(n as u64);
                         }
                         Ok(_) => {}
                         Err(e) => warn!("[account-cleanup] failed: {e}"),
                     }
+
+                    // Cleanup is the one place that removes both posts and (via
+                    // orphan cleanup) accounts, so re-read the table-derived
+                    // gauges here rather than waiting up to a minute for the
+                    // refresher — the deleted accounts are already gone, and the
+                    // bucket distribution cannot be decremented after the fact.
+                    crate::table_gauges::refresh();
                 }
 
                 // ── Summary ─────────────────────────────────────────────

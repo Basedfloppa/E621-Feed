@@ -846,6 +846,49 @@ pub fn count_accounts_by_bucket() -> Result<std::collections::HashMap<String, u6
     Ok(counts)
 }
 
+/// Total rows in `accounts` — the value `e621_accounts_total` reports.
+///
+/// Deliberately not built on [`count_accounts_by_bucket`]: that one reads every
+/// id and evaluates the bucket rules per account, which is both more expensive
+/// and a different question.
+pub fn count_accounts() -> Result<i64, String> {
+    let conn = open_db()?;
+    conn.query_row("SELECT COUNT(*) FROM accounts", [], |row| {
+        row.get::<_, i64>(0)
+    })
+    .map_err(|e| format!("Failed to count accounts: {e}"))
+}
+
+/// Number of accounts whose last recorded visit falls inside `window_days`.
+///
+/// `user_visit_tracker.last_visit_date` is a bare `YYYY-MM-DD` written by
+/// [`update_visit_tracker`], and `date('now', ...)` renders in the same shape,
+/// so comparing the two as text is chronological. That holds only because both
+/// sides are dates: had the column held an RFC3339 timestamp, `datetime('now')`
+/// would render with a space separator, and since `'T'` sorts above `' '` every
+/// row on the boundary date would compare greater than the cutoff regardless of
+/// the time of day.
+///
+/// Accounts that have never visited have no row at all and are not counted —
+/// on the production table this covers 47 of 91 accounts.
+pub fn count_accounts_active_within(window_days: i64) -> Result<i64, String> {
+    let conn = open_db()?;
+    count_active_within_conn(&conn, window_days)
+}
+
+/// Split out from [`count_accounts_active_within`] so the window arithmetic can
+/// be tested against an in-memory table instead of the live database, which
+/// `open_db` insists on.
+fn count_active_within_conn(conn: &rusqlite::Connection, window_days: i64) -> Result<i64, String> {
+    conn.query_row(
+        "SELECT COUNT(*) FROM user_visit_tracker \
+         WHERE last_visit_date >= date('now', ?1)",
+        params![format!("-{window_days} day")],
+        |r| r.get(0),
+    )
+    .map_err(|e| format!("count_accounts_active_within: {e}"))
+}
+
 // ---------------------------------------------------------------------------
 // Per-account e621 API key storage (encrypted at rest).
 //
@@ -1059,4 +1102,104 @@ pub fn get_direct_sync_state(
 pub struct DirectSyncState {
     pub last_synced_at: Option<String>,
     pub has_key: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The window arithmetic, and the text comparison that carries it.
+    ///
+    /// `last_visit_date` is a bare date, so a text `>=` against `date('now')`
+    /// is chronological and the boundary day is inclusive. Both properties are
+    /// load-bearing for `e621_active_accounts` and neither is obvious from the
+    /// SQL, so they are pinned here — offline, against an in-memory table.
+    #[test]
+    fn active_within_counts_only_rows_inside_the_window() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE user_visit_tracker (
+                 account_id INTEGER PRIMARY KEY,
+                 last_visit_date TEXT NOT NULL
+             );",
+        )
+        .unwrap();
+
+        // Anchor every row on the same clock the query uses, so the assertion
+        // does not depend on when the test runs.
+        for (id, offset) in [0_i64, 1, 2, 6, 7, 8, 29, 30, 31, 400]
+            .into_iter()
+            .enumerate()
+        {
+            conn.execute(
+                "INSERT INTO user_visit_tracker (account_id, last_visit_date) \
+                 VALUES (?1, date('now', ?2))",
+                params![id as i64, format!("-{offset} day")],
+            )
+            .unwrap();
+        }
+
+        // rows at 0 and 1 days
+        assert_eq!(count_active_within_conn(&conn, 1).unwrap(), 2);
+        // +2, +6, +7  (the 7-day boundary itself is inside, 8 is not)
+        assert_eq!(count_active_within_conn(&conn, 7).unwrap(), 5);
+        // +8, +29, +30 (31 is outside)
+        assert_eq!(count_active_within_conn(&conn, 30).unwrap(), 8);
+    }
+
+    /// The ordering trap this column avoids, kept as a test so a future
+    /// "store a full timestamp instead" change cannot land silently.
+    ///
+    /// `datetime('now')` renders with a *space* separator and `'T'` sorts above
+    /// `' '`, so the separator — not the time of day — decides the comparison
+    /// for a row whose **date prefix equals the cutoff's date**. Such a row
+    /// counts as inside the window whatever time it holds. Rows on other dates
+    /// are decided by the date prefix before the separator is reached, so the
+    /// damage is confined to the boundary day.
+    ///
+    /// `last_visit_date` sidesteps all of it by staying a bare date.
+    #[test]
+    fn an_rfc3339_value_sorts_above_a_datetime_cutoff_as_text() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+
+        let cutoff_sep: String = conn
+            .query_row("SELECT substr(datetime('now', '-1 day'), 11, 1)", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(cutoff_sep, " ");
+
+        let date_len: i64 = conn
+            .query_row("SELECT length(date('now', '-1 day'))", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(date_len, 10, "a bare date must not carry a separator");
+
+        // Same date as the cutoff, but midnight: earlier in the day, yet it
+        // compares as *greater* because of the separator.
+        let boundary_sorts_above: bool = conn
+            .query_row(
+                "SELECT (date('now','-1 day') || 'T00:00:00+00:00') > datetime('now','-1 day')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            boundary_sorts_above,
+            "a row on the cutoff's own date must sort above it"
+        );
+
+        // An earlier date is decided by the prefix, so it still sorts below.
+        // This bounds the trap to the boundary day.
+        let earlier_date_sorts_below: bool = conn
+            .query_row(
+                "SELECT '2020-01-01T00:00:00+00:00' > datetime('now','-1 day')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            !earlier_date_sorts_below,
+            "an earlier date sorts below regardless of its separator"
+        );
+    }
 }

@@ -13,8 +13,8 @@
   "refresh": "30s",
   "panels": [
     {
-      "title": "Daily Active Users (DAU)",
-      "description": "Unique accounts that viewed feed, digest, or browse in the last 24h",
+      "title": "Active accounts (1d)",
+      "description": "Accounts with a recorded digest visit inside 1 day. \"1 day\" reads as the last 1 day plus today because user_visit_tracker.last_visit_date stores a date, not a timestamp. Source: e621_active_accounts{window=\"1d\"}, refreshed every 60s from user_visit_tracker, which the digest route writes. Accounts that never visited have no row and are not counted.",
       "type": "stat",
       "gridPos": {
         "h": 6,
@@ -24,8 +24,8 @@
       },
       "targets": [
         {
-          "expr": "count(sum by(account_id)(rate(e621_feed_views_total[24h]) or rate(e621_digest_views_total[24h]) or rate(e621_browse_views_total[24h])) > 0)",
-          "legendFormat": "DAU"
+          "expr": "e621_active_accounts{window=\"1d\"}",
+          "legendFormat": "1d"
         }
       ],
       "fieldConfig": {
@@ -150,7 +150,7 @@
       }
     },
     {
-      "title": "Active Users (7d)",
+      "title": "Active accounts (7d)",
       "type": "stat",
       "gridPos": {
         "h": 6,
@@ -160,8 +160,8 @@
       },
       "targets": [
         {
-          "expr": "count(sum by(account_id)(rate(e621_feed_views_total[7d]) or rate(e621_digest_views_total[7d]) or rate(e621_browse_views_total[7d])) > 0)",
-          "legendFormat": "WAU"
+          "expr": "e621_active_accounts{window=\"7d\"}",
+          "legendFormat": "7d"
         }
       ],
       "fieldConfig": {
@@ -187,10 +187,11 @@
           },
           "unit": "none"
         }
-      }
+      },
+      "description": "Accounts with a recorded digest visit inside 7 days. \"7 days\" reads as the last 7 days plus today because user_visit_tracker.last_visit_date stores a date, not a timestamp. Source: e621_active_accounts{window=\"7d\"}, refreshed every 60s from user_visit_tracker, which the digest route writes. Accounts that never visited have no row and are not counted."
     },
     {
-      "title": "Active Users (30d)",
+      "title": "Active accounts (30d)",
       "type": "stat",
       "gridPos": {
         "h": 6,
@@ -200,8 +201,8 @@
       },
       "targets": [
         {
-          "expr": "count(sum by(account_id)(rate(e621_feed_views_total[30d]) or rate(e621_digest_views_total[30d]) or rate(e621_browse_views_total[30d])) > 0)",
-          "legendFormat": "MAU"
+          "expr": "e621_active_accounts{window=\"30d\"}",
+          "legendFormat": "30d"
         }
       ],
       "fieldConfig": {
@@ -227,7 +228,8 @@
           },
           "unit": "none"
         }
-      }
+      },
+      "description": "Accounts with a recorded digest visit inside 30 days. \"30 days\" reads as the last 30 days plus today because user_visit_tracker.last_visit_date stores a date, not a timestamp. Source: e621_active_accounts{window=\"30d\"}, refreshed every 60s from user_visit_tracker, which the digest route writes. Accounts that never visited have no row and are not counted."
     },
     {
       "title": "Feature Usage — Last 7 Days",
@@ -278,7 +280,7 @@
       },
       "targets": [
         {
-          "expr": "sum(rate(e621_browse_views_total{source=\"trending\"}[5m]))",
+          "expr": "sum(rate(e621_browse_views_total{source=~\"trending|trending_scored\"}[5m]))",
           "legendFormat": "Trending"
         },
         {
@@ -431,93 +433,6 @@
         }
       },
       "description": "Feed interaction rate by event type (all buckets combined)"
-    },
-    {
-      "title": "Top Accounts by Feed Views (24h)",
-      "type": "bargauge",
-      "gridPos": {
-        "h": 9,
-        "w": 8,
-        "x": 0,
-        "y": 24
-      },
-      "targets": [
-        {
-          "expr": "topk(10, sum by(account_id)(rate(e621_feed_views_total[24h])))",
-          "legendFormat": "{{ account_id }}"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "none",
-          "thresholds": {
-            "steps": [
-              {
-                "color": "blue",
-                "value": 0
-              }
-            ]
-          }
-        }
-      }
-    },
-    {
-      "title": "Top Accounts by Digest Views (24h)",
-      "type": "bargauge",
-      "gridPos": {
-        "h": 9,
-        "w": 8,
-        "x": 8,
-        "y": 24
-      },
-      "targets": [
-        {
-          "expr": "topk(10, sum by(account_id)(rate(e621_digest_views_total[24h])))",
-          "legendFormat": "{{ account_id }}"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "none",
-          "thresholds": {
-            "steps": [
-              {
-                "color": "green",
-                "value": 0
-              }
-            ]
-          }
-        }
-      }
-    },
-    {
-      "title": "Top Accounts by Browse Views (24h)",
-      "type": "bargauge",
-      "gridPos": {
-        "h": 9,
-        "w": 8,
-        "x": 16,
-        "y": 24
-      },
-      "targets": [
-        {
-          "expr": "topk(10, sum by(account_id)(rate(e621_browse_views_total[24h])))",
-          "legendFormat": "{{ account_id }}"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "none",
-          "thresholds": {
-            "steps": [
-              {
-                "color": "purple",
-                "value": 0
-              }
-            ]
-          }
-        }
-      }
     },
     {
       "title": "A/B — Accounts per Bucket",
@@ -1424,8 +1339,36 @@
           "min": 0
         }
       }
+    },
+    {
+      "title": "Active accounts by window (digest visits)",
+      "type": "timeseries",
+      "description": "Accounts with a recorded digest visit inside each window, read from user_visit_tracker. The three windows overlap by construction: they are not disjoint buckets, so their sum is not meaningful. This panel replaces three \"Top Accounts by ... Views\" bar gauges that could never fill - no metric carries an account_id label (removed deliberately, so scraping /api/metrics cannot reveal which e621 accounts are active), which made sum by(account_id) collapse every series into one unlabelled group and topk(10, ...) draw a single blank bar.",
+      "gridPos": {
+        "h": 9,
+        "w": 24,
+        "x": 0,
+        "y": 24
+      },
+      "targets": [
+        {
+          "expr": "e621_active_accounts",
+          "legendFormat": "{{window}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 0
+          },
+          "unit": "none"
+        }
+      }
     }
   ],
   "schemaVersion": 39,
-  "version": 4
+  "version": 4,
+  "uid": "ad5hhmv"
 }

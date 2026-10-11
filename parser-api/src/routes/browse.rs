@@ -77,10 +77,6 @@ pub(crate) fn spawn_browse_persist(
                     .field("account_id", account_id)
                     .field("count", n)
                     .emit();
-                e621_account_parser_api::metrics::METRICS
-                    .browse_views_total
-                    .with_label_values(&[source])
-                    .inc();
             }
             Ok(Err(e)) => {
                 warn!("[browse] persist {source} failed for account {account_id}: {e}");
@@ -137,6 +133,10 @@ pub(crate) async fn search_posts(
     if cfg().catalog.save_all {
         spawn_browse_persist(posts.clone(), "search", account_id, true);
     }
+    e621_account_parser_api::metrics::METRICS
+        .browse_views_total
+        .with_label_values(&["search"])
+        .inc();
     Ok(Json(posts))
 }
 
@@ -230,6 +230,10 @@ pub(crate) async fn search_scored_posts(
             .partial_cmp(&a.score)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
+    e621_account_parser_api::metrics::METRICS
+        .browse_views_total
+        .with_label_values(&["search_scored"])
+        .inc();
     Ok(Json(scored))
 }
 
@@ -367,6 +371,10 @@ pub(crate) async fn get_trending(
         spawn_browse_persist(posts.clone(), "trending", account_id, true);
     }
 
+    e621_account_parser_api::metrics::METRICS
+        .browse_views_total
+        .with_label_values(&["trending"])
+        .inc();
     Ok(Json(posts))
 }
 
@@ -401,5 +409,9 @@ pub(crate) async fn get_favorites(
         spawn_browse_persist(posts.clone(), "favorites", account_id, true);
     }
 
+    e621_account_parser_api::metrics::METRICS
+        .browse_views_total
+        .with_label_values(&["favorites"])
+        .inc();
     Ok(Json(posts))
 }

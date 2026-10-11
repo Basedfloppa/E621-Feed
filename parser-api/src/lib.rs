@@ -45,6 +45,7 @@ pub mod ratelimit;
 #[allow(dead_code)] // The binary mounts the full API; integration tests mount a subset.
 pub mod routes;
 pub mod sync;
+pub mod table_gauges;
 pub mod utils;
 pub mod validation;
 

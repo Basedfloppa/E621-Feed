@@ -15,6 +15,20 @@ There is also a Loki structured log `SCORING_TRACE` (not a Prometheus metric) �
 | `e621_accounts_total` | gauge | — | number of known accounts |
 | `e621_accounts_created_total` | counter | — | accounts created (link) |
 | `e621_accounts_deleted_total` | counter | — | accounts deleted/unlinked |
+| `e621_active_accounts` | gauge | `window`=1d\|7d\|30d | accounts with a recorded visit inside the window (from `user_visit_tracker`, written by the digest route) |
+
+The account and catalog gauges (`e621_accounts_total`,
+`e621_experiment_bucket_accounts`, `e621_active_accounts`,
+`e621_catalog_posts_total`) are **re-read from their tables every 60 s** rather
+than maintained incrementally by the write paths — see `src/table_gauges.rs`.
+None of them *can* be incremental: posts are UPSERTed (no path can tell a new
+row from a rewrite), and orphan-account cleanup deletes rows straight from SQL
+without knowing which bucket they were in. Expect up to a minute of lag, and
+expect a bucket that empties to fall to `0` rather than hold its last value.
+
+`window="1d"` reads as *today or yesterday*: `user_visit_tracker.last_visit_date`
+stores a bare date, so a sub-day window cannot be expressed from it. Accounts
+that have never visited have no row in that table and are not counted.
 
 ## Feed views
 
@@ -22,7 +36,7 @@ There is also a Loki structured log `SCORING_TRACE` (not a Prometheus metric) �
 |---|---|---|---|
 | `e621_feed_views_total` | counter | — | feed views |
 | `e621_digest_views_total` | counter | — | digest views |
-| `e621_browse_views_total` | counter | `source`=search\|trending\|favorites\|feed\|digest\|trending_scored | browse page views |
+| `e621_browse_views_total` | counter | `source`=search\|search_scored\|trending\|trending_scored\|favorites | browse page views, one per served request (`source` = endpoint) |
 
 ## /process (background profile import)
 

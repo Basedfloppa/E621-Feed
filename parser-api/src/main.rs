@@ -608,19 +608,11 @@ async fn build_rocket() -> rocket::Rocket<rocket::Build> {
     e621_account_parser_api::media_fetch_worker::spawn_media_fetcher();
     e621_account_parser_api::db::spawn_tag_relation_importer();
 
-    // Seed the A/B bucket distribution gauge from the current account table.
-    // Runs on a detached task so it doesn't hold non-Send values across await.
-    rocket::tokio::spawn(async move {
-        let result = db_blocking(e621_account_parser_api::db::count_accounts_by_bucket).await;
-        if let Ok(counts) = result {
-            for (bucket, count) in counts {
-                e621_account_parser_api::metrics::METRICS
-                    .experiment_bucket_accounts
-                    .with_label_values(&[&bucket])
-                    .set(count as i64);
-            }
-        }
-    });
+    // Seed the account- and catalog-derived gauges from the tables, and keep
+    // them fresh. These are counts no write path can maintain incrementally
+    // (see `table_gauges`), so they are re-read rather than inc/dec'd; the
+    // refresher's first pass is the startup seed.
+    e621_account_parser_api::table_gauges::spawn_refresher();
 
     attach_cors(r)
 }

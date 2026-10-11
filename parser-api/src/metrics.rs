@@ -14,12 +14,31 @@ use std::sync::LazyLock;
 pub static METRICS: LazyLock<AppMetrics> = LazyLock::new(AppMetrics::new);
 
 pub struct AppMetrics {
-    /// Current number of saved accounts (gauge — goes up/down).
+    /// Current number of saved accounts. Seeded from the table at startup and
+    /// refreshed after each catalog cleanup: the create and delete handlers
+    /// only inc/dec it, so an unseeded gauge reports the net change since
+    /// process start rather than the size of the table.
     pub accounts_total: IntGauge,
     /// Total accounts created since server start.
     pub accounts_created_total: IntCounter,
     /// Total accounts deleted since server start.
     pub accounts_deleted_total: IntCounter,
+
+    /// Accounts with a recorded visit inside a rolling window, labelled by
+    /// `window` (`1d` / `7d` / `30d`). Refreshed by [`crate::table_gauges`],
+    /// which reads `user_visit_tracker.last_visit_date`.
+    ///
+    /// This is what the dashboard's DAU / WAU / MAU panels needed. They were
+    /// built as `count(sum by(account_id)(rate(...)))` over the view counters,
+    /// but no metric carries an `account_id` label — it was removed on purpose
+    /// (see `feed_views_total`) — so `sum by(account_id)` collapsed every
+    /// series into a single empty-labelled group and `count()` returned a
+    /// constant `1` for any traffic at all.
+    ///
+    /// The visit tracker is written by the digest route, so this counts
+    /// accounts that opened their digest, not every authenticated request; a
+    /// broader definition would need a per-request touch on the account row.
+    pub active_accounts: IntGaugeVec,
 
     /// Feed recommendation views (global counter — deliberately NOT labelled
     /// by `account_id`: that label leaked which e621 accounts are active to any
@@ -28,7 +47,14 @@ pub struct AppMetrics {
     pub feed_views_total: IntCounter,
     /// Digest views (global counter — same rationale as feed_views_total).
     pub digest_views_total: IntCounter,
-    /// Browse views by source (trending / favorites).
+    /// Browse views, one increment per served browse request; the `source`
+    /// label names the endpoint (`search`, `search_scored`, `trending`,
+    /// `trending_scored`, `favorites`).
+    ///
+    /// Catalog persistence is deliberately NOT counted here, though it once
+    /// was: persisting only happens when `catalog.save_all` is on, so counting
+    /// it made a usage metric depend on a storage config toggle. Persists are
+    /// recorded in the `browse.persist` audit event instead.
     pub browse_views_total: IntCounterVec,
 
     /// /process pipeline runs (label: status = "success" | "failed").
@@ -57,7 +83,9 @@ pub struct AppMetrics {
     /// A/B experiment arms: total feed interactions observed since start.
     pub experiment_bucket_interactions_total: IntCounterVec,
 
-    /// Total posts in the local catalog (gauge).
+    /// Total posts in the local catalog. Seeded at startup and re-read after
+    /// each catalog cleanup: posts are UPSERTed, so no write path can tell a
+    /// new row from a rewrite and the count cannot be maintained by inc.
     pub catalog_posts_total: IntGauge,
 
     /// Total HTTP requests by method and route.
@@ -108,6 +136,13 @@ impl AppMetrics {
             accounts_deleted_total: register_int_counter!(
                 "e621_accounts_deleted_total",
                 "Total accounts deleted since server start"
+            )
+            .unwrap(),
+
+            active_accounts: register_int_gauge_vec!(
+                "e621_active_accounts",
+                "Accounts with a recorded visit (digest open) inside the window",
+                &["window"]
             )
             .unwrap(),
 
@@ -264,11 +299,16 @@ mod tests {
         m.http_request_duration_seconds
             .with_label_values(&["GET", "/api/health"])
             .observe(0.01);
+        m.active_accounts.with_label_values(&["1d"]).set(0);
         let out = render();
         assert!(out.contains("e621_process_running_seconds"));
         assert!(out.contains("e621_process_last_duration_seconds"));
         assert!(out.contains("e621_prefetch_breaker_trips_total"));
         assert!(out.contains("e621_upstream_request_seconds"));
         assert!(out.contains("e621_http_request_duration_seconds"));
+        assert!(
+            out.contains("e621_active_accounts"),
+            "the DAU/WAU/MAU panels query this name"
+        );
     }
 }

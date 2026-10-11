@@ -484,7 +484,7 @@ The dashboard includes panels for:
 
 | Panel | Type | Source |
 |-------|------|-------|
-| DAU / WAU / MAU | Stats | `e621_feed_views_total`, `e621_digest_views_total`, `e621_browse_views_total` |
+| Active Accounts 1d / 7d / 30d | Stats | `e621_active_accounts` (by `window`) |
 | Total Accounts / Posts Created | Stats | `e621_accounts_total`, `e621_accounts_created_total` |
 | Feature Usage (Feed / Digest / Browse) | Time series | `e621_feed_views_total`, `e621_digest_views_total`, `e621_browse_views_total` |
 | Process Success Rate + Runs | Gauge + Time series | `e621_process_runs_total` |
@@ -495,16 +495,22 @@ The dashboard includes panels for:
 | A/B — Engagement Rate | Time series | `e621_feed_interactions_total` (positive / impression, by bucket) |
 | A/B — Hide Rate | Time series | `e621_feed_interactions_total` (hide / impression, by bucket) |
 | A/B — Interactions by Type & Bucket | Time series (stacked) | `e621_feed_interactions_total` by bucket + type |
-| Top-10 Accounts per Feature | Bar gauges | Per-account aggregation |
+| Active Accounts by Window | Time series | `e621_active_accounts` (one series per window) |
 | HTTP Response Time (p50/p95/p99) | Time series | `e621_http_request_duration_seconds` (histogram_quantile) |
 | e621 Upstream Latency (p50/p95/p99) | Time series | `e621_upstream_request_seconds` (histogram_quantile) |
 | HTTP p95 by Route | Time series | `e621_http_request_duration_seconds` topk by route |
 | e621 Upstream p95 by Class | Time series | `e621_upstream_request_seconds` by class |
 | HTTP Request Rate by Route | Time series (stacked) | `e621_http_requests_total` by route |
 
-> **Caveat:** the `DAU / WAU / MAU` and `Top-10 Accounts per Feature` panels
-> group by `account_id`, but the view counters carry no such label any more
-> (`parser-api/src/metrics.rs`), so those panels are stale in the shipped JSON.
+> **Caveat:** active-account counts come from `e621_active_accounts`, which is
+> derived from `user_visit_tracker` (per-account in the database, aggregated in
+> the app) — **not** from the view counters. Those counters are global and carry
+> no `account_id` label any more (`parser-api/src/metrics.rs`), so no per-account
+> breakdown can be built from `/api/metrics`; the former `Top-10 Accounts per
+> Feature` bar gauges were removed for that reason, because `sum by(account_id)`
+> collapsed every series into one unlabelled group and `topk(10, …)` drew a
+> single blank bar. `window="1d"` counts *today or yesterday*, since the tracker
+> stores a date rather than a timestamp.
 
 ### Latency & performance
 
@@ -630,8 +636,9 @@ sum(rate(e621_browse_views_total[24h]))  # Browse
 ```
 
 > These three view counters are **global, with no `account_id` label** (it was
-> removed on purpose — see `parser-api/src/metrics.rs`), so a per-account
-> DAU/WAU/MAU panel cannot be built from `/api/metrics`.
+> removed on purpose — see `parser-api/src/metrics.rs`), so they answer "how much
+> traffic", not "how many people". Per-account activity is reported separately by
+> `e621_active_accounts`, which the app computes from `user_visit_tracker`.
 
 **Process success rate** — PromQL:
 

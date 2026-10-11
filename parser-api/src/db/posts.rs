@@ -460,11 +460,18 @@ pub fn upsert_catalog_posts(posts: &[Post]) -> Result<(), String> {
     })
 }
 
+/// Fallible counterpart of [`post_count`], for callers that must not panic:
+/// the startup gauge seed and the background pruner, where a `panic!` would
+/// take down the thread instead of failing one request.
+pub fn try_post_count() -> Result<i64, String> {
+    let conn = open_db()?;
+    conn.query_row("SELECT COUNT(*) FROM posts", [], |row| row.get::<_, i64>(0))
+        .map_err(|e| format!("Failed to count catalog posts: {e}"))
+}
+
 #[must_use]
 pub fn post_count() -> i64 {
-    let conn = open_db().expect("open_db failed");
-    conn.query_row("SELECT COUNT(*) FROM posts", [], |row| row.get::<_, i64>(0))
-        .expect("COUNT(*) query failed")
+    try_post_count().expect("COUNT(*) query failed")
 }
 
 /// Reconstructs `Post` structs from the local catalog. Fields not stored
