@@ -26,7 +26,20 @@ use crate::prefetch_backfill::spawn_backfill_worker;
 const LCG_A: u64 = 6364136223846793005;
 const LCG_C: u64 = 1442695040888963407;
 
-static PREFETCH_CONSECUTIVE_FAILS: AtomicU32 = AtomicU32::new(0);
+/// Consecutive e621 failures for the *hot* (recently active accounts)
+/// prefetch worker.
+static PREFETCH_HOT_CONSECUTIVE_FAILS: AtomicU32 = AtomicU32::new(0);
+
+/// Consecutive e621 failures for the *cold* (dormant accounts) prefetch
+/// worker.
+///
+/// The two workers used to share one counter, so a burst of failures in the
+/// cold sweep — which walks the oldest accounts and is the likeliest to hit
+/// deleted/private ones — opened the breaker for the hot worker as well, and
+/// vice versa. They are independent loops with independent target sets, so
+/// each gets its own streak. `prefetch_backfill.rs` was already split this
+/// way; this brings the hot/cold pair in line.
+static PREFETCH_COLD_CONSECUTIVE_FAILS: AtomicU32 = AtomicU32::new(0);
 
 pub fn spawn_prefetch_workers() {
     let hot_window = cfg().runtime.prefetch_hot_window_hours;
@@ -38,6 +51,7 @@ pub fn spawn_prefetch_workers() {
         hot_window,
         3,
         0, // no exclusion (hot window = itself)
+        &PREFETCH_HOT_CONSECUTIVE_FAILS,
     ));
     // Cold worker: dormant accounts, long interval.
     let cold_window = cfg().runtime.prefetch_active_window_days as u64 * 24;
@@ -48,6 +62,7 @@ pub fn spawn_prefetch_workers() {
         cold_window,
         2,
         hot_window, // exclude accounts in the hot window
+        &PREFETCH_COLD_CONSECUTIVE_FAILS,
     ));
 
     // Backfill worker: full retro-post scan for all accounts.
@@ -61,6 +76,7 @@ async fn prefetch_loop<F1, F2>(
     window_hours: u64,
     max_targets: usize,
     exclude_window_hours: u64,
+    breaker: &'static AtomicU32,
 ) where
     F1: Fn(&crate::models::RuntimeConfig) -> u64,
     F2: Fn(&crate::models::RuntimeConfig) -> u64,
@@ -72,7 +88,7 @@ async fn prefetch_loop<F1, F2>(
     loop {
         let runtime = cfg().runtime.clone();
         let threshold = runtime.prefetch_breaker_threshold;
-        let fails = PREFETCH_CONSECUTIVE_FAILS.load(Ordering::Relaxed);
+        let fails = breaker.load(Ordering::Relaxed);
 
         if threshold > 0 && fails >= threshold {
             let pause = runtime.prefetch_breaker_pause_secs.max(60);
@@ -82,13 +98,19 @@ async fn prefetch_loop<F1, F2>(
                  (threshold {threshold}); pausing {pause}s before resuming"
             );
             rocket::tokio::time::sleep(Duration::from_secs(pause)).await;
-            PREFETCH_CONSECUTIVE_FAILS.store(0, Ordering::Relaxed);
+            breaker.store(0, Ordering::Relaxed);
             info!("[catalog-prefetch:{name}] circuit breaker reset, resuming");
             continue;
         }
 
-        if let Err(e) =
-            run_prefetch_tick(name, window_hours, max_targets, exclude_window_hours).await
+        if let Err(e) = run_prefetch_tick(
+            name,
+            window_hours,
+            max_targets,
+            exclude_window_hours,
+            breaker,
+        )
+        .await
         {
             warn!("[catalog-prefetch:{name}] tick failed: {e}");
         }
@@ -114,6 +136,7 @@ async fn run_prefetch_tick(
     window_hours: u64,
     max_targets: usize,
     exclude_window_hours: u64,
+    breaker: &'static AtomicU32,
 ) -> Result<(), String> {
     let targets = rocket::tokio::task::spawn_blocking(move || {
         pick_prefetch_targets(window_hours, max_targets, exclude_window_hours)
@@ -151,8 +174,8 @@ async fn run_prefetch_tick(
                 .await
             {
                 Ok(posts) if !posts.is_empty() => {
-                    // Successful fetch — reset the breaker.
-                    PREFETCH_CONSECUTIVE_FAILS.store(0, Ordering::Relaxed);
+                    // Successful fetch — reset this worker's breaker.
+                    breaker.store(0, Ordering::Relaxed);
 
                     let posts_for_persist = posts.clone();
                     let res = rocket::tokio::task::spawn_blocking(move || -> Result<(), String> {
@@ -180,7 +203,7 @@ async fn run_prefetch_tick(
                 Err(e) => {
                     // Count this failure and bail out of the rest of the tick.
                     target_clean = false;
-                    let n = PREFETCH_CONSECUTIVE_FAILS.fetch_add(1, Ordering::Relaxed) + 1;
+                    let n = breaker.fetch_add(1, Ordering::Relaxed) + 1;
                     warn!(
                         "[catalog-prefetch:{name}] e621 fetch failed for account={} q={q} \
                          (consecutive_fails={n}): {e}",
