@@ -73,3 +73,26 @@ serde_json = "1"
 chrono = { version = ">=0.4.38, <0.5", features = ["serde", "wasmbind"] }
 serde-wasm-bindgen = "0.6"
 gloo-timers = "0.3"
+
+# Release profile for the WASM bundle.
+#
+# Tuned for *download* size rather than native throughput: the whole artifact
+# is shipped to the browser on every cold load, and the profile defaults
+# (`opt-level = 3`, `lto = false`, DWARF retained) optimise for a use case this
+# crate does not have. `opt-level = "s"` trades a little CPU for bytes, thin
+# LTO lets the wasm-bindgen shims inline across codegen units, and
+# `strip = "debuginfo"` drops DWARF sections the browser never reads.
+#
+# Measured `trunk build --release` on 2026-10-11 (rustc 1.96, `wasm-opt` not
+# installed; gzip figures are a plain `gzip -c` of the wasm, so they read a few
+# KiB higher than the `compress-dist.sh` output):
+#   default profile   3 407 717 B raw / 866 231 B gzip
+#   thin LTO          2 889 041 B raw / 744 843 B gzip   (-15 % / -14 %)
+#   this profile      2 309 171 B raw / 678 528 B gzip   (-32 % / -22 %)
+# Fat LTO plus one codegen unit costs ~25 s more build time than thin LTO; the
+# bytes are paid by every cold page load, the seconds once per CI run.
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = "debuginfo"
