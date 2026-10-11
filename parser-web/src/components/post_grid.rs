@@ -285,14 +285,28 @@ pub fn post_grid(props: &PostGridProps) -> Html {
     // Fetch trigger — bumped when URL changes to start a fresh fetch.
     let fetch_trigger: UseStateHandle<u32> = use_state(|| 0);
 
-    // Reset + trigger first fetch when the source or score cutoff changes.
+    // Set by the Retry button so the next `fetch_more` skips the
+    // `is_loading`/`exhausted` guards. A plain `use_state` would not work
+    // here: the callback handed to `ErrorAlert` was captured during an older
+    // render and would still read the stale value. `use_mut_ref` is shared by
+    // reference across every clone of the callback.
+    let force_fetch = use_mut_ref(|| false);
+
+    // Reset + trigger first fetch when the source, score cutoff or the
+    // `scored` flag changes. `props.scored` used to be missing from this key,
+    // so toggling "scored" left the already-loaded (unscored) list on screen
+    // and only mixed scored pages in on the next infinite-scroll tick.
     {
-        let url = (props.fetch_url.clone(), props.score_cutoff_pct);
+        let reset_key = (
+            props.fetch_url.clone(),
+            props.score_cutoff_pct,
+            props.scored,
+        );
         let posts = posts.clone();
         let page = page.clone();
         let exhausted = exhausted.clone();
         let ft = fetch_trigger.clone();
-        use_effect_with(url, move |_| {
+        use_effect_with(reset_key, move |_| {
             posts.set(Vec::new());
             page.set(0);
             exhausted.set(false);
@@ -312,8 +326,13 @@ pub fn post_grid(props: &PostGridProps) -> Html {
         let scored = props.scored;
         let score_cutoff_pct = props.score_cutoff_pct;
         let session_id = session_id.clone();
+        let force_fetch = force_fetch.clone();
         Callback::from(move |_| {
-            if *is_loading || *exhausted {
+            // Retry sets the flag before emitting, so neither a stuck
+            // `is_loading` nor an already-`exhausted` list can swallow the
+            // click and leave the Retry button permanently inert.
+            let forced = std::mem::take(&mut *force_fetch.borrow_mut());
+            if !forced && (*is_loading || *exhausted) {
                 return;
             }
             is_loading.set(true);
@@ -387,6 +406,21 @@ pub fn post_grid(props: &PostGridProps) -> Html {
                     }
                 }
             });
+        })
+    };
+
+    // Retry after a failed page. Distinct from `fetch_more` on purpose: it
+    // clears the error, arms `force_fetch` so the guards above are bypassed,
+    // and re-emits. Used to hand `fetch_more` straight to `ErrorAlert`, which
+    // made the button a no-op whenever `is_loading` or `exhausted` was set.
+    let retry = {
+        let fetch_more = fetch_more.clone();
+        let force_fetch = force_fetch.clone();
+        let error = error.clone();
+        Callback::from(move |_| {
+            *force_fetch.borrow_mut() = true;
+            error.set(None);
+            fetch_more.emit(());
         })
     };
 
@@ -471,7 +505,7 @@ pub fn post_grid(props: &PostGridProps) -> Html {
                         <>
                             {
                                 if let Some(error) = &*error {
-                                    html! { <ErrorAlert message={error.clone()} on_retry={Some(fetch_more.clone())} /> }
+                                    html! { <ErrorAlert message={error.clone()} on_retry={Some(retry.clone())} /> }
                                 } else { html! {} }
                             }
                             { render_post_grid(
