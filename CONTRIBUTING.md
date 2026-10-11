@@ -68,6 +68,34 @@ cargo test --manifest-path parser-web/Cargo.toml -- --test-threads=1
 
 To apply Rust formatting, omit `-- --check` from the `cargo fmt` command. For machine-applicable lint fixes, use `cargo clippy --fix --allow-dirty --all-targets`, then inspect the diff and rerun the full checks.
 
+## Browser and HTTP smoke checks
+
+`scripts/e2e-smoke.mjs` and `scripts/browser-check.mjs` cover what unit tests
+cannot see: the HTTP contract of the embedded SPA, and whether a real browser can
+boot the built bundle. Both are plain Node (>= 22, for the global `WebSocket`)
+with no dependencies to install, print every check they ran, and exit non-zero if
+any of them failed.
+
+```bash
+# embedded SPA, static assets (including their SRI hashes) and the owner cookie
+node scripts/e2e-smoke.mjs --base-url http://127.0.0.1:8181
+
+# does the bundle actually boot: CSP, WASM MIME, Yew mount, console errors
+node scripts/browser-check.mjs --url http://127.0.0.1:8181
+```
+
+`browser-check.mjs` looks for Chrome in `$CHROME_PATH`, the Playwright cache and
+`$PATH`, and skips with exit code 0 when it finds none, so it can be called on a
+runner without a browser. Two things are worth knowing before reading its output:
+
+- Run it against a **release** API binary. A debug build mounts a `rocket_cors`
+  fairing that diverts any non-allowlisted `Origin` to `/cors/403`, which the SPA
+  fallback then serves as `200 OK index.html`; because Trunk marks the bundle
+  references `crossorigin`, the browser sends an `Origin` even for a same-origin
+  load, so the app cannot boot straight from a debug `:8181`.
+- `/api/health` answers 503 whenever the upstream e621 probe fails or its rate
+  limit trips. That is the probe endpoint reporting, not the server being down.
+
 ## Static checks (optional tooling)
 
 `static-checks.sh` runs clippy (default lints as errors, `perf`/`nursery` as
