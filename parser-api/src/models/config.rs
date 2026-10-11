@@ -1248,7 +1248,26 @@ impl Drop for ConfigWatcher {
 
 pub fn load_config(p: &Path) -> anyhow::Result<Config> {
     let s = fs::read_to_string(p).with_context(|| format!("reading {}", p.display()))?;
-    toml::from_str(&s).context("parsing config.toml")
+    let cfg: Config = toml::from_str(&s).context("parsing config.toml")?;
+    validate_admin_credentials(&cfg)?;
+    Ok(cfg)
+}
+
+/// The shared admin credentials are what every server-side e621 call
+/// authenticates with (`sync.rs`, `api.rs`), so an empty value is a
+/// misconfiguration rather than a way to run anonymously: e621 would answer
+/// with the anonymous rate limit and the `admin_user` account would stop
+/// syncing. `toml` proves only that the key exists, not that it has a value.
+fn validate_admin_credentials(cfg: &Config) -> anyhow::Result<()> {
+    for (name, value) in [
+        ("admin_user", &cfg.admin_user),
+        ("admin_api", &cfg.admin_api),
+    ] {
+        if value.trim().is_empty() {
+            anyhow::bail!("config: `{name}` is empty — shared e621 admin credentials are required");
+        }
+    }
+    Ok(())
 }
 
 pub fn default_path() -> anyhow::Result<PathBuf> {
@@ -1488,6 +1507,16 @@ now = "2025-01-01T00:00:00Z"
         // Missing admin_api → should fail
         let r = parse_toml(toml);
         assert!(r.is_err(), "missing required field should fail");
+    }
+
+    #[test]
+    fn load_config_empty_admin_credentials_fails() {
+        let toml = MINIMAL_TOML.replace("\"test_key\"", "\"\"");
+        let r = parse_toml(&toml);
+        assert!(r.is_err(), "empty admin_api should fail");
+        let toml = MINIMAL_TOML.replace("\"test_admin\"", "\"  \"");
+        let r = parse_toml(&toml);
+        assert!(r.is_err(), "whitespace-only admin_user should fail");
     }
 
     #[test]
