@@ -87,6 +87,7 @@ use e621_account_parser_api::utils::{
 use crate::cache::{ChannelScores, ScoreCache};
 use crate::grid::gate_probe;
 use crate::metrics::{Metrics, mrr_pub, ndcg_at_k_pub, recall_at_k_pub};
+use crate::options::FitObjective;
 
 /// A weight vector in [`BLEND_CHANNEL_NAMES`] order.
 type Weights = [f32; BLEND_CHANNEL_COUNT];
@@ -304,6 +305,275 @@ fn objective_and_grad(
     (obj, grad)
 }
 
+// ---- differentiable NDCG@k -------------------------------------------------
+
+/// Shortlist size as a multiple of the metric's `k`.
+///
+/// NDCG@k reads only the first `k` slots, so the approximation may ignore the
+/// tail — but the shortlist has to be *wider* than `k`, or a candidate could
+/// never be pulled into the head: a hard cut at exactly `k` leaves everything
+/// below it with a zero gradient and freezes the current head. `8k` leaves room
+/// to reorder while keeping the pairwise work (∝ shortlist²) small: 160² per
+/// account against 4096² for an untruncated soft rank.
+const NDCG_SHORTLIST_MULT: usize = 8;
+
+/// Floor for the per-account soft-rank temperature, in blend units.
+const NDCG_TAU_FLOOR: f32 = 1e-6;
+
+/// Indices of the `limit` highest-scoring candidates, best first.
+fn top_indices(u: &[f32], limit: usize) -> Vec<usize> {
+    let mut idx: Vec<usize> = (0..u.len()).collect();
+    let keep = limit.min(u.len());
+    if keep < u.len() {
+        idx.select_nth_unstable_by(keep, |&a, &b| {
+            u[b].partial_cmp(&u[a]).unwrap_or(std::cmp::Ordering::Equal)
+        });
+        idx.truncate(keep);
+    }
+    idx.sort_unstable_by(|&a, &b| u[b].partial_cmp(&u[a]).unwrap_or(std::cmp::Ordering::Equal));
+    idx
+}
+
+/// `IDCG@k` for an account with `n_pos` positives — the same sum
+/// [`crate::metrics`] divides by, so the approximation is normalised in the same
+/// units as the gate.
+fn ideal_dcg(n_pos: usize, k: usize) -> f64 {
+    (0..n_pos.min(k))
+        .map(|p| 1.0 / ((p as f64) + 2.0).log2())
+        .sum()
+}
+
+/// Per-account soft-rank temperature, **frozen from the starting weights**.
+///
+/// Freezing is what lets the solver keep its monotone line search: an accepted
+/// step is one where the objective strictly improved, which presumes the
+/// objective is a fixed function of `w` for the duration of the solve. A
+/// temperature recomputed from the current spread would move the objective under
+/// the very step being judged.
+///
+/// The value is one average score gap across the shortlist
+/// (`spread / shortlist_len`), so the sigmoid transitions over roughly one rank
+/// position: sharp enough that the soft ranks track the true ones, smooth enough
+/// that the gradient is not lost to rounding.
+fn ndcg_temperatures(
+    cache: &ScoreCache,
+    init: &Weights,
+    temp: f32,
+    penalty: f32,
+    k: usize,
+) -> Vec<f32> {
+    let limit = k.saturating_mul(NDCG_SHORTLIST_MULT).max(1);
+    let mut taus = Vec::with_capacity(cache.accounts.len());
+    let mut u: Vec<f32> = Vec::new();
+    for acc in &cache.accounts {
+        if acc.n_test == 0 || acc.channels.is_empty() {
+            taus.push(NDCG_TAU_FLOOR);
+            continue;
+        }
+        u.clear();
+        for ch in &acc.channels {
+            let v = candidate_score(init, ch, temp, penalty);
+            u.push(if v.is_finite() { v } else { 0.0 });
+        }
+        let sel = top_indices(&u, limit);
+        let mut lo = f32::INFINITY;
+        let mut hi = f32::NEG_INFINITY;
+        for &i in &sel {
+            lo = lo.min(u[i]);
+            hi = hi.max(u[i]);
+        }
+        let gaps = sel.len().max(1) as f32;
+        taus.push(((hi - lo) / gaps).max(NDCG_TAU_FLOOR));
+    }
+    taus
+}
+
+/// Soft NDCG@k for one account, plus `∂(soft NDCG)/∂u_l` for the shortlisted
+/// candidates. `du` is indexed by candidate and must be zeroed by the caller.
+///
+/// The soft rank `r_i = 1 + Σ_{j≠i} σ((u_j − u_i)/τ)` stands in for "how many
+/// candidates outrank `i`" while staying differentiable in `u`. Computing it
+/// *inside the shortlist* rather than over every candidate is what makes the
+/// whole objective affordable, and it costs nothing in fidelity where the metric
+/// looks: for an item in the head the shortlist contains everything above it.
+///
+/// The gate `σ(k − r_i)` is what keeps this an NDCG@k surrogate rather than a
+/// plain discounted-rank sum. Without it a positive parked at rank 100 would
+/// still earn `1/log2(101)`, and the solver could farm the tail of the shortlist
+/// instead of the head — which is precisely the failure the Plackett–Luce
+/// objective exhibited, with the sign flipped.
+fn account_soft_ndcg(
+    acc: &crate::cache::AccountChannelCache,
+    u: &[f32],
+    tau: f32,
+    k: usize,
+    du: &mut [f64],
+    sig: &mut Vec<f64>,
+    ranks: &mut Vec<f64>,
+) -> f64 {
+    let sel = top_indices(u, k.saturating_mul(NDCG_SHORTLIST_MULT).max(1));
+    let m = sel.len();
+    let n_pos = acc.n_test.min(u.len());
+    let idcg = ideal_dcg(n_pos, k);
+    if m == 0 || idcg <= 0.0 {
+        return 0.0;
+    }
+
+    // σ((u_j − u_i)/τ) for every ordered pair in the shortlist, kept because the
+    // gradient needs σ' = σ(1−σ) and recomputing the whole matrix would double
+    // the cost of the only expensive part of this objective.
+    let inv_tau = 1.0 / f64::from(tau);
+    sig.clear();
+    sig.resize(m * m, 0.0);
+    for (a, &i) in sel.iter().enumerate() {
+        let ui = f64::from(u[i]);
+        for (b, &j) in sel.iter().enumerate() {
+            if a == b {
+                continue;
+            }
+            let z = (f64::from(u[j]) - ui) * inv_tau;
+            sig[a * m + b] = 1.0 / (1.0 + (-z).exp());
+        }
+    }
+
+    ranks.clear();
+    ranks.resize(m, 0.0);
+    for a in 0..m {
+        let row = &sig[a * m..a * m + m];
+        ranks[a] = 1.0 + row.iter().sum::<f64>();
+    }
+
+    let kf = k as f64;
+    let mut dcg = 0.0f64;
+    for a in 0..m {
+        if sel[a] >= n_pos {
+            continue;
+        }
+        let r = ranks[a];
+        let log2 = (1.0 + r).log2();
+        let gate = 1.0 / (1.0 + (r - kf).exp());
+        dcg += gate / log2;
+    }
+
+    // ∂/∂u: for each rewarded positive, the gate and the discount both depend on
+    // its soft rank, and that rank depends on every other score in the shortlist.
+    let inv_idcg = 1.0 / idcg;
+    for a in 0..m {
+        if sel[a] >= n_pos {
+            continue;
+        }
+        let r = ranks[a];
+        let log2 = (1.0 + r).log2();
+        let gate = 1.0 / (1.0 + (r - kf).exp());
+        let d_gate = -gate * (1.0 - gate);
+        let d_disc = -1.0 / ((1.0 + r) * std::f64::consts::LN_2 * log2 * log2);
+        let d_term = (d_gate / log2 + gate * d_disc) * inv_idcg;
+
+        let mut own = 0.0f64;
+        for b in 0..m {
+            if b == a {
+                continue;
+            }
+            let s = sig[a * m + b];
+            let ds = s * (1.0 - s) * inv_tau;
+            // `∂r_a/∂u_b > 0`: raising someone else's score pushes them above
+            // `a` and so deepens `a`'s rank. `∂r_a/∂u_a` is the negative of the
+            // sum, because raising `a` pulls it up past every one of them.
+            own += ds;
+            du[sel[b]] += d_term * ds;
+        }
+        du[sel[a]] -= d_term * own;
+    }
+
+    dcg * inv_idcg
+}
+
+fn fill_ndcg_scores(
+    acc: &crate::cache::AccountChannelCache,
+    w: &Weights,
+    temp: f32,
+    penalty: f32,
+    u: &mut Vec<f32>,
+) {
+    u.clear();
+    for ch in &acc.channels {
+        let v = candidate_score(w, ch, temp, penalty);
+        u.push(if v.is_finite() { v } else { 0.0 });
+    }
+}
+
+/// `Σ_accounts soft NDCG@k` — the differentiable stand-in for the gate's metric.
+pub(crate) fn objective_ndcg(
+    cache: &ScoreCache,
+    w: &Weights,
+    temp: f32,
+    penalty: f32,
+    k: usize,
+    taus: &[f32],
+) -> f64 {
+    let mut obj = 0.0f64;
+    let mut u: Vec<f32> = Vec::new();
+    let mut du: Vec<f64> = Vec::new();
+    let mut sig: Vec<f64> = Vec::new();
+    let mut ranks: Vec<f64> = Vec::new();
+    for (ai, acc) in cache.accounts.iter().enumerate() {
+        if acc.n_test == 0 || acc.channels.is_empty() {
+            continue;
+        }
+        fill_ndcg_scores(acc, w, temp, penalty, &mut u);
+        du.clear();
+        du.resize(acc.channels.len(), 0.0);
+        obj += account_soft_ndcg(acc, &u, taus[ai], k, &mut du, &mut sig, &mut ranks);
+    }
+    obj
+}
+
+/// [`objective_ndcg`] and its gradient.
+///
+/// The chain rule runs `u_l → w_c` through the production blend's own
+/// [`candidate_grad`], so the approximation differentiates exactly the function
+/// production scores with. Only shortlisted candidates have a non-zero
+/// `∂L/∂u_l`, and only those are walked.
+fn objective_ndcg_and_grad(
+    cache: &ScoreCache,
+    w: &Weights,
+    temp: f32,
+    penalty: f32,
+    k: usize,
+    taus: &[f32],
+    unidentifiable: &[usize],
+) -> (f64, Grad) {
+    let mut obj = 0.0f64;
+    let mut grad = [0.0f64; BLEND_CHANNEL_COUNT];
+    let mut u: Vec<f32> = Vec::new();
+    let mut du: Vec<f64> = Vec::new();
+    let mut sig: Vec<f64> = Vec::new();
+    let mut ranks: Vec<f64> = Vec::new();
+    for (ai, acc) in cache.accounts.iter().enumerate() {
+        if acc.n_test == 0 || acc.channels.is_empty() {
+            continue;
+        }
+        fill_ndcg_scores(acc, w, temp, penalty, &mut u);
+        du.clear();
+        du.resize(acc.channels.len(), 0.0);
+        obj += account_soft_ndcg(acc, &u, taus[ai], k, &mut du, &mut sig, &mut ranks);
+
+        for (l, &d) in du.iter().enumerate() {
+            if d == 0.0 {
+                continue;
+            }
+            let g = candidate_grad(w, &acc.channels[l], temp, penalty);
+            for c in 0..BLEND_CHANNEL_COUNT {
+                grad[c] += d * g[c];
+            }
+        }
+    }
+    for &c in unidentifiable {
+        grad[c] = 0.0;
+    }
+    (obj, grad)
+}
+
 // ---- two-sided simplex -----------------------------------------------------
 
 /// The weights split into their positive and negative parts: `w = plus - minus`.
@@ -431,19 +701,99 @@ pub(crate) fn unidentifiable_channels(cache: &ScoreCache) -> Vec<usize> {
 
 // ---- solver ----------------------------------------------------------------
 
-/// Maximise [`objective`] over the two-sided simplex by exponentiated gradient
-/// with a backtracking line search.
+/// Value of the selected surrogate, with no gradient.
+/// Everything the surrogate needs besides the weight vector: the channel matrix,
+/// the blend parameters, and — for [`FitObjective::ApproxNdcg`] — the metric's
+/// `k` together with the per-account temperatures frozen at the start of the
+/// solve.
+///
+/// Bundled rather than threaded as loose parameters because `solve` recomputes
+/// the surrogate at least once per iteration, and a call whose argument list
+/// grows a term every time the objective gains a knob is where a stale argument
+/// silently survives.
+#[derive(Clone, Copy)]
+struct Surrogate<'a> {
+    kind: FitObjective,
+    cache: &'a ScoreCache,
+    temp: f32,
+    penalty: f32,
+    top_k: usize,
+    taus: &'a [f32],
+}
+
+impl Surrogate<'_> {
+    /// Value only.
+    fn value(&self, w: &Weights) -> f64 {
+        match self.kind {
+            FitObjective::PlackettLuce => objective(self.cache, w, self.temp, self.penalty),
+            FitObjective::ApproxNdcg => objective_ndcg(
+                self.cache,
+                w,
+                self.temp,
+                self.penalty,
+                self.top_k,
+                self.taus,
+            ),
+        }
+    }
+
+    /// Value and gradient, with the unidentifiable components projected out in
+    /// both cases.
+    fn value_and_grad(&self, w: &Weights, unidentifiable: &[usize]) -> (f64, Grad) {
+        match self.kind {
+            FitObjective::PlackettLuce => {
+                objective_and_grad(self.cache, w, self.temp, self.penalty, unidentifiable)
+            }
+            FitObjective::ApproxNdcg => objective_ndcg_and_grad(
+                self.cache,
+                w,
+                self.temp,
+                self.penalty,
+                self.top_k,
+                self.taus,
+                unidentifiable,
+            ),
+        }
+    }
+}
+
+/// Maximise the selected surrogate over the two-sided simplex by exponentiated
+/// gradient with a backtracking line search.
 ///
 /// Deterministic and single-threaded on purpose: the gradient is an f64
 /// reduction over every candidate, and the result is a persisted config
 /// recommendation — reproducibility is worth more here than the wall clock,
 /// and the whole solve is a few seconds against the ~60s scoring pass that
 /// produced the cache.
-pub(crate) fn solve(cache: &ScoreCache, init: &Weights, temp: f32, penalty: f32) -> FitOutcome {
+///
+/// `top_k` is the metric's `k` and only matters to [`FitObjective::ApproxNdcg`],
+/// whose shortlist and soft-rank gate are both sized from it.
+pub(crate) fn solve(
+    cache: &ScoreCache,
+    init: &Weights,
+    temp: f32,
+    penalty: f32,
+    kind: FitObjective,
+    top_k: usize,
+) -> FitOutcome {
     let unidentifiable = unidentifiable_channels(cache);
+    // Frozen once, from the starting weights — see `ndcg_temperatures` for why
+    // it must not follow the iterate.
+    let taus = match kind {
+        FitObjective::ApproxNdcg => ndcg_temperatures(cache, init, temp, penalty, top_k),
+        FitObjective::PlackettLuce => Vec::new(),
+    };
     let mut parts = split(init);
     let mut w = parts.joined();
-    let (mut obj, _) = objective_and_grad(cache, &w, temp, penalty, &unidentifiable);
+    let surrogate = Surrogate {
+        kind,
+        cache,
+        temp,
+        penalty,
+        top_k,
+        taus: &taus,
+    };
+    let (mut obj, _) = surrogate.value_and_grad(&w, &unidentifiable);
     let initial_objective = obj;
     let mut history = vec![obj];
     let mut eta = ETA0;
@@ -454,7 +804,7 @@ pub(crate) fn solve(cache: &ScoreCache, init: &Weights, temp: f32, penalty: f32)
     let mut budget_exhausted = true;
 
     for it in 0..MAX_ITERS {
-        let (obj_now, g) = objective_and_grad(cache, &w, temp, penalty, &unidentifiable);
+        let (obj_now, g) = surrogate.value_and_grad(&w, &unidentifiable);
         // `w` only ever changes to an accepted (improving) step, so the
         // recomputed objective must match the tracked one up to rounding.
         debug_assert!(
@@ -477,7 +827,7 @@ pub(crate) fn solve(cache: &ScoreCache, init: &Weights, temp: f32, penalty: f32)
             }
             let cand = eg_step(&parts, &g, gradient_inf, eta);
             let cand_w = cand.joined();
-            let cand_obj = objective(cache, &cand_w, temp, penalty);
+            let cand_obj = surrogate.value(&cand_w);
             if cand_obj > obj + tol {
                 parts = cand;
                 w = cand_w;
@@ -563,6 +913,95 @@ pub(crate) fn rescore(
         totals.mrr_per_account.push(mrr);
     }
     totals
+}
+
+/// Step sizes along the fitted direction, largest first.
+///
+/// Geometric, and deliberately including values well below 1: the documented
+/// failure of the analytic fit is a surrogate that is right about the *direction*
+/// but wrong about the magnitude (its optimum drove `sim` down while the metric
+/// wanted it up, and after negative weights were allowed it recommended a vector
+/// 0.208 NDCG worse). A ladder makes the surrogate a direction generator, and
+/// leaves the size of the step to the same gate the grid uses.
+const DIRECTION_LADDER: [f32; 5] = [1.0, 0.75, 0.5, 0.25, 0.1];
+
+/// `incumbent + t·(fitted − incumbent)`, rescaled to an L1 share.
+///
+/// The rescale is not cosmetic. A convex combination of two vectors that each
+/// have `Σ|w| = 1` has `Σ|w| ≤ 1`, with equality only when the signs agree — so
+/// with a negative weight anywhere the raw interpolation would silently shrink
+/// the blend. Shrinking is not neutral here: `clamp(0, 1)` and the logistic are
+/// active, so the *scale* of the weights is meaningful, and production only ever
+/// sees L1-normalised priors (`MixWeights::from_priors`). A ladder step has to be
+/// a vector production could actually be configured with.
+fn lerp_l1(a: &Weights, b: &Weights, t: f32) -> Weights {
+    let mut w = [0.0f32; BLEND_CHANNEL_COUNT];
+    for c in 0..BLEND_CHANNEL_COUNT {
+        w[c] = a[c] + t * (b[c] - a[c]);
+    }
+    let sum: f32 = w.iter().map(|w| w.abs()).sum();
+    if sum > 0.0 && sum.is_finite() {
+        for v in w.iter_mut() {
+            *v /= sum;
+        }
+    }
+    w
+}
+
+/// (b): use the fitted vector as a *direction* from the incumbent and let the
+/// gate choose the step.
+///
+/// Each step is an exact re-score through the production blend on the same
+/// matrix, so the whole ladder costs a few seconds — cheaper than one grid probe
+/// set, and it answers the question the raw fit could not: if the surrogate has
+/// the direction but not the magnitude, some fraction of the way there should
+/// pass the gate even when the full step does not.
+fn report_direction_ladder(
+    cache: &ScoreCache,
+    priors: &Priors,
+    incumbent: &Weights,
+    fitted: &Weights,
+    inc: &Metrics,
+    top_k_ndcg: usize,
+    top_k_recall: usize,
+) {
+    eprintln!(
+        "[fit] (b) direction ladder — the fitted vector used only as a direction from the \
+         incumbent;"
+    );
+    eprintln!(
+        "[fit]     every step is re-scored exactly and judged by the same paired gate as a probe"
+    );
+    eprintln!(
+        "[fit]     {:>5} {:>10} {:>11} {:>10}  verdict",
+        "t", "NDCG", "delta", "SE"
+    );
+    let mut best: Option<(f32, f64)> = None;
+    for &t in &DIRECTION_LADDER {
+        let w = lerp_l1(incumbent, fitted, t);
+        let m = rescore(cache, priors, &w, top_k_ndcg, top_k_recall).average();
+        let gate = gate_probe(&m, inc.ndcg_at_k, &inc.ndcg_per_account);
+        eprintln!(
+            "[fit]     {t:>5.2} {:>10.4} {:>+11.6} {:>10.6}  {}",
+            m.ndcg_at_k,
+            gate.delta,
+            gate.se,
+            if gate.accept { "ACCEPT" } else { "reject" }
+        );
+        if gate.accept && best.is_none_or(|(_, nd)| m.ndcg_at_k > nd) {
+            best = Some((t, m.ndcg_at_k));
+        }
+    }
+    match best {
+        Some((t, nd)) => eprintln!(
+            "[fit]     => best accepted step t={t:.2} at NDCG@{top_k_ndcg}={nd:.4}: the direction \
+             has support even though the full step may not"
+        ),
+        None => eprintln!(
+            "[fit]     => no step along the fitted direction passes the gate — the direction \
+             itself is unsupported, not merely its magnitude"
+        ),
+    }
 }
 
 /// Largest absolute per-account difference; `None` when the vectors differ in
@@ -729,6 +1168,7 @@ pub(crate) fn run_fit_and_report(
     baseline: &Metrics,
     diversify: bool,
     reference: Option<&ReferenceVector>,
+    kind: FitObjective,
 ) {
     let cfg_arc = cfg();
     let top_k_ndcg = cfg_arc.backtest.top_k_ndcg;
@@ -746,8 +1186,24 @@ pub(crate) fn run_fit_and_report(
     }
     eprintln!(
         "[fit] solving 12 mix weights from {n_accounts} accounts / {n_cand} candidates / \
-         {n_pos} positives (temp={temp}, penalty={penalty})"
+         {n_pos} positives (temp={temp}, penalty={penalty}, objective={})",
+        kind.label()
     );
+    if kind == FitObjective::ApproxNdcg {
+        eprintln!(
+            "[fit] objective=ndcg: maximising a soft NDCG@{top_k_ndcg} over each account's \
+             {}-candidate head",
+            top_k_ndcg.saturating_mul(NDCG_SHORTLIST_MULT)
+        );
+        eprintln!(
+            "[fit]   unlike the Plackett-Luce surrogate this one is NOT concave, so the solver \
+             reports a local optimum;"
+        );
+        eprintln!(
+            "[fit]   it is measured in the gate's own units, which is exactly what the previous \
+             surrogate got wrong"
+        );
+    }
     if diversify {
         eprintln!(
             "[fit] NOTE: MMR diversify is on. The fit and its acceptance re-score rank by the \
@@ -762,7 +1218,7 @@ pub(crate) fn run_fit_and_report(
     let init = initial_weights(&priors);
 
     let t_solve = Instant::now();
-    let outcome = solve(cache, &init, temp, penalty);
+    let outcome = solve(cache, &init, temp, penalty, kind, top_k_ndcg);
     let solve_secs = t_solve.elapsed().as_secs_f32();
 
     let unidentifiable = &outcome.unidentifiable;
@@ -901,8 +1357,18 @@ pub(crate) fn run_fit_and_report(
         }
     }
 
+    report_direction_ladder(
+        cache,
+        &priors,
+        &incumbent,
+        &outcome.weights,
+        &inc,
+        top_k_ndcg,
+        top_k_recall,
+    );
+
     if let Some(reference) = reference {
-        report_reference(cache, &incumbent, &inc, reference);
+        report_reference(cache, &incumbent, &inc, reference, kind);
     }
 }
 
@@ -919,6 +1385,7 @@ fn report_reference(
     incumbent: &Weights,
     inc: &Metrics,
     reference: &ReferenceVector,
+    kind: FitObjective,
 ) {
     // Re-read rather than thread five more parameters through: every function
     // in this module resolves the live config the same way, and the caller's
@@ -967,10 +1434,27 @@ fn report_reference(
         );
     }
 
-    let inc_obj = objective(cache, incumbent, temp, penalty);
-    let ref_obj = objective(cache, &w, temp, penalty);
+    // The same surrogate the solve used, so this ΔL is comparable with the
+    // solve's own progress line. The NDCG objective needs a per-account
+    // temperature and `solve` freezes it from its start vector — which, for the
+    // comparison this function exists to make, is the incumbent.
+    let taus = match kind {
+        FitObjective::ApproxNdcg => ndcg_temperatures(cache, incumbent, temp, penalty, top_k_ndcg),
+        FitObjective::PlackettLuce => Vec::new(),
+    };
+    let surrogate = Surrogate {
+        kind,
+        cache,
+        temp,
+        penalty,
+        top_k: top_k_ndcg,
+        taus: &taus,
+    };
+    let inc_obj = surrogate.value(incumbent);
+    let ref_obj = surrogate.value(&w);
     eprintln!(
-        "[fit] reference objective L={ref_obj:.6} vs incumbent L={inc_obj:.6} (Δ={:+.6})",
+        "[fit] reference objective L({})={ref_obj:.6} vs incumbent L={inc_obj:.6} (Δ={:+.6})",
+        kind.label(),
         ref_obj - inc_obj
     );
 
@@ -1285,7 +1769,14 @@ mod tests {
         }
         let cache = synthetic_cache(&accounts);
         let (temp, penalty) = temp_penalty();
-        let outcome = solve(&cache, &initial_weights(&Priors::default()), temp, penalty);
+        let outcome = solve(
+            &cache,
+            &initial_weights(&Priors::default()),
+            temp,
+            penalty,
+            FitObjective::PlackettLuce,
+            20,
+        );
 
         assert!(
             outcome.unidentifiable.is_empty(),
@@ -1310,7 +1801,7 @@ mod tests {
         let (temp, penalty) = temp_penalty();
         let p = Priors::default();
         let init = initial_weights(&p);
-        let outcome = solve(&cache, &init, temp, penalty);
+        let outcome = solve(&cache, &init, temp, penalty, FitObjective::PlackettLuce, 20);
 
         assert!(
             outcome.history.len() > 1,
@@ -1345,7 +1836,14 @@ mod tests {
         let cache = separating_cache();
         let (temp, penalty) = temp_penalty();
         let p = Priors::default();
-        let outcome = solve(&cache, &initial_weights(&p), temp, penalty);
+        let outcome = solve(
+            &cache,
+            &initial_weights(&p),
+            temp,
+            penalty,
+            FitObjective::PlackettLuce,
+            20,
+        );
 
         assert!(
             outcome.weights[0] > 0.9,
@@ -1396,7 +1894,7 @@ mod tests {
         let (temp, penalty) = temp_penalty();
         let p = Priors::default();
         let init = initial_weights(&p);
-        let outcome = solve(&cache, &init, temp, penalty);
+        let outcome = solve(&cache, &init, temp, penalty, FitObjective::PlackettLuce, 20);
         assert_eq!(outcome.unidentifiable, unident);
 
         // Its gradient contribution is projected out, so the solver cannot move
@@ -1493,7 +1991,7 @@ mod tests {
             "novelty ships at zero, which is the hard case"
         );
 
-        let outcome = solve(&cache, &init, 0.0, 0.0);
+        let outcome = solve(&cache, &init, 0.0, 0.0, FitObjective::PlackettLuce, 20);
         assert!(
             outcome.weights[10] < 0.0,
             "novelty should be subtracted, got {}",
@@ -1606,7 +2104,7 @@ mod tests {
         let priors = cfg().priors.clone();
         let w = normalised_mix_weights(&priors);
         let baseline = rescore(&cache, &priors, &w, 20, 50).average();
-        run_fit_and_report(&cache, &baseline, false, None);
+        run_fit_and_report(&cache, &baseline, false, None, FitObjective::PlackettLuce);
     }
 
     /// The objective evaluated through the fit must agree with the exact blend
@@ -1752,6 +2250,288 @@ mod tests {
                 ..Priors::default()
             },
         };
-        run_fit_and_report(&cache, &baseline, false, Some(&reference));
+        run_fit_and_report(
+            &cache,
+            &baseline,
+            false,
+            Some(&reference),
+            FitObjective::PlackettLuce,
+        );
+    }
+
+    // ---- differentiable NDCG@k --------------------------------------------
+
+    /// One account, positives first (as the scorer expects), **every candidate on
+    /// a distinct `sim`**.
+    ///
+    /// Distinctness is the point: a soft rank reproduces a strict ranking exactly
+    /// as `τ → 0`, but tied candidates are inherently averaged (`σ(0) = 0.5`
+    /// each), so a tied fixture would compare the approximation against a metric
+    /// that breaks ties by position.
+    fn ramp_cache(n_pos: usize, n_neg: usize, pos_top: f32, neg_top: f32) -> ScoreCache {
+        let mut rows = Vec::new();
+        for j in 0..n_pos {
+            let mut r = Row::zeros();
+            r.sim = pos_top - j as f32 * 0.001;
+            rows.push(r);
+        }
+        for i in 0..n_neg {
+            let mut r = Row::zeros();
+            r.sim = neg_top - i as f32 * 0.001;
+            rows.push(r);
+        }
+        synthetic_cache(&[(n_pos, rows)])
+    }
+
+    /// One account of 40 candidates with genuine spread in three channels and
+    /// every value interior, so the blend's `clamp(0, 1)` stays inactive and the
+    /// objective is smooth — which a finite-difference check needs.
+    ///
+    /// The positives are deliberately *mid-range*: under the initial weights they
+    /// land around the `k` boundary, where the gate is neither saturated nor
+    /// zero. A fixture that buried them (all soft ranks ≫ k, every gate ≈ 0)
+    /// would have a gradient of ≈ 0 everywhere and would let a sign error pass
+    /// the difference check unchallenged — which is exactly what the first
+    /// version of this fixture did.
+    fn smooth_cache() -> ScoreCache {
+        let mut rows = Vec::new();
+        for j in 0..8usize {
+            let t = j as f32 / 7.0;
+            let mut r = Row::zeros();
+            r.sim = 0.45 + 0.05 * t;
+            r.quality = 0.55 - 0.05 * t;
+            r.recency = 0.5;
+            r.rating = 0.5;
+            r.media = 0.5;
+            r.popularity = 0.5;
+            r.interaction = 0.5;
+            r.tag_relation = 0.5;
+            r.uploader = 0.5;
+            r.exclusivity = 0.5;
+            r.novelty = 0.5;
+            r.artist_discovery = 0.5;
+            rows.push(r);
+        }
+        for i in 0..32usize {
+            let t = i as f32 / 31.0;
+            let mut r = Row::zeros();
+            r.sim = 0.2 + 0.6 * t;
+            r.quality = 0.8 - 0.6 * t;
+            r.recency = 0.3 + 0.4 * t;
+            r.rating = 0.5;
+            r.media = 0.5;
+            r.popularity = 0.5;
+            r.interaction = 0.5;
+            r.tag_relation = 0.5;
+            r.uploader = 0.5;
+            r.exclusivity = 0.5;
+            r.novelty = 0.5;
+            r.artist_discovery = 0.5;
+            rows.push(r);
+        }
+        synthetic_cache(&[(8usize, rows)])
+    }
+
+    /// The whole point of the option: the surrogate must be measured in the
+    /// gate's units. With a sharp temperature the soft ranks saturate onto the
+    /// real ones, so the objective has to reproduce [`rescore`]'s NDCG@20.
+    ///
+    /// The third account is what makes this more than a sanity check: its
+    /// positives sit at ranks 25..34 — *inside* the shortlist but outside `k` —
+    /// where exact NDCG@20 is zero. Without the `σ(k − r)` gate the surrogate
+    /// would happily bank `1/log2(1+r)` for them, so a missing gate fails here
+    /// loudly instead of surfacing as a quiet bias in a real run.
+    #[test]
+    fn the_soft_ndcg_reproduces_the_exact_metric_when_the_temperature_is_sharp() {
+        let priors = Priors::default();
+        let temp = priors.score_temperature;
+        let penalty = priors.strong_negative_penalty;
+
+        let mut accounts = Vec::new();
+        // Positives strictly above every negative: exact NDCG@20 = 1.0.
+        accounts.extend(ramp_cache(5, 60, 0.70, 0.60).accounts);
+        // Every positive strictly below all 60 negatives: exact NDCG@20 = 0.0.
+        accounts.extend(ramp_cache(5, 60, 0.10, 0.60).accounts);
+        // Positives at ranks 25..34: outside @20, inside the shortlist.
+        accounts.extend(ramp_cache(10, 24, 0.10, 0.60).accounts);
+        let cache = ScoreCache { accounts };
+
+        let w = normalised_mix_weights(&priors);
+        let exact = rescore(&cache, &priors, &w, 20, 50).average().ndcg_at_k;
+
+        let taus = vec![1e-6f32; cache.accounts.len()];
+        let soft =
+            objective_ndcg(&cache, &w, temp, penalty, 20, &taus) / cache.accounts.len() as f64;
+
+        // The tolerance is `5e-3`, not `1e-9`: the gate is a sigmoid, not a step,
+        // so the third account contributes ~5e-4 where the metric has exactly 0.
+        // That residue is the intended smoothness; the failure this guards
+        // against — no gate at all — would be ~0.5.
+        assert!(
+            (soft - exact).abs() < 5e-3,
+            "soft NDCG@20 {soft:.6} must track the exact metric {exact:.6}"
+        );
+    }
+
+    /// The gradient is hand-derived, so it is checked against central
+    /// differences rather than trusted. The fixture is shortlist-saturating
+    /// (40 candidates < 8·k), which keeps the selected set fixed as `w` moves —
+    /// truncation is the one part of this objective that is not differentiable,
+    /// and it must not be what the check ends up measuring.
+    #[test]
+    fn the_ndcg_gradient_matches_central_differences() {
+        let priors = Priors::default();
+        let temp = priors.score_temperature;
+        let penalty = priors.strong_negative_penalty;
+        let cache = smooth_cache();
+        let w = normalised_mix_weights(&priors);
+        let taus = ndcg_temperatures(&cache, &w, temp, penalty, 20);
+        let (_, g) = objective_ndcg_and_grad(&cache, &w, temp, penalty, 20, &taus, &[]);
+
+        // The objective is evaluated through the production **f32** blend, so the
+        // difference quotient cannot be made arbitrarily accurate: quantisation
+        // contributes ~`ε·f / (2h)` while truncation contributes ~`h²·f'''`.
+        // `h = 1e-3` puts quantisation near 1e-5 and still resolves `f'''`, and
+        // the bound below is loose enough for that but far tighter than any sign
+        // or factor error (which would show up as O(1)).
+        let h = 1e-3f32;
+        let mut worst = 0.0f64;
+        for (c, name) in BLEND_CHANNEL_NAMES.iter().enumerate() {
+            let mut up = w;
+            up[c] += h;
+            let mut down = w;
+            down[c] -= h;
+            let fd = (objective_ndcg(&cache, &up, temp, penalty, 20, &taus)
+                - objective_ndcg(&cache, &down, temp, penalty, 20, &taus))
+                / (2.0 * f64::from(h));
+            let rel = (fd - g[c]).abs() / (1.0 + g[c].abs());
+            worst = worst.max(rel);
+            assert!(
+                rel <= 5e-3,
+                "{name}: central difference {fd:.9} vs analytic {:.9} (rel {rel:.2e}, h={h})",
+                g[c]
+            );
+        }
+        assert!(
+            g.iter().any(|v| v.abs() > 1e-3),
+            "the fixture must exercise a non-zero gradient: {g:?}"
+        );
+        eprintln!("[test] worst relative gradient error {worst:.2e} at h={h}");
+    }
+
+    /// The NDCG objective has to actually drive the solver, not merely evaluate:
+    /// the solve must improve its own objective and return a usable share.
+    ///
+    /// The fixture is built so there is somewhere to go. Positives are told apart
+    /// by `quality`, negatives by `sim`, and the solver starts from the shipped
+    /// sim-heavy priors — so the start ranks the favourites badly, and climbing
+    /// means moving weight onto `quality`. A fixture whose positives already sit
+    /// on top would assert nothing: soft NDCG@20 is then already maximal at 1.0
+    /// and a zero gradient is the correct answer, not a solver failure.
+    #[test]
+    fn the_ndcg_solve_improves_its_own_objective() {
+        let rows: Vec<Row> = (0..30)
+            .map(|i| {
+                let mut r = Row::zeros();
+                if i < 4 {
+                    r.sim = 0.1;
+                    r.quality = 0.9;
+                } else {
+                    r.sim = 0.9;
+                    r.quality = 0.1;
+                }
+                r
+            })
+            .collect();
+        let cache = synthetic_cache(&[(4usize, rows)]);
+        let priors = Priors::default();
+        let temp = priors.score_temperature;
+        let penalty = priors.strong_negative_penalty;
+        let outcome = solve(
+            &cache,
+            &initial_weights(&priors),
+            temp,
+            penalty,
+            FitObjective::ApproxNdcg,
+            20,
+        );
+        assert!(
+            outcome.objective > outcome.initial_objective,
+            "objective must improve: {} -> {}",
+            outcome.initial_objective,
+            outcome.objective
+        );
+        let l1: f32 = outcome.weights.iter().map(|v| v.abs()).sum();
+        // `Σ|w|` is a share, not exactly 1: the solver parameterises on the
+        // two-sided simplex and floors *each half* at `WEIGHT_FLOOR`, so
+        // `Σ|plus − minus|` falls a hair below `Σ(plus + minus) = 1`. The gap is
+        // bounded by the floor — an unnormalised vector would be off by orders of
+        // magnitude, not by 1e-4.
+        assert!(
+            (0.999..=1.0001).contains(&l1),
+            "weights must stay a share: Σ|w|={l1}"
+        );
+    }
+
+    /// A ladder step has to be a vector production could actually hold.
+    ///
+    /// `clamp(0, 1)` and the logistic are both active, so the *scale* of the
+    /// weights is meaningful, and a raw convex combination of two shares with
+    /// mixed signs lands below `Σ|w| = 1` — a silent shrink that would read as
+    /// "the direction is bad" when it was only the step that was malformed.
+    #[test]
+    fn a_ladder_step_stays_on_the_l1_share_simplex() {
+        let mut a = [0.0f32; BLEND_CHANNEL_COUNT];
+        let mut b = [0.0f32; BLEND_CHANNEL_COUNT];
+        a[0] = 0.9;
+        a[1] = 0.1;
+        b[0] = 0.5;
+        b[1] = -0.3;
+        b[2] = 0.2;
+
+        for &t in &DIRECTION_LADDER {
+            let w = lerp_l1(&a, &b, t);
+            let sum: f32 = w.iter().map(|v| v.abs()).sum();
+            assert!((sum - 1.0).abs() < 1e-5, "t={t}: Σ|w| = {sum}");
+        }
+        for (t, expected) in [(0.0f32, &a), (1.0f32, &b)] {
+            let w = lerp_l1(&a, &b, t);
+            for c in 0..BLEND_CHANNEL_COUNT {
+                assert!(
+                    (w[c] - expected[c]).abs() < 1e-6,
+                    "t={t} channel {c}: {} != {}",
+                    w[c],
+                    expected[c]
+                );
+            }
+        }
+    }
+
+    /// Nothing below the shortlist is rewarded *or* pulled up. That truncation
+    /// is a deliberate limit of the approximation, and its size is a documented
+    /// constant rather than an accident of the fixture.
+    #[test]
+    fn a_positive_below_the_shortlist_is_neither_rewarded_nor_pulled() {
+        let k = 20usize;
+        let priors = Priors::default();
+        let temp = priors.score_temperature;
+        let penalty = priors.strong_negative_penalty;
+
+        // One positive, parked below `shortlist` stronger negatives.
+        let cache = ramp_cache(1, k * NDCG_SHORTLIST_MULT + 5, 0.10, 0.60);
+        let acc = &cache.accounts[0];
+        let w = normalised_mix_weights(&priors);
+        let mut u = Vec::new();
+        fill_ndcg_scores(acc, &w, temp, penalty, &mut u);
+        let mut du = vec![0.0f64; acc.channels.len()];
+        let mut sig = Vec::new();
+        let mut ranks = Vec::new();
+        let value = account_soft_ndcg(acc, &u, 1e-6, k, &mut du, &mut sig, &mut ranks);
+
+        assert_eq!(value, 0.0, "the positive is outside the shortlist");
+        assert!(
+            du.iter().all(|d| *d == 0.0),
+            "and contributes no gradient either"
+        );
     }
 }

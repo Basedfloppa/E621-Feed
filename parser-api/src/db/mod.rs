@@ -384,4 +384,132 @@ mod tests {
         );
         assert!(err.contains("database schema is newer"), "{err}");
     }
+
+    /// V31 — rewrite a lone `-animated` line to `require:animated`.
+    ///
+    /// Run from the embedded migration text rather than a re-implementation, so
+    /// the artifact refinery applies is the artifact under test. No deployment we
+    /// can inspect has a `-animated` row left, so this test and the one-shot file
+    /// are the only places the rewrite is exercised.
+    #[test]
+    fn migration_v31_rewrites_only_a_lone_dashed_static_rule() {
+        const SQL: &str = include_str!("../../migrations/V31__require_animated_blacklist_rule.sql");
+
+        let cases: &[(&str, &str)] = &[
+            // The old "Block static images" entry, alone on its line, in each
+            // position it can occupy.
+            ("-animated", "require:animated"),
+            ("gore\n-animated", "gore\nrequire:animated"),
+            ("-animated\ngore", "require:animated\ngore"),
+            ("gore\n-animated\nscat", "gore\nrequire:animated\nscat"),
+            // Structure around it survives: trailing newline, blank run.
+            ("-animated\n", "require:animated\n"),
+            ("gore\n\n-animated", "gore\n\nrequire:animated"),
+            // Neither case nor surrounding whitespace hides the rule. The
+            // converted line comes out canonical, so its padding is dropped.
+            ("-ANIMATED", "require:animated"),
+            ("-Animated", "require:animated"),
+            ("  -animated  ", "require:animated"),
+            ("\t-animated\t", "require:animated"),
+            // CRLF: the rewritten line loses its CR, the separator stays `\n`.
+            ("-animated\r\ngore", "require:animated\ngore"),
+            // NOT rewritten — the dashed text is not a rule on its own, so it was
+            // not written by the button and inverting it would corrupt a rule the
+            // user typed deliberately.
+            ("foo-animated", "foo-animated"),
+            ("-animated_gif", "-animated_gif"),
+            ("gore -animated", "gore -animated"),
+            ("-animated -animated", "-animated -animated"),
+            ("gore\t-animated\tscat", "gore\t-animated\tscat"),
+            // A comment is not a rule; the line after it still is.
+            ("# -animated", "# -animated"),
+            ("# -animated\n-animated", "# -animated\nrequire:animated"),
+            // Already-migrated and unrelated text is left alone.
+            ("require:animated", "require:animated"),
+            ("gore", "gore"),
+        ];
+
+        let conn = mem();
+        conn.execute_batch(
+            "CREATE TABLE accounts(id INTEGER PRIMARY KEY, blacklisted_tags TEXT NOT NULL DEFAULT '');
+             CREATE TABLE account_device_links(id INTEGER PRIMARY KEY, blacklisted_tags TEXT NOT NULL DEFAULT '');",
+        )
+        .unwrap();
+        for (i, (input, _)) in cases.iter().enumerate() {
+            let id = i as i64 + 1;
+            for table in ["accounts", "account_device_links"] {
+                conn.execute(
+                    &format!("INSERT INTO {table}(id, blacklisted_tags) VALUES (?1, ?2)"),
+                    rusqlite::params![id, input],
+                )
+                .unwrap();
+            }
+        }
+
+        let read = |table: &str, id: i64| -> String {
+            conn.query_row(
+                &format!("SELECT blacklisted_tags FROM {table} WHERE id = ?1"),
+                rusqlite::params![id],
+                |row| row.get(0),
+            )
+            .unwrap()
+        };
+
+        // Applying twice proves the rewrite is a fixed point: the migrated text
+        // no longer matches the `LIKE '%-animated%'` screen, and a surviving
+        // non-rule (`gore -animated`) re-serialises to itself.
+        for pass in 1..=2 {
+            conn.execute_batch(SQL).unwrap();
+            for (i, (input, expected)) in cases.iter().enumerate() {
+                let id = i as i64 + 1;
+                for table in ["accounts", "account_device_links"] {
+                    let got = read(table, id);
+                    assert_eq!(
+                        got, *expected,
+                        "pass {pass}, {table}, case {input:?}: expected {expected:?}, got {got:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Every `migrations/*.sql` must be picked up by `embed_migrations!`.
+    ///
+    /// refinery skips a filename that is not `V<n>__<name>.sql` without a word, so
+    /// a typo there produces a migration that simply never runs — the failure is
+    /// invisible until someone wonders why a column is missing. Compare the two
+    /// sets instead of trusting the directory.
+    #[test]
+    fn every_migration_file_on_disk_is_embedded() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
+        let mut on_disk: Vec<i64> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.ends_with(".sql"))
+            .map(|name| {
+                let rest = name
+                    .strip_prefix('V')
+                    .unwrap_or_else(|| panic!("migration filename must start with V: {name}"));
+                let (version, _) = rest.split_once("__").unwrap_or_else(|| {
+                    panic!("migration filename must be V<n>__<name>.sql: {name}")
+                });
+                version
+                    .parse::<i64>()
+                    .unwrap_or_else(|_| panic!("migration version must be numeric: {name}"))
+            })
+            .collect();
+        on_disk.sort_unstable();
+
+        let mut embedded_versions: Vec<i64> = super::embedded::migrations::runner()
+            .get_migrations()
+            .iter()
+            .map(|migration| migration.version() as i64)
+            .collect();
+        embedded_versions.sort_unstable();
+
+        assert_eq!(
+            on_disk, embedded_versions,
+            "migrations/ and the embedded set disagree (both sorted by version)"
+        );
+    }
 }

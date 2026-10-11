@@ -44,6 +44,35 @@ impl NegMode {
     }
 }
 
+/// Which surrogate `--fit-mix` maximises.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub(crate) enum FitObjective {
+    /// Listwise softmax / Plackett–Luce over the account's whole candidate set.
+    ///
+    /// Concave in `w` (so the optimum is global), cheap, and — measured on the
+    /// real cache — pointed the *wrong way* on the dominant channel: its optimum
+    /// drops `sim` and inflates `rating`, and the exact gate rejected the result
+    /// by 5.5 SE. Kept as the default because it is the documented incumbent and
+    /// every past comparison was made against it.
+    PlackettLuce,
+    /// Differentiable approximation of the acceptance metric itself — soft
+    /// NDCG@`backtest.top_k_ndcg` over a truncated head of each account.
+    ///
+    /// Not concave, so a local optimum is all it can promise; the point of the
+    /// option is that its optimum is measured in the same units as the gate.
+    /// See `fit::objective_ndcg`.
+    ApproxNdcg,
+}
+
+impl FitObjective {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            FitObjective::PlackettLuce => "pl",
+            FitObjective::ApproxNdcg => "ndcg",
+        }
+    }
+}
+
 #[derive(Copy, Clone, Debug)]
 pub(crate) struct GridOptions {
     pub(crate) pairs_only: bool,
@@ -68,6 +97,8 @@ pub(crate) struct GridOptions {
     /// that cache-building path even without a following `grid`, because the
     /// production-scorer path discards the per-channel matrix.
     pub(crate) fit_mix: bool,
+    /// Surrogate the fit maximises. Set via `fit-mix-objective=pl|ndcg`.
+    pub(crate) fit_objective: FitObjective,
 }
 
 impl Default for GridOptions {
@@ -81,6 +112,7 @@ impl Default for GridOptions {
             verbose: false,
             channel_cache: true,
             fit_mix: false,
+            fit_objective: FitObjective::PlackettLuce,
         }
     }
 }

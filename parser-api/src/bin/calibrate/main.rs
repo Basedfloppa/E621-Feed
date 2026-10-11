@@ -55,7 +55,7 @@ use crate::dataset::{EvalDataset, prepare_eval_dataset};
 use crate::grid::run_grid_with_dataset;
 use crate::knobs::{GRID_KNOBS, KnobSpec, MIX_ONLY_KNOBS};
 use crate::metrics::{Metrics, print_metrics, score_with_progress};
-use crate::options::{GridOptions, NegMode, SplitStrategy};
+use crate::options::{FitObjective, GridOptions, NegMode, SplitStrategy};
 use crate::probe::run_probe;
 
 /// Deterministic seed for negative sampling so grid runs are reproducible.
@@ -127,7 +127,8 @@ fn main() -> anyhow::Result<()> {
         eprintln!(
             "no mode given. Use 'eval', 'grid [mix-only]', 'probe', 'graph', or chain them \
              (e.g. 'eval grid'). Flags: pairs-only, no-pairs, with-diversify, no-cache, \
-             fit-mix[=<priors.toml>], split=random|post_id|time_causal, \
+             fit-mix[=<priors.toml>], fit-mix-objective=pl|ndcg, \
+             split=random|post_id|time_causal, \
              neg=uniform|mixed|hybrid, verbose"
         );
         std::process::exit(2);
@@ -233,7 +234,13 @@ fn run_modes(
                         // Runs on the matrix this pass just built — one
                         // scoring pass, then a pure in-memory solve. A
                         // reference vector rides the same matrix.
-                        fit::run_fit_and_report(&cache, &m, opts.diversify, reference);
+                        fit::run_fit_and_report(
+                            &cache,
+                            &m,
+                            opts.diversify,
+                            reference,
+                            opts.fit_objective,
+                        );
                     }
                     if let Some(k) = key.as_ref() {
                         match cache_file::save(&cache_path(), k, dataset, &cache) {
@@ -444,6 +451,23 @@ fn parse_grid_flags(args: impl Iterator<Item = String>) -> (GridOptions, Option<
                 // when the fit asks for it.
                 opts.fit_mix = true;
                 reference = Some(path.to_string());
+            }
+            continue;
+        }
+
+        // Value-carrying form too, and checked before the literal table below.
+        // It is *not* matched by the `fit-mix=` prefix above: that one requires
+        // the `=` right after `fit-mix`.
+        let objective = arg
+            .strip_prefix("--fit-mix-objective=")
+            .or_else(|| arg.strip_prefix("fit-mix-objective="));
+        if let Some(value) = objective {
+            match value {
+                "pl" | "plackett-luce" => opts.fit_objective = FitObjective::PlackettLuce,
+                "ndcg" => opts.fit_objective = FitObjective::ApproxNdcg,
+                other => eprintln!(
+                    "[run] unknown --fit-mix-objective={other} (expected pl|ndcg; ignored)"
+                ),
             }
             continue;
         }

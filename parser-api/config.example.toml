@@ -89,6 +89,18 @@ quality_log_bias = -3.0
 # — see "Run 2026-10-10" in docs/calibration.md). That is the size of the bet
 # this pass declines to take, so treat the five values below as *deliberately
 # uncalibrated* rather than as a null result.
+#
+# A later full grid run reached the same verdict from the other side and was
+# likewise NOT applied (`grid_20261010_232439.toml`, 2026-10-11): its optimum
+# zeroes `quality`, `recency` and `popularity` once more and pushes `mix_sim` to
+# a 0.961 share, scoring +0.133 NDCG@20 over this config on a single matrix. It
+# was rejected because its `df_floor` sits on the lower clamp of the search
+# range — the harness prints that warning itself — so the vector is a boundary
+# point, not a converged optimum, and it points into the same confounded
+# direction as above. Do not read +0.133 as growth over +0.069: the two come
+# from different datasets, which is exactly the comparison `docs/calibration.md`
+# rules out. Re-deriving the zeroed block is therefore a settled question —
+# it belongs to the online bucket A/B (§2.1 of TODO.md), not to another grid run.
 mix_sim = 2.261
 mix_quality = 0.017
 mix_recency = 0.017
