@@ -8,7 +8,7 @@
 use wasm_bindgen::JsCast;
 use wasm_bindgen::JsValue;
 use wasm_bindgen_futures::{JsFuture, spawn_local};
-use web_sys::{Cache, CacheQueryOptions, CustomEvent, Request, Response, window};
+use web_sys::{Cache, CustomEvent, Response, window};
 use yew::prelude::*;
 
 fn format_bytes(mut b: u64) -> String {
@@ -22,6 +22,18 @@ fn format_bytes(mut b: u64) -> String {
 }
 
 /// Total bytes held in all service-worker caches for this origin.
+///
+/// One `matchAll()` per cache rather than a `match()` round trip per key, and
+/// each body is measured through a `Blob` instead of an `ArrayBuffer`. A Blob
+/// is kept by the browser outside the JS heap, so a multi-megabyte wasm bundle
+/// no longer has to be copied into wasm memory just to learn its length —
+/// which is what the previous `array_buffer()` did for every entry in every
+/// cache, sequentially.
+///
+/// This is still not free: Cache Storage has no "size" query, so the browser
+/// does read each body to build the Blob. It is bounded work on a settings
+/// page rather than on any hot path, which is why a real measurement is
+/// preferred over `navigator.storage.estimate()`'s origin-wide total.
 async fn sum_caches() -> u64 {
     let caches = match window().map(|w| w.caches()) {
         Some(Ok(c)) => c,
@@ -40,33 +52,25 @@ async fn sum_caches() -> u64 {
             continue;
         };
         let cache: Cache = cache_value.unchecked_into();
-        let Ok(reqs_value) = JsFuture::from(cache.keys()).await else {
+        let Ok(responses_value) = JsFuture::from(cache.match_all()).await else {
             continue;
         };
-        let reqs = js_sys::Array::from(&reqs_value);
-        for j in 0..reqs.length() {
-            let req = reqs.get(j);
-            let Some(req_obj) = req.dyn_ref::<Request>() else {
+        let responses = js_sys::Array::from(&responses_value);
+        for j in 0..responses.length() {
+            let Some(resp) = responses.get(j).dyn_into::<Response>().ok() else {
                 continue;
             };
-            let Ok(maybe_value) = JsFuture::from(
-                cache.match_with_request_and_options(req_obj, &CacheQueryOptions::new()),
-            )
-            .await
-            else {
+            let Ok(blob_promise) = resp.blob() else {
                 continue;
             };
-            let Some(resp) = maybe_value.dyn_ref::<Response>() else {
+            let Ok(blob) = JsFuture::from(blob_promise).await else {
                 continue;
             };
-            let Ok(ab_promise) = resp.array_buffer() else {
-                continue;
-            };
-            let Ok(ab_value) = JsFuture::from(ab_promise).await else {
-                continue;
-            };
-            let ab: js_sys::ArrayBuffer = ab_value.unchecked_into();
-            total += ab.byte_length() as u64;
+            let size = js_sys::Reflect::get(&blob, &JsValue::from_str("size"))
+                .ok()
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.0);
+            total += size as u64;
         }
     }
     total

@@ -13,8 +13,13 @@
 // cache holds entries keyed by URL, and a bumped version is the only way to
 // purge entries that went stale (see the SRI notes below).
 
-const CACHE_VERSION = "e621-static-v3";
+const CACHE_VERSION = "e621-static-v4";
 const STATIC_CACHE = `${CACHE_VERSION}`;
+// App-shell cache, kept apart from the hashed-asset cache. Navigations are
+// stored under a single fixed key (`SHELL_KEY`) instead of one entry per
+// navigation URL — see `handleNavigation` for why that matters.
+const SHELL_CACHE = `${CACHE_VERSION}-shell`;
+const SHELL_KEY = "/__app-shell";
 
 // API content endpoints worth keeping for offline browsing. Cached responses
 // are stored in IndexedDB and served network-first: fresh when online, last
@@ -31,9 +36,20 @@ const API_CACHEABLE = [
 // IndexedDB schema: cached API responses and pending interaction events
 // awaiting background-sync replay.
 const DB_NAME = "e621-feed";
-const DB_VERSION = 2;
+const DB_VERSION = 3;
 const API_STORE = "api-responses";
+const API_TS_INDEX = "by-ts";
 const PENDING_STORE = "pending-events";
+
+// Bounds for the API body cache. Every cacheable response is written with a
+// `ts`, and without these the store grew for the lifetime of the install —
+// there is no quota eviction for IndexedDB on the app's side. Pruned oldest
+// first on both axes, so a busy week cannot push out a response that is still
+// useful while a quiet month still cannot retain stale bodies forever.
+const API_MAX_ENTRIES = 200;
+const API_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+// Housekeeping runs at most this often per service-worker lifetime.
+const PRUNE_INTERVAL_MS = 60 * 60 * 1000;
 
 // Background-sync tag used to flush queued interactions when online.
 const SYNC_TAG = "feed-events";
@@ -202,8 +218,16 @@ function openDB() {
 		const req = indexedDB.open(DB_NAME, DB_VERSION);
 		req.onupgradeneeded = (e) => {
 			const db = e.target.result;
+			let api;
 			if (!db.objectStoreNames.contains(API_STORE)) {
-				db.createObjectStore(API_STORE, { keyPath: "url" });
+				api = db.createObjectStore(API_STORE, { keyPath: "url" });
+			} else {
+				// v2 -> v3: the store exists, we are only adding the index the
+				// pruning cursor walks.
+				api = e.target.transaction.objectStore(API_STORE);
+			}
+			if (!api.indexNames.contains(API_TS_INDEX)) {
+				api.createIndex(API_TS_INDEX, "ts");
 			}
 			if (!db.objectStoreNames.contains(PENDING_STORE)) {
 				db.createObjectStore(PENDING_STORE, { keyPath: "id" });
@@ -222,6 +246,84 @@ function txDone(tx) {
 	});
 }
 
+function requestResult(req) {
+	return new Promise((resolve) => {
+		req.onsuccess = () => resolve(req.result);
+		req.onerror = () => resolve(undefined);
+	});
+}
+
+// Drop cached API bodies that are past `API_MAX_AGE_MS` or that push the store
+// over `API_MAX_ENTRIES`, oldest first.
+//
+// The cursor walks the `by-ts` index in ascending order, so the first entry
+// that is both fresh enough and within the cap marks the end of the work —
+// cost is proportional to the number of rows actually deleted, not to the
+// size of the cache. `count()` deliberately runs in its own readonly
+// transaction: an IndexedDB transaction auto-commits as soon as a promise
+// boundary leaves it with no pending request, so mixing the two in one
+// transaction would make the cursor throw `TransactionInactiveError`.
+async function pruneApiResponses() {
+	let db;
+	try {
+		db = await openDB();
+	} catch (err) {
+		return; // IndexedDB unavailable — caching itself was best-effort.
+	}
+	try {
+		const total = await requestResult(
+			db.transaction(API_STORE, "readonly").objectStore(API_STORE).count(),
+		);
+		if (!total) {
+			return;
+		}
+		const expireBefore = Date.now() - API_MAX_AGE_MS;
+		await new Promise((resolve) => {
+			const tx = db.transaction(API_STORE, "readwrite");
+			const req = tx
+				.objectStore(API_STORE)
+				.index(API_TS_INDEX)
+				.openCursor();
+			let remaining = total;
+			req.onsuccess = () => {
+				const cursor = req.result;
+				if (!cursor) {
+					resolve();
+					return;
+				}
+				const tooOld = cursor.value.ts < expireBefore;
+				const tooMany = remaining > API_MAX_ENTRIES;
+				if (tooOld || tooMany) {
+					cursor.delete();
+					remaining -= 1;
+					cursor.continue();
+				} else {
+					resolve();
+				}
+			};
+			req.onerror = () => resolve();
+		});
+	} catch (err) {
+		// Housekeeping never breaks a live request.
+	} finally {
+		db.close();
+	}
+}
+
+// Service workers are torn down between events, so this throttles per worker
+// lifetime rather than globally — in the worst case housekeeping runs once per
+// worker start, which is still bounded and cheap.
+let lastPruneAt = 0;
+
+function maybePruneApiResponses() {
+	const now = Date.now();
+	if (now - lastPruneAt < PRUNE_INTERVAL_MS) {
+		return;
+	}
+	lastPruneAt = now;
+	pruneApiResponses();
+}
+
 async function storeApiResponse(url, response) {
 	try {
 		const body = await response.clone().text();
@@ -237,6 +339,7 @@ async function storeApiResponse(url, response) {
 		});
 		await txDone(tx);
 		db.close();
+		maybePruneApiResponses();
 	} catch (err) {
 		// Caching is best-effort; never break the live request.
 	}
@@ -306,25 +409,51 @@ async function networkFirstApi(request) {
 	}
 }
 
+// Network-first navigation with an offline app-shell fallback.
+//
+// The shell is stored under one fixed key (`SHELL_KEY`) rather than under the
+// request URL. Keyed by URL — as this used to be — every distinct path *and
+// query string* the user ever opened (`?project=…`, `?page=2`, …) added a
+// permanent entry to the cache: `cache.put` was neither awaited nor caught, so
+// a quota failure surfaced as an unhandled rejection, and nothing ever evicted
+// an entry. One SPA document is what actually needs to survive, so one key is
+// what gets written.
 async function handleNavigation(request) {
 	try {
 		const fresh = await fetch(request);
-		// Opportunistically cache the app shell for future offline navigations.
-		const cache = await caches.open(STATIC_CACHE);
-		cache.put(request.url, fresh.clone());
+		// Only a successful document is worth keeping: an error page cached
+		// here would later be served offline *in place of* the app.
+		if (fresh && fresh.ok) {
+			try {
+				const cache = await caches.open(SHELL_CACHE);
+				await cache.put(SHELL_KEY, fresh.clone());
+			} catch (err) {
+				// Quota exceeded / storage disabled — the live response is
+				// what matters, so keep going.
+			}
+		}
 		return fresh;
 	} catch (err) {
-		const cache = await caches.open(STATIC_CACHE);
-		const cachedIndex = await cache.match(request.url);
-		if (cachedIndex) {
-			return cachedIndex;
-		}
-		const offline = await cache.match("/static/offline.html");
-		if (offline) {
-			return offline;
+		const shell = await cachedShell();
+		if (shell) {
+			return shell;
 		}
 		// Nothing cached at all — let the browser show its own error page.
 		throw err;
+	}
+}
+
+async function cachedShell() {
+	try {
+		const shellCache = await caches.open(SHELL_CACHE);
+		const shell = await shellCache.match(SHELL_KEY);
+		if (shell) {
+			return shell;
+		}
+		const staticCache = await caches.open(STATIC_CACHE);
+		return (await staticCache.match("/static/offline.html")) || null;
+	} catch (err) {
+		return null;
 	}
 }
 
@@ -477,18 +606,27 @@ async function refreshPeriodically() {
 	// Deliver any queued feedback first.
 	await replayPendingEvents();
 
-	// Re-validate the app shell and static shell so installed clients pick up
-	// new deployments without a manual refresh.
+	// Re-validate the app shell and the offline page so installed clients pick
+	// up new deployments without a manual refresh. The shell is refreshed under
+	// the same fixed key `handleNavigation` writes, otherwise the offline
+	// fallback would keep serving whatever document happened to be cached
+	// first. `cache.put` is awaited: un-awaited, a rejected write escapes this
+	// try/catch as an unhandled rejection.
+	const targets = [
+		{ url: "/", cacheName: SHELL_CACHE, key: SHELL_KEY },
+		{ url: "/static/offline.html", cacheName: STATIC_CACHE, key: "/static/offline.html" },
+	];
 	try {
-		const cache = await caches.open(STATIC_CACHE);
-		for (const url of ["/", "/static/offline.html"]) {
+		for (const target of targets) {
 			try {
-				const resp = await fetch(url, {
+				// `resp` is not used after the put, so no clone is needed.
+				const resp = await fetch(target.url, {
 					cache: "reload",
 					credentials: "same-origin",
 				});
 				if (resp && resp.ok) {
-					cache.put(url, resp);
+					const cache = await caches.open(target.cacheName);
+					await cache.put(target.key, resp);
 				}
 			} catch (err) {
 				// Offline — keep the previous cached copy.
@@ -497,6 +635,10 @@ async function refreshPeriodically() {
 	} catch (err) {
 		// Best-effort.
 	}
+
+	// Periodic sync is the reliable moment to reconcile the API body cache: it
+	// fires while the PWA is idle, off any request's critical path.
+	pruneApiResponses();
 }
 
 self.addEventListener("periodicsync", (event) => {
