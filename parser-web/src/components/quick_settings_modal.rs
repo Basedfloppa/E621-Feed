@@ -110,11 +110,12 @@ fn persist(s: &DisplaySettings) {
     write_local("settings_score_results", &s.score_results.to_string());
     write_local("settings_score_cutoff_pct", &s.score_cutoff_pct.to_string());
     write_local("settings_grid_type", s.grid.to_storage());
-    // Tell open pages to re-read their display config.
-    if let Some(win) = window() {
-        let _ = win.dispatch_event(
-            &web_sys::CustomEvent::new("settings-changed").expect("create settings-changed event"),
-        );
+    // Tell open pages to re-read their display config. A refused event must
+    // not take the modal down with it — the settings are already persisted.
+    if let Some(win) = window()
+        && let Ok(ev) = web_sys::CustomEvent::new("settings-changed")
+    {
+        let _ = win.dispatch_event(&ev);
     }
 }
 

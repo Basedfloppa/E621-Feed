@@ -55,11 +55,18 @@ pub struct TourOptions {
 }
 
 pub fn start_tour(steps: Vec<Step>) {
-    let steps_js = serde_wasm_bindgen::to_value(&steps).unwrap();
-    let opts_js = serde_wasm_bindgen::to_value(&TourOptions {
+    // Serialising the tour config is not worth a panic: if it fails the app
+    // would blank out, so log and skip the tour instead.
+    let Ok(steps_js) = serde_wasm_bindgen::to_value(&steps) else {
+        web_sys::console::warn_1(&"tour: could not serialise steps; skipping the tour".into());
+        return;
+    };
+    let Ok(opts_js) = serde_wasm_bindgen::to_value(&TourOptions {
         default_step_options: None,
         tour_options: None,
-    })
-    .unwrap();
+    }) else {
+        web_sys::console::warn_1(&"tour: could not serialise options; skipping the tour".into());
+        return;
+    };
     start_tour_js(&steps_js, &opts_js);
 }

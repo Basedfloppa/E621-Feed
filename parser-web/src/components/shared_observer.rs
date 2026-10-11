@@ -27,10 +27,10 @@ thread_local! {
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
-fn get_or_init_observer() -> IntersectionObserver {
+fn get_or_init_observer() -> Option<IntersectionObserver> {
     OBSERVER.with(|cell| {
         if let Some(obs) = cell.borrow().clone() {
-            return obs;
+            return Some(obs);
         }
 
         let cb = Closure::<dyn FnMut(js_sys::Array, IntersectionObserver)>::wrap(Box::new(
@@ -72,23 +72,36 @@ fn get_or_init_observer() -> IntersectionObserver {
 
         let opts = IntersectionObserverInit::new();
         opts.set_threshold(&JsValue::from_f64(0.5));
-        let obs = IntersectionObserver::new_with_options(cb.as_ref().unchecked_ref(), &opts)
-            .expect("create shared IntersectionObserver");
+        // A WebView without `IntersectionObserver` (or one that rejects the
+        // options object) must not blank the SPA. Degrade to "no lazy-loading
+        // signal" and say so once, instead of panicking during render.
+        let Some(obs) =
+            IntersectionObserver::new_with_options(cb.as_ref().unchecked_ref(), &opts).ok()
+        else {
+            web_sys::console::warn_1(
+                &"shared IntersectionObserver unavailable — feed cards will not lazy-load".into(),
+            );
+            return None;
+        };
         cb.forget();
         *cell.borrow_mut() = Some(obs.clone());
-        obs
+        Some(obs)
     })
 }
 
 /// Register `element` with the shared observer; `on_entry` runs when the
 /// element crosses the threshold. Returns the registration id; pass it to
 /// `unobserve` on cleanup.
+///
+/// When the observer could not be created the registration is still recorded
+/// (so `unobserve` stays symmetric) but nothing is observed.
 pub fn observe(element: &Element, on_entry: CardCallback) -> u64 {
     let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
     let _ = element.set_attribute(ID_ATTR, &id.to_string());
     REGISTRY.with(|r| r.borrow_mut().insert(id, on_entry));
-    let observer = get_or_init_observer();
-    observer.observe(element);
+    if let Some(observer) = get_or_init_observer() {
+        observer.observe(element);
+    }
     id
 }
 

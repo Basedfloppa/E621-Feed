@@ -107,19 +107,21 @@ pub fn theme_toggle() -> Html {
                 apply_theme(&theme);
             });
 
-            window()
-                .unwrap()
-                .add_event_listener_with_callback("storage", handler.as_ref().unchecked_ref())
-                .expect("Failed to add storage event listener");
+            // A missing `window` (non-DOM build) or a refused listener must not
+            // panic the component: the toggle still works locally, it just
+            // won't follow changes made in another tab.
+            if let Some(w) = window() {
+                let _ =
+                    w.add_event_listener_with_callback("storage", handler.as_ref().unchecked_ref());
+            }
 
             move || {
-                window()
-                    .unwrap()
-                    .remove_event_listener_with_callback(
+                if let Some(w) = window() {
+                    let _ = w.remove_event_listener_with_callback(
                         "storage",
                         handler.as_ref().unchecked_ref(),
-                    )
-                    .expect("Failed to remove storage event listener");
+                    );
+                }
             }
         }
     });

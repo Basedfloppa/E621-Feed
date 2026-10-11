@@ -38,14 +38,22 @@ pub fn offline_banner() -> Html {
                 let offline = offline.clone();
                 Closure::<dyn FnMut(Event)>::new(move |_| offline.set(true))
             };
-            let w = window().expect("window in browser context");
-
-            w.add_event_listener_with_callback("online", on_online.as_ref().unchecked_ref())
-                .expect("add online listener");
-            w.add_event_listener_with_callback("offline", on_offline.as_ref().unchecked_ref())
-                .expect("add offline listener");
+            // No `window` (non-DOM build) means there is nothing to observe;
+            // the banner just keeps its initial state instead of panicking.
+            let w = window();
+            if let Some(w) = &w {
+                let _ = w
+                    .add_event_listener_with_callback("online", on_online.as_ref().unchecked_ref());
+                let _ = w.add_event_listener_with_callback(
+                    "offline",
+                    on_offline.as_ref().unchecked_ref(),
+                );
+            }
 
             move || {
+                let Some(w) = w else {
+                    return;
+                };
                 let _ = w.remove_event_listener_with_callback(
                     "online",
                     on_online.as_ref().unchecked_ref(),
