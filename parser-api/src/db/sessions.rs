@@ -208,6 +208,17 @@ pub fn get_session_shown_post_ids(
         .map_err(|e| format!("Failed to collect session shown posts: {e}"))
 }
 
+/// SQL for the shown-post cleanup leg of [`prune_expired_sessions`].
+///
+/// Named constants so the `EXPLAIN QUERY PLAN` regression test below asserts on
+/// the statements that actually run.
+const PRUNE_SESSION_POSTS_SQL: &str = "DELETE FROM feed_session_posts \
+     WHERE session_id IN (SELECT session_id FROM feed_sessions \
+                          WHERE last_accessed_at < ?1)";
+
+/// SQL for the session-deletion leg of [`prune_expired_sessions`].
+const PRUNE_SESSIONS_SQL: &str = "DELETE FROM feed_sessions WHERE last_accessed_at < ?1";
+
 /// Prune expired sessions and their shown posts.
 /// Returns the number of pruned sessions.
 pub fn prune_expired_sessions() -> Result<usize, String> {
@@ -219,19 +230,88 @@ pub fn prune_expired_sessions() -> Result<usize, String> {
         // `feed_session_posts` rows become permanently unreachable orphans
         // (`get_session_shown_posts` INNER JOINs `feed_sessions`), so nothing
         // would ever clean them up.
-        tx.execute(
-            "DELETE FROM feed_session_posts \
-             WHERE session_id IN (SELECT session_id FROM feed_sessions \
-                                  WHERE last_accessed_at < ?1)",
-            params![cutoff],
-        )
-        .map_err(|e| format!("Failed to prune expired session posts: {e}"))?;
+        tx.execute(PRUNE_SESSION_POSTS_SQL, params![cutoff])
+            .map_err(|e| format!("Failed to prune expired session posts: {e}"))?;
         let n = tx
-            .execute(
-                "DELETE FROM feed_sessions WHERE last_accessed_at < ?1",
-                params![cutoff],
-            )
+            .execute(PRUNE_SESSIONS_SQL, params![cutoff])
             .map_err(|e| format!("Failed to prune expired sessions: {e}"))?;
         Ok(n)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A migrated, empty in-memory database — enough for the planner, and
+    /// hermetic: the shared integration DB is mutated by dozens of other tests.
+    fn migrated_memory_db() -> rusqlite::Connection {
+        let mut conn = rusqlite::Connection::open_in_memory().expect("open in-memory db");
+        crate::db::embedded::migrations::runner()
+            .run(&mut conn)
+            .expect("apply migrations");
+        conn
+    }
+
+    /// Detail lines of `EXPLAIN QUERY PLAN` for `sql`, joined for readability.
+    fn plan(conn: &rusqlite::Connection, sql: &str) -> String {
+        let mut stmt = conn
+            .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+            .expect("prepare EXPLAIN QUERY PLAN");
+        let rows = stmt
+            .query_map(rusqlite::params!["2026-01-01T00:00:00+00:00"], |r| {
+                r.get::<_, String>(3)
+            })
+            .expect("run EXPLAIN QUERY PLAN");
+        rows.collect::<Result<Vec<_>, _>>()
+            .expect("collect plan rows")
+            .join("\n")
+    }
+
+    /// Session pruning runs on every feed cycle. Both statements lean on an
+    /// index: `idx_feed_sessions_accessed` turns the TTL filter into a range
+    /// seek, and an index on `session_id` keeps the orphan cleanup from
+    /// scanning the shown-posts table. Losing either silently turns a cheap
+    /// scheduled delete into a full scan — correct, but progressively slower as
+    /// the table grows.
+    #[test]
+    fn prune_expired_sessions_plan_uses_indexes() {
+        let conn = migrated_memory_db();
+
+        let posts_plan = plan(&conn, PRUNE_SESSION_POSTS_SQL);
+        assert!(
+            posts_plan.contains("idx_feed_sessions_accessed"),
+            "session-post cleanup no longer range-seeks the TTL index:\n{posts_plan}"
+        );
+        // The shown-posts side resolves through whichever index leads on
+        // `session_id` — today the `PRIMARY KEY(session_id, post_id)`
+        // autoindex, which makes the named `idx_feed_session_posts_session`
+        // redundant. Assert the shape, not the name.
+        let fsp_line = posts_plan
+            .lines()
+            .find(|l| l.contains("feed_session_posts"))
+            .expect("plan mentions feed_session_posts");
+        assert!(
+            fsp_line.contains("SEARCH") && fsp_line.contains("INDEX"),
+            "session-post cleanup no longer uses an index on session_id:\n{posts_plan}"
+        );
+
+        let sessions_plan = plan(&conn, PRUNE_SESSIONS_SQL);
+        assert!(
+            sessions_plan.contains("idx_feed_sessions_accessed"),
+            "session deletion no longer uses idx_feed_sessions_accessed:\n{sessions_plan}"
+        );
+
+        for (label, p) in [
+            ("session-post cleanup", &posts_plan),
+            ("session deletion", &sessions_plan),
+        ] {
+            for table in ["feed_sessions", "feed_session_posts"] {
+                assert!(
+                    !p.contains(&format!("SCAN {table}")),
+                    "{label} now scans {table} instead of using an index:\n{p}"
+                );
+            }
+        }
+    }
 }

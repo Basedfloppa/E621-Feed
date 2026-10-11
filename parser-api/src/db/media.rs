@@ -82,20 +82,22 @@ pub fn count_media_bytes() -> Result<i64, String> {
     .map_err(|e| format!("count_media_bytes: {e}"))
 }
 
+/// SQL for the `pending_saved` leg of [`queue_stats`].
+///
+/// A named constant rather than an inline literal so the `EXPLAIN QUERY PLAN`
+/// regression test below asserts on the statement that actually runs.
+const QUEUE_STATS_PENDING_SQL: &str = "SELECT COUNT(*) FROM posts p
+     WHERE p.file_url IS NOT NULL AND p.is_deleted = 0
+       AND EXISTS (SELECT 1 FROM accounts_post a WHERE a.post_id = p.id)
+       AND NOT EXISTS (SELECT 1 FROM media_entries m WHERE m.post_id = p.id)";
+
 /// Queue/status summary for the media worker control UI:
 /// `(pending_saved, stored, bytes_total)`. `pending_saved` is the number of
 /// saved posts still awaiting their original download.
 pub fn queue_stats() -> Result<(i64, i64, i64), String> {
     let conn = open_db().map_err(|e| format!("queue_stats open: {e}"))?;
     let pending: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM posts p
-             WHERE p.file_url IS NOT NULL AND p.is_deleted = 0
-               AND EXISTS (SELECT 1 FROM accounts_post a WHERE a.post_id = p.id)
-               AND NOT EXISTS (SELECT 1 FROM media_entries m WHERE m.post_id = p.id)",
-            [],
-            |r| r.get(0),
-        )
+        .query_row(QUEUE_STATS_PENDING_SQL, [], |r| r.get(0))
         .map_err(|e| format!("queue_stats pending: {e}"))?;
     let stored: i64 = conn
         .query_row("SELECT COUNT(*) FROM media_entries", [], |r| r.get(0))
@@ -250,4 +252,63 @@ pub fn clear_media_entries() -> Result<usize, String> {
         tx.execute("DELETE FROM media_entries", [])
             .map_err(|e| format!("clear_media_entries: {e}"))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A migrated, empty in-memory database — enough for the planner, and
+    /// hermetic: the shared integration DB is mutated by dozens of other tests.
+    fn migrated_memory_db() -> rusqlite::Connection {
+        let mut conn = rusqlite::Connection::open_in_memory().expect("open in-memory db");
+        crate::db::embedded::migrations::runner()
+            .run(&mut conn)
+            .expect("apply migrations");
+        conn
+    }
+
+    /// Detail lines of `EXPLAIN QUERY PLAN` for `sql`, joined for readability.
+    fn plan(conn: &rusqlite::Connection, sql: &str) -> String {
+        let mut stmt = conn
+            .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+            .expect("prepare EXPLAIN QUERY PLAN");
+        let rows = stmt
+            .query_map([], |r| r.get::<_, String>(3))
+            .expect("run EXPLAIN QUERY PLAN");
+        rows.collect::<Result<Vec<_>, _>>()
+            .expect("collect plan rows")
+            .join("\n")
+    }
+
+    /// `queue_stats` is polled continuously by the media worker. Its
+    /// `pending_saved` leg is index-dependent: degrade the join and SQLite
+    /// scans `accounts_post` once per saved post, while still returning the
+    /// right number — so only a plan assertion catches the regression.
+    #[test]
+    fn queue_stats_pending_plan_uses_accounts_post_index() {
+        let conn = migrated_memory_db();
+        let plan = plan(&conn, QUEUE_STATS_PENDING_SQL);
+
+        assert!(
+            plan.contains("SEARCH a EXISTS USING COVERING INDEX"),
+            "pending_saved no longer resolves the accounts_post EXISTS with a \
+             covering-index search:\n{plan}"
+        );
+        assert!(
+            plan.contains("SEARCH m USING INTEGER PRIMARY KEY"),
+            "stored-media exclusion is no longer a primary-key probe:\n{plan}"
+        );
+        // Assert the *shape*, not an index name: the planner serves the EXISTS
+        // through whichever index leads on `post_id`, which today is the
+        // `PRIMARY KEY(post_id, account_id)` autoindex — the named
+        // `idx_ap_post(post_id)` is redundant beside it. Naming it here would
+        // turn "the redundant index was dropped" into a false failure.
+        for alias in ["a", "m"] {
+            assert!(
+                !plan.contains(&format!("SCAN {alias}")),
+                "pending_saved scans {alias} instead of using an index:\n{plan}"
+            );
+        }
+    }
 }
