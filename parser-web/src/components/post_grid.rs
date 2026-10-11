@@ -14,38 +14,77 @@ type IntersectionObserverHandle = (
     Closure<dyn FnMut(Vec<web_sys::IntersectionObserverEntry>)>,
 );
 
-/// Determine the current number of columns from a `columns-*` / `grid-cols-*`
-/// class string by matching the viewport width against Tailwind breakpoints.
-/// Best-known pixel dimensions for layout calculations.
-/// Prefers preview > sample > original, falling back to (4, 3) for 4:3.
-pub(crate) fn best_dimensions(files: &crate::models::Files) -> (i64, i64) {
-    let w = files.preview.width.max(1);
-    let h = files.preview.height.max(1);
-    if w > 1 && h > 1 {
-        return (w, h);
+/// Dimensions of the **source frame** — the picture as it will actually be
+/// rendered, and therefore the only ratio the column maths may use.
+///
+/// Prefers `original` > `sample` > `preview`. That order matters: e621 caps
+/// previews at 2:1, so for an ultra-tall post the preview is a *crop*. Charging
+/// its 2.0 to the column while the card renders a 1:14 sample is what made the
+/// greedy assignment optimise for heights that never land on screen, leaving a
+/// multi-viewport hole under the comic's neighbours. Falls back to 4:3 when no
+/// candidate has usable dimensions.
+pub(crate) fn frame_dimensions(files: &crate::models::Files) -> (i64, i64) {
+    for (w, h) in [
+        (files.original.width, files.original.height),
+        (files.sample.width, files.sample.height),
+        (files.preview.width, files.preview.height),
+    ] {
+        if w > 1 && h > 1 {
+            return (w, h);
+        }
     }
-    let w = files.sample.width.max(1);
-    let h = files.sample.height.max(1);
-    if w > 1 && h > 1 {
-        return (w, h);
-    }
-    let w = files.original.width.max(1);
-    let h = files.original.height.max(1);
-    if w > 1 && h > 1 { (w, h) } else { (4, 3) }
+    (4, 3)
 }
 
-/// Maximum media aspect ratio (height ÷ width) a single card may occupy.
-/// Ultra-tall images are height-capped to this ratio (both in the card's
-/// reserved box and in the column-balancing below), so one extremely tall
-/// post can't tower over the grid and unbalance the masonry columns.
-pub(crate) const MAX_CARD_MEDIA_RATIO: f64 = 2.5;
+/// Relative deviation below which a file counts as a faithful resize of the
+/// frame rather than a crop. Two percent absorbs the integer rounding of small
+/// thumbnails — a 150×113 preview of a 4:3 frame is 0.44% off — while still
+/// rejecting a 2:1 preview of a 1:14 frame.
+pub(crate) const CROP_TOLERANCE: f64 = 0.02;
 
-/// The `height / width` ratio actually used for layout — the same capped
-/// value the card reserves, so column balancing matches the rendered height
-/// of every post (including ultra-tall ones). Normal/wide ratios pass through.
+/// Whether a candidate file shows the whole frame: its own aspect ratio matches
+/// the frame's within [`CROP_TOLERANCE`].
+pub(crate) fn is_proportional(candidate: (i64, i64), frame: (i64, i64)) -> bool {
+    let (candidate_w, candidate_h) = candidate;
+    let (frame_w, frame_h) = frame;
+    if candidate_w <= 1 || candidate_h <= 1 || frame_w <= 1 || frame_h <= 1 {
+        return false;
+    }
+    let candidate_ratio = candidate_h as f64 / candidate_w as f64;
+    let frame_ratio = frame_h as f64 / frame_w as f64;
+    ((candidate_ratio - frame_ratio) / frame_ratio).abs() <= CROP_TOLERANCE
+}
+
+/// The `height / width` ratio the card occupies, used to balance the columns.
+///
+/// The card renders the whole frame at its natural height, so this is the raw
+/// frame ratio — never capped, and never taken from a cropped candidate.
 pub(crate) fn card_media_ratio(files: &crate::models::Files) -> f64 {
-    let (w, h) = best_dimensions(files);
-    (h as f64 / w.max(1) as f64).min(MAX_CARD_MEDIA_RATIO)
+    let (w, h) = frame_dimensions(files);
+    h as f64 / w.max(1) as f64
+}
+
+/// Greedy masonry assignment: every item joins the column with the smallest
+/// accumulated ratio, and its own ratio is then added there. Returns, per
+/// column, the indices of the items it received, in input order.
+///
+/// Split out of `render_post_grid` so the balancing is testable without a DOM:
+/// it depends only on the ratios and the column count.
+fn assign_to_columns(ratios: &[f64], num_columns: usize) -> Vec<Vec<usize>> {
+    let num_columns = num_columns.max(1);
+    let mut heights = vec![0.0f64; num_columns];
+    let mut columns: Vec<Vec<usize>> = (0..num_columns).map(|_| Vec::new()).collect();
+    for (index, ratio) in ratios.iter().enumerate() {
+        let shortest = heights
+            .iter()
+            .enumerate()
+            .min_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|(index, _)| index)
+            .unwrap_or(0);
+        heights[shortest] += *ratio;
+        columns[shortest].push(index);
+    }
+    columns
 }
 
 fn current_column_count(grid_class: &str) -> usize {
@@ -174,30 +213,23 @@ pub fn render_post_grid(
         grid_class
     };
     let num_columns = current_column_count(effective_class).max(1);
-    let mut col_heights = vec![0.0f64; num_columns];
-    let mut columns: Vec<Vec<(usize, &ScoredPost)>> =
-        (0..num_columns).map(|_| Vec::new()).collect();
-
-    for (post_index, post) in posts.iter().enumerate() {
-        // Use the same capped preview ratio the card reserves, so balancing
-        // matches the actual rendered height — extremely tall posts can no
-        // longer make one column tower over and unbalance the rest.
-        let aspect = card_media_ratio(&post.post.files);
-        let shortest = col_heights
-            .iter()
-            .enumerate()
-            .min_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
-            .map(|(index, _)| index)
-            .unwrap_or(0);
-        col_heights[shortest] += aspect;
-        columns[shortest].push((post_index, post));
-    }
+    // Balance on the same raw ratio the card renders with, so the greedy
+    // assignment matches the height that actually lands in each column: an
+    // ultra-tall post leaves its column genuinely tall, and the posts after it
+    // go to the shorter columns instead of piling onto the same one.
+    let ratios: Vec<f64> = posts
+        .iter()
+        .map(|post| card_media_ratio(&post.post.files))
+        .collect();
+    let columns = assign_to_columns(&ratios, num_columns);
 
     html! {
         <div class={format!("{} m-3", effective_class)} style="align-items: start;">
             { for columns.into_iter().enumerate().map(|(column_index, column_posts)| html! {
                 <div key={column_index} class="flex flex-col">
-                    { for column_posts.into_iter().map(|(post_index, scored_post)| html! {
+                    { for column_posts.into_iter().map(|post_index| {
+                        let scored_post = &posts[post_index];
+                        html! {
                         <PostCard
                             key={scored_post.post.id}
                             post={Rc::new(scored_post.post.clone())}
@@ -217,6 +249,7 @@ pub fn render_post_grid(
                             show_breakdown={show_breakdown}
                             show_detailed_breakdown={show_detailed_breakdown}
                         />
+                        }
                     }) }
                 </div>
             }) }
@@ -535,5 +568,133 @@ pub fn post_grid(props: &PostGridProps) -> Html {
                 }
             }
         </div>
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{assign_to_columns, card_media_ratio, frame_dimensions, is_proportional};
+    use crate::models::{FileOriginal, FilePreview, FileSample, Files};
+
+    fn files_with_preview(width: i64, height: i64) -> Files {
+        Files {
+            preview: FilePreview {
+                width,
+                height,
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    /// A 1:18.7 post exactly as e621 serves it: a full-frame sample/original and
+    /// a preview capped at 2:1.
+    fn tall_post_files() -> Files {
+        Files {
+            original: FileOriginal {
+                width: 91,
+                height: 1700,
+                url: None,
+            },
+            sample: FileSample {
+                width: 91,
+                height: 1700,
+                ..Default::default()
+            },
+            preview: FilePreview {
+                width: 256,
+                height: 512,
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn media_ratio_is_not_capped() {
+        // A long comic strip: the estimator must report the whole 1:50, because
+        // the card renders it at that height — nothing is cropped any more.
+        let ratio = card_media_ratio(&files_with_preview(100, 5000));
+        assert!((ratio - 50.0).abs() < f64::EPSILON, "got {ratio}");
+        // A normal 4:3 preview passes through untouched.
+        let ratio = card_media_ratio(&files_with_preview(400, 300));
+        assert!((ratio - 0.75).abs() < 1e-9, "got {ratio}");
+        // Unknown dimensions fall back to 4:3 instead of dividing by zero.
+        let ratio = card_media_ratio(&files_with_preview(0, 0));
+        assert!((ratio - 0.75).abs() < 1e-9, "got {ratio}");
+    }
+
+    #[test]
+    fn frame_dimensions_prefer_the_uncropped_source() {
+        // The preview is a 2:1 crop of a 1:18.7 frame — the column must be
+        // charged 18.7, not 2.0, or the posts after the comic pile into a
+        // column that is already a dozen viewports tall.
+        let files = tall_post_files();
+        assert_eq!(frame_dimensions(&files), (91, 1700));
+        let ratio = card_media_ratio(&files);
+        assert!((ratio - 18.68).abs() < 0.01, "got {ratio}");
+    }
+
+    #[test]
+    fn proportional_check_rejects_a_capped_preview() {
+        let frame = (91, 1700);
+        assert!(is_proportional((91, 1700), frame), "the frame itself");
+        assert!(
+            is_proportional((455, 8500), frame),
+            "a faithful downscale is still the whole frame"
+        );
+        assert!(!is_proportional((256, 512), frame), "2:1 preview of 1:18.7");
+        // Thumbnail rounding must not disqualify an honest resize.
+        assert!(is_proportional((150, 113), (1920, 1440)));
+        // Unknown dimensions are never treated as proportional.
+        assert!(!is_proportional((0, 0), frame));
+        assert!(!is_proportional((100, 100), (0, 0)));
+    }
+
+    #[test]
+    fn order_within_a_column_follows_the_feed() {
+        // Positions inside a column must stay in input order: the grid is a
+        // feed, and the greedy pass must not reshuffle it the way a
+        // longest-first balancing pass would.
+        let columns = assign_to_columns(&[1.0, 9.0, 1.0, 1.0, 1.0], 2);
+        for column in &columns {
+            let mut sorted = column.clone();
+            sorted.sort_unstable();
+            assert_eq!(*column, sorted, "column {column:?} is out of order");
+        }
+    }
+
+    #[test]
+    fn ultra_tall_post_stands_alone_in_its_column() {
+        // One 1:50 post plus three normal ones over two columns: the tall post
+        // must be charged its full height, so the following posts go to the
+        // other column instead of stacking under it and leaving the neighbour a
+        // viewport-sized hole.
+        let normal = 3.0 / 4.0;
+        let columns = assign_to_columns(&[normal, 50.0, normal, normal], 2);
+        assert_eq!(columns[0], vec![0, 2, 3]);
+        assert_eq!(columns[1], vec![1]);
+    }
+
+    #[test]
+    fn capped_weight_would_pick_a_different_column() {
+        // Distinguishes the raw ratio from the old `MAX_CARD_MEDIA_RATIO = 2.5`
+        // cap: with a capped weight the third post fits "under" the tall one
+        // (2.5 < 4.0) and lands in its column; with the true height it does not.
+        let columns = assign_to_columns(&[4.0, 50.0, 1.0], 2);
+        assert_eq!(columns, vec![vec![0, 2], vec![1]]);
+    }
+
+    #[test]
+    fn every_post_is_placed_exactly_once() {
+        let columns = assign_to_columns(&[1.0, 2.0, 3.0, 4.0, 5.0], 3);
+        let mut placed: Vec<usize> = columns.iter().flatten().copied().collect();
+        placed.sort_unstable();
+        assert_eq!(placed, vec![0, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn zero_columns_still_yields_a_column() {
+        assert_eq!(assign_to_columns(&[1.0], 0), vec![vec![0]]);
     }
 }

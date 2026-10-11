@@ -203,29 +203,46 @@ admin_api is used directly — sync needs no stored per-account key for it.
 The feed/browse grids (`parser-web/src/components/post_grid.rs`) are a
 faux-masonry: a CSS `grid-cols-*` container holds one `flex flex-col` per
 column, and each post is placed into the **shortest column** (by accumulated
-`height/width` preview ratio). Cards render via `PostCard`
+`height/width` frame ratio). Cards render via `PostCard`
 (`post_card.rs`), which reserves the media box with
 `aspect-ratio: {w} / {h}`.
 
 ### Extreme-tall media handling
 
-A single **extremely tall** image (e.g. a long comic strip, `height/width`
-far above normal) would otherwise stretch one card (and thus one column) to
-many screen-heights, unbalancing the columns and leaving a large gap. Two
-matching guards keep the columns stable:
+Nothing is cropped by us, and the ratio the layout charges is the ratio the card
+renders. e621 caps previews at 2:1, though: for an ultra-tall post the preview is
+a *crop*, so "render the preview" and "render the frame" are different pictures.
+Three rules keep both ends of the layout in agreement:
 
-- `post_grid.rs` defines `MAX_CARD_MEDIA_RATIO = 2.5` and
-  `card_media_ratio()` — the capped `height/width` ratio used for
-  **column balancing** in `render_post_grid`. Ultra-tall posts are counted at
-  most `2.5` instead of their raw (huge) ratio, so one post can't make its
-  column the runaway "shortest"/"tallest" target.
-- `post_card.rs` applies the **same** cap to the media box, and keeps it
-  **after load**: media with `ratio > 2.5` gets
-  `aspect-ratio: 1 / 2.5; max-height: 70vh; overflow: hidden` (object-cover
-  crops the tall image), so the card itself can't tower. The card cap and the
-  balancing weight always agree, so the greedy column assignment matches the
-  rendered height.
+- `post_grid.rs::frame_dimensions()` returns the **source frame** (original →
+  sample → preview → 4:3), and `card_media_ratio()` charges exactly its
+  `height/width` — never the preview's. Charging 2.0 for a post that renders at
+  14 is what makes the greedy balancer optimise for heights that never reach the
+  screen, and the posts after the comic then pile into a column that is already
+  a dozen viewports tall while its neighbours end early.
+- `post_card.rs::proportional_candidates()` drops every file whose own aspect
+  ratio differs from the frame by more than `CROP_TOLERANCE` (2%), so a card only
+  renders a faithful resize of the frame; a cropped file comes back only when
+  nothing else is displayable. Among those, the smallest candidate at least as
+  wide as the measured column wins, so sharpness still follows the column width.
+- `post_card.rs::media_reserve_style()` reserves the pre-load height with that
+  same frame ratio and **no `min-height` floor**. The old 300px floor reserved
+  more than the image rendered for every landscape post (a 3:1 pano reserved
+  300px and rendered at 119px), which was its own source of column drift.
+  `assign_to_columns()` is greedy shortest-column and walks the feed in order,
+  so each column keeps the feed order — a longest-first pass would balance
+  marginally better and scramble the reading order.
 
-Normal and wide posts are unaffected (`ratio ≤ 2.5` keeps the existing
-reserve-then-natural behavior). Tune with `MAX_CARD_MEDIA_RATIO` (both sides
-bleed together — change it in `post_grid.rs` and `post_card.rs`).
+Measured on the live app (real DB, tag `tall_image`, 6 columns, 160 cards):
+**0 / 160 cards cropped** (media box ratio == image natural ratio), **0 / 143
+lazily-loading cards with a wrong reserve**, and the live column membership
+matches the greedy assignment over frame ratios exactly (0 / 160 mismatches)
+while the old preview-ratio weighting lands **133 / 160** cards in a different
+column. Column-height spread on that page: **3 069 px** with frame ratios versus
+**6 402 px** with preview ratios.
+
+The trade-off is explicit: a 1:50 post occupies ~50 column-widths of vertical
+space (≈15 000 px in a 300 px column), so its neighbours can only be evened out
+by posts that come after it, and a page that ends right after one comic keeps a
+gap at the bottom of the other columns. Showing the whole frame is the intended
+behaviour — a cap would have to crop (or letterbox) the media again.

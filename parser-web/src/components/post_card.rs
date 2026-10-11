@@ -15,7 +15,7 @@ struct PendingBlacklistRule {
     label: String,
 }
 
-use crate::components::post_grid::{MAX_CARD_MEDIA_RATIO, best_dimensions};
+use crate::components::post_grid::{frame_dimensions, is_proportional};
 use crate::components::post_viewer::open_post_viewer;
 use crate::components::{ConfirmModal, shared_observer};
 use crate::models::*;
@@ -733,22 +733,17 @@ pub fn post_card(props: &PostCardProps) -> Html {
         let media_ready = media_ready.clone();
         Callback::from(move |_e: Event| media_ready.set(true))
     };
-    // Media box. Normal/wide media keep the existing reserve-then-natural
-    // behavior. Ultra-tall media (height/width > MAX_CARD_MEDIA_RATIO) is
-    // height-capped EVEN AFTER LOAD so a single extremely tall post can't
-    // tower over the grid and unbalance the masonry columns — this must match
-    // the capped ratio `render_post_grid` uses for column balancing.
-    let (media_w, media_h) = best_dimensions(&post.files);
-    let media_ratio = media_h as f64 / media_w.max(1) as f64;
-    let media_style = if media_ratio > MAX_CARD_MEDIA_RATIO {
-        format!(
-            "aspect-ratio: 1 / {}; max-height: 70vh; overflow: hidden;",
-            MAX_CARD_MEDIA_RATIO
-        )
-    } else if *media_ready {
+    // Media box. It reserves height only while the media is still loading, and
+    // it reserves the source frame's true ratio — never a capped one, and never
+    // a cropped candidate's. Once the media loads the box holds nothing, so the
+    // image keeps its natural height and is never cropped, and the height that
+    // ends up in the grid is the same ratio `render_post_grid` balances the
+    // columns with.
+    let (media_w, media_h) = frame_dimensions(&post.files);
+    let media_style = if *media_ready {
         String::new()
     } else {
-        format!("aspect-ratio: {media_w} / {media_h}; min-height: 300px;")
+        media_reserve_style(media_w, media_h)
     };
 
     let inner: Html = html! {
@@ -777,7 +772,7 @@ pub fn post_card(props: &PostCardProps) -> Html {
                                 html! {
                                     <video
                                         ref={video_ref.clone()}
-                                        class="w-full object-cover"
+                                        class={media_classes()}
                                         src={video_url.clone()}
                                         poster={url.clone()}
                                         autoplay={true}
@@ -795,7 +790,7 @@ pub fn post_card(props: &PostCardProps) -> Html {
                             } else {
                                 html! {
                                     <img
-                                        class="w-full object-cover"
+                                        class={media_classes()}
                                         src={url}
                                         referrerpolicy="origin"
                                         alt={(*alt_text).clone()}
@@ -809,7 +804,7 @@ pub fn post_card(props: &PostCardProps) -> Html {
                         } else {
                             html! {
                                 <img
-                                    class="w-full object-cover"
+                                    class={media_classes()}
                                     src={url}
                                     referrerpolicy="origin"
                                     alt={(*alt_text).clone()}
@@ -1251,7 +1246,10 @@ fn image_urls(post: &Post) -> Vec<String> {
 }
 
 fn fallback_image_url(post: &Post) -> String {
-    image_urls(post).into_iter().next().unwrap_or_default()
+    proportional_candidates(post)
+        .first()
+        .map(|(url, _, _)| url.to_string())
+        .unwrap_or_default()
 }
 
 /// Return the next smaller/safer image source after a load failure. The final
@@ -1263,30 +1261,76 @@ fn next_image_url(post: &Post, failed_url: &str) -> Option<String> {
         .and_then(|index| urls.get(index + 1).cloned())
 }
 
-fn preferred_image_url(post: &Post, required_width: i64) -> Option<AttrValue> {
-    let mut candidates: Vec<(AttrValue, i64)> = Vec::new();
+/// Every browser-displayable file for this post, as `(url, width, height)`,
+/// ordered by width. A file usually has dimensions only for its own slot
+/// (preview/sample/original), which is exactly what the crop check needs.
+fn media_candidates(post: &Post) -> Vec<(AttrValue, i64, i64)> {
+    let mut candidates: Vec<(AttrValue, i64, i64)> = Vec::new();
 
     if let Some(url) = preview_url(post)
         && is_supported_image(url)
     {
-        candidates.push((AttrValue::from(url.to_owned()), post.files.preview.width));
+        candidates.push((
+            AttrValue::from(url.to_owned()),
+            post.files.preview.width,
+            post.files.preview.height,
+        ));
     }
     if let Some(url) = sample_url(post)
         && is_supported_image(url)
     {
-        candidates.push((AttrValue::from(url.to_owned()), post.files.sample.width));
+        candidates.push((
+            AttrValue::from(url.to_owned()),
+            post.files.sample.width,
+            post.files.sample.height,
+        ));
     }
     if let Some(url) = post.files.original.url.as_deref()
         && is_supported_image(url)
     {
-        candidates.push((AttrValue::from(url.to_owned()), post.files.original.width));
+        candidates.push((
+            AttrValue::from(url.to_owned()),
+            post.files.original.width,
+            post.files.original.height,
+        ));
     }
 
-    candidates.sort_by_key(|&(_, w)| w);
-    if let Some((u, _)) = candidates.iter().find(|&&(_, w)| w >= required_width) {
-        return Some(u.clone());
+    candidates.sort_by_key(|&(_, width, _)| width);
+    candidates
+}
+
+/// Candidates that show the **whole frame**. e621 caps previews at 2:1, so the
+/// preview of an ultra-tall post is a crop: rendering it would hide most of the
+/// picture and shrink the card far below the height the column was charged.
+///
+/// Cropped files come back only when nothing else is displayable — a cropped
+/// thumbnail still beats an empty card.
+fn proportional_candidates(post: &Post) -> Vec<(AttrValue, i64, i64)> {
+    let frame = frame_dimensions(&post.files);
+    let all = media_candidates(post);
+    let proportional: Vec<(AttrValue, i64, i64)> = all
+        .iter()
+        .filter(|&&(_, width, height)| is_proportional((width, height), frame))
+        .cloned()
+        .collect();
+    if proportional.is_empty() {
+        all
+    } else {
+        proportional
     }
-    candidates.last().map(|(u, _)| u.clone())
+}
+
+/// The smallest whole-frame file that is at least `required_width` device
+/// pixels wide, or the largest one when even that is too small.
+fn preferred_image_url(post: &Post, required_width: i64) -> Option<AttrValue> {
+    let candidates = proportional_candidates(post);
+    if let Some((url, _, _)) = candidates
+        .iter()
+        .find(|&&(_, width, _)| width >= required_width)
+    {
+        return Some(url.clone());
+    }
+    candidates.last().map(|(url, _, _)| url.clone())
 }
 
 fn rating_badge_classes(r: &Rating) -> (&'static str, Classes) {
@@ -1313,5 +1357,159 @@ fn preview_tag_count(card_width: f64) -> usize {
         w if w >= 260.0 => 4,
         w if w >= 210.0 => 3,
         _ => 2,
+    }
+}
+
+/// Pre-load height reserve for the media box: the source frame's aspect ratio,
+/// so the space held before the load event is exactly the height the image
+/// occupies afterwards.
+///
+/// There is deliberately no `min-height`: a floor taller than the reserved box
+/// made every wide image collapse on load (a 3:1 pano reserved 300px and then
+/// rendered at 119px of a 356px column), and those per-card differences are
+/// exactly what put the columns out of step with each other.
+fn media_reserve_style(media_w: i64, media_h: i64) -> String {
+    format!("aspect-ratio: {media_w} / {media_h};")
+}
+
+/// Media classes for the card's media box.
+///
+/// The box never constrains the media: every image renders at its natural height
+/// with its whole frame visible. `block` also drops the inline descender gap, so
+/// the box height is exactly `width × ratio` — the same figure column balancing
+/// charges to the column.
+fn media_classes() -> &'static str {
+    "w-full block"
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{fallback_image_url, media_classes, media_reserve_style, preferred_image_url};
+    use crate::models::{FileOriginal, FilePreview, FileSample, Files, Post};
+
+    #[test]
+    fn media_classes_never_crop_the_media() {
+        let classes = media_classes();
+        for forbidden in [
+            "object-cover",
+            "object-contain",
+            "h-full",
+            "absolute",
+            "max-h-",
+        ] {
+            assert!(
+                !classes.contains(forbidden),
+                "`{forbidden}` would keep the media from rendering at its natural size"
+            );
+        }
+        assert!(classes.contains("w-full"), "media must fill the card width");
+    }
+
+    #[test]
+    fn reserve_keeps_the_true_ratio_for_ultra_tall_media() {
+        // 1:50. The reserve used to be capped at 2.5 while the box was capped
+        // too — the two agreed, but only because the image was being cropped.
+        let style = media_reserve_style(100, 5000);
+        assert!(style.contains("aspect-ratio: 100 / 5000"), "{style}");
+        assert!(!style.contains("max-height"), "{style}");
+        // No floor either: any height above the reserved ratio makes the card
+        // shrink on load and drags its column out of step with the maths.
+        assert!(!style.contains("min-height"), "{style}");
+    }
+
+    fn post_with_files(files: Files) -> Post {
+        Post {
+            files,
+            ..Default::default()
+        }
+    }
+
+    /// A 1:18.7 post as e621 serves it: full-frame sample/original plus a
+    /// preview capped at 2:1.
+    fn tall_post() -> Post {
+        post_with_files(Files {
+            original: FileOriginal {
+                width: 91,
+                height: 1700,
+                url: Some("https://static1.e621.net/data/original/ab/cd/tall.webp".into()),
+            },
+            sample: FileSample {
+                width: 91,
+                height: 1700,
+                url: Some("https://static1.e621.net/data/sample/ab/cd/tall.jpg".into()),
+                ..Default::default()
+            },
+            preview: FilePreview {
+                width: 256,
+                height: 512,
+                url: Some("https://static1.e621.net/data/preview/ab/cd/tall.jpg".into()),
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+    }
+
+    #[test]
+    fn preferred_media_is_never_the_capped_preview() {
+        let post = tall_post();
+        // The first paint must already show the whole frame — rendering the
+        // 2:1 preview first would leave the 1:18.7 reserve box mostly empty.
+        let initial = fallback_image_url(&post);
+        assert!(initial.contains("/sample/"), "{initial}");
+        // Narrow column: the smallest whole-frame file wins.
+        let narrow = preferred_image_url(&post, 0).unwrap();
+        assert!(narrow.contains("/sample/"), "{narrow}");
+        // Wide column: upgrade, but only to another whole-frame file.
+        let wide = preferred_image_url(&post, 1400).unwrap();
+        assert!(wide.contains("/original/"), "{wide}");
+    }
+
+    #[test]
+    fn a_proportional_preview_is_still_used_for_normal_posts() {
+        let post = post_with_files(Files {
+            original: FileOriginal {
+                width: 1920,
+                height: 1440,
+                url: Some("https://static1.e621.net/data/original/ab/cd/wide.jpg".into()),
+            },
+            sample: FileSample {
+                width: 850,
+                height: 638,
+                url: Some("https://static1.e621.net/data/sample/ab/cd/wide.jpg".into()),
+                ..Default::default()
+            },
+            preview: FilePreview {
+                width: 150,
+                height: 113,
+                url: Some("https://static1.e621.net/data/preview/ab/cd/wide.jpg".into()),
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        assert_eq!(
+            fallback_image_url(&post),
+            "https://static1.e621.net/data/preview/ab/cd/wide.jpg"
+        );
+        let sample = preferred_image_url(&post, 712).unwrap();
+        assert!(sample.contains("/sample/"), "{sample}");
+    }
+
+    #[test]
+    fn a_cropped_file_is_only_a_last_resort() {
+        // Nothing but a 2:1-cropped preview is displayable: the card shows it
+        // rather than rendering an empty box.
+        let post = post_with_files(Files {
+            preview: FilePreview {
+                width: 256,
+                height: 512,
+                url: Some("https://static1.e621.net/data/preview/ab/cd/only.jpg".into()),
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        assert_eq!(
+            preferred_image_url(&post, 712).unwrap(),
+            "https://static1.e621.net/data/preview/ab/cd/only.jpg"
+        );
     }
 }
