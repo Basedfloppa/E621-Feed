@@ -551,13 +551,13 @@ pub fn delete_device_link(owner_token: &str, account_id: i32) -> Result<usize, S
 
     // Step 2: the two unbounded per-account tables can reach millions of
     // rows on heavy users. Running them inside the cascade tx pinned the
-    // writer mutex for minutes during account teardown. Wipe in batched
-    // chunks so the writer can yield to other operations between
-    // chunks. Non-atomic with the rest of the cascade: if we crash here
-    // the account row survives with empty cooc/feed history, which is
-    // self-healing on the next /process run.
+    // writer mutex for minutes during account teardown, so both are wiped
+    // outside it: `feed_interactions` in chunks, `account_tag_cooccurrence`
+    // in a single indexed DELETE. Non-atomic with the rest of the cascade:
+    // if we crash here the account row survives with empty cooc/feed
+    // history, which is self-healing on the next /process run.
     let batch_size = crate::models::cfg().runtime.drop_cooc_batch_size.max(1_000);
-    let cooc_dropped = super::drop_account_cooccurrence_batched(account_id, batch_size, |_, _| {})?;
+    let cooc_dropped = super::drop_account_cooccurrence(account_id, |_| {})?;
     let feed_dropped =
         super::drop_account_feed_interactions_batched(account_id, batch_size, |_, _| {})?;
     if cooc_dropped > 0 || feed_dropped > 0 {

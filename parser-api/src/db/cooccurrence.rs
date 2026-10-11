@@ -144,11 +144,10 @@ pub(super) fn upsert_cooccurrence_pairs(
 pub fn set_account_tag_cooccurrence(account_id: i32) -> Result<(), String> {
     // The existing per-account row count can reach millions; folding the
     // DELETE into the same tx as the INSERT-SELECT held the writer mutex
-    // for the entire scan. Wipe first with the shared batched helper
-    // (releases the writer between chunks), then do the rebuild in its
-    // own short tx.
-    let batch_size = crate::models::cfg().runtime.drop_cooc_batch_size.max(1_000);
-    super::drop_account_cooccurrence_batched(account_id, batch_size, |_, _| {})?;
+    // for the entire scan. Wipe first (the table is indexed on
+    // `account_id`, so one unbounded DELETE is cheap), then rebuild in
+    // its own short tx.
+    super::drop_account_cooccurrence(account_id, |_| {})?;
 
     super::with_write_tx(|tx| {
         tx.execute(

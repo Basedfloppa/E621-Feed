@@ -155,11 +155,11 @@ fn incremental_cooccurrence_roundtrip() {
     // ---- Drop + re-save: verify cooccurrence is rebuilt correctly ----
     //
     // `drop_account_posts` clears `accounts_post`; the cooc wipe lives in
-    // `drop_account_cooccurrence_batched` so the two destructive paths
+    // `drop_account_cooccurrence` so the two destructive paths
     // can be staged separately (progress logging for the long one). The
     // /process pipeline calls both back-to-back; tests mirror that.
     db::drop_account_posts(account_id).unwrap();
-    db::drop_account_cooccurrence_batched(account_id, 1024, |_, _| {}).unwrap();
+    db::drop_account_cooccurrence(account_id, |_| {}).unwrap();
     let count_after_drop = count_account_cooc(account_id);
     assert_eq!(count_after_drop, 0, "cooc should be empty after drop");
 
@@ -175,7 +175,7 @@ fn incremental_cooccurrence_roundtrip() {
 
     // Clean up
     db::drop_account_posts(account_id).unwrap();
-    db::drop_account_cooccurrence_batched(account_id, 1024, |_, _| {}).unwrap();
+    db::drop_account_cooccurrence(account_id, |_| {}).unwrap();
 }
 
 /// Verify that `refresh_account_profiles_skip_cooc` does NOT rebuild
@@ -294,8 +294,7 @@ fn setup_test(account_id: i32) {
     ensure_migrations();
     let _ = e621_account_parser_api::db::set_account("test_owner", account_id, "test_user", "");
     let _ = e621_account_parser_api::db::drop_account_posts(account_id);
-    let _ =
-        e621_account_parser_api::db::drop_account_cooccurrence_batched(account_id, 1024, |_, _| {});
+    let _ = e621_account_parser_api::db::drop_account_cooccurrence(account_id, |_| {});
     // Drop any stale feed_sessions a previous panicking run may have
     // left behind. Without this, the Fresh→Active→Expired tests are
     // order-dependent: a leftover row makes the first call return
@@ -331,7 +330,7 @@ impl TestAccount {
         let owner = "test_owner_token_1234";
         let _ = e621_account_parser_api::db::set_account(owner, id, "test_user", "");
         let _ = e621_account_parser_api::db::drop_account_posts(id);
-        let _ = e621_account_parser_api::db::drop_account_cooccurrence_batched(id, 1024, |_, _| {});
+        let _ = e621_account_parser_api::db::drop_account_cooccurrence(id, |_| {});
         let _ = e621_account_parser_api::db::drop_account_feed_interactions_batched(
             id,
             1024,
@@ -357,11 +356,7 @@ impl Drop for TestAccount {
         // through a linked owner, the cascade above won't trigger.
         // Wipe what we can directly.
         let _ = e621_account_parser_api::db::drop_account_posts(self.id);
-        let _ = e621_account_parser_api::db::drop_account_cooccurrence_batched(
-            self.id,
-            1024,
-            |_, _| {},
-        );
+        let _ = e621_account_parser_api::db::drop_account_cooccurrence(self.id, |_| {});
         let _ = e621_account_parser_api::db::drop_account_feed_interactions_batched(
             self.id,
             1024,
@@ -435,7 +430,7 @@ fn get_post_by_id_returns_hydrated_tags() {
     assert!(missing.is_none());
 
     db::drop_account_posts(account_id).unwrap();
-    db::drop_account_cooccurrence_batched(account_id, 1024, |_, _| {}).unwrap();
+    db::drop_account_cooccurrence(account_id, |_| {}).unwrap();
 }
 
 /// `touch_or_create_feed_session` is the atomic replacement for the
@@ -514,24 +509,20 @@ fn touch_or_create_feed_session_lifecycle() {
         .unwrap();
     }
     db::drop_account_posts(account_id).unwrap();
-    db::drop_account_cooccurrence_batched(account_id, 1024, |_, _| {}).unwrap();
+    db::drop_account_cooccurrence(account_id, |_| {}).unwrap();
 }
 
-/// `drop_account_cooccurrence_batched` must loop until everything is
-/// gone, not just clear `batch_size` rows and stop. Forces a 2-batch
-/// scenario by setting `batch_size` smaller than the number of rows
-/// inserted, then verifies both that the callback fires multiple
-/// times and that the table is empty afterwards.
+/// `drop_account_cooccurrence` must remove every row of the account, report
+/// the total exactly once, and be a no-op on an already-empty slate.
 #[test]
-fn drop_account_cooccurrence_batched_loops_until_empty() {
+fn drop_account_cooccurrence_removes_every_row() {
     let account_id = 90008;
     let blacklist = HashSet::new();
     setup_test(account_id);
 
-    // Build a post with enough tags that account_tag_cooccurrence
-    // ends up with more rows than our deliberately tiny batch_size.
-    // With 5 general tags and 1 artist tag we get C(6,2)=15 ordered
-    // pairs (function picks canonical ordering); 3-batch is enough.
+    // Build a post with enough tags that account_tag_cooccurrence ends up
+    // with a non-trivial row count: 5 general tags + 1 artist tag give
+    // C(6,2)=15 ordered pairs (the function picks a canonical ordering).
     let p = make_post(
         13001,
         make_tags(&["a"], &[], &["g1", "g2", "g3", "g4", "g5"]),
@@ -544,13 +535,12 @@ fn drop_account_cooccurrence_batched_loops_until_empty() {
     let before = count_account_cooc(account_id);
     assert!(before >= 10, "expected ≥10 cooc rows, got {before}");
 
-    // The function now does a single unbounded DELETE (the index on
-    // account_id makes it O(log n)) and fires one callback with the
-    // total deleted count.
+    // Single unbounded DELETE (the index on account_id makes it O(log n)),
+    // so the callback fires exactly once with the total.
     use std::cell::Cell;
     let calls = Cell::new(0usize);
     let total_seen = Cell::new(0usize);
-    let deleted = db::drop_account_cooccurrence_batched(account_id, 4, |_batch, total| {
+    let deleted = db::drop_account_cooccurrence(account_id, |total| {
         calls.set(calls.get() + 1);
         total_seen.set(total);
     })
@@ -571,7 +561,7 @@ fn drop_account_cooccurrence_batched_loops_until_empty() {
     // No-op idempotency: calling again on an empty slate fires zero
     // callbacks and returns 0.
     let calls2 = Cell::new(0usize);
-    let deleted2 = db::drop_account_cooccurrence_batched(account_id, 4, |_, _| {
+    let deleted2 = db::drop_account_cooccurrence(account_id, |_| {
         calls2.set(calls2.get() + 1);
     })
     .unwrap();
@@ -625,7 +615,7 @@ fn save_posts_tags_batch_no_self_pairs() {
     );
 
     db::drop_account_posts(account_id).unwrap();
-    db::drop_account_cooccurrence_batched(account_id, 1024, |_, _| {}).unwrap();
+    db::drop_account_cooccurrence(account_id, |_| {}).unwrap();
 }
 
 /// `delete_by_account_in_batches` runs hand-spliced SQL keyed on the
@@ -663,7 +653,7 @@ fn drop_helpers_only_touch_their_target_table() {
     };
     assert_eq!(accounts_post_before, 1);
 
-    db::drop_account_cooccurrence_batched(account_id, 1024, |_, _| {}).unwrap();
+    db::drop_account_cooccurrence(account_id, |_| {}).unwrap();
 
     assert_eq!(count_account_cooc(account_id), 0);
     let accounts_post_after: i64 = {
@@ -681,6 +671,93 @@ fn drop_helpers_only_touch_their_target_table() {
     );
 
     db::drop_account_posts(account_id).unwrap();
+}
+
+/// `drop_account_posts` may only remove posts this account owns
+/// *exclusively*. A post shared with another account has to survive, and a
+/// post owned only by the dropped account has to go.
+///
+/// This pins the semantics of the set-based rewrite: the exclusivity test is
+/// a correlated `NOT EXISTS` against `accounts_post` that runs before this
+/// account's rows are cleared, so ordering and the `account_id != ?1`
+/// qualifier both matter.
+#[test]
+fn drop_account_posts_keeps_posts_shared_with_another_account() {
+    let owner_a = 90030;
+    let owner_b = 90031;
+    let blacklist = HashSet::new();
+    setup_test(owner_a);
+    setup_test(owner_b);
+
+    let shared = make_post(16001, make_tags(&["sharedartist"], &[], &["g1"]), 42);
+    let only_a = make_post(16002, make_tags(&["aartist"], &[], &["g2"]), 42);
+    let only_b = make_post(16003, make_tags(&["bartist"], &[], &["g3"]), 42);
+
+    for (acc, posts) in [
+        (owner_a, vec![shared.clone(), only_a.clone()]),
+        (owner_b, vec![shared.clone(), only_b.clone()]),
+    ] {
+        db::save_posts(&posts, acc).unwrap();
+        db::save_posts_tags_batch(&posts, &blacklist, true, Some(acc)).unwrap();
+    }
+
+    let post_exists = |id: i64| -> bool {
+        let conn = db::open_db_for_calibration().unwrap();
+        conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM posts WHERE id = ?1)",
+            rusqlite::params![id],
+            |r| r.get::<_, bool>(0),
+        )
+        .unwrap()
+    };
+    let ownership_rows = |acc: i32| -> i64 {
+        let conn = db::open_db_for_calibration().unwrap();
+        conn.query_row(
+            "SELECT COUNT(*) FROM accounts_post WHERE account_id = ?1",
+            rusqlite::params![acc],
+            |r| r.get(0),
+        )
+        .unwrap()
+    };
+
+    assert!(post_exists(16001) && post_exists(16002) && post_exists(16003));
+    assert_eq!(ownership_rows(owner_a), 2);
+    assert_eq!(ownership_rows(owner_b), 2);
+
+    db::drop_account_posts(owner_a).unwrap();
+
+    assert!(
+        post_exists(16001),
+        "a post still owned by another account must survive"
+    );
+    assert!(
+        !post_exists(16002),
+        "a post owned only by the dropped account must go"
+    );
+    assert!(
+        post_exists(16003),
+        "the other account's posts are untouched"
+    );
+    assert_eq!(ownership_rows(owner_a), 0);
+    assert_eq!(ownership_rows(owner_b), 2);
+
+    // The shared post must still be reachable through the surviving owner.
+    let still_owned: i64 = {
+        let conn = db::open_db_for_calibration().unwrap();
+        conn.query_row(
+            "SELECT COUNT(*) FROM accounts_post WHERE post_id = 16001 AND account_id = ?1",
+            rusqlite::params![owner_b],
+            |r| r.get(0),
+        )
+        .unwrap()
+    };
+    assert_eq!(still_owned, 1, "the other owner's link must be intact");
+
+    db::drop_account_posts(owner_b).unwrap();
+    assert!(
+        !post_exists(16001),
+        "with the last owner gone the shared post is removed too"
+    );
 }
 
 /// `prune_expired_sessions` must wipe sessions whose
@@ -780,9 +857,9 @@ fn session_shown_posts_dedup_roundtrip() {
     db::drop_account_posts(account_id).unwrap();
 }
 
-/// Symmetric coverage for the second batched-delete helper. The cooc
-/// version is already covered by
-/// `drop_account_cooccurrence_batched_loops_until_empty`; this exercises
+/// Symmetric coverage for the batched-delete helper. The cooc
+/// version (a single indexed DELETE) is covered by
+/// `drop_account_cooccurrence_removes_every_row`; this exercises
 /// the `feed_interactions` helper the same way so a future change to the
 /// shared `delete_by_account_in_batches` core can't break only one of
 /// the two callers.
@@ -881,7 +958,7 @@ fn delete_device_link_three_phase_cascade() {
     let _ = db::set_account(owner_a, account_id, "test_user", "");
     let _ = db::set_account(owner_b, account_id, "test_user", "");
     let _ = db::drop_account_posts(account_id);
-    let _ = db::drop_account_cooccurrence_batched(account_id, 1024, |_, _| {});
+    let _ = db::drop_account_cooccurrence(account_id, |_| {});
     let _ = db::drop_account_feed_interactions_batched(account_id, 1024, |_, _| {});
 
     let p = make_post(17001, make_tags(&["a"], &["c"], &["g1", "g2"]), 42);
@@ -977,7 +1054,7 @@ fn delete_device_link_three_phase_cascade() {
     // Belt-and-suspenders cleanup (matches the new TestAccount pattern
     // for symmetry, even though everything's already gone).
     let _ = db::drop_account_posts(account_id);
-    let _ = db::drop_account_cooccurrence_batched(account_id, 1024, |_, _| {});
+    let _ = db::drop_account_cooccurrence(account_id, |_| {});
     let _ = db::drop_account_feed_interactions_batched(account_id, 1024, |_, _| {});
 }
 

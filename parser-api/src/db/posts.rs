@@ -115,68 +115,58 @@ pub fn prune_stale_catalog_posts(retention_days: i64) -> Result<i64, String> {
 
 pub fn drop_account_posts(account_id: i32) -> Result<(), String> {
     super::with_write_tx(|tx| {
-        // Collect post_ids owned by this account before clearing.
-        // We delete them from `posts` to avoid stale data leaking into
-        // profile/digest queries across test runs (the accounts_post FK
-        // is ON DELETE CASCADE, but deleting FROM accounts_post does not
-        // cascade back to posts).
-        let post_ids: Vec<i64> = {
-            let mut stmt = tx
-                .prepare_cached("SELECT post_id FROM accounts_post WHERE account_id = ?1")
-                .map_err(|e| format!("Failed to prepare account posts list: {e}"))?;
-            stmt.query_map(params![account_id], |r| r.get::<_, i64>(0))
-                .map_err(|e| format!("Failed to list account posts: {e}"))?
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|e| format!("Failed to collect account post ids: {e}"))?
-        };
+        // Order matters: the "exclusively owned" test is a correlated
+        // subquery against `accounts_post`, so it has to run *before* this
+        // account's ownership rows are cleared. Doing it in the other order
+        // forced a `SELECT COUNT(*)` per post inside the write transaction
+        // (a 1500-favourite account = 1500 extra statements while the writer
+        // mutex is held), which is exactly the kind of work `with_write_tx`
+        // exists to keep short.
+        //
+        // We delete from `posts` at all because the `accounts_post` FK is
+        // ON DELETE CASCADE in the wrong direction: clearing `accounts_post`
+        // does not remove the post, and stale posts leak into profile/digest
+        // queries. The cascade below only reaches this account's own rows,
+        // because a post with any other owner is not selected.
+        tx.execute(
+            "DELETE FROM posts \
+             WHERE id IN (SELECT post_id FROM accounts_post WHERE account_id = ?1) \
+               AND NOT EXISTS (SELECT 1 FROM accounts_post AS other \
+                               WHERE other.post_id = posts.id AND other.account_id != ?1)",
+            params![account_id],
+        )
+        .map_err(|e| format!("Failed to drop exclusively owned posts: {e}"))?;
 
         tx.execute(
             "DELETE FROM accounts_post WHERE account_id = ?1",
             params![account_id],
         )
         .map_err(|e| format!("Failed to clear accounts_post: {e}"))?;
-
-        // Remove posts that were exclusively owned by this account.
-        for pid in &post_ids {
-            let cnt: i64 = {
-                let mut stmt = tx
-                    .prepare("SELECT COUNT(*) FROM accounts_post WHERE post_id = ?1")
-                    .map_err(|e| format!("prepare accounts_post count: {e}"))?;
-                stmt.query_row(params![pid], |r| r.get::<_, i64>(0))
-                    .unwrap_or(0)
-            };
-            if cnt == 0 {
-                let _ = tx.execute("DELETE FROM posts WHERE id = ?1", params![pid]);
-            }
-        }
         Ok(())
     })?;
     hydrate_cache::clear_owned_and_candidates(i64::from(account_id));
     Ok(())
 }
 
-/// Delete this account's cooccurrence rows in chunks.
+/// Delete every `account_tag_cooccurrence` row of this account.
 ///
-/// `account_tag_cooccurrence` can hold millions of rows for a single
-/// account (one row per (tag1, tag2) pair, materialised across the user's
-/// favourites). A single DELETE locks the writer mutex for the entire
-/// scan, which we've measured at 200+ seconds on a 2.6M-row account —
-/// long enough that `/process` looked frozen before any e621 request
-/// could fire. Chunking releases the mutex between batches so the rest
-/// of the API (status polling, prefetch, cache pruner) keeps moving,
-/// and emits a callback per batch so the caller can log progress.
+/// `account_tag_cooccurrence` can hold millions of rows for a single account
+/// (one row per (tag1, tag2) pair, materialised across the user's
+/// favourites), and wiping them used to be a chunked delete. That shape was
+/// removed on purpose: the `rowid IN (SELECT … LIMIT ?)` pattern materialised
+/// the subquery as a temp table once per batch and took 27 minutes on a
+/// 1.7M-row account, while the table has an index on `account_id`, so one
+/// unbounded `DELETE` is O(log n) for the scan. Chunking only pays when
+/// picking rowids is cheaper than deleting them — which is why
+/// `drop_account_feed_interactions_batched` still chunks, and this does not.
 ///
-/// Returns the total number of rows deleted.
-pub fn drop_account_cooccurrence_batched(
+/// `on_deleted` is called exactly once, with the total, when rows were
+/// removed; it exists so callers keep their progress logging. Returns the
+/// number of rows deleted.
+pub fn drop_account_cooccurrence(
     account_id: i32,
-    _batch_size: usize,
-    on_batch: impl FnMut(usize, usize),
+    on_deleted: impl FnOnce(usize),
 ) -> Result<usize, String> {
-    // account_tag_cooccurrence has an index on (account_id, ...), so a
-    // single unbounded DELETE is O(log n) — the old rowid-IN-subquery
-    // pattern took 27 minutes on 1.7M rows because SQLite materialised
-    // the subquery as a temp table for each batch and then scanned the
-    // outer table against it. Just delete everything at once.
     let deleted = super::with_write_tx(|tx| {
         let n = tx
             .execute(
@@ -186,9 +176,8 @@ pub fn drop_account_cooccurrence_batched(
             .map_err(|e| format!("Failed to drop account cooccurrence: {e}"))?;
         Ok(n)
     })?;
-    let mut cb = on_batch;
     if deleted > 0 {
-        cb(deleted, deleted);
+        on_deleted(deleted);
     }
     Ok(deleted)
 }

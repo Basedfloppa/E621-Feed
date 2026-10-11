@@ -242,13 +242,12 @@ pub async fn run_process_with_mode(
         .await?;
         record_phase!("drop_old");
 
-        let drop_cooc_batch = cfg.runtime.drop_cooc_batch_size.max(1_000);
         let deleted_cooc = db_blocking(move || {
-            db::drop_account_cooccurrence_batched(account_id, drop_cooc_batch, |batch, total| {
-                info!("[process {account_id}] drop_cooc deleted {batch} rows (total: {total})");
+            db::drop_account_cooccurrence(account_id, |deleted| {
+                info!("[process {account_id}] drop_cooc deleted {deleted} rows");
                 audit::event("process.drop_cooc_progress")
                     .field("account_id", account_id)
-                    .field("deleted", total)
+                    .field("deleted", deleted)
                     .emit();
             })
             .map_err(|e| format!("Failed to drop account cooccurrence: {e}"))

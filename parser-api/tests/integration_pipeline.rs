@@ -262,7 +262,7 @@ fn wipe_account(id: i32) {
     };
 
     let _ = db::drop_account_posts(id);
-    let _ = db::drop_account_cooccurrence_batched(id, 1024, |_, _| {});
+    let _ = db::drop_account_cooccurrence(id, |_| {});
     let _ = db::drop_account_feed_interactions_batched(id, 1024, |_, _| {});
 
     // Force-remove via direct SQL since delete_device_link refuses if no
