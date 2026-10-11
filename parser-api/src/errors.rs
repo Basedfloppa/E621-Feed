@@ -88,6 +88,21 @@ impl ApiError {
     }
 }
 
+/// `true` when an e621-layer error string means the upstream itself answered
+/// **404 Not Found** — the resource genuinely does not exist.
+///
+/// `api::fetch_authed_conditional` renders every non-2xx as
+/// `"{UPSTREAM_ERR_MARKER}returned {status}: {preview}"`, so the status text
+/// travels inside the string and there is no typed error to match on. The
+/// distinction matters for user-facing lookups: only a real 404 justifies
+/// "no such account", while `401`/`403`/timeout/`5xx` mean we could not ask at
+/// all and the user should be told to check credentials or retry. Both halves
+/// live next to each other on purpose — the unit test below pins the format,
+/// so changing the producer without changing this predicate fails the build.
+pub fn upstream_error_is_not_found(err: &str) -> bool {
+    err.contains(UPSTREAM_ERR_MARKER) && err.contains("returned 404")
+}
+
 /// Map `rusqlite::Error` directly to the appropriate `ApiError` variant.
 ///
 /// * `QueryReturnedNoRows` → `NotFound`
@@ -172,6 +187,41 @@ mod tests {
             ApiError::from_string("database error".to_string()),
             ApiError::Internal(_)
         ));
+    }
+
+    /// A genuine upstream 404 must be separable from "we could not ask"
+    /// (`401`/`403`/`429`/`5xx`/network/timeout), because only the former
+    /// justifies telling the user the resource does not exist.
+    #[test]
+    fn upstream_404_is_distinguishable_from_other_failures() {
+        use crate::errors::UPSTREAM_ERR_MARKER;
+
+        let not_found =
+            format!("{UPSTREAM_ERR_MARKER}returned 404 Not Found: {{\"error\":\"not found\"}}");
+        assert!(upstream_error_is_not_found(&not_found));
+
+        // A contextual prefix must not defeat the check.
+        assert!(upstream_error_is_not_found(&format!(
+            "user-by-name {not_found}"
+        )));
+
+        for other in [
+            format!("{UPSTREAM_ERR_MARKER}returned 401 Unauthorized: nope"),
+            format!("{UPSTREAM_ERR_MARKER}returned 403 Forbidden"),
+            format!("{UPSTREAM_ERR_MARKER}returned 429 Too Many Requests"),
+            format!("{UPSTREAM_ERR_MARKER}returned 500 Internal Server Error"),
+            format!("{UPSTREAM_ERR_MARKER}returned 503 Service Unavailable: <html>"),
+            format!("{UPSTREAM_ERR_MARKER}request failed: timeout"),
+            format!("{UPSTREAM_ERR_MARKER}body read failed: connection reset"),
+        ] {
+            assert!(
+                !upstream_error_is_not_found(&other),
+                "must not be read as a real 404: {other}"
+            );
+        }
+
+        // A local error that merely mentions 404 in prose is not an upstream 404.
+        assert!(!upstream_error_is_not_found("no row for post 404"));
     }
 
     #[test]

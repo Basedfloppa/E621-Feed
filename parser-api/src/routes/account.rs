@@ -403,7 +403,15 @@ pub(crate) async fn get_account_name(
     ratelimit::check(&format!("user_lookup:owner:{owner_token}"), 30, 10)?;
     let response = api::get_user_by_name(&name_owned).await.map_err(|e| {
         error!("e621 user lookup for '{name_owned}' failed: {e}");
-        ApiError::NotFound(format!("No account found for '{name_owned}'"))
+        // Only a real upstream 404 means "this account does not exist". An
+        // auth failure, timeout or 5xx means we could not ask — reporting that
+        // as "no such account" sends a user with a rotated/expired e621 key
+        // looking for a typo instead of checking their credentials.
+        if e621_account_parser_api::errors::upstream_error_is_not_found(&e) {
+            ApiError::NotFound(format!("No account found for '{name_owned}'"))
+        } else {
+            ApiError::from_string(e)
+        }
     })?;
     let (id, resolved_name) = match response {
         UserApiResponse::FullUser(u) => (u.id, u.name),
