@@ -31,7 +31,6 @@ pub struct Config {
     pub default_account_blacklist: Vec<String>,
     pub posts_domain: String,
     pub posts_limit: i32,
-    pub rps_delay_ms: u64,
     pub max_retries: u64,
     /// Set to `true` only when a trusted reverse proxy (nginx/Caddy) sits in
     /// front and rewrites `X-Forwarded-For`. When `false` (the default — direct
@@ -1407,7 +1406,6 @@ admin_api     = "test_key"
 tag_blacklist = ["sound"]
 posts_domain  = "https://e621.net"
 posts_limit   = 320
-rps_delay_ms  = 250
 max_retries   = 2
 
 [priors]
@@ -1483,7 +1481,6 @@ admin_user = "x"
 tag_blacklist = []
 posts_domain = "https://x"
 posts_limit = 10
-rps_delay_ms = 1
 max_retries = 1
 [priors]
 now = "2025-01-01T00:00:00Z"
@@ -1507,7 +1504,6 @@ admin_api = "x"
 tag_blacklist = []
 posts_domain = "https://x"
 posts_limit = 10
-rps_delay_ms = 1
 max_retries = 1
 "#;
         let r = parse_toml(toml);
@@ -1688,7 +1684,6 @@ admin_api = "x"
 tag_blacklist = []
 posts_domain = "https://e621.net"
 posts_limit = 10
-rps_delay_ms = 1
 max_retries = 1
 
 [priors]
@@ -1896,7 +1891,6 @@ admin_api = "x"
 tag_blacklist = []
 posts_domain = "https://e621.net"
 posts_limit = 10
-rps_delay_ms = 1
 max_retries = 1
 
 [priors]

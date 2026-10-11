@@ -48,7 +48,6 @@ default_account_blacklist = [
 # same value in parser-web/static/config.js (frontend) before building.
 posts_domain = "https://e621.net"
 posts_limit = 160 # e621 maximum: 320
-rps_delay_ms = 250 # legacy global delay; priority delays are under [runtime]
 max_retries = 2 # 0 disables retries
 attempt_timeout_secs = 30 # hard timeout per HTTP attempt
 

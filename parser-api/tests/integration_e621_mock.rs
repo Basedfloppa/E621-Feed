@@ -90,10 +90,12 @@ fn install_mock_config(mock_uri: &str) -> tempfile::NamedTempFile {
     // Sync persists favourites in the favourites-collection scope — enable
     // save_favourites so the sync flow tests persist favourites.
     modified = swap_toml_field(&modified, "save_favourites", "true");
-    // No retries and no mandatory inter-request delay → 5xx tests fail fast
-    // and the sync loop is not throttled by the per-attempt backoff.
+    // No retries and no inter-request delay → 5xx tests fail fast and the
+    // sync loop is not throttled by the adaptive rate gate. The delay lives
+    // under `[runtime]`: `live_rps_delay_ms` governs user-facing requests,
+    // which is what this suite issues.
     modified = swap_toml_field(&modified, "max_retries", "0");
-    modified = swap_toml_field(&modified, "rps_delay_ms", "0");
+    modified = swap_toml_field(&modified, "live_rps_delay_ms", "0");
 
     let mut file = tempfile::NamedTempFile::new().expect("temp file");
     use std::io::Write;
