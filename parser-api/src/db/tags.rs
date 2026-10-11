@@ -468,14 +468,36 @@ fn canonical_relation_status(raw: &str) -> (&'static str, Option<&str>) {
     ("error", Some(raw))
 }
 
+/// Resolve a tag-relation table name against a closed whitelist.
+///
+/// `save_tag_relations` and `count_tag_relation` splice the table name
+/// straight into SQL text, so the parameter must never carry caller-controlled
+/// data. Every current caller passes a literal; this turns that from a
+/// convention into a checked invariant, mirroring the table whitelist in
+/// `db::posts::delete_by_account_in_batches`.
+fn resolve_tag_relation_table(table: &str) -> Result<&'static str, String> {
+    match table {
+        "tag_aliases" => Ok("tag_aliases"),
+        "tag_implications" => Ok("tag_implications"),
+        other => Err(format!(
+            "unknown tag relation table '{other}' \
+             (expected 'tag_aliases' or 'tag_implications')"
+        )),
+    }
+}
+
 /// Bulk upsert tag relation entries (aliases or implications) with
 /// `INSERT OR REPLACE`, so existing rows are overwritten with fresh
 /// status/dates. Both tables share the same schema:
 /// (`antecedent_name`, `consequent_name`, status, `created_at`, `updated_at`).
+///
+/// `table` is validated against [`resolve_tag_relation_table`] before it is
+/// interpolated into SQL.
 pub fn save_tag_relations(table: &str, entries: &[impl TagRelationEntry]) -> Result<(), String> {
     if entries.is_empty() {
         return Ok(());
     }
+    let table = resolve_tag_relation_table(table)?;
     // Every entry shares one transaction, so a single value the CHECK
     // constraint rejects rolls back the whole page — that is how one upstream
     // row froze the entire import. Resolve the statuses up front and report
@@ -861,8 +883,10 @@ pub fn get_implications_batch_cached(
 
 use std::time::Duration;
 
-/// Count rows in a tag relation table.
+/// Count rows in a tag relation table. `table` is validated against
+/// [`resolve_tag_relation_table`] before it is interpolated into SQL.
 pub fn count_tag_relation(table: &str) -> Result<i64, String> {
+    let table = resolve_tag_relation_table(table)?;
     let conn = open_db()?;
     conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
         .map_err(|e| format!("count {table}: {e}"))
@@ -997,7 +1021,9 @@ async fn run_full_import() -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{DECLARED_RELATION_STATUSES, canonical_relation_status};
+    use super::{
+        DECLARED_RELATION_STATUSES, canonical_relation_status, resolve_tag_relation_table,
+    };
 
     /// The exact table the migration creates, so the CHECK constraint under
     /// test is the one production has.
@@ -1063,6 +1089,31 @@ mod tests {
             assert_eq!(folded, "error", "{raw:?} must not become an active status");
             assert_eq!(report, Some(raw));
             insert(&relation_table(), folded).expect("folded status must satisfy the constraint");
+        }
+    }
+
+    /// Only the two known relation tables may reach the SQL text. Anything
+    /// else must be refused before it is interpolated.
+    #[test]
+    fn tag_relation_table_whitelist_rejects_anything_else() {
+        assert_eq!(
+            resolve_tag_relation_table("tag_aliases").unwrap(),
+            "tag_aliases"
+        );
+        assert_eq!(
+            resolve_tag_relation_table("tag_implications").unwrap(),
+            "tag_implications"
+        );
+        for bad in [
+            "tags",
+            "tag_aliases; DROP TABLE tags",
+            "tag_aliases JOIN tags",
+            "",
+        ] {
+            assert!(
+                resolve_tag_relation_table(bad).is_err(),
+                "{bad:?} must not be accepted as a relation table"
+            );
         }
     }
 }
