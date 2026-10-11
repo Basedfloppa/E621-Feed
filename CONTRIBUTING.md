@@ -17,10 +17,12 @@ npm install
 
 ## Enable the pre-commit hook
 
-This repository has no remote quality gate: the only GitHub workflow
-(`.github/workflows/docker-publish.yml`) builds and publishes the image, and runs
-nothing else — no `fmt`, `clippy`, tests, audit or WASM build. Enable the
-versioned local hook after cloning:
+CI is the authoritative gate: `.github/workflows/ci.yml` runs `fmt`, Clippy, both
+test suites and the WASM build on every push and pull request, and
+`.github/workflows/audit.yml` runs `cargo audit` and `cargo deny check` on a
+schedule and whenever a manifest or lock file changes. The versioned local hook
+mirrors those checks so a failure surfaces before the push, but it is opt-in —
+enable it after cloning:
 
 ```bash
 git config core.hooksPath .githooks
@@ -86,8 +88,10 @@ Three things worth knowing before fighting the tooling:
 - `--locked` is required for `cargo-outdated` and `cargo-geiger`: without it
   Cargo resolves a `cargo-util` that needs rustc 1.97, newer than the toolchain
   used here.
-- `cargo-deny` stays a no-op (`status: "skipped"`) until a `deny.toml` exists —
-  there is none today, so installing the tool alone does not turn the step on.
+- `cargo-deny` reads the `deny.toml` checked in at the repository root and is
+  invoked once per crate with an explicit `--config`. Without the tool installed
+  the step reports `status: "skipped"` instead of failing, so a green report does
+  not by itself mean the license and advisory policy was checked.
 - If `~/.cargo` is not writable, point `CARGO_HOME` at a writable directory
   first (`CARGO_HOME="$PWD/target/cargo-home"`), otherwise every `cargo install`
   fails even though the registry is reachable.
