@@ -194,28 +194,33 @@ pub fn pending_saved_original_posts(limit: i64) -> Result<Vec<(i64, String, Stri
         .map_err(|e| format!("pending_saved_original_posts collect: {e}"))
 }
 
-/// Remove an entry (after the backing file has been deleted). `limit` guards
-/// against a runaway eviction sweep deleting arbitrarily many rows at once.
+/// Remove an entry (after the backing file has been deleted).
 pub fn delete_media_entries(post_ids: &[i64]) -> Result<usize, String> {
     if post_ids.is_empty() {
         return Ok(0);
     }
-    let placeholders = std::iter::repeat_n("?", post_ids.len())
-        .collect::<Vec<_>>()
-        .join(",");
-    let sql = format!("DELETE FROM media_entries WHERE post_id IN ({placeholders})");
     with_write_tx(move |tx| {
-        let mut stmt = tx
-            .prepare(&sql)
-            .map_err(|e| format!("delete_media_entries prepare: {e}"))?;
-        for (i, id) in post_ids.iter().enumerate() {
-            stmt.raw_bind_parameter(i + 1, id)
-                .map_err(|e| format!("delete_media_entries bind: {e}"))?;
+        // Chunked so an over-long eviction list cannot blow SQLite's
+        // bound-parameter ceiling; one transaction keeps it atomic (see
+        // `db::IN_CLAUSE_CHUNK`).
+        let mut deleted = 0usize;
+        for chunk in post_ids.chunks(super::IN_CLAUSE_CHUNK) {
+            let placeholders = std::iter::repeat_n("?", chunk.len())
+                .collect::<Vec<_>>()
+                .join(",");
+            let sql = format!("DELETE FROM media_entries WHERE post_id IN ({placeholders})");
+            let mut stmt = tx
+                .prepare(&sql)
+                .map_err(|e| format!("delete_media_entries prepare: {e}"))?;
+            for (i, id) in chunk.iter().enumerate() {
+                stmt.raw_bind_parameter(i + 1, id)
+                    .map_err(|e| format!("delete_media_entries bind: {e}"))?;
+            }
+            deleted += stmt
+                .raw_execute()
+                .map_err(|e| format!("delete_media_entries: {e}"))?;
         }
-        let n = stmt
-            .raw_execute()
-            .map_err(|e| format!("delete_media_entries: {e}"))?;
-        Ok(n)
+        Ok(deleted)
     })
 }
 

@@ -425,12 +425,20 @@ pub fn delete_catalog_posts_by_ids(ids: &[i64]) -> Result<usize, String> {
         return Ok(0);
     }
     super::with_write_tx(|tx| {
-        let placeholders = vec!["?"; ids.len()].join(",");
-        tx.execute(
-            &format!("DELETE FROM posts WHERE id IN ({placeholders})"),
-            rusqlite::params_from_iter(ids.iter()),
-        )
-        .map_err(|e| format!("delete unrecoverable catalog posts: {e}"))
+        // Chunked so an arbitrarily long id list can never exceed SQLite's
+        // bound-parameter ceiling; the whole loop shares one transaction, so
+        // the delete stays atomic (see `db::IN_CLAUSE_CHUNK`).
+        let mut deleted = 0usize;
+        for chunk in ids.chunks(super::IN_CLAUSE_CHUNK) {
+            let placeholders = vec!["?"; chunk.len()].join(",");
+            deleted += tx
+                .execute(
+                    &format!("DELETE FROM posts WHERE id IN ({placeholders})"),
+                    rusqlite::params_from_iter(chunk.iter()),
+                )
+                .map_err(|e| format!("delete unrecoverable catalog posts: {e}"))?;
+        }
+        Ok(deleted)
     })
 }
 

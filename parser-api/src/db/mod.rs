@@ -39,6 +39,17 @@ pub use profiles::*;
 pub use sessions::*;
 pub use tags::*;
 
+/// Maximum number of values bound into a single `IN (…)` clause.
+///
+/// SQLite accepts up to 32766 bound parameters, but several call sites build
+/// the placeholder list from whatever the caller hands them (`DELETE … WHERE
+/// id IN (…)` over prune results, media evictions, catalog deletes). Rather
+/// than leave that as an undocumented "keep your list short" contract, the
+/// helpers chunk at this size: any list length is accepted, each statement
+/// stays small, and the whole operation still runs inside one write
+/// transaction so it remains atomic.
+pub(crate) const IN_CLAUSE_CHUNK: usize = 1000;
+
 mod embedded {
     use refinery::embed_migrations;
     embed_migrations!("migrations");
