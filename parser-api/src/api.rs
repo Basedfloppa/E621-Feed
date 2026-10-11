@@ -1,7 +1,7 @@
 use reqwest::{Client, Response, StatusCode};
 use rocket::serde::json;
 use std::collections::HashMap;
-use std::sync::{LazyLock, Mutex as StdMutex};
+use std::sync::{Arc, LazyLock, Mutex as StdMutex};
 use std::time::{Duration, Instant as StdInstant};
 use tokio::time::{sleep, timeout};
 use urlencoding::encode;
@@ -34,7 +34,10 @@ async fn rate_gate_wait(priority: Priority) {
 /// the box has been quiet long enough, so the ~1 GB of response bodies
 /// doesn't stay resident indefinitely on an idle server.
 struct CachedBody {
-    body: String,
+    /// Shared, immutable response text. `Arc<str>` so the hot cache-hit
+    /// path hands out a refcount bump instead of copying a body that can
+    /// be tens of megabytes (the cache is documented to hold ~1 GB).
+    body: Arc<str>,
     /// HTTP validator (`ETag`) from the upstream that produced this body.
     /// Used for conditional revalidation (If-None-Match) so unchanged
     /// resources short-circuit with a 304 instead of a full re-download.
@@ -60,7 +63,7 @@ fn touch_api_cache_access() {
     *g = StdInstant::now();
 }
 
-fn api_cache_get(url: &str, ttl: Duration) -> Option<String> {
+fn api_cache_get(url: &str, ttl: Duration) -> Option<Arc<str>> {
     if ttl.is_zero() {
         return None;
     }
@@ -124,7 +127,7 @@ fn api_cache_etag(url: &str) -> Option<String> {
 
 /// Body of a cached entry regardless of freshness — used to serve a 304
 /// revalidation without re-reading the network.
-fn api_cache_stale_body(url: &str) -> Option<String> {
+fn api_cache_stale_body(url: &str) -> Option<Arc<str>> {
     let map = API_CACHE.lock().expect("api cache poisoned");
     map.get(url).map(|e| e.body.clone())
 }
@@ -194,7 +197,13 @@ pub fn evict_api_cache_if_idle(idle_secs: u64) -> (usize, usize) {
     (before, after)
 }
 
-fn api_cache_put(url: &str, body: String, etag: Option<String>, ttl: Duration, max_entries: usize) {
+fn api_cache_put(
+    url: &str,
+    body: Arc<str>,
+    etag: Option<String>,
+    ttl: Duration,
+    max_entries: usize,
+) {
     if ttl.is_zero() || max_entries == 0 {
         return;
     }
@@ -239,7 +248,7 @@ async fn fetch_authed_text(
     bypass_cache: bool,
     cache_ttl_secs: u64,
     priority: Priority,
-) -> Result<String, String> {
+) -> Result<Arc<str>, String> {
     let (body, _) = fetch_authed_conditional(url, bypass_cache, cache_ttl_secs, priority).await?;
     Ok(body)
 }
@@ -260,7 +269,7 @@ async fn fetch_authed_conditional(
     bypass_cache: bool,
     cache_ttl_secs: u64,
     priority: Priority,
-) -> Result<(String, bool), String> {
+) -> Result<(Arc<str>, bool), String> {
     let cfg = cfg();
     let ttl = Duration::from_secs(if cache_ttl_secs > 0 {
         cache_ttl_secs
@@ -319,12 +328,16 @@ async fn fetch_authed_conditional(
         .get("etag")
         .and_then(|v| v.to_str().ok())
         .map(str::to_string);
-    let body = resp.text().await.map_err(|e| {
-        format!(
-            "{}body read failed: {e}",
-            crate::errors::UPSTREAM_ERR_MARKER
-        )
-    })?;
+    let body: Arc<str> = resp
+        .text()
+        .await
+        .map_err(|e| {
+            format!(
+                "{}body read failed: {e}",
+                crate::errors::UPSTREAM_ERR_MARKER
+            )
+        })?
+        .into();
 
     if !status.is_success() {
         // Don't cache Cloudflare/rate-limit pages — would pin an outage past recovery.
