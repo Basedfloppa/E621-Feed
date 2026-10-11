@@ -17,7 +17,7 @@
 use std::collections::HashSet;
 use std::env;
 
-use e621_account_parser_api::{api, db, models};
+use e621_account_parser_api::{api, db, models, utils};
 use models::{Post, UserApiResponse};
 
 fn load_existing_account_ids() -> anyhow::Result<HashSet<i32>> {
@@ -196,27 +196,36 @@ async fn import_user(uid: i32, name: &str) -> anyhow::Result<usize> {
 
     db::drop_account_posts(uid).map_err(|e| anyhow::anyhow!("drop posts: {e}"))?;
 
-    let mut total = 0usize;
-    for page in 1..=pages {
-        let raw = api::get_favorites(&account, page)
+    // Every page is fetched before anything is written, so a failure part-way
+    // through leaves no half-imported user behind. Pages go out one at a time:
+    // a concurrent window measured no faster against live e621, see
+    // `utils::page_fetch`.
+    let account = &account;
+    let raw_pages = utils::fetch_pages(pages as usize, |page| async move {
+        let api_page = i32::try_from(page).expect("favourites page fits in i32");
+        api::get_favorites(account, api_page)
             .await
-            .map_err(|e| anyhow::anyhow!("get_favorites page {page}: {e}"))?;
-        if raw.is_empty() {
-            // Either rate-limit hit (already retried inside send_with_retry)
-            // or the user's favourites went private mid-import. Stop early
-            // rather than spinning on empty pages.
-            break;
-        }
-        let posts: Vec<Post> = raw
-            .into_iter()
-            .map(|p| strip_blacklisted_tags(p, &blacklist))
-            .collect();
-        let n = posts.len();
-        db::save_posts(&posts, uid).map_err(|e| anyhow::anyhow!("save_posts page {page}: {e}"))?;
-        db::save_posts_tags_batch(&posts, &blacklist, false, None)
-            .map_err(|e| anyhow::anyhow!("save_tags page {page}: {e}"))?;
-        total += n;
+            .map_err(|e| anyhow::anyhow!("get_favorites page {page}: {e}"))
+    })
+    .await?;
+
+    let posts: Vec<Post> = raw_pages
+        .into_iter()
+        .flatten()
+        .map(|p| strip_blacklisted_tags(p, &blacklist))
+        .collect();
+    if posts.is_empty() {
+        // Either the user's favourites went private mid-import, or the first
+        // page came back empty after `send_with_retry` gave up.
+        return Ok(0);
     }
+
+    // One transaction for the whole import: `save_posts` + `save_posts_tags_batch`
+    // used to commit per page, which is 8 commits and 8 rounds of index
+    // maintenance for what is a single unit of work.
+    let total = posts.len();
+    db::save_posts_with_tags(&posts, uid, &blacklist, false, None)
+        .map_err(|e| anyhow::anyhow!("save posts with tags: {e}"))?;
 
     Ok(total)
 }

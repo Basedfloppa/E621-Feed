@@ -1,11 +1,14 @@
 pub mod blacklist;
 mod explain;
 mod idf;
+mod page_fetch;
 mod scorer;
 mod tag_relation;
 pub mod taste_themes;
 
 pub use explain::explain_scored_posts;
+
+pub use page_fetch::fetch_pages;
 
 pub use idf::{
     IdfIndex, bump_idf, current_idf, evict_if_idle as evict_idf_if_idle, mark_idf_dirty,
