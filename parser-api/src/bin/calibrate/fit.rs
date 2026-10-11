@@ -84,7 +84,7 @@ use e621_account_parser_api::utils::{
     BLEND_CHANNEL_COUNT, BLEND_CHANNEL_NAMES, Priors, blend_score, normalised_mix_weights,
 };
 
-use crate::cache::{ChannelScores, ScoreCache};
+use crate::cache::{AccountChannelCache, ChannelScores, ScoreCache};
 use crate::grid::gate_probe;
 use crate::metrics::{Metrics, mrr_pub, ndcg_at_k_pub, recall_at_k_pub};
 use crate::options::FitObjective;
@@ -1004,6 +1004,256 @@ fn report_direction_ladder(
     }
 }
 
+// ---- out-of-fold check -----------------------------------------------------
+
+/// Number of folds the holdout splits the accounts into.
+///
+/// Two. The question is "how much of the fitted gain survives on accounts the
+/// vector never trained on", and the cheapest honest answer uses every account
+/// exactly once as held-out data. More folds shrink each fold's training set
+/// further, which would confound generalisation with "fitted on less data" —
+/// and this is a verdict, not a tuning loop, so extra folds buy nothing.
+pub(crate) const HOLDOUT_FOLDS: usize = 2;
+
+/// A cache restricted to `idxs`, order preserved.
+///
+/// `context_base` is dropped rather than carried: the solver and [`rescore`]
+/// read `channels` and `n_test` only. The base exists so a partial-mask grid
+/// probe can re-blend without rebuilding an account's hashmaps, and no path
+/// here takes that route — so cloning the profile maps per fold would allocate
+/// for no reader.
+fn subset_cache(cache: &ScoreCache, idxs: &[usize]) -> ScoreCache {
+    ScoreCache {
+        accounts: idxs
+            .iter()
+            .map(|&i| {
+                let a = &cache.accounts[i];
+                AccountChannelCache {
+                    channels: a.channels.clone(),
+                    n_test: a.n_test,
+                    context_base: None,
+                }
+            })
+            .collect(),
+    }
+}
+
+/// Accumulate one fold's metrics into a pool **addressed by cache index**.
+///
+/// `src` must be the raw [`rescore`] output (sums, not `average()`d) and `dst`
+/// pre-sized to the full account count. Scattering rather than appending is what
+/// makes the pools comparable: the gate is paired, so a pool left in fold order
+/// would difference each account against a different one.
+fn add_scattered(dst: &mut Metrics, idxs: &[usize], src: &Metrics) {
+    dst.ndcg_at_k += src.ndcg_at_k;
+    dst.recall_at_k += src.recall_at_k;
+    dst.mrr += src.mrr;
+    dst.n_accounts += src.n_accounts;
+    for (slot, &i) in idxs.iter().enumerate() {
+        dst.ndcg_per_account[i] = src.ndcg_per_account[slot];
+        dst.recall_per_account[i] = src.recall_per_account[slot];
+        dst.mrr_per_account[i] = src.mrr_per_account[slot];
+    }
+}
+
+/// One fold: a vector fitted on that fold's training accounts, scored on both
+/// halves.
+struct HoldoutFold {
+    n_train: usize,
+    n_test: usize,
+    /// NDCG on the accounts the vector was fitted on.
+    in_sample: f64,
+    /// NDCG on the accounts it was not.
+    held_out: f64,
+    /// The incumbent on those same held-out accounts.
+    incumbent: f64,
+    iterations: usize,
+    budget_exhausted: bool,
+}
+
+/// Out-of-fold evidence about a fitted vector.
+struct Holdout {
+    folds: Vec<HoldoutFold>,
+    /// Every account scored by the fold that trained on it.
+    in_sample: Metrics,
+    /// Every account scored by the fold that did **not** train on it.
+    held_out: Metrics,
+    /// The incumbent over all accounts, in cache order.
+    incumbent: Metrics,
+}
+
+/// Fit on each fold and score on the other, so every account is ranked by a
+/// vector that never saw it.
+///
+/// This is the only number in the report the fit cannot inflate. The main verdict
+/// scores the vector on the very accounts its weights were chosen from, and the
+/// paired gate cannot detect that: it measures per-account spread, not how the
+/// vector was picked — so a vector fitted to this dataset's noise passes it by
+/// construction, and more iterations of a better optimiser make it look *better*
+/// while meaning less.
+fn run_holdout(
+    cache: &ScoreCache,
+    priors: &Priors,
+    incumbent: &Weights,
+    kind: FitObjective,
+    top_k_ndcg: usize,
+    top_k_recall: usize,
+) -> Holdout {
+    let n = cache.accounts.len();
+    let temp = priors.score_temperature;
+    let penalty = priors.strong_negative_penalty;
+    let init = initial_weights(priors);
+
+    // Stride, not contiguous halves. The dataset is ordered by favourite count
+    // (`[prep] N eligible accounts (top by fav count ...)`), so splitting it
+    // down the middle would hand one fold the heavy accounts and the other the
+    // light ones — and account size is what NDCG@K is most sensitive to.
+    // Striding alternates them, so both folds span the same range.
+    let mut fold_idx: Vec<Vec<usize>> = vec![Vec::new(); HOLDOUT_FOLDS];
+    for i in 0..n {
+        fold_idx[i % HOLDOUT_FOLDS].push(i);
+    }
+
+    let pool = || Metrics {
+        ndcg_per_account: vec![0.0; n],
+        recall_per_account: vec![0.0; n],
+        mrr_per_account: vec![0.0; n],
+        ..Metrics::default()
+    };
+    let (mut in_sample, mut held_out) = (pool(), pool());
+    let mut folds = Vec::with_capacity(HOLDOUT_FOLDS);
+
+    for (f, train_idx) in fold_idx.iter().enumerate() {
+        let test_idx = &fold_idx[(f + 1) % HOLDOUT_FOLDS];
+        let train = subset_cache(cache, train_idx);
+        let test = subset_cache(cache, test_idx);
+        let outcome = solve(&train, &init, temp, penalty, kind, top_k_ndcg);
+
+        let fit_train = rescore(&train, priors, &outcome.weights, top_k_ndcg, top_k_recall);
+        let fit_test = rescore(&test, priors, &outcome.weights, top_k_ndcg, top_k_recall);
+        let inc_test = rescore(&test, priors, incumbent, top_k_ndcg, top_k_recall);
+
+        folds.push(HoldoutFold {
+            n_train: train.accounts.len(),
+            n_test: test.accounts.len(),
+            in_sample: fit_train.average().ndcg_at_k,
+            held_out: fit_test.average().ndcg_at_k,
+            incumbent: inc_test.average().ndcg_at_k,
+            iterations: outcome.iterations,
+            budget_exhausted: outcome.budget_exhausted,
+        });
+        add_scattered(&mut in_sample, train_idx, &fit_train);
+        add_scattered(&mut held_out, test_idx, &fit_test);
+    }
+
+    Holdout {
+        folds,
+        in_sample: in_sample.average(),
+        held_out: held_out.average(),
+        incumbent: rescore(cache, priors, incumbent, top_k_ndcg, top_k_recall).average(),
+    }
+}
+
+fn report_holdout(h: &Holdout, top_k_ndcg: usize) {
+    eprintln!(
+        "[fit] holdout ({HOLDOUT_FOLDS}-fold by stride): each fold's vector is scored on the \
+         accounts it did NOT train on"
+    );
+    eprintln!(
+        "[fit]   the dataset is ordered by favourite count, so a contiguous split would put the \
+         heavy accounts in"
+    );
+    eprintln!("[fit]   one fold; striding makes both folds span the same range.");
+    eprintln!(
+        "[fit]   {:>4} {:>8} {:>7} {:>10} {:>10} {:>10} {:>11}",
+        "fold", "n_train", "n_test", "in-sample", "held-out", "incumbent", "held-out Δ"
+    );
+    for (i, f) in h.folds.iter().enumerate() {
+        eprintln!(
+            "[fit]   {i:>4} {:>8} {:>7} {:>10.4} {:>10.4} {:>10.4} {:>+11.6}",
+            f.n_train,
+            f.n_test,
+            f.in_sample,
+            f.held_out,
+            f.incumbent,
+            f.held_out - f.incumbent
+        );
+        if f.budget_exhausted {
+            eprintln!(
+                "[fit]        fold {i}: the solve hit the iteration budget after {} iterations — \
+                 its vector is not an optimum",
+                f.iterations
+            );
+        }
+    }
+
+    // The like-for-like pair: both pools come from vectors fitted on one fold,
+    // so "how much survives" is not confounded by training-set size the way a
+    // comparison against the full-sample fit would be.
+    let ins = gate_probe(
+        &h.in_sample,
+        h.incumbent.ndcg_at_k,
+        &h.incumbent.ndcg_per_account,
+    );
+    let out = gate_probe(
+        &h.held_out,
+        h.incumbent.ndcg_at_k,
+        &h.incumbent.ndcg_per_account,
+    );
+    eprintln!(
+        "[fit] pooled in-sample NDCG@{top_k_ndcg}={:.4} delta={:+.6} SE={:.6}",
+        h.in_sample.ndcg_at_k, ins.delta, ins.se
+    );
+    eprintln!(
+        "[fit] pooled held-out NDCG@{top_k_ndcg}={:.4} delta={:+.6} SE={:.6} gate={}",
+        h.held_out.ndcg_at_k,
+        out.delta,
+        out.se,
+        if out.accept { "ACCEPT" } else { "REJECT" }
+    );
+
+    if ins.delta.abs() <= 1e-9 {
+        eprintln!(
+            "[fit] => the in-sample gain is zero, so there is no shrinkage to measure; a \
+             non-positive held-out"
+        );
+        eprintln!(
+            "[fit]    delta alongside it would mean the channels carry no signal in this dataset"
+        );
+    } else {
+        eprintln!(
+            "[fit] => {:.0}% of the in-sample gain survives out-of-fold ({:+.4} in-sample -> \
+             {:+.4} held-out)",
+            out.delta / ins.delta * 100.0,
+            ins.delta,
+            out.delta
+        );
+        if out.delta <= 0.0 {
+            eprintln!(
+                "[fit]    the held-out vector does NOT beat the incumbent on accounts it never \
+                 trained on:"
+            );
+            eprintln!(
+                "[fit]    the in-sample number is fitted to these accounts, not to the signal"
+            );
+        } else if !out.accept {
+            eprintln!(
+                "[fit]    the held-out vector still beats the incumbent but does not clear the \
+                 gate at this N"
+            );
+        }
+    }
+    eprintln!(
+        "[fit] note: the fitted/incumbent delta reported above is in-sample at full N. The \
+         like-for-like"
+    );
+    eprintln!(
+        "[fit]   generalisation pair is the two pooled lines here; the full-sample fit cannot be \
+         compared"
+    );
+    eprintln!("[fit]   to them, because it trains on twice as many accounts.");
+}
+
 /// Largest absolute per-account difference; `None` when the vectors differ in
 /// length (nothing to align).
 fn max_abs_per_account_diff(a: &[f64], b: &[f64]) -> Option<f64> {
@@ -1169,6 +1419,7 @@ pub(crate) fn run_fit_and_report(
     diversify: bool,
     reference: Option<&ReferenceVector>,
     kind: FitObjective,
+    holdout: bool,
 ) {
     let cfg_arc = cfg();
     let top_k_ndcg = cfg_arc.backtest.top_k_ndcg;
@@ -1369,6 +1620,22 @@ pub(crate) fn run_fit_and_report(
 
     if let Some(reference) = reference {
         report_reference(cache, &incumbent, &inc, reference, kind);
+    }
+
+    // Last, and after the reference, because it is the check on everything the
+    // fit produced rather than one more comparison of it.
+    if holdout {
+        let h = run_holdout(cache, &priors, &incumbent, kind, top_k_ndcg, top_k_recall);
+        report_holdout(&h, top_k_ndcg);
+    } else {
+        eprintln!(
+            "[fit] no holdout requested (--fit-mix-holdout): the fitted/incumbent delta above is \
+             in-sample —"
+        );
+        eprintln!(
+            "[fit]   the vector was fitted on the same accounts it is scored on, and the paired \
+             gate cannot see that."
+        );
     }
 }
 
@@ -2104,7 +2371,14 @@ mod tests {
         let priors = cfg().priors.clone();
         let w = normalised_mix_weights(&priors);
         let baseline = rescore(&cache, &priors, &w, 20, 50).average();
-        run_fit_and_report(&cache, &baseline, false, None, FitObjective::PlackettLuce);
+        run_fit_and_report(
+            &cache,
+            &baseline,
+            false,
+            None,
+            FitObjective::PlackettLuce,
+            false,
+        );
     }
 
     /// The objective evaluated through the fit must agree with the exact blend
@@ -2256,6 +2530,7 @@ mod tests {
             false,
             Some(&reference),
             FitObjective::PlackettLuce,
+            false,
         );
     }
 
@@ -2532,6 +2807,150 @@ mod tests {
         assert!(
             du.iter().all(|d| *d == 0.0),
             "and contributes no gradient either"
+        );
+    }
+
+    // ---- out-of-fold check -------------------------------------------------
+
+    fn sim_row(sim: f32) -> Row {
+        Row {
+            sim,
+            ..Row::zeros()
+        }
+    }
+
+    #[test]
+    fn subset_cache_keeps_the_requested_accounts_in_order() {
+        let cache = synthetic_cache(&[
+            (1, vec![sim_row(0.1), sim_row(0.2)]),
+            (2, vec![sim_row(0.3), sim_row(0.4), sim_row(0.5)]),
+            (1, vec![sim_row(0.6), sim_row(0.7)]),
+        ]);
+
+        let sub = subset_cache(&cache, &[2, 0]);
+
+        assert_eq!(sub.accounts.len(), 2);
+        assert_eq!(sub.accounts[0].n_test, 1);
+        assert_eq!(sub.accounts[0].channels[0].sim, 0.6);
+        assert_eq!(sub.accounts[0].channels.len(), 2);
+        assert_eq!(sub.accounts[1].n_test, 1);
+        assert_eq!(sub.accounts[1].channels[0].sim, 0.1);
+        assert!(
+            sub.accounts.iter().all(|a| a.context_base.is_none()),
+            "the base is dropped: neither the solver nor rescore reads it"
+        );
+        assert_eq!(cache.accounts.len(), 3, "the full cache is left alone");
+    }
+
+    /// The pools are addressed by cache index, not by fold order. The gate is
+    /// paired, so a fold-ordered pool would difference unrelated accounts.
+    #[test]
+    fn add_scattered_writes_each_fold_into_its_own_cache_slots() {
+        let mut dst = Metrics {
+            ndcg_per_account: vec![0.0; 4],
+            recall_per_account: vec![0.0; 4],
+            mrr_per_account: vec![0.0; 4],
+            ..Metrics::default()
+        };
+        let src = Metrics {
+            ndcg_at_k: 3.0,
+            n_accounts: 2,
+            ndcg_per_account: vec![0.5, 0.25],
+            recall_per_account: vec![0.1, 0.2],
+            mrr_per_account: vec![0.3, 0.4],
+            ..Metrics::default()
+        };
+
+        add_scattered(&mut dst, &[3, 1], &src);
+
+        assert_eq!(dst.ndcg_per_account, vec![0.0, 0.25, 0.0, 0.5]);
+        assert_eq!(dst.recall_per_account, vec![0.0, 0.2, 0.0, 0.1]);
+        assert_eq!(dst.mrr_per_account, vec![0.0, 0.4, 0.0, 0.3]);
+        assert_eq!(dst.ndcg_at_k, 3.0);
+        assert_eq!(dst.n_accounts, 2);
+    }
+
+    /// Nuisance `sim`, uncorrelated with the label and free of ties, so the
+    /// sim-dominant incumbent has something to rank by and cannot score by a
+    /// tie falling back on index order (which would put the positives first and
+    /// leave no room for a fitted vector to improve).
+    const SIM_NOISE: [f32; 8] = [0.20, 0.90, 0.45, 0.15, 0.75, 0.30, 0.60, 0.05];
+    /// `rating` when it is *not* the fold's signal.
+    const RATING_NOISE: [f32; 8] = [0.50, 0.10, 0.90, 0.30, 0.20, 0.80, 0.40, 0.60];
+
+    /// The holdout must score each fold's vector on the **other** fold.
+    ///
+    /// The two folds carry opposite signals: in fold A the positives are the
+    /// `quality`-high candidates, while in fold B they are the `rating`-high ones
+    /// and `quality` is *anti*-correlated. A vector fitted on A therefore ranks
+    /// B's positives below B's negatives, and has to lose to the incumbent on
+    /// the fold it never saw — even while it wins by a wide margin on its own.
+    ///
+    /// This assertion is what gives the test power: a holdout that scored the
+    /// fitted vector on its training fold would report A's in-sample number for
+    /// B's accounts and pass every other check here.
+    #[test]
+    fn the_holdout_scores_each_fold_on_the_accounts_it_did_not_train_on() {
+        // 0,2,4,6 land in fold 0 and 1,3,5,7 in fold 1: the holdout strides
+        // (`index % HOLDOUT_FOLDS`), it does not take contiguous halves.
+        let mut accounts = Vec::new();
+        for acc in 0..8usize {
+            let mut rows = Vec::new();
+            for i in 0..8usize {
+                let positive = i < 2;
+                let mut r = Row::zeros();
+                r.sim = SIM_NOISE[i];
+                if acc % 2 == 0 {
+                    r.quality = if positive { 1.0 } else { 0.0 };
+                    r.rating = RATING_NOISE[i];
+                } else {
+                    r.quality = if positive { 0.0 } else { 1.0 };
+                    r.rating = if positive { 1.0 } else { 0.0 };
+                }
+                rows.push(r);
+            }
+            accounts.push((2usize, rows));
+        }
+        let cache = synthetic_cache(&accounts);
+
+        let priors = Priors::default();
+        let incumbent = normalised_mix_weights(&priors);
+        let h = run_holdout(
+            &cache,
+            &priors,
+            &incumbent,
+            FitObjective::ApproxNdcg,
+            20,
+            50,
+        );
+
+        assert_eq!(h.folds.len(), HOLDOUT_FOLDS);
+        assert_eq!(h.folds[0].n_train, 4);
+        assert_eq!(h.folds[0].n_test, 4);
+        assert_eq!(
+            h.held_out.ndcg_per_account.len(),
+            8,
+            "the held-out pool covers every account, addressed by cache index"
+        );
+
+        assert!(
+            h.folds[0].in_sample > h.folds[0].incumbent + 0.1,
+            "fold A's vector should beat the incumbent on the fold it trained on: {} vs {}",
+            h.folds[0].in_sample,
+            h.folds[0].incumbent
+        );
+        assert!(
+            h.folds[0].held_out < h.folds[0].incumbent,
+            "fold A's vector inverts fold B's signal, so it must lose to the incumbent there: \
+             {} vs {}",
+            h.folds[0].held_out,
+            h.folds[0].incumbent
+        );
+        assert!(
+            h.held_out.ndcg_at_k < h.in_sample.ndcg_at_k,
+            "pooled held-out {} must sit below pooled in-sample {}",
+            h.held_out.ndcg_at_k,
+            h.in_sample.ndcg_at_k
         );
     }
 }

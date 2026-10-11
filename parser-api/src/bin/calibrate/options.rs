@@ -97,6 +97,15 @@ pub(crate) struct GridOptions {
     /// that cache-building path even without a following `grid`, because the
     /// production-scorer path discards the per-channel matrix.
     pub(crate) fit_mix: bool,
+    /// Also run the out-of-fold check on the fitted vector. Set via
+    /// `--fit-mix-holdout`.
+    ///
+    /// Off by default even though it is the only number here that the fit
+    /// cannot inflate: it costs one extra solve per fold (each on a fraction of
+    /// the accounts) on top of the main one, and a run that only wants the
+    /// direction may not want to pay for it. When it is off the report says the
+    /// delta is in-sample.
+    pub(crate) fit_holdout: bool,
     /// Surrogate the fit maximises. Set via `fit-mix-objective=pl|ndcg`.
     pub(crate) fit_objective: FitObjective,
 }
@@ -112,6 +121,7 @@ impl Default for GridOptions {
             verbose: false,
             channel_cache: true,
             fit_mix: false,
+            fit_holdout: false,
             fit_objective: FitObjective::PlackettLuce,
         }
     }

@@ -88,7 +88,10 @@ quality_log_bias = -3.0
 # worth +0.069 NDCG@20 (paired, SE 0.002616, one matrix, `eval --fit-mix=<file>`
 # — see "Run 2026-10-10" in docs/calibration.md). That is the size of the bet
 # this pass declines to take, so treat the five values below as *deliberately
-# uncalibrated* rather than as a null result.
+# uncalibrated* rather than as a null result. The figure is conditioned on the
+# split, though: under `split=random` the same vector is worth only +0.013 and
+# the shipped config scores 0.79 rather than 0.53 (2026-10-11), so +0.069 sizes
+# the bet under `time_causal`, not in general.
 #
 # A later full grid run reached the same verdict from the other side and was
 # likewise NOT applied (`grid_20261010_232439.toml`, 2026-10-11): its optimum

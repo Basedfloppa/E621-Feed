@@ -127,7 +127,7 @@ fn main() -> anyhow::Result<()> {
         eprintln!(
             "no mode given. Use 'eval', 'grid [mix-only]', 'probe', 'graph', or chain them \
              (e.g. 'eval grid'). Flags: pairs-only, no-pairs, with-diversify, no-cache, \
-             fit-mix[=<priors.toml>], fit-mix-objective=pl|ndcg, \
+             fit-mix[=<priors.toml>], fit-mix-objective=pl|ndcg, fit-mix-holdout, \
              split=random|post_id|time_causal, \
              neg=uniform|mixed|hybrid, verbose"
         );
@@ -240,6 +240,7 @@ fn run_modes(
                             opts.diversify,
                             reference,
                             opts.fit_objective,
+                            opts.fit_holdout,
                         );
                     }
                     if let Some(k) = key.as_ref() {
@@ -485,6 +486,12 @@ fn parse_grid_flags(args: impl Iterator<Item = String>) -> (GridOptions, Option<
             "verbose" | "--verbose" => opts.verbose = true,
             "no-cache" => opts.channel_cache = false,
             "fit-mix" | "--fit-mix" => opts.fit_mix = true,
+            // Implies the fit: there is nothing to hold out without a vector
+            // to hold it out of.
+            "fit-mix-holdout" | "--fit-mix-holdout" => {
+                opts.fit_mix = true;
+                opts.fit_holdout = true;
+            }
             other => eprintln!("[run] unknown flag: {other} (ignored)"),
         }
     }

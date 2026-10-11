@@ -571,6 +571,32 @@ grid file disagrees on (`diversity_pmi_threshold` 0.5 → 0.0,
 `diversity_semantic_blend` 0.05 → 0.0) — inert here, because `diversify` is off
 and MMR never runs, but printed rather than silently absorbed.
 
+**The +0.069 is conditioned on the split.** A later pair of runs (2026-10-11)
+re-measured the same reference file with identical clock, flags and reference —
+changing only `split=random` for `split=time_causal` — and the number the
+paragraph above calls "the size of the decision" moves with the construction
+that **Caveats** describes:
+
+| | `split=time_causal` | `split=random` |
+|---|---:|---:|
+| shipped config | 0.5349 | 0.7948 |
+| the grid file's `mix_*` | +0.059465 | +0.012903 |
+
+The shipped config scores 0.79 rather than 0.53 once the temporal ordering is
+gone, and the grid vector's edge shrinks 4.6×. So `sim = 0.96` was tuned to the
+`time_causal` structure as much as to the users, and **+0.069 is the size of the
+bet under one split, not in general**. Read the earlier "reproduced on two
+datasets" as reproduced *within* `time_causal`.
+
+The same runs fitted the twelve weights from scratch under both splits with a
+differentiable NDCG@20 (`--fit-mix-objective=ndcg`, `--fit-mix-holdout` for
+out-of-fold validation). The fitted vector's gain survives out-of-fold in both
+(94.5 % and 96 % retained), so overfitting is not what drives it — but its own
+weights move as much as the metric when only the split changes: `sim`
+0.802 → 0.613, `recency` −0.070 → +0.051, `novelty` −0.018 → −0.257. That
+instability, not the gate verdict, is why no offline vector is promoted to
+`[priors]`. Full tables in §2.7 of [TODO.md](../TODO.md).
+
 ## Files
 
 - [`parser-api/src/bin/seed.rs`](../parser-api/src/bin/seed.rs) —
