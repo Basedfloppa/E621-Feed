@@ -44,10 +44,20 @@ fn get_set(
     (entry.inserted_at.elapsed() < ttl).then(|| entry.set.clone())
 }
 
-fn put_set(map: &Mutex<HashMap<i64, SetEntry>>, key: i64, set: HashSet<i64>) -> Arc<HashSet<i64>> {
+fn put_set(
+    map: &Mutex<HashMap<i64, SetEntry>>,
+    key: i64,
+    set: HashSet<i64>,
+    ttl: Duration,
+) -> Arc<HashSet<i64>> {
     let shared = Arc::new(set);
     if let Ok(mut guard) = map.lock() {
-        guard.retain(|_, e| e.inserted_at.elapsed() < RECENT_SEEN_TTL.max(OWNED_TTL));
+        // Prune against *this* map's TTL. The previous shared
+        // `RECENT_SEEN_TTL.max(OWNED_TTL)` bound kept `recent_seen` (20 s) and
+        // `long_term_seen` (30 s) entries resident for a full 60 s — reads
+        // still honoured their own TTL, so this was only wasted memory, but
+        // the constant named the wrong window.
+        guard.retain(|_, e| e.inserted_at.elapsed() < ttl);
         guard.insert(
             key,
             SetEntry {
@@ -124,7 +134,7 @@ pub fn recent_seen(account_id: i64) -> Option<Arc<HashSet<i64>>> {
     get_set(&RECENT_SEEN_CACHE, account_id, RECENT_SEEN_TTL)
 }
 pub fn store_recent_seen(account_id: i64, set: HashSet<i64>) -> Arc<HashSet<i64>> {
-    put_set(&RECENT_SEEN_CACHE, account_id, set)
+    put_set(&RECENT_SEEN_CACHE, account_id, set, RECENT_SEEN_TTL)
 }
 
 // --- long-term seen --------------------------------------------------------
@@ -137,7 +147,7 @@ pub fn long_term_seen(account_id: i64) -> Option<Arc<HashSet<i64>>> {
     get_set(&LONG_TERM_SEEN_CACHE, account_id, LONG_TERM_SEEN_TTL)
 }
 pub fn store_long_term_seen(account_id: i64, set: HashSet<i64>) -> Arc<HashSet<i64>> {
-    put_set(&LONG_TERM_SEEN_CACHE, account_id, set)
+    put_set(&LONG_TERM_SEEN_CACHE, account_id, set, LONG_TERM_SEEN_TTL)
 }
 
 // --- owned ----------------------------------------------------------------
@@ -150,7 +160,7 @@ pub fn owned(account_id: i64) -> Option<Arc<HashSet<i64>>> {
     get_set(&OWNED_CACHE, account_id, OWNED_TTL)
 }
 pub fn store_owned(account_id: i64, set: HashSet<i64>) -> Arc<HashSet<i64>> {
-    put_set(&OWNED_CACHE, account_id, set)
+    put_set(&OWNED_CACHE, account_id, set, OWNED_TTL)
 }
 
 // --- local candidates ------------------------------------------------------
