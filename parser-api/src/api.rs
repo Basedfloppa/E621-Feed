@@ -606,6 +606,11 @@ async fn send_with_retry(
                 let elapsed = attempt_start.elapsed();
                 let up_class = if status.is_success() {
                     "success"
+                } else if status == StatusCode::NOT_MODIFIED {
+                    // Successful conditional revalidation: the upstream
+                    // confirmed our cached copy is current. Not a failure, so
+                    // it gets its own class instead of inflating `4xx`.
+                    "304"
                 } else if status == StatusCode::TOO_MANY_REQUESTS {
                     "429"
                 } else if status.is_server_error() {
@@ -652,6 +657,20 @@ async fn send_with_retry(
                 if status.is_success() {
                     debug!(
                         "Request succeeded {} ({:.2}s) for {}.{}",
+                        status,
+                        elapsed.as_secs_f64(),
+                        url_for_logs,
+                        diag
+                    );
+                } else if status == StatusCode::NOT_MODIFIED {
+                    // 304 is the *good* outcome of a conditional GET: the
+                    // cached body is still current. It used to fall through to
+                    // the failure branch and be recorded as a `4xx` upstream
+                    // failure (61 of the 77 "failures" in one seed run), which
+                    // both skewed `e621_upstream_request_seconds{class="4xx"}`
+                    // and polluted the audit stream.
+                    debug!(
+                        "Request not modified {} ({:.2}s) for {}.{}",
                         status,
                         elapsed.as_secs_f64(),
                         url_for_logs,

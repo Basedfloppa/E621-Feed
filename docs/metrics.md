@@ -88,11 +88,18 @@ that have never visited have no row in that table and are not counted.
 | Metric | Type | Labels | Read as |
 |---|---|---|---|
 | `e621_upstream_errors_total` | counter | `class`=429\|5xx\|4xx\|timeout\|network\|decode | final outbound e621 errors |
-| `e621_upstream_request_seconds` | histogram | `class`=success\|429\|… | latency of each outbound e621 attempt |
+| `e621_upstream_request_seconds` | histogram | `class`=success\|304\|429\|… | latency of each outbound e621 attempt |
 
 ### `class` values
 
-`success` / `429` / `5xx` / `4xx` / `timeout` / `network` / `decode`.
+`success` / `304` / `429` / `5xx` / `4xx` / `timeout` / `network` / `decode`.
+
+`304` is a *successful* conditional revalidation (`If-None-Match` against a
+cached body): it belongs on the latency histogram but is deliberately **not**
+passed to `e621_upstream_errors_total`. Before that split every 304 fell into
+`4xx` — one seed run reported 61 "upstream failures" that were all cache
+revalidations, which skewed both the error counter and the `[AUDIT-ERR]
+e621.failed` stream.
 
 ### How to read a "high % of e621 errors"
 
