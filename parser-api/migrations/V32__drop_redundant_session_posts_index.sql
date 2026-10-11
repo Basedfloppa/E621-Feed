@@ -1,0 +1,13 @@
+-- Drop `idx_feed_session_posts_session(session_id)`.
+--
+-- It is a pure prefix of `PRIMARY KEY(session_id, post_id)`, so the planner
+-- already serves both lookups and the TTL cleanup through the primary-key
+-- autoindex: `db::sessions::tests::prune_expired_sessions_plan_uses_indexes`
+-- asserts the *shape* of that plan precisely because the named index never
+-- appears in it. All it kept doing was add write cost to every
+-- `feed_session_posts` insert.
+--
+-- Same reasoning as V29, which removed the `accounts_post(post_id)` and
+-- `tags_posts(tag_id)` twins. `idx_feed_sessions_account` and
+-- `idx_feed_sessions_accessed` are NOT prefixes of anything and stay.
+DROP INDEX IF EXISTS idx_feed_session_posts_session;

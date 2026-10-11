@@ -314,4 +314,21 @@ mod tests {
             }
         }
     }
+
+    /// V32 dropped the prefix-duplicate index. This is the ratchet: a future
+    /// `CREATE INDEX ... (session_id)` would restore write cost that the
+    /// primary key already pays for, and nothing else would notice.
+    #[test]
+    fn session_posts_has_no_prefix_duplicate_index() {
+        let conn = migrated_memory_db();
+        let left: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master \
+                 WHERE type = 'index' AND name = 'idx_feed_session_posts_session'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("count indexes");
+        assert_eq!(left, 0, "idx_feed_session_posts_session came back");
+    }
 }
