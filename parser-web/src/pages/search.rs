@@ -25,6 +25,37 @@ pub fn read_display_setting(suffix: &str, old: &str, default: bool) -> bool {
         .unwrap_or(default)
 }
 
+/// Grid layout options for the result grid (mirrors feed/favorites/catalog).
+/// Read from the unified `settings_grid_type` key so the search page follows
+/// the same layout preference as every other post collection.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SearchGrid {
+    Auto,
+    Three,
+    Two,
+    One,
+}
+impl SearchGrid {
+    fn from_storage(s: Option<String>) -> Self {
+        match s.as_deref() {
+            Some("3") => Self::Three,
+            Some("2") => Self::Two,
+            Some("1") => Self::One,
+            _ => Self::Auto,
+        }
+    }
+    fn grid_class(self) -> &'static str {
+        match self {
+            Self::Auto => {
+                "grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-3"
+            }
+            Self::Three => "grid grid-cols-2 sm:grid-cols-3 gap-3",
+            Self::Two => "grid grid-cols-2 gap-3",
+            Self::One => "grid grid-cols-1 gap-3",
+        }
+    }
+}
+
 const KEY_SAVED: &str = "search_saved";
 const KEY_HISTORY: &str = "search_history";
 const HISTORY_CAP: usize = 10;
@@ -298,6 +329,17 @@ pub fn search_page() -> Html {
             )
         })
     });
+    // Layout density comes from the unified setting, with the legacy
+    // per-page key as a fallback, so this page reads the layout the user
+    // picked in the quick-settings modal or on /settings.
+    let grid = {
+        let storage = || window().and_then(|w| w.local_storage().ok().flatten());
+        SearchGrid::from_storage(
+            storage()
+                .and_then(|s| s.get_item("settings_grid_type").ok().flatten())
+                .or_else(|| storage().and_then(|s| s.get_item("search_grid_type").ok().flatten())),
+        )
+    };
     let show_rating = read_display_setting("rating", "search_show_rating", true);
     let show_affinity = read_display_setting("affinity", "search_show_affinity", false);
     let show_score = read_display_setting("score", "search_show_score", true);
@@ -442,6 +484,7 @@ pub fn search_page() -> Html {
             }
             if let Some(url) = fetch_url {
                 <PostGrid
+                    grid_class={grid.grid_class().to_string()}
                     fetch_url={url}
                     scored={*score_results}
                     score_cutoff_pct={if *score_results { Some(*score_cutoff_pct) } else { None }}
@@ -468,7 +511,46 @@ pub fn search_page() -> Html {
 
 #[cfg(test)]
 mod tests {
-    use super::{push_front_unique, push_unique};
+    use super::{SearchGrid, push_front_unique, push_unique};
+
+    #[test]
+    fn grid_type_maps_the_unified_setting_values() {
+        assert_eq!(SearchGrid::from_storage(Some("1".into())), SearchGrid::One);
+        assert_eq!(SearchGrid::from_storage(Some("2".into())), SearchGrid::Two);
+        assert_eq!(
+            SearchGrid::from_storage(Some("3".into())),
+            SearchGrid::Three
+        );
+        assert_eq!(
+            SearchGrid::from_storage(Some("auto".into())),
+            SearchGrid::Auto
+        );
+        // Missing or unknown values must not silently lock in a fixed density.
+        assert_eq!(SearchGrid::from_storage(None), SearchGrid::Auto);
+        assert_eq!(SearchGrid::from_storage(Some("4".into())), SearchGrid::Auto);
+    }
+
+    #[test]
+    fn explicit_grid_types_carry_their_column_counts() {
+        assert_eq!(SearchGrid::One.grid_class(), "grid grid-cols-1 gap-3");
+        assert_eq!(SearchGrid::Two.grid_class(), "grid grid-cols-2 gap-3");
+        assert_eq!(
+            SearchGrid::Three.grid_class(),
+            "grid grid-cols-2 sm:grid-cols-3 gap-3"
+        );
+    }
+
+    /// Search must land on the same `Auto` density as the other post
+    /// collections. Before this page read the setting at all it passed no
+    /// class, so it fell through to the grid component's private default and
+    /// rendered one column more than every other page.
+    #[test]
+    fn auto_matches_the_shared_layout_preference() {
+        assert_eq!(
+            SearchGrid::Auto.grid_class(),
+            "grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-3"
+        );
+    }
 
     #[test]
     fn history_moves_matching_item_to_front() {
