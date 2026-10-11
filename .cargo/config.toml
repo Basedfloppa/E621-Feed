@@ -1,0 +1,14 @@
+# The API integration suite shares one process-wide SQLite file and one global
+# `Config`, so its tests are not parallel-safe: they insert/delete the same
+# accounts and posts and reconfigure the crate-wide config behind each other's
+# backs. Measured on this tree, `cargo test --test integration` with the
+# default thread pool failed 1–40 of 43 tests per run and passed 0 times in 6
+# consecutive runs, while `--test-threads=1` passed 3/3.
+#
+# `.githooks/pre-commit` and `.github/workflows/ci.yml` both pass
+# `--test-threads=1` explicitly, but `cargo test` typed by hand is the common
+# case and used to look like a broken tree. Setting the variable here makes the
+# serial behaviour the default; an explicit `--test-threads=N` on the command
+# line, or `RUST_TEST_THREADS` already present in the environment, still wins.
+[env]
+RUST_TEST_THREADS = "1"

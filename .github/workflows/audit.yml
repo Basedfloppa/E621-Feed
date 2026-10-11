@@ -1,0 +1,61 @@
+# Dependency advisory scan (`cargo audit`) for both crates.
+#
+# Kept out of `ci.yml` on purpose: the advisory database changes without a
+# commit, so a new CVE in a transitive dependency would otherwise turn an
+# unrelated PR red. Running it on a schedule (and whenever the lockfiles
+# change) keeps the signal actionable. Ignore lists live in
+# `parser-api/.cargo/audit.toml` and `parser-web/.cargo/audit.toml`.
+
+name: Security audit
+
+on:
+  schedule:
+    # 06:00 UTC daily.
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+  push:
+    branches: [master]
+    paths:
+      - "**/Cargo.toml"
+      - "**/Cargo.lock"
+      - "**/.cargo/audit.toml"
+      - ".github/workflows/audit.yml"
+
+concurrency:
+  group: audit-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  audit:
+    name: cargo audit --deny warnings
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin
+          key: ${{ runner.os }}-audit-${{ hashFiles('rust-toolchain.toml') }}
+          restore-keys: ${{ runner.os }}-audit-
+
+      - name: Install cargo-audit
+        run: command -v cargo-audit >/dev/null || cargo install cargo-audit --locked
+
+      - name: Audit parser-api
+        working-directory: parser-api
+        run: cargo audit --deny warnings
+
+      - name: Audit parser-web
+        working-directory: parser-web
+        run: cargo audit --deny warnings

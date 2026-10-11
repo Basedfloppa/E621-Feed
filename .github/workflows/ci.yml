@@ -1,0 +1,135 @@
+# Quality gate: formatting, lints, tests and the WASM build.
+#
+# Before this workflow the only CI was `docker-publish.yml`, which builds and
+# pushes an image but runs neither `cargo test` nor the frontend build — so a
+# red test, a clippy error or a broken WASM bundle could reach `master` and be
+# deployed. This mirrors `.githooks/pre-commit` (opt-in: it needs
+# `git config core.hooksPath .githooks`) and adds the trunk/WASM gate the hook
+# never had.
+#
+# The toolchain comes from `rust-toolchain.toml` (1.96.0 + wasm32-unknown-unknown),
+# so rustup installs the same rustc the release image uses. That matters more
+# than usual here: the WASM bytes and the SRI hashes in `dist/index.html` are
+# toolchain-sensitive, and a mismatch is what caused the live "integrity
+# attribute mismatch" incidents (see the comment in `rust-toolchain.toml`).
+#
+# `RUST_TEST_THREADS=1` is set by the workspace `.cargo/config.toml`; the
+# explicit `--test-threads=1` below is kept so the requirement survives a
+# change to that file.
+
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  api:
+    name: API — fmt, clippy, tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Cache cargo registry and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            parser-api/target
+          key: ${{ runner.os }}-api-${{ hashFiles('parser-api/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: ${{ runner.os }}-api-
+
+      - name: cargo fmt --check
+        run: cargo fmt --manifest-path parser-api/Cargo.toml --all -- --check
+
+      - name: cargo clippy (deny warnings)
+        run: cargo clippy --manifest-path parser-api/Cargo.toml --all-targets -- -D warnings
+
+      # Serial on purpose: the integration suite shares one SQLite file and one
+      # global config across tests (see tests/integration.rs).
+      - name: cargo test (serial)
+        run: cargo test --manifest-path parser-api/Cargo.toml -- --test-threads=1
+
+  web:
+    name: Web — fmt, clippy, WASM build
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Cache cargo, target and the trunk-downloaded tools
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cache/trunk
+            parser-web/target
+          key: ${{ runner.os }}-web-${{ hashFiles('parser-web/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: ${{ runner.os }}-web-
+
+      - name: cargo fmt --check
+        run: cargo fmt --manifest-path parser-web/Cargo.toml --all -- --check
+
+      - name: cargo clippy (wasm32, deny warnings)
+        run: >
+          cargo clippy --manifest-path parser-web/Cargo.toml
+          --target wasm32-unknown-unknown --all-targets -- -D warnings
+
+      # The pure-logic unit tests (bbcode, api_error, search history) run on
+      # the host target, same as `.githooks/pre-commit` does.
+      - name: cargo test
+        run: cargo test --manifest-path parser-web/Cargo.toml -- --test-threads=1
+
+      # `trunk build` runs a pre-build hook that shells out to
+      # `npx @tailwindcss/cli`, so the npm dependencies must be present.
+      # package-lock.json is committed, so `npm ci` is reproducible.
+      - name: Install tailwind dependencies
+        working-directory: parser-web
+        run: npm ci
+
+      - name: trunk build --release
+        working-directory: parser-web
+        # Trunk reads `NO_COLOR` as a *valued* boolean (`--no-color <true|false>`),
+        # so the widespread `NO_COLOR=1` convention makes it abort with
+        # "invalid value '1' for '--no-color'" before it compiles anything.
+        # Pin the value so the gate does not depend on the runner's environment.
+        env:
+          NO_COLOR: "true"
+        run: trunk build --release
+
+      # The SPA refuses to boot when an SRI hash does not match the emitted
+      # file, and it is the kind of breakage that is invisible to `cargo check`.
+      - name: Verify the built bundle
+        working-directory: parser-web
+        run: |
+          set -euo pipefail
+          test -f dist/index.html
+          wasm="$(find dist -maxdepth 1 -name '*_bg.wasm' -print -quit)"
+          if [ -z "$wasm" ]; then
+            echo "::error::trunk build produced no *_bg.wasm" >&2
+            exit 1
+          fi
+          grep -q 'integrity="sha384-' dist/index.html || {
+            echo "::error::dist/index.html has no SRI integrity attributes" >&2
+            exit 1
+          }
+          echo "wasm: $(basename "$wasm") $(stat -c%s "$wasm") bytes raw"
+          echo "gzip: $(stat -c%s "$wasm.gz" 2>/dev/null || echo 'n/a') bytes"

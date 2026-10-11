@@ -2,6 +2,13 @@
 //!
 //! These tests exercise real `SQLite` reads/writes against a process-isolated
 //! temporary database. Run with `cargo test --test integration`.
+//!
+//! ⚠️ **Not parallel-safe.** Every test in this binary shares one database
+//! file and one process-wide `Config`, and they create/drop the same accounts
+//! and posts, so running them on the default thread pool makes them clobber
+//! each other (1–40 of the 43 fail, run to run). They must run serially —
+//! `RUST_TEST_THREADS=1`, which the workspace `.cargo/config.toml` now sets by
+//! default, and which `.githooks/pre-commit` / CI pass explicitly.
 
 mod support;
 
