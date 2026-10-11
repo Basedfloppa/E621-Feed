@@ -529,7 +529,7 @@ pub fn digest_page() -> Html {
 
             if !*is_loading && !process_is_running && posts.is_empty() && error.is_none() {
                 <div class="alert alert-info" role="alert">
-                    { "No posts yet. Select an account above and wait for the digest to load." }
+                    { digest_empty_message(*hide_saved) }
                 </div>
             }
 
@@ -573,4 +573,35 @@ async fn fetch_json<T: DeserializeOwned>(url: &str) -> Result<T, String> {
 
     serde_json::from_str(&text)
         .map_err(|_| "The server returned invalid data. Please try again.".to_string())
+}
+
+/// What to say when the digest came back with nothing.
+///
+/// "Hide already-saved posts" is on by default (`digest_hide_saved`), so the
+/// common empty case is a filter that removed every candidate — not a digest
+/// that has yet to load. The previous single message told the user to wait for
+/// a request that had already finished (2026-09-22 E2E: `reqid=711..716`,
+/// `?full=true&exclude_saved=true` returned `[]` while the unfiltered call
+/// returned 12 posts).
+fn digest_empty_message(hide_saved: bool) -> &'static str {
+    if hide_saved {
+        "Nothing to show while \"Hide already-saved posts\" is on: posts you have already saved are left out. Turn it off to include them."
+    } else {
+        "No posts yet. Select an account above and wait for the digest to load."
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::digest_empty_message;
+
+    #[test]
+    fn empty_digest_message_matches_the_filter_state() {
+        let filtered = digest_empty_message(true);
+        assert!(filtered.contains("Hide already-saved posts"));
+        assert_ne!(filtered, digest_empty_message(false));
+        // The misleading half: with the filter on, the user must not be told to
+        // wait for a digest that the request has already returned.
+        assert!(!filtered.contains("wait for the digest"));
+    }
 }

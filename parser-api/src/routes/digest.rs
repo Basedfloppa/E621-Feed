@@ -253,6 +253,28 @@ fn stratified_sample(
 // Builders
 // ---------------------------------------------------------------------------
 
+/// Read an optional digest stratum, reporting the failure instead of hiding it.
+///
+/// Falling back to an empty stratum is deliberate: trending/wildcard/popular
+/// streams add variety, they are not the answer, and a partial digest beats a
+/// 500. But `.unwrap_or_default()` made a broken read look exactly like "e621
+/// has nothing to offer", so a failure now leaves an `[AUDIT-ERR]` line with
+/// the stratum name. Reads that would change the *meaning* of the result — the
+/// owned-post set that `exclude_saved` relies on — are propagated instead.
+fn stratum_or_default<T: Default>(what: &'static str, account_id: i32, r: Result<T, String>) -> T {
+    match r {
+        Ok(value) => value,
+        Err(error) => {
+            e621_account_parser_api::audit::event("digest.read_failed")
+                .field("what", what)
+                .field("account_id", account_id)
+                .field("error", error)
+                .emit_err();
+            T::default()
+        }
+    }
+}
+
 /// Full personalised digest: runs the scoring pipeline on local candidates
 /// and applies stratified sampling.
 ///
@@ -318,7 +340,8 @@ async fn build_personalized_digest(
     // Owned post IDs serve double duty: as a source for the "recent added"
     // stratum below, and (when exclude_saved is on) as the dedup set against
     // every other candidate stream.
-    let owned: HashSet<i64> = db::get_owned_post_ids(account_id).unwrap_or_default();
+    let owned: HashSet<i64> = db::get_owned_post_ids(account_id)
+        .map_err(|e| format!("Failed to read owned post ids: {e}"))?;
     let drop_owned = exclude_saved;
 
     // Get local candidate posts.
@@ -435,12 +458,16 @@ async fn build_personalized_digest(
     let mut rng = rand::thread_rng();
     // Trending: 30-day window instead of 7, wider pool
     let trending = {
-        let raw = db::get_trending_posts(30, 6).unwrap_or_default();
+        let raw = stratum_or_default("trending", account_id, db::get_trending_posts(30, 6));
         let posts: Vec<Post> = filter_blacklist(raw.into_iter().map(|sp| sp.post).collect());
         filter_seen(filter_owned(score_batch(posts)))
     };
     let wildcards = {
-        let raw = db::get_random_posts_by_group(account_id, 5).unwrap_or_default();
+        let raw = stratum_or_default(
+            "wildcards",
+            account_id,
+            db::get_random_posts_by_group(account_id, 5),
+        );
         let posts: Vec<Post> = filter_blacklist(raw.into_iter().map(|sp| sp.post).collect());
         filter_seen(filter_owned(score_batch(posts)))
     };
@@ -454,14 +481,21 @@ async fn build_personalized_digest(
         if ids.is_empty() {
             Vec::new()
         } else {
-            let posts = filter_blacklist(db::hydrate_posts_by_ids(&ids).unwrap_or_default());
+            let posts = filter_blacklist(stratum_or_default(
+                "recent_added_posts",
+                account_id,
+                db::hydrate_posts_by_ids(&ids),
+            ));
             filter_seen(score_batch(posts))
         }
     };
     // Popular new: 7-day window instead of 2
     let popular_new = {
-        let raw = db::get_popular_posts_since(Utc::now() - chrono::Duration::days(7), 3)
-            .unwrap_or_default();
+        let raw = stratum_or_default(
+            "popular_new",
+            account_id,
+            db::get_popular_posts_since(Utc::now() - chrono::Duration::days(7), 3),
+        );
         let posts: Vec<Post> = filter_blacklist(raw.into_iter().map(|sp| sp.post).collect());
         filter_seen(filter_owned(score_batch(posts)))
     };
@@ -469,7 +503,7 @@ async fn build_personalized_digest(
     // seen yet. Guarantees new faces even when the user's favourite-tag pool
     // is small and has been exhausted.
     let fresh_blood = {
-        let raw = db::get_old_random_posts(14, 8).unwrap_or_default();
+        let raw = stratum_or_default("fresh_blood", account_id, db::get_old_random_posts(14, 8));
         let posts: Vec<Post> = filter_blacklist(raw.into_iter().map(|sp| sp.post).collect());
         filter_seen(filter_owned(score_batch(posts)))
     };
@@ -518,11 +552,15 @@ async fn build_generic_digest(
 
     let mut rng = rand::thread_rng();
     // Same widened windows as the personalised path
-    let trending = db::get_trending_posts(30, 10).unwrap_or_default();
-    let popular_new =
-        db::get_popular_posts_since(Utc::now() - chrono::Duration::days(7), 5).unwrap_or_default();
-    let fresh_blood = db::get_old_random_posts(14, 8).unwrap_or_default();
-    let random = db::get_random_posts(5).unwrap_or_default();
+    let trending = stratum_or_default("trending", account_id, db::get_trending_posts(30, 10));
+    let popular_new = stratum_or_default(
+        "popular_new",
+        account_id,
+        db::get_popular_posts_since(Utc::now() - chrono::Duration::days(7), 5),
+    );
+    let fresh_blood =
+        stratum_or_default("fresh_blood", account_id, db::get_old_random_posts(14, 8));
+    let random = stratum_or_default("random", account_id, db::get_random_posts(5));
 
     // Seen-post dedup via feed_interactions (7 days).
     let seen_ids = get_digest_seen_ids(account_id);
@@ -548,7 +586,8 @@ async fn build_generic_digest(
     }
 
     if exclude_saved {
-        let owned: HashSet<i64> = db::get_owned_post_ids(account_id).unwrap_or_default();
+        let owned: HashSet<i64> = db::get_owned_post_ids(account_id)
+            .map_err(|e| format!("Failed to read owned post ids: {e}"))?;
         if !owned.is_empty() {
             all_posts.retain(|sp| !owned.contains(&sp.post.id));
         }
@@ -679,11 +718,11 @@ pub(crate) async fn get_daily_digest(
     };
 
     // Human-readable "why this post" reasons for digest cards (both modes).
-    let user_tags: std::collections::HashSet<String> = get_tag_counts(account_id)
-        .unwrap_or_default()
-        .iter()
-        .map(|t| t.name.to_lowercase())
-        .collect();
+    let user_tags: std::collections::HashSet<String> =
+        stratum_or_default("user_tag_counts", account_id, get_tag_counts(account_id))
+            .iter()
+            .map(|t| t.name.to_lowercase())
+            .collect();
     e621_account_parser_api::utils::explain_scored_posts(&mut posts, &user_tags, false);
 
     e621_account_parser_api::audit::event("feed.digest")
@@ -710,4 +749,17 @@ pub(crate) async fn get_daily_digest(
     }
     cache_set(cache_key, posts.clone());
     Ok(Json(posts))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::stratum_or_default;
+
+    #[test]
+    fn failed_stratum_falls_back_to_empty_and_keeps_good_reads() {
+        let ok: Vec<i32> = stratum_or_default("test_stratum", 1, Ok(vec![1, 2]));
+        assert_eq!(ok, vec![1, 2]);
+        let failed: Vec<i32> = stratum_or_default("test_stratum", 1, Err("db down".into()));
+        assert!(failed.is_empty());
+    }
 }
