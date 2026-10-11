@@ -174,6 +174,14 @@ pub(super) fn save_posts_tags_batch_in_tx(
                         let id: i64 = upsert_tag
                             .query_row(params![&cache_key.0, group], |r| r.get(0))
                             .map_err(|e| format!("upsert tag {}:{group}: {e}", cache_key.0))?;
+                        // Record the reverse mapping while we still own the
+                        // name. `tag_id_to_meta` is keyed by id, so it needs
+                        // the name/group we already have here; recovering them
+                        // later meant a linear scan over `tag_id_cache` per
+                        // tag per post. A cache hit below always implies this
+                        // insert already ran in this batch, so the map is
+                        // complete for every id in `post_tag_ids`.
+                        tag_id_to_meta.insert(id, (cache_key.0.clone(), group));
                         tag_id_cache.insert(cache_key, id);
                         id
                     };
@@ -211,14 +219,8 @@ pub(super) fn save_posts_tags_batch_in_tx(
             // Class G: incremental account-level cooccurrence update.
             // Since we cleared account_tag_cooccurrence in drop_account_posts,
             // every post's tag pairs are fresh; ON CONFLICT handles dedup.
-            // Build the reverse map incrementally as we discover new tags.
-            for &tid in &post_tag_ids {
-                if !tag_id_to_meta.contains_key(&tid)
-                    && let Some(((name, group), _)) = tag_id_cache.iter().find(|&(_, &v)| v == tid)
-                {
-                    tag_id_to_meta.insert(tid, (name.clone(), *group));
-                }
-            }
+            // `tag_id_to_meta` is filled at tag-upsert time above, so every
+            // id in `post_tag_ids` already has its (name, group).
             if let Some(account_id) = account_id
                 && track_cooccurrence
                 && has_multi_tags
