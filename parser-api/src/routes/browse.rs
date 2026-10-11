@@ -18,8 +18,8 @@ use e621_account_parser_api::{
     api, audit,
     auth::OwnerToken,
     db::{
-        get_account_by_id, get_account_preference_profile, get_tag_counts, save_posts,
-        upsert_catalog_posts,
+        get_account_by_id, get_account_preference_profile, get_tag_counts, save_posts_with_tags,
+        upsert_catalog_posts_with_tags,
     },
     errors::ApiError,
     load_monitor::Priority,
@@ -47,23 +47,23 @@ pub(crate) fn spawn_browse_persist(
     rocket::tokio::spawn(async move {
         let count = posts.len();
         let res = rocket::tokio::task::spawn_blocking(move || -> Result<usize, String> {
+            // Posts and their tag postings commit together: a post row with no
+            // tags is not a usable post, and the pair used to pay two commits.
+            // Browse posts are not user preferences, hence no cooccurrence and
+            // no blacklist.
             if link_to_account {
-                // save_posts handles both catalog upsert AND accounts_post link
-                save_posts(&posts, account_id)
-                    .map_err(|e| format!("Failed to save posts with account link: {e}"))?;
+                save_posts_with_tags(
+                    &posts,
+                    account_id,
+                    &std::collections::HashSet::new(),
+                    false,
+                    None,
+                )
+                .map_err(|e| format!("Failed to save posts with account link: {e}"))?;
             } else {
-                upsert_catalog_posts(&posts)
+                upsert_catalog_posts_with_tags(&posts)
                     .map_err(|e| format!("Failed to upsert catalog posts: {e}"))?;
             }
-
-            // Save tags (skip cooccurrence — browse posts aren't user preferences)
-            e621_account_parser_api::db::save_posts_tags_batch(
-                &posts,
-                &std::collections::HashSet::new(),
-                false, // track_cooccurrence: false
-                None,  // account_id: none — no account-level cooccurrence
-            )
-            .map_err(|e| format!("Failed to save tags: {e}"))?;
 
             Ok(count)
         })

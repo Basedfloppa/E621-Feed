@@ -244,29 +244,38 @@ fn delete_by_account_in_batches(
 }
 
 pub fn save_posts(posts: &[Post], account_id: i32) -> Result<(), String> {
-    let result = super::with_write_tx(|tx| {
-        let mut insert_post = tx
-            .prepare_cached(POST_UPSERT_SQL)
-            .map_err(|e| format!("Failed to prepare transaction: {e}"))?;
-        let mut insert_account = tx
-            .prepare_cached(
-                "INSERT OR IGNORE INTO accounts_post (account_id, post_id) VALUES (?1, ?2);",
-            )
-            .map_err(|e| format!("Failed to prepare transaction: {e}"))?;
-
-        for post in posts {
-            insert_post
-                .execute(rusqlite::params_from_iter(post_upsert_params(post)))
-                .map_err(|e| format!("Failed to execute transaction: {e}"))?;
-
-            insert_account
-                .execute(params![account_id, post.id])
-                .map_err(|e| format!("Failed to execute transaction: {e}"))?;
-        }
-        Ok(())
-    });
+    let result = super::with_write_tx(|tx| save_posts_in_tx(tx, posts, account_id));
     hydrate_cache::clear_owned_and_candidates(i64::from(account_id));
     result
+}
+
+/// Body of [`save_posts`], taking an existing transaction so callers can put
+/// the tag postings in the same commit
+/// (see [`save_posts_with_tags`](super::save_posts_with_tags)).
+pub(super) fn save_posts_in_tx(
+    tx: &rusqlite::Connection,
+    posts: &[Post],
+    account_id: i32,
+) -> Result<(), String> {
+    let mut insert_post = tx
+        .prepare_cached(POST_UPSERT_SQL)
+        .map_err(|e| format!("Failed to prepare transaction: {e}"))?;
+    let mut insert_account = tx
+        .prepare_cached(
+            "INSERT OR IGNORE INTO accounts_post (account_id, post_id) VALUES (?1, ?2);",
+        )
+        .map_err(|e| format!("Failed to prepare transaction: {e}"))?;
+
+    for post in posts {
+        insert_post
+            .execute(rusqlite::params_from_iter(post_upsert_params(post)))
+            .map_err(|e| format!("Failed to execute transaction: {e}"))?;
+
+        insert_account
+            .execute(params![account_id, post.id])
+            .map_err(|e| format!("Failed to execute transaction: {e}"))?;
+    }
+    Ok(())
 }
 
 /// Single source of truth for the posts upsert. Both `save_posts` and
@@ -443,18 +452,26 @@ pub fn delete_catalog_posts_by_ids(ids: &[i64]) -> Result<usize, String> {
 }
 
 pub fn upsert_catalog_posts(posts: &[Post]) -> Result<(), String> {
-    super::with_write_tx(|tx| {
-        let mut insert_post = tx
-            .prepare_cached(POST_UPSERT_SQL)
-            .map_err(|e| format!("Failed to prepare catalog upsert: {e}"))?;
+    super::with_write_tx(|tx| upsert_catalog_posts_in_tx(tx, posts))
+}
 
-        for post in posts {
-            insert_post
-                .execute(rusqlite::params_from_iter(post_upsert_params(post)))
-                .map_err(|e| format!("Failed to upsert catalog post: {e}"))?;
-        }
-        Ok(())
-    })
+/// Body of [`upsert_catalog_posts`], taking an existing transaction so callers
+/// can put the tag postings in the same commit (see
+/// [`upsert_catalog_posts_with_tags`](super::upsert_catalog_posts_with_tags)).
+pub(super) fn upsert_catalog_posts_in_tx(
+    tx: &rusqlite::Connection,
+    posts: &[Post],
+) -> Result<(), String> {
+    let mut insert_post = tx
+        .prepare_cached(POST_UPSERT_SQL)
+        .map_err(|e| format!("Failed to prepare catalog upsert: {e}"))?;
+
+    for post in posts {
+        insert_post
+            .execute(rusqlite::params_from_iter(post_upsert_params(post)))
+            .map_err(|e| format!("Failed to upsert catalog post: {e}"))?;
+    }
+    Ok(())
 }
 
 /// Fallible counterpart of [`post_count`], for callers that must not panic:

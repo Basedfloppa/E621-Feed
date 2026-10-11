@@ -85,9 +85,53 @@ pub fn save_posts_tags_batch(
     })
 }
 
+/// Upsert posts (with their `accounts_post` link) **and** their tag postings in
+/// a single transaction.
+///
+/// Prefer this over `save_posts` followed by [`save_posts_tags_batch`]: the pair
+/// needed two write transactions per page, so every commit also paid the WAL
+/// sync and index maintenance twice, and the post was briefly readable with no
+/// tags at all. Both upserts are one unit of work — a post row without its tag
+/// postings is not a usable post.
+///
+/// `link_account_id` is the account the posts are linked to; `cooc_account_id`
+/// selects the account-level co-occurrence update (seed imports pass `None`
+/// because calibration reads no account co-occurrence).
+pub fn save_posts_with_tags(
+    posts: &[Post],
+    link_account_id: i32,
+    blacklist: &HashSet<String>,
+    track_cooccurrence: bool,
+    cooc_account_id: Option<i32>,
+) -> Result<(), String> {
+    if posts.is_empty() {
+        return Ok(());
+    }
+    let result = super::with_write_tx(|tx| {
+        super::posts::save_posts_in_tx(tx, posts, link_account_id)?;
+        save_posts_tags_batch_in_tx(tx, posts, blacklist, track_cooccurrence, cooc_account_id)
+    });
+    // Mirrors `save_posts`: the posts themselves changed, so owned-post and
+    // candidate hydration for this account is stale regardless of the outcome.
+    super::hydrate_cache::clear_owned_and_candidates(i64::from(link_account_id));
+    result
+}
+
+/// Catalog-only counterpart of [`save_posts_with_tags`] for callers that must
+/// not link the posts to an account.
+pub fn upsert_catalog_posts_with_tags(posts: &[Post]) -> Result<(), String> {
+    if posts.is_empty() {
+        return Ok(());
+    }
+    super::with_write_tx(|tx| {
+        super::posts::upsert_catalog_posts_in_tx(tx, posts)?;
+        save_posts_tags_batch_in_tx(tx, posts, &HashSet::new(), false, None)
+    })
+}
+
 /// Body of [`save_posts_tags_batch`], taking an existing connection/transaction
 /// so callers can combine it with other statements atomically
-/// (see [`replace_posts_tags_batch`]).
+/// (see [`replace_posts_tags_batch`] and [`save_posts_with_tags`]).
 pub(super) fn save_posts_tags_batch_in_tx(
     tx: &rusqlite::Connection,
     posts: &[Post],

@@ -364,9 +364,8 @@ async fn run_full_fetch(
         info!("{posts_len} post(s) found on page {page}");
         let bl = blacklist.clone();
         db_blocking(move || -> Result<(), String> {
-            db::save_posts(&posts, acc_id).map_err(|e| format!("Failed to save posts: {e}"))?;
-            db::save_posts_tags_batch(&posts, &bl, true, Some(acc_id))
-                .map_err(|e| format!("Failed to save tags for page {page}: {e}"))?;
+            db::save_posts_with_tags(&posts, acc_id, &bl, true, Some(acc_id))
+                .map_err(|e| format!("Failed to save posts with tags for page {page}: {e}"))?;
             Ok(())
         })
         .await?;
@@ -491,10 +490,8 @@ async fn run_incremental_fetch(
         if new_count > 0 {
             let bl = blacklist.clone();
             db_blocking(move || -> Result<(), String> {
-                db::save_posts(&new_posts, acc_id)
-                    .map_err(|e| format!("Failed to save posts: {e}"))?;
-                db::save_posts_tags_batch(&new_posts, &bl, true, Some(acc_id))
-                    .map_err(|e| format!("Failed to save tags for page {page}: {e}"))?;
+                db::save_posts_with_tags(&new_posts, acc_id, &bl, true, Some(acc_id))
+                    .map_err(|e| format!("Failed to save posts with tags for page {page}: {e}"))?;
                 Ok(())
             })
             .await?;

@@ -81,9 +81,8 @@ fn persist_favorites(
         .split_whitespace()
         .map(std::string::ToString::to_string)
         .collect();
-    crate::db::save_posts(&posts, account_id).map_err(|e| format!("Failed to save posts: {e}"))?;
-    crate::db::save_posts_tags_batch(&posts, &blacklist, true, Some(account_id))
-        .map_err(|e| format!("Failed to update tag feedback: {e}"))?;
+    crate::db::save_posts_with_tags(&posts, account_id, &blacklist, true, Some(account_id))
+        .map_err(|e| format!("Failed to save posts with tags: {e}"))?;
     Ok(posts.len())
 }
 
