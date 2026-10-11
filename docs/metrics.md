@@ -61,6 +61,14 @@ that have never visited have no row in that table and are not counted.
 | `e621_experiment_bucket_accounts` | gauge | `bucket` | accounts in each bucket |
 | `e621_experiment_bucket_interactions_total` | counter | `bucket` | interactions in each bucket |
 
+> **Both write paths move these counters.** The WASM client batches every
+> interaction (`interaction_queue` → `POST /api/interaction/batch`), which is the
+> route real traffic uses; only Undo calls the single one. They used to be counted
+> on the single route alone, so `e621_feed_interactions_total` stayed unpopulated
+> while `feed_interactions` filled up — the five interaction / A-B dashboard panels
+> read empty on a busy instance. Counts now follow the rows the DB reports as
+> inserted, so a retried batch is not double-counted.
+
 ## Catalog / cache
 
 | Metric | Type | Labels | Read as |

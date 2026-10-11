@@ -192,9 +192,33 @@ pub(crate) async fn log_feed_interaction_batch(
     ratelimit::check(&format!("interaction:owner:{owner_token}"), 240, 60)?;
     let count = body.interactions.len();
     let primary_account = body.interactions.first().map(|i| i.account_id);
-    db_blocking(move || record_feed_interactions_batch(&owner_token, &body.interactions))
-        .await
-        .map_err(ApiError::from)?;
+    let recorded =
+        db_blocking(move || record_feed_interactions_batch(&owner_token, &body.interactions))
+            .await
+            .map_err(ApiError::from)?;
+    // The WASM client sends every interaction through THIS route —
+    // `interaction_queue` batches them and only `undo` uses the single
+    // endpoint — so the counters have to be moved here as well as in
+    // `log_feed_interaction`. Without this the feed-interaction and A/B panels
+    // stayed empty however much traffic the backend served, while
+    // `feed_interactions` filled up. Counting the rows the DB reports as
+    // inserted (not `count`) keeps a retried batch from double-counting.
+    let metrics = &e621_account_parser_api::metrics::METRICS;
+    for rec in &recorded {
+        let bucket = rec.bucket.as_deref().unwrap_or("none");
+        metrics
+            .feed_interactions_total
+            .with_label_values(&[bucket, &rec.event])
+            .inc();
+        metrics
+            .experiment_bucket_interactions_total
+            .with_label_values(&[bucket])
+            .inc();
+        metrics
+            .feed_interactions_by_type_total
+            .with_label_values(&[&rec.event])
+            .inc();
+    }
     audit::event("feed.batch")
         .field_opt("account_id", primary_account)
         .field("count", count)

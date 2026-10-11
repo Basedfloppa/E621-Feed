@@ -386,14 +386,33 @@ pub fn clear_feed_interactions(owner_token: &str, account_id: i32) -> Result<usi
     Ok(deleted)
 }
 
+/// One row that [`record_feed_interactions_batch`] actually wrote, carrying
+/// the A/B arm it was filed under.
+///
+/// The caller needs this because `INSERT OR IGNORE` collapses duplicates: the
+/// frontend submits interactions through the batched route and **retries** a
+/// batch that failed to send, so counting *submitted* interactions would
+/// inflate the metrics on every retry while the table stayed the same size.
+#[derive(Debug, Clone)]
+pub struct RecordedInteraction {
+    /// `feed_interactions.experiment_bucket` as stored; `None` when no
+    /// experiment buckets are configured.
+    pub bucket: Option<String>,
+    /// `event_type` exactly as written to the row, i.e. already the label the
+    /// Prometheus series uses.
+    pub event: String,
+}
+
+/// Write a batch of interactions, returning one entry per row that was
+/// actually inserted (retries and duplicates yield none).
 pub fn record_feed_interactions_batch(
     owner_token: &str,
     interactions: &[FeedInteractionRequest],
-) -> Result<(), String> {
+) -> Result<Vec<RecordedInteraction>, String> {
     if interactions.is_empty() {
-        return Ok(());
+        return Ok(Vec::new());
     }
-    super::with_write_tx(|tx| {
+    let recorded = super::with_write_tx(|tx| {
         // Pre-verify ownership for each distinct account_id in the batch.
         let distinct_accounts: HashSet<i32> = interactions.iter().map(|i| i.account_id).collect();
         // Build a single query per account.
@@ -466,6 +485,10 @@ pub fn record_feed_interactions_batch(
             )
             .map_err(|e| format!("Failed to prepare batch feedback update: {e}"))?;
 
+        // One entry per row actually written: a retried batch inserts nothing
+        // (`INSERT OR IGNORE`) and must therefore move no counter.
+        let mut recorded: Vec<RecordedInteraction> = Vec::with_capacity(interactions.len());
+
         for interaction in interactions {
             let bucket = buckets
                 .get(&interaction.account_id)
@@ -484,6 +507,11 @@ pub fn record_feed_interactions_batch(
                 .map_err(|e| format!("Failed to record batch feed interaction: {e}"))?;
 
             if inserted > 0 {
+                recorded.push(RecordedInteraction {
+                    bucket: bucket.clone(),
+                    event: interaction.event_type.to_string(),
+                });
+
                 let (impression_delta, positive_delta, negative_delta) =
                     match interaction.event_type {
                         FeedInteractionType::QualifiedImpression => (1, 0, 0),
@@ -506,7 +534,7 @@ pub fn record_feed_interactions_batch(
             }
         }
 
-        Ok(())
+        Ok(recorded)
     })?;
     {
         let mut seen_accounts: Vec<i64> = Vec::new();
@@ -520,7 +548,7 @@ pub fn record_feed_interactions_batch(
             hydrate_cache::clear_seen(a);
         }
     }
-    Ok(())
+    Ok(recorded)
 }
 
 /// Posts the user has already interacted with in any way (qualified

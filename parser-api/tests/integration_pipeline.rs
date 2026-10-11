@@ -1305,13 +1305,24 @@ fn feed_interactions_batch_dedups_duplicates() {
 
     // Three identical interactions in one batch — `INSERT OR IGNORE`
     // collapses them to exactly one stored row.
-    db::record_feed_interactions_batch("batch_owner", &[make_req(), make_req(), make_req()])
-        .unwrap();
+    let recorded =
+        db::record_feed_interactions_batch("batch_owner", &[make_req(), make_req(), make_req()])
+            .unwrap();
     assert_eq!(count_table_for_account("feed_interactions", account_id), 1);
+    // ...and the caller is told that exactly one row landed. The Prometheus
+    // counters are driven off this list, so reporting the submitted count
+    // instead would triple-count a batch the table stored once.
+    assert_eq!(recorded.len(), 1, "only the inserted row may be reported");
+    assert_eq!(recorded[0].event, "open");
 
-    // Same batch again across a second call — still 1 row.
-    db::record_feed_interactions_batch("batch_owner", &[make_req()]).unwrap();
+    // Same batch again across a second call — still 1 row, and now zero
+    // reported rows: a retried batch inserts nothing and must move no counter.
+    let replay = db::record_feed_interactions_batch("batch_owner", &[make_req()]).unwrap();
     assert_eq!(count_table_for_account("feed_interactions", account_id), 1);
+    assert!(
+        replay.is_empty(),
+        "a replayed batch stored nothing, so it must report nothing"
+    );
 
     wipe_account(account_id);
 }
