@@ -6,6 +6,8 @@ path = "src/main.rs"
 name = "e621-account-parser-web"
 version = "0.1.0"
 edition = "2024"
+# SPDX id of the repository `LICENCE` file ("MIT No Attribution").
+license = "MIT-0"
 
 [dependencies]
 wasm-bindgen-futures = "0.4"

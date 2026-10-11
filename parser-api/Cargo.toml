@@ -18,6 +18,10 @@ path = "src/bin/catalog_seed.rs"
 name = "e621-account-parser-api"
 version = "0.1.0"
 edition = "2024"
+# SPDX id of the repository `LICENCE` file ("MIT No Attribution"). Declared so
+# `cargo deny check licenses` can settle the workspace crates instead of
+# reporting them as unlicensed.
+license = "MIT-0"
 
 [dependencies]
 refinery = { version = "0.9", features = ["rusqlite"] }

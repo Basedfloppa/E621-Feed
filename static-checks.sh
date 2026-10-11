@@ -156,16 +156,21 @@ for PROJ in "${PROJECTS[@]}"; do
   run_check audit "$PROJ" cargo-audit \
     cd@ cargo audit --json
 
-  # --- 3. cargo-deny (also repo-scoped, run once) --------------------------
-  if [[ "$PROJ" == "${PROJECTS[0]}" ]]; then
-    if [[ -f "$REPO_ROOT/deny.toml" ]]; then
-      run_check deny "$PROJ" cargo-deny \
-        cargo deny --manifest-path "$PROJ/Cargo.toml" check
-    else
-      jq -n '{status:"skipped", reason:"no deny.toml config"}' \
-        > "$(project_out "$PROJ" deny).summary.json"
-      log "skip   $(basename "$PROJ")/deny (no deny.toml config)"
-    fi
+  # --- 3. cargo-deny (repo-scoped config, per-project dependency tree) -----
+  # Every project, not just the first: `deny.toml` is one shared policy, but the
+  # dependency trees differ. The WASM tree carries two unmaintained advisories
+  # (bincode, proc-macro-error) that the API tree never sees, so a "run once"
+  # check hid real findings for the second project.
+  # `--config` is explicit so the policy in use is this repository's file: the
+  # default search is anchored on the working directory / manifest path, and the
+  # gate should not depend on where the script was invoked from.
+  if [[ -f "$REPO_ROOT/deny.toml" ]]; then
+    run_check deny "$PROJ" cargo-deny \
+      cargo deny --config "$REPO_ROOT/deny.toml" --manifest-path "$PROJ/Cargo.toml" check
+  else
+    jq -n '{status:"skipped", reason:"no deny.toml config"}' \
+      > "$(project_out "$PROJ" deny).summary.json"
+    log "skip   $(basename "$PROJ")/deny (no deny.toml config)"
   fi
 
   # --- 4. cargo-outdated ---------------------------------------------------

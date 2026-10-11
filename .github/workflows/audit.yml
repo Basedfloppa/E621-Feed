@@ -1,10 +1,12 @@
-# Dependency advisory scan (`cargo audit`) for both crates.
+# Dependency advisory scan (`cargo audit`) plus the supply-chain policy checks
+# (`cargo deny`) for both crates.
 #
 # Kept out of `ci.yml` on purpose: the advisory database changes without a
 # commit, so a new CVE in a transitive dependency would otherwise turn an
-# unrelated PR red. Running it on a schedule (and whenever the lockfiles
-# change) keeps the signal actionable. Ignore lists live in
-# `parser-api/.cargo/audit.toml` and `parser-web/.cargo/audit.toml`.
+# unrelated PR red. Running it on a schedule (and whenever the lockfiles or the
+# policy change) keeps the signal actionable. Advisory ignore lists live in
+# `parser-api/.cargo/audit.toml` and `parser-web/.cargo/audit.toml`; license,
+# registry and dependency-shape rules live in `deny.toml` at the repo root.
 
 name: Security audit
 
@@ -19,6 +21,7 @@ on:
       - "**/Cargo.toml"
       - "**/Cargo.lock"
       - "**/.cargo/audit.toml"
+      - "deny.toml"
       - ".github/workflows/audit.yml"
 
 concurrency:
@@ -49,8 +52,10 @@ jobs:
           key: ${{ runner.os }}-audit-${{ hashFiles('rust-toolchain.toml') }}
           restore-keys: ${{ runner.os }}-audit-
 
-      - name: Install cargo-audit
-        run: command -v cargo-audit >/dev/null || cargo install cargo-audit --locked
+      - name: Install cargo-audit and cargo-deny
+        run: |
+          command -v cargo-audit >/dev/null || cargo install cargo-audit --locked
+          command -v cargo-deny  >/dev/null || cargo install cargo-deny  --locked
 
       - name: Audit parser-api
         working-directory: parser-api
@@ -59,3 +64,17 @@ jobs:
       - name: Audit parser-web
         working-directory: parser-web
         run: cargo audit --deny warnings
+
+      # `deny.toml` at the repository root carries the rules that do not change
+      # under us — accepted licenses, allowed registries, wildcard/duplicate
+      # dependencies. It existed as a checked-in hole until now: `static-checks.sh`
+      # looks for this file and silently reported "skipped: no deny.toml config"
+      # because the file was never written, so the deny gate never ran anywhere.
+      # `static-checks.sh` still runs it locally when `cargo-deny` is on `PATH`;
+      # this step is what makes it a gate. Run from the repo root: cargo-deny
+      # discovers `deny.toml` from the working directory, not from
+      # `--manifest-path`.
+      - name: cargo deny (licenses, bans, sources, advisories)
+        run: |
+          cargo deny --manifest-path parser-api/Cargo.toml check
+          cargo deny --manifest-path parser-web/Cargo.toml check
