@@ -510,6 +510,9 @@ pub fn post_card(props: &PostCardProps) -> Html {
     blockable_tags.sort_by(|a, b| a.0.cmp(&b.0));
     blockable_tags.dedup_by(|a, b| a.0 == b.0);
     let artist_to_block = post.tags.artist.first().cloned();
+    // `require:animated` rather than `-animated`: a blacklist entry names what to
+    // hide, so a leading `-` is stripped as decoration and `-animated` would hide
+    // animated media — the opposite of this entry's label.
     let media_rule = match post
         .files
         .meta
@@ -520,7 +523,7 @@ pub fn post_card(props: &PostCardProps) -> Html {
     {
         Some("mp4") | Some("webm") => ("video", "Block video"),
         Some("gif") => ("animated", "Block animated media"),
-        _ => ("-animated", "Block static images"),
+        _ => ("require:animated", "Block static images"),
     };
     let block_callback = |rule: String, label: String| {
         let pending = pending_blacklist_rule.clone();

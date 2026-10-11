@@ -10,36 +10,9 @@ use rocket_okapi::openapi;
 use crate::db_blocking;
 use e621_account_parser_api::auth::OwnerToken;
 use e621_account_parser_api::utils::{
-    CachedPostFeatures, ChannelTiming, PipelineMetrics, ScoringContext, ScoringMetrics,
+    CachedPostFeatures, ChannelTiming, PipelineMetrics, ScoringContext, ScoringMetrics, blacklist,
     current_global_relation, current_idf, diversify_scored_posts, post_pair_similarity,
 };
-/// Apply supported blacklist metatags to locally cached candidates. e621
-/// handles these for live results; cached posts need the equivalent check.
-fn matches_local_blacklist_metatag(post: &Post, blacklist: &str) -> bool {
-    let meta = |tag: &str| {
-        post.tags
-            .meta
-            .iter()
-            .any(|value| value.eq_ignore_ascii_case(tag))
-    };
-    blacklist
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty() && !line.starts_with('#'))
-        .any(|rule| match rule.to_ascii_lowercase().as_str() {
-            "video" => meta("video"),
-            "animated" => meta("animated"),
-            "-animated" => !meta("animated"),
-            "rating:s" | "rating:safe" => matches!(post.rating, models::Rating::S),
-            "rating:q" | "rating:questionable" => matches!(post.rating, models::Rating::Q),
-            "rating:e" | "rating:explicit" => matches!(post.rating, models::Rating::E),
-            rule if rule.starts_with("uploader:!") => rule[10..]
-                .parse::<i64>()
-                .is_ok_and(|id| id == post.uploader_id),
-            _ => false,
-        })
-}
-
 use e621_account_parser_api::{
     api, audit,
     db::{
@@ -467,18 +440,12 @@ async fn build_recommendations_shared(
     let mut local_candidate_ids = local_res.map_err(|e| format!("Join error: {e}"))??;
     let explicit_bucket = bucket_res.map_err(|e| format!("Join error: {e}"))??;
 
-    // Blacklist filter (applies to local candidates only — live posts already
-    // have the blacklist applied via e621 search syntax). We only extract
-    // simple tag names (no e621 search syntax like `-rating:s` or `young furry`);
-    // complex expressions are best-effort and will be ignored here — they still
-    // apply to live e621 posts.
-    let blacklisted_simple_tags: Vec<String> = account
-        .blacklist
-        .lines()
-        .flat_map(|l| l.split_whitespace().filter(|t| !t.is_empty()))
-        .filter(|t| !t.contains(':') && !t.starts_with('-'))
-        .map(str::to_lowercase)
-        .collect();
+    // Cheap pre-filter for local candidates: drop blacklisted posts *before*
+    // hydrating them. Only simple tag names are usable here — the DB check has
+    // no rating/uploader columns. This is an optimisation, not the enforcement
+    // point; the authoritative pass runs over the merged pool below and covers
+    // live posts too.
+    let blacklisted_simple_tags = blacklist::simple_tags(&account.blacklist);
     if !blacklisted_simple_tags.is_empty() && !local_candidate_ids.is_empty() {
         let ids_for_filter = local_candidate_ids.clone();
         let tags_for_filter = blacklisted_simple_tags.clone();
@@ -507,7 +474,37 @@ async fn build_recommendations_shared(
         p.mark("db_hydrate");
     }
 
-    let live_posts: Vec<Post> = api::get_posts(&account, page)
+    // Positive boost group for the live e621 query: the account's explicit
+    // preferred tags first, then IDF-ranked anchors from its own tag counts.
+    // Without it the request carries nothing but exclusions, so e621 answers
+    // with the global default feed — the account's taste would reach scoring
+    // but never selection, and most of every pool would be posts it has no
+    // affinity for at all.
+    let live_boost: Vec<String> = {
+        let mut preferred = db_blocking(move || db::get_all_preferred_tags(account_id)).await?;
+        preferred.sort_by(|a, b| {
+            b.2.partial_cmp(&a.2)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.0.cmp(&b.0))
+        });
+        let mut boost: Vec<String> = preferred.into_iter().map(|(name, _, _)| name).collect();
+        let idf = current_idf();
+        for group in ["artist", "character"] {
+            let rows: Vec<(String, i64)> = tags
+                .iter()
+                .filter(|t| t.group_type == group)
+                .map(|t| (t.name.clone(), t.count))
+                .collect();
+            boost.extend(db::rank_tags_by_idf(
+                rows,
+                &idf,
+                cfg.runtime.candidate_anchor_tags,
+            ));
+        }
+        boost
+    };
+
+    let live_posts: Vec<Post> = api::get_posts(&account, page, &live_boost)
         .await
         .map_err(|e| ApiError::from_string(format!("Failed to fetch posts: {e}")))?;
     if let Some(p) = &mut pipe {
@@ -565,7 +562,7 @@ async fn build_recommendations_shared(
         Vec::new()
     } else {
         let mut posts = db_blocking(move || hydrate_posts_by_ids(&local_to_hydrate)).await?;
-        posts.retain(|post| !matches_local_blacklist_metatag(post, &account.blacklist));
+        posts.retain(|post| !blacklist::matches(post, &account.blacklist));
         posts
     };
 
@@ -582,6 +579,14 @@ async fn build_recommendations_shared(
         if combined_ids.insert(post.id) {
             combined.push(post);
         }
+    }
+
+    // Authoritative blacklist pass over the merged pool. Local candidates were
+    // already filtered while hydrating (that path can skip hydration entirely),
+    // but live posts only ever saw the share of the blacklist that fit inside
+    // the e621 query, so they must be re-checked against the full text.
+    if !account.blacklist.is_empty() {
+        combined.retain(|post| !blacklist::matches(post, &account.blacklist));
     }
 
     // Build the blacklist set for the IDF prior (scoring-level soft filter).

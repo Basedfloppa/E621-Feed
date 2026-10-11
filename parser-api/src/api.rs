@@ -12,6 +12,7 @@ use crate::{
     metrics::METRICS,
     models::{Comment, E621User, Post, TruncatedAccount, UserApiResponse, UserSearchResult, cfg},
     ratelimit,
+    utils::blacklist,
 };
 
 async fn rate_gate_wait(priority: Priority) {
@@ -1008,20 +1009,74 @@ pub async fn verify_e621_key(
 /// e621 refuses search queries with more than this many tags (returns 422).
 pub const E621_TAG_LIMIT: usize = 40;
 
-/// Build the final e621 `tags` query from a user search plus the account
-/// blacklist, in one pass, so a pasted e621 blacklist (duplicates, blank runs,
-/// already-negated `-x` tokens, and more tags than e621 accepts) can't 422:
-/// - every blacklist entry becomes an exclusion (leading `-` stripped then
-///   re-applied, so `--fav:me` / `-fav:me` become a valid `-fav:me`);
+/// How the [`E621_TAG_LIMIT`] budget is split across the three parts of a
+/// `tags` query: the caller's search terms, the positive boost group, and the
+/// blacklist exclusions.
+#[derive(Debug, Clone, Copy)]
+pub struct TagQueryBudget {
+    /// Total terms e621 accepts.
+    pub limit: usize,
+    /// Slots the boost group may occupy.
+    pub boost: usize,
+    /// Slots exclusions may occupy. `0` means "whatever remains".
+    pub blacklist: usize,
+}
+
+impl Default for TagQueryBudget {
+    fn default() -> Self {
+        Self {
+            limit: E621_TAG_LIMIT,
+            boost: 0,
+            blacklist: 0,
+        }
+    }
+}
+
+impl TagQueryBudget {
+    /// Budget from `[runtime]`. `e621_tag_limit` is clamped to the protocol
+    /// ceiling: honouring a larger configured value would 422 every request
+    /// that filled the budget, which is worse than ignoring the setting.
+    #[must_use]
+    pub fn from_config() -> Self {
+        let rt = &cfg().runtime;
+        Self {
+            limit: rt.e621_tag_limit.clamp(1, E621_TAG_LIMIT),
+            boost: rt.e621_boost_budget,
+            blacklist: rt.e621_blacklist_budget,
+        }
+    }
+}
+
+/// Build the final e621 `tags` query from a user search, a positive boost
+/// group, and the account blacklist, in one pass, so a pasted e621 blacklist
+/// (duplicates, blank runs, already-negated `-x` tokens, and more tags than
+/// e621 accepts) can't 422:
+/// - a blacklist entry is an exclusion, with a leading `-` stripped rather than
+///   read as negation, so `--fav:me` / `-fav:me` both become a valid `-fav:me`;
+/// - a `require:x` entry is the opposite and becomes a bare *positive*, because
+///   an exclusion engine can only express "hide what lacks x" by demanding x —
+///   `blacklist::query_terms` splits the two apart;
 /// - blank runs and case-insensitive duplicates are dropped (18× → one);
-/// - the user's *positive* search terms keep priority, then exclusions fill the
-///   budget up to [`E621_TAG_LIMIT`] (exclusions beyond it are dropped — the
-///   feed still enforces the full blacklist locally);
-/// - each group is kept sorted so equal blacklists in any order share a cache key.
-fn build_e621_tags_query(user_query: &str, blacklist: &str) -> String {
+/// - the user's *positive* search terms keep priority, then the boost group,
+///   then requirements, then exclusions fill the remaining budget;
+/// - each group is kept sorted so equal inputs in any order share a cache key.
+///
+/// Requirements and exclusions beyond the budget are dropped here. That is not a
+/// safety hole: the feed re-checks live posts against the full blacklist
+/// in-process (see `routes::feed`), so an over-budget blacklist costs recall,
+/// not compliance.
+fn build_e621_tags_query_with_budget(
+    user_query: &str,
+    blacklist: &str,
+    boost: &[String],
+    budget: TagQueryBudget,
+) -> String {
+    let limit = budget.limit.clamp(1, E621_TAG_LIMIT);
     let mut seen = std::collections::HashSet::new();
     let mut positives: Vec<String> = Vec::new();
+    let mut boosts: Vec<String> = Vec::new();
     let mut negatives: Vec<String> = Vec::new();
+
     // Positive search terms come only from user query (the actual search).
     for raw in user_query.split_whitespace() {
         let tail = raw.trim_start_matches('-');
@@ -1030,28 +1085,88 @@ fn build_e621_tags_query(user_query: &str, blacklist: &str) -> String {
         }
         positives.push(tail.to_string());
     }
-    // Blacklist entries are always demoted to exclusions.
-    for raw in blacklist.split_whitespace() {
-        let tail = raw.trim_start_matches('-');
+    // Boost terms are positive, so they participate in the same dedup set as
+    // the search: a tag the user searched for is not repeated in the OR-group.
+    // Anything carrying e621 syntax is skipped rather than escaped — a stray
+    // space or paren in a stored tag name would otherwise restructure the query.
+    for raw in boost {
+        let tail = raw.trim().trim_start_matches('-');
+        if tail.is_empty() || !seen.insert(tail.to_ascii_lowercase()) {
+            continue;
+        }
+        if tail.contains(|c: char| c.is_whitespace() || matches!(c, '(' | ')' | '~' | '"')) {
+            continue;
+        }
+        boosts.push(format!("~{tail}"));
+    }
+    // Blacklist entries split into what the query has to require and what it has
+    // to exclude — the two halves of `blacklist::query_terms`.
+    let terms = blacklist::query_terms(blacklist);
+    let mut required: Vec<String> = terms
+        .required
+        .into_iter()
+        .filter(|tag| seen.insert(tag.to_ascii_lowercase()))
+        .collect();
+    for tail in terms.excluded {
         if tail.is_empty() || !seen.insert(tail.to_ascii_lowercase()) {
             continue;
         }
         negatives.push(format!("-{tail}"));
     }
+
     positives.sort_unstable();
+    boosts.sort_unstable();
+    required.sort_unstable();
     negatives.sort_unstable();
-    let total = positives.len() + negatives.len();
-    let mut picked: Vec<String> = Vec::with_capacity(E621_TAG_LIMIT.min(total));
-    for t in positives.into_iter().chain(negatives) {
-        if picked.len() >= E621_TAG_LIMIT {
+    let total = positives.len() + boosts.len() + required.len() + negatives.len();
+
+    let mut picked: Vec<String> = Vec::with_capacity(limit);
+    let mut used = 0usize;
+    for t in positives.iter().take(limit) {
+        picked.push(t.clone());
+        used += 1;
+    }
+    // e621's `~` is a unary OR, so the group is parenthesised: without the
+    // parens a bare positive search term would AND against only the first
+    // `~tag` instead of the whole set. Each `~tag` still counts as one tag.
+    let boost_take = budget.boost.min(boosts.len()).min(limit - used);
+    if boost_take > 0 {
+        let group: Vec<String> = boosts.into_iter().take(boost_take).collect();
+        used += group.len();
+        picked.push(format!("( {} )", group.join(" ")));
+    }
+    // Requirements sit behind the boost group: dropping one costs recall — the
+    // in-process pass still hides those posts — never compliance.
+    for tag in required {
+        if used >= limit {
+            break;
+        }
+        picked.push(tag);
+        used += 1;
+    }
+    let blacklist_cap = if budget.blacklist == 0 {
+        limit
+    } else {
+        budget.blacklist
+    };
+    for (excluded, t) in negatives.into_iter().enumerate() {
+        if used >= limit || excluded >= blacklist_cap {
             break;
         }
         picked.push(t);
+        used += 1;
     }
-    if total > E621_TAG_LIMIT {
-        warn!("Trimming e621 tag query from {total} tags to the limit of {E621_TAG_LIMIT}");
+
+    if total > limit {
+        warn!("Trimming e621 tag query from {total} tags to the limit of {limit}");
     }
     picked.join(" ")
+}
+
+/// Blacklist-only variant, kept for callers that pass an explicit search query
+/// and have no boost group (the background prefetcher).
+fn build_e621_tags_query(user_query: &str, blacklist: &str) -> String {
+    build_e621_tags_query_with_budget(user_query, blacklist, &[], TagQueryBudget::default())
 }
 
 /// `get_posts` with a caller-supplied `tags` query — used by the
@@ -1174,8 +1289,21 @@ pub async fn get_post_comments(post_id: i64, limit: i64) -> Result<Vec<Comment>,
     Ok(comments.into_iter().filter(|c| !c.is_hidden).collect())
 }
 
-pub async fn get_posts(account: &TruncatedAccount, page: Option<i32>) -> Result<Vec<Post>, String> {
-    let tags = build_e621_tags_query("", &account.blacklist);
+/// Live e621 feed for an account.
+///
+/// `boost` is the positive group OR-ed into the query (preferred tags plus IDF
+/// anchors). An empty `boost` reproduces the historical blacklist-only request.
+pub async fn get_posts(
+    account: &TruncatedAccount,
+    page: Option<i32>,
+    boost: &[String],
+) -> Result<Vec<Post>, String> {
+    let tags = build_e621_tags_query_with_budget(
+        "",
+        &account.blacklist,
+        boost,
+        TagQueryBudget::from_config(),
+    );
     let cfg = cfg();
     let ttl_secs = posts_cache_ttl(page);
     let url = build_url(
@@ -1225,7 +1353,9 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{E621_TAG_LIMIT, build_e621_tags_query};
+    use super::{
+        E621_TAG_LIMIT, TagQueryBudget, build_e621_tags_query, build_e621_tags_query_with_budget,
+    };
 
     #[test]
     fn builds_clean_query_from_query_and_blacklist() {
@@ -1283,5 +1413,142 @@ mod tests {
             "positives first: {out}"
         );
         assert!(!out.contains("-tag77"), "over-budget exclusions dropped");
+    }
+
+    fn budget(limit: usize, boost: usize, blacklist: usize) -> TagQueryBudget {
+        TagQueryBudget {
+            limit,
+            boost,
+            blacklist,
+        }
+    }
+
+    #[test]
+    fn boost_group_is_a_parenthesised_or_set() {
+        // The parens are load-bearing: without them a bare positive term binds
+        // to only the first `~term` instead of the whole OR-set.
+        let out = build_e621_tags_query_with_budget(
+            "kuribon",
+            "",
+            &["dragon".to_string(), "wolf".to_string()],
+            budget(40, 8, 0),
+        );
+        assert_eq!(out, "kuribon ( ~dragon ~wolf )");
+    }
+
+    #[test]
+    fn boost_budget_caps_the_group_and_keeps_it_sorted() {
+        let boost: Vec<String> = (0..10).map(|i| format!("b{i:02}")).collect();
+        let out = build_e621_tags_query_with_budget("", "", &boost, budget(40, 3, 0));
+        assert_eq!(out, "( ~b00 ~b01 ~b02 )");
+    }
+
+    #[test]
+    fn boost_is_deduped_against_search_terms_and_itself() {
+        let out = build_e621_tags_query_with_budget(
+            "dragon",
+            "",
+            &[
+                "dragon".to_string(),
+                "DRAGON".to_string(),
+                "wolf".to_string(),
+            ],
+            budget(40, 8, 0),
+        );
+        assert_eq!(out, "dragon ( ~wolf )");
+    }
+
+    #[test]
+    fn boost_skips_terms_carrying_e621_syntax() {
+        // A stored tag name containing a space or paren would restructure the
+        // query rather than search for it.
+        let out = build_e621_tags_query_with_budget(
+            "",
+            "",
+            &[
+                "young furry".to_string(),
+                "a(b".to_string(),
+                "~x".to_string(),
+                "ok".to_string(),
+            ],
+            budget(40, 8, 0),
+        );
+        assert_eq!(out, "( ~ok )");
+    }
+
+    #[test]
+    fn a_require_entry_becomes_a_positive_and_the_dash_stays_decoration() {
+        // `require:animated` is the only way an exclusion engine can say "hide
+        // what is not animated". The other two spellings are both exclusions:
+        // e621 hands leading-dash entries back through `blacklisted_tags`, so a
+        // dash cannot be allowed to mean negation here.
+        assert_eq!(build_e621_tags_query("", "animated"), "-animated");
+        assert_eq!(build_e621_tags_query("", "-animated"), "-animated");
+        assert_eq!(build_e621_tags_query("", "require:animated"), "animated");
+    }
+
+    #[test]
+    fn an_unsupported_require_payload_is_not_forwarded() {
+        // `-require:gore` would be a tag name e621 cannot resolve, and a bare
+        // `gore` would contradict the marker.
+        assert_eq!(build_e621_tags_query("", "require:gore"), "");
+    }
+
+    #[test]
+    fn a_requirement_outranks_an_exclusion_in_the_budget() {
+        // limit 3: both search terms win, the requirement takes the last slot,
+        // and every exclusion is what gets dropped.
+        let out = build_e621_tags_query_with_budget(
+            "a b",
+            "gore\nloli\nrequire:animated",
+            &[],
+            budget(3, 0, 0),
+        );
+        assert_eq!(out, "a b animated");
+    }
+
+    #[test]
+    fn blacklist_budget_reserves_slots_and_drops_the_rest() {
+        let blob = (0..10)
+            .map(|i| format!("t{i:02}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let out = build_e621_tags_query_with_budget("", &blob, &[], budget(40, 0, 3));
+        assert_eq!(out, "-t00 -t01 -t02");
+    }
+
+    #[test]
+    fn positives_boost_and_blacklist_share_one_limit() {
+        // limit 4: one positive + two boost terms leaves room for exactly one
+        // exclusion, and the total never exceeds the limit.
+        let out = build_e621_tags_query_with_budget(
+            "kuribon",
+            "gore scat",
+            &["dragon".to_string(), "wolf".to_string()],
+            budget(4, 8, 0),
+        );
+        assert_eq!(out, "kuribon ( ~dragon ~wolf ) -gore");
+        assert_eq!(out.matches('~').count(), 2);
+    }
+
+    #[test]
+    fn empty_boost_reproduces_the_blacklist_only_builder() {
+        for (query, blacklist) in [("", ""), ("kuribon", "gore\nloli"), ("a b", "c")] {
+            assert_eq!(
+                build_e621_tags_query(query, blacklist),
+                build_e621_tags_query_with_budget(query, blacklist, &[], TagQueryBudget::default()),
+            );
+        }
+    }
+
+    #[test]
+    fn configured_limit_is_clamped_to_the_protocol_ceiling() {
+        // Honouring an over-large configured budget would 422 every request.
+        let blob = (0..80)
+            .map(|i| format!("t{i:02}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let out = build_e621_tags_query_with_budget("", &blob, &[], budget(1000, 0, 0));
+        assert_eq!(out.split_whitespace().count(), E621_TAG_LIMIT);
     }
 }

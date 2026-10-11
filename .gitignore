@@ -19,6 +19,9 @@ parser-web/.well-known/security.txt
 */db
 parser-api/loadtest/server.log
 parser-api/loadtest/__pycache__/
+# Calibration/eval run logs. Each run writes one file plus a
+# `calibrate-current.log` symlink; they are multi-MB transcripts, not sources.
+parser-api/run-logs/
 **media
 **db_exports
 

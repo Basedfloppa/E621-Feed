@@ -154,6 +154,56 @@ pub struct RuntimeConfig {
     /// posts out of the candidate pool.
     #[serde(default = "default_dedup_lookback_days")]
     pub dedup_lookback_days: i64,
+
+    /// Anchor tags per group (`artist`, `character`) selected for the local
+    /// candidate pool. Ranking is by IDF-weighted frequency, not raw `count`:
+    /// raw counts surface the generic tags every account shares (`male`,
+    /// `solo`, `anthro`), which collapses every account's pool onto the same
+    /// globally popular posts. Default `20`.
+    #[serde(default = "default_candidate_anchor_tags")]
+    pub candidate_anchor_tags: usize,
+    /// Lookback window for the recent-popular stream. Default `60`.
+    #[serde(default = "default_candidate_recent_days")]
+    pub candidate_recent_days: i64,
+    /// Per-stream ceiling as a fraction of `local_candidate_limit`. Streams are
+    /// capped independently because their densities differ by orders of
+    /// magnitude — artist tags match far more posts than character tags, so a
+    /// shared pool counter lets the densest stream consume every slot and the
+    /// rest contribute nothing. Default `0.34` (five streams, the three
+    /// inferred ones sized for roughly equal shares).
+    #[serde(default = "default_candidate_stream_share")]
+    pub candidate_stream_share: f64,
+    /// Ceiling for the explicit preferred-tags stream. Preferred tags are the
+    /// only signal the user states rather than one we infer, so this stream is
+    /// allowed to be larger than any single inferred one. Default `120`.
+    #[serde(default = "default_candidate_preferred_limit")]
+    pub candidate_preferred_limit: usize,
+    /// Ceiling for the co-occurrence-neighbour stream (tags that co-occur with
+    /// the account's own). Default `80`.
+    #[serde(default = "default_candidate_cooccurrence_limit")]
+    pub candidate_cooccurrence_limit: usize,
+    /// Minimum `cooc_count` for a partner tag to seed the neighbour stream.
+    /// Pairs seen once are overwhelmingly incidental. Default `2`.
+    #[serde(default = "default_candidate_cooccurrence_min_cooc")]
+    pub candidate_cooccurrence_min_cooc: i64,
+
+    /// Total number of terms e621 accepts in a `tags` query; above this it
+    /// answers 422. Clamped to the protocol ceiling at the call site, so a
+    /// larger value cannot break every request. Default `40`.
+    #[serde(default = "default_e621_tag_limit")]
+    pub e621_tag_limit: usize,
+    /// Slots of `e621_tag_limit` reserved for the live positive boost group —
+    /// preferred tags plus IDF anchors, OR-ed together so the live query
+    /// narrows to the account's taste instead of the global default feed.
+    /// `0` reproduces the historical blacklist-only behaviour. Default `12`.
+    #[serde(default = "default_e621_boost_budget")]
+    pub e621_boost_budget: usize,
+    /// Slots of `e621_tag_limit` reserved for blacklist exclusions. `0` means
+    /// "whatever remains after the search terms and the boost group". This is
+    /// not a safety limit: live posts are filtered against the full blacklist
+    /// in-process, so exclusions dropped here cost recall, not compliance.
+    #[serde(default)]
+    pub e621_blacklist_budget: usize,
     /// Cap on the number of account co-occurrence pairs materialized into the
     /// MMR user-relation graph by `load_account_tag_relation`. Only the
     /// strongest `user_relation_edge_limit` pairs (by `cooc_count`) are loaded,
@@ -336,6 +386,15 @@ impl Default for RuntimeConfig {
         Self {
             local_candidate_limit: default_local_candidate_limit(),
             dedup_lookback_days: default_dedup_lookback_days(),
+            candidate_anchor_tags: default_candidate_anchor_tags(),
+            candidate_recent_days: default_candidate_recent_days(),
+            candidate_stream_share: default_candidate_stream_share(),
+            candidate_preferred_limit: default_candidate_preferred_limit(),
+            candidate_cooccurrence_limit: default_candidate_cooccurrence_limit(),
+            candidate_cooccurrence_min_cooc: default_candidate_cooccurrence_min_cooc(),
+            e621_tag_limit: default_e621_tag_limit(),
+            e621_boost_budget: default_e621_boost_budget(),
+            e621_blacklist_budget: 0,
             user_relation_edge_limit: default_user_relation_edge_limit(),
             process_fetch_concurrency: default_process_fetch_concurrency(),
             drop_cooc_batch_size: default_drop_cooc_batch_size(),
@@ -407,6 +466,30 @@ fn default_local_candidate_limit() -> i64 {
 }
 fn default_dedup_lookback_days() -> i64 {
     14
+}
+fn default_candidate_anchor_tags() -> usize {
+    20
+}
+fn default_candidate_recent_days() -> i64 {
+    60
+}
+fn default_candidate_stream_share() -> f64 {
+    0.34
+}
+fn default_candidate_preferred_limit() -> usize {
+    120
+}
+fn default_candidate_cooccurrence_limit() -> usize {
+    80
+}
+fn default_candidate_cooccurrence_min_cooc() -> i64 {
+    2
+}
+fn default_e621_tag_limit() -> usize {
+    40
+}
+fn default_e621_boost_budget() -> usize {
+    12
 }
 fn default_user_relation_edge_limit() -> usize {
     250_000

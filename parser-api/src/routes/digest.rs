@@ -43,40 +43,12 @@ use e621_account_parser_api::db::{
     self, get_account_by_id, get_account_preference_profile, get_tag_counts,
 };
 use e621_account_parser_api::errors::ApiError;
-use e621_account_parser_api::models::{Post, Rating, ScoredPost, cfg};
+use e621_account_parser_api::models::{Post, ScoredPost, cfg};
 use e621_account_parser_api::utils::{
-    CachedPostFeatures, PipelineMetrics, ScoringContext, ScoringMetrics, current_global_relation,
-    current_idf,
+    CachedPostFeatures, PipelineMetrics, ScoringContext, ScoringMetrics, blacklist,
+    current_global_relation, current_idf,
 };
 use e621_account_parser_api::validation;
-
-/// Apply supported blacklist metatags to locally cached candidates (mirrors
-/// the same-named function in feed.rs). e621 handles these for live results;
-/// cached posts need the equivalent check.
-fn matches_local_blacklist_metatag(post: &Post, blacklist: &str) -> bool {
-    let meta = |tag: &str| {
-        post.tags
-            .meta
-            .iter()
-            .any(|value| value.eq_ignore_ascii_case(tag))
-    };
-    blacklist
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty() && !line.starts_with('#'))
-        .any(|rule| match rule.to_ascii_lowercase().as_str() {
-            "video" => meta("video"),
-            "animated" => meta("animated"),
-            "-animated" => !meta("animated"),
-            "rating:s" | "rating:safe" => matches!(post.rating, Rating::S),
-            "rating:q" | "rating:questionable" => matches!(post.rating, Rating::Q),
-            "rating:e" | "rating:explicit" => matches!(post.rating, Rating::E),
-            rule if rule.starts_with("uploader:!") => rule[10..]
-                .parse::<i64>()
-                .is_ok_and(|id| id == post.uploader_id),
-            _ => false,
-        })
-}
 
 /// Does the post match any blacklisted SIMPLE tag (exact tag-name match)?
 /// Used as a hard exclusion in the generic/personalised digest, so a
@@ -94,16 +66,6 @@ fn has_blacklisted_simple_tag(post: &Post, blacklist_set: &HashSet<String>) -> b
         .chain(post.tags.species.iter())
         .chain(post.tags.lore.iter())
         .any(|t| blacklist_set.contains(&t.to_ascii_lowercase()))
-}
-
-/// Parse the plain (simple) blacklist tags from blacklist text.
-fn blacklist_simple_tag_set(account_blacklist: &str) -> HashSet<String> {
-    account_blacklist
-        .lines()
-        .flat_map(|l| l.split_whitespace().filter(|t| !t.is_empty()))
-        .filter(|t| !t.contains(':') && !t.starts_with('-'))
-        .map(str::to_lowercase)
-        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -333,12 +295,7 @@ async fn build_personalized_digest(
     priors.now = Utc::now();
 
     // Parse blacklist (same logic as feed.rs build_recommendations_shared).
-    let blacklisted_simple_tags: Vec<String> = account_blacklist
-        .lines()
-        .flat_map(|l| l.split_whitespace().filter(|t| !t.is_empty()))
-        .filter(|t| !t.contains(':') && !t.starts_with('-'))
-        .map(str::to_lowercase)
-        .collect();
+    let blacklisted_simple_tags = blacklist::simple_tags(account_blacklist);
     let blacklist_set: HashSet<String> = blacklisted_simple_tags.into_iter().collect();
 
     let ctx = ScoringContext::new_with_blacklist(
@@ -373,7 +330,7 @@ async fn build_personalized_digest(
     } else {
         let mut posts = db::hydrate_posts_by_ids(&local_ids)
             .map_err(|e| format!("Failed to hydrate local posts: {e}"))?;
-        posts.retain(|p| !matches_local_blacklist_metatag(p, account_blacklist));
+        posts.retain(|p| !blacklist::matches_metatag(p, account_blacklist));
         if drop_owned {
             posts.retain(|p| !owned.contains(&p.id));
         }
@@ -425,7 +382,7 @@ async fn build_personalized_digest(
     let filter_blacklist = |posts: Vec<Post>| -> Vec<Post> {
         posts
             .into_iter()
-            .filter(|p| !matches_local_blacklist_metatag(p, account_blacklist))
+            .filter(|p| !blacklist::matches_metatag(p, account_blacklist))
             .collect()
     };
 
@@ -574,13 +531,15 @@ async fn build_generic_digest(
     // any post that matches a blacklisted metatag or carries a blacklisted
     // simple tag before returning the digest (the generic branch previously
     // ignored it entirely).
-    let blacklist_set = blacklist_simple_tag_set(account_blacklist);
+    let blacklist_set: HashSet<String> = blacklist::simple_tags(account_blacklist)
+        .into_iter()
+        .collect();
     let mut all_posts: Vec<ScoredPost> = Vec::with_capacity(20);
     for sp in [trending, popular_new, fresh_blood, random]
         .into_iter()
         .flatten()
     {
-        if matches_local_blacklist_metatag(&sp.post, account_blacklist)
+        if blacklist::matches_metatag(&sp.post, account_blacklist)
             || has_blacklisted_simple_tag(&sp.post, &blacklist_set)
         {
             continue;

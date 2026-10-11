@@ -270,6 +270,24 @@ diversity_head_limit = 0
 [runtime]
 local_candidate_limit = 400             # local candidates per recommendations page
 dedup_lookback_days = 14                # live-post deduplication window
+# --- candidate pool composition ---------------------------------------------
+# Streams are capped independently. A shared counter lets the densest stream
+# (artist tags match far more posts than character tags) take every slot, which
+# is what happened before: the pool came out at 134 posts from the artist stream
+# alone and the other two streams contributed nothing.
+candidate_anchor_tags = 20              # anchor tags per group, ranked by IDF
+candidate_recent_days = 60              # recent-popular lookback window
+candidate_stream_share = 0.34           # per-stream ceiling as a fraction of local_candidate_limit
+candidate_preferred_limit = 120         # ceiling for the explicit preferred-tags stream
+candidate_cooccurrence_limit = 80       # ceiling for the co-occurrence-neighbour stream
+candidate_cooccurrence_min_cooc = 2     # min cooc_count for a partner tag to qualify
+# --- live e621 query budget --------------------------------------------------
+# e621 answers 422 above 40 terms. The budget is split three ways; the blacklist
+# is enforced in-process for live posts as well, so 0 here costs recall, not
+# safety.
+e621_tag_limit = 40                     # total terms in the live tags query
+e621_boost_budget = 12                  # slots for the positive boost group (preferred tags + IDF anchors, OR-ed)
+e621_blacklist_budget = 0               # slots for exclusions; 0 = whatever remains
 process_fetch_concurrency = 4           # parallel pages during /process import
 drop_cooc_batch_size = 50000            # co-occurrence DELETE batch size
 user_relation_edge_limit = 250000       # max account cooc-pairs loaded into the MMR user graph

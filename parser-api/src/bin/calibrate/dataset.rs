@@ -1,7 +1,7 @@
 //! Eval-dataset hydration: catalog index + per-account fixtures.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use chrono::{DateTime, Utc};
@@ -134,6 +134,162 @@ pub(crate) fn load_catalog_index() -> anyhow::Result<CatalogIndex> {
         by_fav,
         by_age,
     })
+}
+
+impl CatalogIndex {
+    /// A copy holding only `keep`, with the `by_fav` / `by_age` permutations
+    /// rebuilt to index the new arrays.
+    ///
+    /// Lets negatives be drawn from the production candidate pool instead of
+    /// the whole catalog without touching the sampling strategy itself.
+    pub(crate) fn restrict(&self, keep: &HashSet<i64>) -> Self {
+        let mut ids = Vec::with_capacity(keep.len().min(self.ids.len()));
+        let mut fav_counts = Vec::with_capacity(ids.capacity());
+        let mut created_at_epoch = Vec::with_capacity(ids.capacity());
+        for (i, id) in self.ids.iter().enumerate() {
+            if keep.contains(id) {
+                ids.push(*id);
+                fav_counts.push(self.fav_counts[i]);
+                created_at_epoch.push(self.created_at_epoch[i]);
+            }
+        }
+        let mut by_fav: Vec<u32> = (0..ids.len() as u32).collect();
+        by_fav.sort_unstable_by_key(|&i| fav_counts[i as usize]);
+        let mut by_age: Vec<u32> = (0..ids.len() as u32).collect();
+        by_age.sort_unstable_by_key(|&i| created_at_epoch[i as usize]);
+        Self {
+            ids,
+            fav_counts,
+            created_at_epoch,
+            by_fav,
+            by_age,
+        }
+    }
+}
+
+/// Every tag name on a post, lowercased, across all categories.
+fn post_tag_names(post: &Post) -> Vec<String> {
+    let t = &post.tags;
+    t.general
+        .iter()
+        .chain(&t.artist)
+        .chain(&t.copyright)
+        .chain(&t.character)
+        .chain(&t.species)
+        .chain(&t.invalid)
+        .chain(&t.meta)
+        .chain(&t.lore)
+        .chain(&t.contributor)
+        .map(|s| s.to_lowercase())
+        .collect()
+}
+
+/// Co-occurrence partner tags derived from the **training** split only.
+///
+/// The live stream reads `account_tag_cooccurrence`, which is built from every
+/// favourite the account has — including the test split being scored. Using it
+/// here would leak: a test post's own rare tag could surface as a partner and
+/// pull that very post back into the candidate pool.
+fn train_cooccurrence_partners(
+    train_posts: &[Post],
+    tag_counts: &[TagCount],
+    min_cooc: i64,
+    want: usize,
+) -> Vec<String> {
+    if want == 0 {
+        return Vec::new();
+    }
+    // Seeded on the account's own tags so the inner loop stays bounded:
+    // accumulating every pair inside every post is O(tags²) per post, and the
+    // training splits are large.
+    let seeds: HashSet<&str> = tag_counts.iter().map(|t| t.name.as_str()).collect();
+    // Keyed by owned name: `names` is rebuilt per post, so borrowed keys would
+    // not outlive the loop that produced them.
+    let mut partners: HashMap<String, i64> = HashMap::new();
+    for post in train_posts {
+        let names = post_tag_names(post);
+        for seed in names.iter().filter(|n| seeds.contains(n.as_str())) {
+            for other in &names {
+                if other != seed {
+                    *partners.entry(other.clone()).or_insert(0) += 1;
+                }
+            }
+        }
+    }
+    let mut ranked: Vec<(i64, String)> = partners
+        .into_iter()
+        .filter(|(_, c)| *c >= min_cooc)
+        .map(|(n, c)| (c, n))
+        .collect();
+    ranked.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    ranked.truncate(want);
+    ranked.into_iter().map(|(_, n)| n).collect()
+}
+
+/// Candidate ids the **live feed** would consider for this account, built from
+/// the training split alone.
+///
+/// Production draws from five streams (IDF anchors, recent-popular, explicit
+/// preferred tags, co-occurrence neighbours). The harness used to draw its
+/// negatives from the entire catalog instead, so the fitted weights were tuned
+/// against a candidate distribution the feed never produces. Everything here is
+/// derived from `train_posts`; the account tables would leak the test split.
+fn production_pool_ids(
+    account_id: i32,
+    train_posts: &[Post],
+    tag_counts: &[TagCount],
+    idf: &IdfIndex,
+) -> Vec<i64> {
+    let tuning = db::CandidatePoolTuning::from_config();
+    // Preferred tags are explicit user settings — not derived from favourites —
+    // so reading them from the table leaks nothing.
+    let mut preferred: Vec<(f64, String)> = db::get_all_preferred_tags(account_id)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(name, _group, weight)| (weight, name))
+        .collect();
+    preferred.sort_by(|a, b| {
+        b.0.partial_cmp(&a.0)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.1.cmp(&b.1))
+    });
+
+    let avg_fav = if train_posts.is_empty() {
+        0.0
+    } else {
+        train_posts
+            .iter()
+            .map(|p| p.stats.fav_count as f64)
+            .sum::<f64>()
+            / train_posts.len() as f64
+    };
+
+    let input = db::CandidatePoolInput {
+        tag_counts: tag_counts
+            .iter()
+            .map(|t| (t.name.clone(), t.group_type.clone(), t.count))
+            .collect(),
+        cooccurrence: train_cooccurrence_partners(
+            train_posts,
+            tag_counts,
+            tuning.cooccurrence_min_cooc,
+            tuning.cooccurrence_limit,
+        ),
+        preferred: preferred.into_iter().map(|(_, name)| name).collect(),
+        fav_baseline: avg_fav,
+    };
+
+    let Ok(conn) = db::open_db_for_calibration() else {
+        return Vec::new();
+    };
+    db::collect_candidate_ids(
+        &conn,
+        &input,
+        idf,
+        &tuning,
+        cfg().runtime.local_candidate_limit,
+    )
+    .unwrap_or_default()
 }
 
 pub(crate) fn prepare_eval_dataset(
@@ -283,6 +439,22 @@ pub(crate) fn prepare_eval_dataset(
             let mut excluded_ids: Vec<i64> = Vec::with_capacity(train_ids.len() + test_ids.len());
             excluded_ids.extend_from_slice(&train_ids);
             excluded_ids.extend_from_slice(&test_ids);
+
+            // Restrict the negative universe to the pool the live feed would
+            // actually score. Catalog-wide negatives trained the weights on a
+            // candidate distribution production never produces; falling back to
+            // the whole catalog keeps the run alive when the pool comes back
+            // empty (cold DB, unbuilt IDF).
+            let restricted = {
+                let pool_ids = production_pool_ids(account_id, &train_posts, &tags, &idf);
+                if pool_ids.is_empty() {
+                    None
+                } else {
+                    Some(catalog.restrict(&pool_ids.iter().copied().collect::<HashSet<i64>>()))
+                }
+            };
+            let catalog: &CatalogIndex = restricted.as_ref().unwrap_or(&catalog);
+
             // Thread-local scratch buffer reuse (Point 5): avoids per-account HashSet alloc.
             let neg_ids = HYDRATION_SCRATCH.with(|cell| {
                 let mut scratch = cell.borrow_mut();
@@ -292,7 +464,7 @@ pub(crate) fn prepare_eval_dataset(
                         sample_negatives_uniform(&catalog.ids, &excluded_ids, target_negs, &mut scratch)
                     }
                     NegMode::Mixed => sample_negatives_mixed(
-                        &catalog,
+                        catalog,
                         &excluded_ids,
                         &test_posts,
                         target_negs,
@@ -306,7 +478,7 @@ pub(crate) fn prepare_eval_dataset(
                         // 70% mixed (existing mixed-strategy negatives).
                         let mut negs = if n_mixed > 0 {
                             sample_negatives_mixed(
-                                &catalog,
+                                catalog,
                                 &excluded_ids,
                                 &test_posts,
                                 n_mixed,
@@ -466,6 +638,7 @@ pub(crate) fn prepare_eval_dataset(
             // Drop the heavy `Post` structs now that features are extracted.
             drop(test_posts);
             drop(neg_posts);
+
 
             // Progress heartbeat (thread-safe atomic counter, stderr output may
             // interleave across threads — acceptable for progress logging).
@@ -713,5 +886,42 @@ mod tests {
              the bounded-pool helper: a bare parallel iterator escapes to the global \
              rayon pool and oversubscribes the SQLite connection pool"
         );
+    }
+
+    /// Negatives are drawn through `restrict`. If the `by_fav` / `by_age`
+    /// permutations still indexed the *old* arrays the sampler would read
+    /// another post's fav count and age — a bias that leaves no trace in the
+    /// metrics, only in the fitted weights.
+    #[test]
+    fn restrict_keeps_the_requested_ids_and_rebuilds_the_permutations() {
+        use super::CatalogIndex;
+        use std::collections::HashSet;
+
+        let index = CatalogIndex {
+            ids: vec![10, 20, 30, 40],
+            fav_counts: vec![5, 1, 9, 3],
+            created_at_epoch: vec![400, 100, 300, 200],
+            by_fav: vec![1, 3, 0, 2],
+            by_age: vec![1, 3, 2, 0],
+        };
+        let keep: HashSet<i64> = [20i64, 40].into_iter().collect();
+        let restricted = index.restrict(&keep);
+
+        assert_eq!(restricted.ids, vec![20, 40]);
+        assert_eq!(restricted.fav_counts, vec![1, 3]);
+        assert_eq!(restricted.created_at_epoch, vec![100, 200]);
+        assert_eq!(restricted.by_fav, vec![0, 1]);
+        assert_eq!(restricted.by_age, vec![0, 1]);
+        for &i in restricted.by_fav.iter().chain(restricted.by_age.iter()) {
+            assert!(
+                (i as usize) < restricted.ids.len(),
+                "permutation index {i} is out of range for {} ids",
+                restricted.ids.len()
+            );
+        }
+
+        // Restricting to nothing yields empty parallel arrays, not a mismatch.
+        let empty = index.restrict(&HashSet::new());
+        assert!(empty.ids.is_empty() && empty.by_fav.is_empty() && empty.by_age.is_empty());
     }
 }

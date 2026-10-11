@@ -247,8 +247,11 @@ interested hides the post and records one negative count per tag, reducing
 future `interaction_fit` scores for similar candidates rather than creating a
 permanent blacklist rule. The same menu can add a confirmed permanent account
 blacklist rule for a tag, artist, uploader, rating, or media category. The
-media rules use e621 meta tags: `video`, `animated`, or `-animated` (static
-media). Undo removes the current session's hide interaction
+media rules use the e621 meta tags `video` and `animated`, plus `require:animated`
+for static media. A blacklist entry is an exclusion, so a leading `-` is stripped
+as decoration rather than read as negation; "hide everything that is not
+animated" is instead spelled as a requirement, which the live query forwards to
+e621 as a positive tag. Undo removes the current session's hide interaction
 and reverses that negative tag feedback. The menu closes when the pointer
 leaves it or the user clicks outside it.
 

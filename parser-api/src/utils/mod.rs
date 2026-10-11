@@ -1,3 +1,4 @@
+pub mod blacklist;
 mod explain;
 mod idf;
 mod scorer;

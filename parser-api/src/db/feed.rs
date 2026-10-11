@@ -3,6 +3,7 @@ use rusqlite::{Connection, params};
 use std::collections::{HashMap, HashSet};
 
 use crate::models::{FeedInteractionRequest, FeedInteractionType, InteractionHistoryItem};
+use crate::utils::IdfIndex;
 
 use super::{hydrate_cache, open_db};
 
@@ -648,98 +649,242 @@ fn run_id_query(
         .map_err(|e| format!("collect: {e}"))
 }
 
-/// Shared body of `local_candidates_for_top_tags` sql, parameterised as
-/// `?1=account_id ?2=group_type ?3=n_tags ?4=limit`. Two closing variants are
-/// appended by the caller: a fast rowid-window plus the exact `ORDER BY RANDOM()`
-/// fallback used to top up when a sparse window under-fills.
-const TOP_TAGS_BODY: &str = "
-            WITH top_tags AS (
-                SELECT tag_name
-                FROM account_tag_counts
-                WHERE account_id = ?1 AND group_type = ?2
-                ORDER BY count DESC
-                LIMIT ?3
-            )
-            SELECT DISTINCT p.id
-            FROM posts p
-            INNER JOIN tags_posts tp ON tp.post_id = p.id
-            INNER JOIN tags t ON t.id = tp.tag_id
-            WHERE t.group_type = ?2
-              AND t.name IN (SELECT tag_name FROM top_tags)
-              AND p.is_deleted = 0
-              AND p.preview_url IS NOT NULL
-";
+/// Per-stream ceilings for the local candidate pool.
+///
+/// Streams are capped independently because their densities differ by orders of
+/// magnitude: artist tags match far more posts than character tags. A single
+/// shared counter let the densest stream fill the pool while the others broke
+/// out on their first element, so the pool was `cap` posts of one stream rather
+/// than the union of five.
+#[derive(Debug, Clone, Copy)]
+pub struct CandidatePoolTuning {
+    pub anchor_tags: usize,
+    pub recent_days: i64,
+    pub stream_share: f64,
+    pub preferred_limit: usize,
+    pub cooccurrence_limit: usize,
+    pub cooccurrence_min_cooc: i64,
+}
 
-/// Recent posts above the user's own popularity baseline (`avg_fav_count`).
-/// Randomized instead of ranked — picks from a wider pool to reduce
-/// repetition of the same popular posts across requests.
-const RECENT_POPULAR_BODY: &str = "
-            WITH baseline AS (
-                SELECT MAX(1.0, COALESCE(avg_fav_count, 0.0) * 0.6) AS thresh
-                FROM account_quality_profile
-                WHERE account_id = ?1
-            )
-            SELECT p.id
-            FROM posts p
-            WHERE p.created_at >= ?2
-              AND p.is_deleted = 0
-              AND p.preview_url IS NOT NULL
-              AND p.fav_count >= COALESCE((SELECT thresh FROM baseline), 1.0)
-";
+impl CandidatePoolTuning {
+    #[must_use]
+    pub fn from_config() -> Self {
+        let rt = &crate::models::cfg().runtime;
+        Self {
+            anchor_tags: rt.candidate_anchor_tags,
+            recent_days: rt.candidate_recent_days,
+            stream_share: rt.candidate_stream_share,
+            preferred_limit: rt.candidate_preferred_limit,
+            cooccurrence_limit: rt.candidate_cooccurrence_limit,
+            cooccurrence_min_cooc: rt.candidate_cooccurrence_min_cooc,
+        }
+    }
 
-fn local_candidates_for_top_tags(
+    /// Floored at 1 so a degenerate `stream_share` cannot silently starve every
+    /// stream and leave the pool empty.
+    #[must_use]
+    fn stream_cap(&self, limit: i64) -> i64 {
+        ((limit as f64 * self.stream_share.clamp(0.05, 1.0)).ceil() as i64).max(1)
+    }
+}
+
+/// Account-derived inputs the pool is drawn from.
+///
+/// Split out from the SQL on purpose: `bin/calibrate` has no
+/// `account_tag_counts` / `account_tag_cooccurrence` rows it may use for the
+/// accounts it evaluates — those tables are built from *all* favourites,
+/// including the test split it is scoring. It derives the same inputs from the
+/// training posts and calls the same builder, so the harness competes on the
+/// candidate distribution production actually produces.
+#[derive(Debug, Clone, Default)]
+pub struct CandidatePoolInput {
+    /// `(tag_name, group_type, count)`.
+    pub tag_counts: Vec<(String, String, i64)>,
+    /// Co-occurrence partner tag names, strongest first.
+    pub cooccurrence: Vec<String>,
+    /// Explicit preferred tags, strongest first.
+    pub preferred: Vec<String>,
+    /// `account_quality_profile.avg_fav_count` — the recent-popular baseline.
+    pub fav_baseline: f64,
+}
+
+/// Candidate posts carrying any of `tags`, sampled through a random rowid
+/// window with an `ORDER BY RANDOM()` top-up.
+///
+/// Matched on tag name alone: `tags` is `UNIQUE(name, group_type)` and e621
+/// keeps a name in exactly one category, so threading the group through would
+/// add a parameter to every stream (preferred tags and neighbours mix groups)
+/// without changing the result.
+///
+/// One `?` per tag, so the list must stay short — every caller caps it well
+/// below SQLite's 999-variable floor.
+///
+/// The window runs as an `EXISTS` probe over a rowid scan rather than as a
+/// join plus `DISTINCT`. The join form fans out one row per matching tag, so
+/// it needs `DISTINCT` — and `DISTINCT` forces SQLite to materialise *every*
+/// match into a temp B-tree before `LIMIT` can stop anything, which makes the
+/// cost proportional to the match count instead of to `limit`. On a generic
+/// tag that is the whole catalog (`male` alone carries ~63% of it, and the
+/// co-occurrence stream samples exactly such tags), which is where the multi
+/// second `db_hydrate` came from. Measured on the production DB over the same
+/// 80 generic tags: 6.81 s -> 0.06 s for the same 136 ids.
+/// The top-up is not restricted to the part of the catalog the window skipped,
+/// so it can repeat ids the window already returned. Callers are expected to
+/// absorb that: `collect_candidate_ids` dedups through `seen` and charges only
+/// genuinely new ids against a stream's budget.
+fn local_candidates_for_tag_names(
     conn: &Connection,
-    account_id: i32,
-    group_type: &str,
-    n_tags: i64,
+    tags: &[String],
     limit: i64,
 ) -> Result<Vec<i64>, String> {
+    if tags.is_empty() || limit <= 0 {
+        return Ok(Vec::new());
+    }
     let anchor = random_rowid_anchor(conn)?;
-    // Fast path: a random rowid window, ordered by rowid — avoids the full
-    // `ORDER BY RANDOM()` sort over every post matching the top tags.
-    let window_sql = format!("{TOP_TAGS_BODY} AND p.rowid >= ?5 ORDER BY p.rowid LIMIT ?4");
-    let base: &[&dyn rusqlite::ToSql] = &[
-        &account_id as &dyn rusqlite::ToSql,
-        &group_type as &dyn rusqlite::ToSql,
-        &n_tags as &dyn rusqlite::ToSql,
-        &limit as &dyn rusqlite::ToSql,
-    ];
-    let mut out = {
-        let with_anchor: Vec<&dyn rusqlite::ToSql> = base
-            .iter()
-            .copied()
-            .chain(std::iter::once(&anchor as &dyn rusqlite::ToSql))
-            .collect();
-        run_id_query(conn, &window_sql, &with_anchor)?
-    };
-    // Fallback: if the random window is sparse, top up with the exact random
-    // sample so the stream still contributes up to `limit` diverse candidates.
+    local_candidates_for_tag_names_from(conn, tags, limit, anchor)
+}
+
+/// The body of [`local_candidates_for_tag_names`] with the anchor passed in.
+///
+/// Split out so tests can pin the anchor: the window is the contract this
+/// function has to keep, and a randomly drawn anchor can only ever be checked
+/// probabilistically. Callers must pass a non-empty `tags` and a positive
+/// `limit`; the public wrapper enforces both.
+fn local_candidates_for_tag_names_from(
+    conn: &Connection,
+    tags: &[String],
+    limit: i64,
+    anchor: i64,
+) -> Result<Vec<i64>, String> {
+    let n = tags.len();
+    // Tag placeholders are numbered explicitly: a bare `?` takes the index
+    // *after the largest one seen so far*, so an anonymous placeholder sitting
+    // behind `?n+2` would become `?n+3` and ask for a parameter that does not
+    // exist. Numbering every placeholder makes binding independent of the
+    // order the clauses happen to appear in.
+    let placeholders = (1..=n)
+        .map(|i| format!("?{i}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    // `?1..?n` are tag names, `?n+1` the limit, `?n+2` the rowid anchor.
+    let mut params: Vec<&dyn rusqlite::ToSql> =
+        tags.iter().map(|t| t as &dyn rusqlite::ToSql).collect();
+    params.push(&limit as &dyn rusqlite::ToSql);
+    params.push(&anchor as &dyn rusqlite::ToSql);
+
+    let window_sql = format!(
+        "SELECT p.id
+         FROM posts p
+         WHERE p.is_deleted = 0
+           AND p.preview_url IS NOT NULL
+           AND p.rowid >= ?{}
+           AND EXISTS (
+               SELECT 1
+               FROM tags_posts tp
+               INNER JOIN tags t ON t.id = tp.tag_id
+               WHERE tp.post_id = p.id AND t.name IN ({placeholders})
+           )
+         ORDER BY p.rowid
+         LIMIT ?{}",
+        n + 2,
+        n + 1
+    );
+    let mut out = run_id_query(conn, &window_sql, &params)?;
     if (out.len() as i64) < limit {
-        let random_sql = format!("{TOP_TAGS_BODY} ORDER BY RANDOM() LIMIT ?4");
-        let extra = run_id_query(conn, &random_sql, base)?;
-        out.extend(extra);
+        // The top-up keeps the join + `ORDER BY RANDOM()` shape on purpose: it
+        // only fires when the rowid window under-filled, which means the tag
+        // matched fewer posts than `limit` inside the tail — that is, the match
+        // set is small, which is exactly when sorting all of it is cheap. In
+        // `EXISTS` form this query would instead probe every row of `posts`.
+        let random_sql = format!(
+            "SELECT DISTINCT p.id
+             FROM posts p
+             INNER JOIN tags_posts tp ON tp.post_id = p.id
+             INNER JOIN tags t ON t.id = tp.tag_id
+             WHERE t.name IN ({placeholders})
+               AND p.is_deleted = 0
+               AND p.preview_url IS NOT NULL
+             ORDER BY RANDOM() LIMIT ?{}",
+            n + 1
+        );
+        out.extend(run_id_query(conn, &random_sql, &params[..n + 1])?);
     }
     out.truncate(limit as usize);
     Ok(out)
 }
 
-/// Recent posts above the user's own popularity baseline (`avg_fav_count`).
-/// Randomized instead of ranked — picks from a wider pool to reduce
-/// repetition of the same popular posts across requests.
+/// Rank `(tag_name, count)` rows by IDF-weighted frequency, keep the best
+/// `want`. The DF comes from the passed index so both callers order identically.
+///
+/// Ties break on the tag name: the anchor set decides the candidate pool, and
+/// the pool decides the calibration channel-cache key, so an order that varies
+/// per run makes the harness non-reproducible.
+#[must_use]
+pub fn rank_tags_by_idf(rows: Vec<(String, i64)>, idf: &IdfIndex, want: usize) -> Vec<String> {
+    if want == 0 {
+        return Vec::new();
+    }
+    let mut scored: Vec<(f32, String)> = rows
+        .into_iter()
+        .map(|(name, count)| {
+            // Fixed knobs rather than `priors`: this only decides *which* tags
+            // seed the pool, and pinning them keeps the anchor set stable while
+            // the scoring knobs are being tuned.
+            let weight = idf.idf_tempered_from_df(idf.df_for(&name), 1.0, 100.0, 0.5, 1.0, 1.0);
+            (count.max(1) as f32 * weight, name)
+        })
+        .collect();
+    scored.sort_by(|a, b| {
+        b.0.partial_cmp(&a.0)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.1.cmp(&b.1))
+    });
+    scored.truncate(want);
+    scored.into_iter().map(|(_, name)| name).collect()
+}
+
+/// Recent posts above the account's own popularity baseline.
+///
+/// `?1=created_at cutoff ?2=fav_count threshold ?3=limit`. The baseline is
+/// passed in rather than read from `account_quality_profile` so `bin/calibrate`
+/// can build the same stream from its training split.
+///
+/// Randomized instead of ranked — picks from a wider pool to reduce repetition
+/// of the same popular posts across requests.
+const RECENT_POPULAR_BODY: &str = "
+            SELECT p.id
+            FROM posts p
+            WHERE p.created_at >= ?1
+              AND p.is_deleted = 0
+              AND p.preview_url IS NOT NULL
+              AND p.fav_count >= ?2
+";
+
+/// Recent posts above the account's own popularity baseline.
+///
+/// Randomized instead of ranked — picks from a wider pool to reduce repetition
+/// of the same popular posts across requests.
 fn local_candidates_recent_popular(
     conn: &Connection,
-    account_id: i32,
+    fav_baseline: f64,
     recent_days: i64,
     limit: i64,
 ) -> Result<Vec<i64>, String> {
+    if limit <= 0 {
+        return Ok(Vec::new());
+    }
     let cutoff = (Utc::now() - chrono::Duration::days(recent_days.max(1))).to_rfc3339();
+    // 0.6 × the account's own average favourited count: below that a post is
+    // not "popular for this user". Floored at 1.0 so a fresh account (average
+    // 0) still gets a usable stream instead of an empty one.
+    let threshold = (fav_baseline.max(0.0) * 0.6).max(1.0);
     let anchor = random_rowid_anchor(conn)?;
     // Fast path: a random rowid window, ordered by rowid — avoids the full
     // `ORDER BY RANDOM()` sort over the entire recent set.
     let window_sql = format!("{RECENT_POPULAR_BODY} AND p.rowid >= ?4 ORDER BY p.rowid LIMIT ?3");
     let base: &[&dyn rusqlite::ToSql] = &[
-        &account_id as &dyn rusqlite::ToSql,
         &cutoff as &dyn rusqlite::ToSql,
+        &threshold as &dyn rusqlite::ToSql,
         &limit as &dyn rusqlite::ToSql,
     ];
     let mut out = {
@@ -759,48 +904,189 @@ fn local_candidates_recent_popular(
     Ok(out)
 }
 
-/// Three SQL streams (top-artist, top-character, recent-popular) unioned and
-/// capped at `limit`. Caller dedups against seen/owned in memory.
+/// Build the local candidate pool from pre-loaded sources.
+///
+/// Streams, in order: IDF-ranked artist anchors, IDF-ranked character anchors,
+/// recent-popular, explicit preferred tags, co-occurrence neighbours. Every
+/// stream draws up to its own cap and the union is deduped in insertion order,
+/// so a stream that under-fills leaves room for the next one instead of the
+/// first dense stream consuming the whole pool.
+pub fn collect_candidate_ids(
+    conn: &Connection,
+    input: &CandidatePoolInput,
+    idf: &IdfIndex,
+    tuning: &CandidatePoolTuning,
+    limit: i64,
+) -> Result<Vec<i64>, String> {
+    if limit <= 0 {
+        return Ok(Vec::new());
+    }
+    let cap = tuning.stream_cap(limit);
+
+    let anchors_for = |group: &str| -> Vec<String> {
+        let rows: Vec<(String, i64)> = input
+            .tag_counts
+            .iter()
+            .filter(|(_, g, _)| g == group)
+            .map(|(name, _, count)| (name.clone(), *count))
+            .collect();
+        rank_tags_by_idf(rows, idf, tuning.anchor_tags)
+    };
+    let artist_anchors = anchors_for("artist");
+    let character_anchors = anchors_for("character");
+
+    let preferred: Vec<String> = input
+        .preferred
+        .iter()
+        .take(tuning.preferred_limit)
+        .cloned()
+        .collect();
+    let neighbours: Vec<String> = input
+        .cooccurrence
+        .iter()
+        .take(tuning.cooccurrence_limit)
+        .cloned()
+        .collect();
+
+    let streams = [
+        local_candidates_for_tag_names(conn, &artist_anchors, cap)?,
+        local_candidates_for_tag_names(conn, &character_anchors, cap)?,
+        local_candidates_recent_popular(conn, input.fav_baseline, tuning.recent_days, cap)?,
+        local_candidates_for_tag_names(conn, &preferred, cap)?,
+        local_candidates_for_tag_names(conn, &neighbours, cap)?,
+    ];
+
+    let mut out: Vec<i64> = Vec::with_capacity(limit as usize);
+    let mut seen: HashSet<i64> = HashSet::with_capacity(limit as usize);
+    for ids in streams {
+        // Count each stream's own contribution, not the pool's running size:
+        // a shared counter let the first (densest) stream fill the pool and
+        // every later stream break out before adding anything, so the pool was
+        // one stream's output dressed up as five.
+        let mut added = 0usize;
+        for id in ids {
+            if added >= cap as usize || out.len() as i64 >= limit {
+                break;
+            }
+            // `insert` returning false means the id was already in the pool, so
+            // it must not be charged against this stream's budget.
+            if seen.insert(id) {
+                out.push(id);
+                added += 1;
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Read the account-side inputs the pool is built from.
+fn load_candidate_pool_input(
+    conn: &Connection,
+    account_id: i32,
+    tuning: &CandidatePoolTuning,
+) -> Result<CandidatePoolInput, String> {
+    let mut stmt = conn
+        .prepare("SELECT tag_name, group_type, count FROM account_tag_counts WHERE account_id = ?1")
+        .map_err(|e| format!("prep pool input/tags: {e}"))?;
+    let tag_counts = stmt
+        .query_map(params![account_id], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, i64>(2)?,
+            ))
+        })
+        .map_err(|e| format!("query pool input/tags: {e}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("collect pool input/tags: {e}"))?;
+    drop(stmt);
+
+    // Aggregate in SQL instead of shipping every pair into Rust: an active
+    // account holds millions of rows and only the top few dozen partners are
+    // ever used. `cooc_count >= ?2` keeps the scan on
+    // `idx_atc_account_cooc(account_id, cooc_count)` rather than a full table
+    // walk, and both directions of a pair are folded together because the
+    // table's ordering is not guaranteed to be canonical.
+    let mut stmt = conn
+        .prepare(
+            "SELECT partner, SUM(c) AS total
+             FROM (
+                 SELECT tag1_name AS partner, cooc_count AS c
+                 FROM account_tag_cooccurrence
+                 WHERE account_id = ?1 AND cooc_count >= ?2
+                 UNION ALL
+                 SELECT tag2_name AS partner, cooc_count AS c
+                 FROM account_tag_cooccurrence
+                 WHERE account_id = ?1 AND cooc_count >= ?2
+             )
+             GROUP BY partner
+             ORDER BY total DESC, partner ASC
+             LIMIT ?3",
+        )
+        .map_err(|e| format!("prep pool input/cooc: {e}"))?;
+    let cooccurrence = stmt
+        .query_map(
+            params![
+                account_id,
+                tuning.cooccurrence_min_cooc,
+                tuning.cooccurrence_limit as i64
+            ],
+            |r| r.get::<_, String>(0),
+        )
+        .map_err(|e| format!("query pool input/cooc: {e}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("collect pool input/cooc: {e}"))?;
+    drop(stmt);
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT tag_name FROM account_preferred_tags
+             WHERE account_id = ?1
+             ORDER BY weight DESC, tag_name ASC",
+        )
+        .map_err(|e| format!("prep pool input/preferred: {e}"))?;
+    let preferred = stmt
+        .query_map(params![account_id], |r| r.get::<_, String>(0))
+        .map_err(|e| format!("query pool input/preferred: {e}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("collect pool input/preferred: {e}"))?;
+    drop(stmt);
+
+    // A missing profile row means "no favourites yet": the recent-popular
+    // stream then falls back to its `.max(1.0)` floor instead of the whole pool
+    // failing to build.
+    let fav_baseline: f64 = conn
+        .query_row(
+            "SELECT COALESCE(avg_fav_count, 0.0) FROM account_quality_profile WHERE account_id = ?1",
+            params![account_id],
+            |r| r.get(0),
+        )
+        .unwrap_or(0.0);
+
+    Ok(CandidatePoolInput {
+        tag_counts,
+        cooccurrence,
+        preferred,
+        fav_baseline,
+    })
+}
+
+/// Five SQL streams unioned and capped at `limit`. Caller dedups against
+/// seen/owned in memory.
 ///
 /// ## Randomisation
 /// Each stream samples a pseudo-random rowid window (with an `ORDER BY
 /// RANDOM()` fallback) so the same best posts don't dominate every feed request.
-/// - Artist/character: pulls from the user's top 20 tags.
-/// - Recent-popular: looks back 60 days.
-/// - Pool size per stream: `(limit / 3 * 2).max(100)`.
 pub fn collect_local_candidate_ids(account_id: i32, limit: i64) -> Result<Vec<i64>, String> {
     let cache_key = i64::from(account_id);
     if let Some(cached) = hydrate_cache::candidates(cache_key) {
         return Ok((*cached).clone());
     }
     let conn = open_db()?;
-    // Use a larger multiplier per stream so each source contributes a diverse
-    // set. Each query samples a pseudo-random rowid window (with an exact
-    // ORDER BY RANDOM() fallback) so different posts appear every time.
-    // Combined with the HashSet dedup this gives us a varied pool that still
-    // respects the user's taste.
-    let per_stream = (limit / 3 * 2).max(100);
-    let cap_per_stream = (limit as usize / 3 + 1).max(20);
-
-    let mut out: HashSet<i64> = HashSet::with_capacity(limit as usize);
-    for ids in [
-        // Pull from more tags (20 instead of 10/12) and randomize the results
-        local_candidates_for_top_tags(&conn, account_id, "artist", 20, per_stream)?,
-        local_candidates_for_top_tags(&conn, account_id, "character", 20, per_stream)?,
-        // Look back 60 days instead of 30 for a bigger pool of recent-popular posts
-        local_candidates_recent_popular(&conn, account_id, 60, per_stream)?,
-    ] {
-        for id in ids {
-            if out.len() >= cap_per_stream {
-                break;
-            }
-            out.insert(id);
-            if out.len() as i64 >= limit {
-                break;
-            }
-        }
-    }
-    let result: Vec<i64> = out.into_iter().collect();
+    let tuning = CandidatePoolTuning::from_config();
+    let input = load_candidate_pool_input(&conn, account_id, &tuning)?;
+    let idf = crate::utils::current_idf();
+    let result = collect_candidate_ids(&conn, &input, &idf, &tuning, limit)?;
     Ok((*hydrate_cache::store_candidates(cache_key, result)).clone())
 }
 
@@ -951,7 +1237,7 @@ pub(crate) mod tests {
         )
         .unwrap();
 
-        let ids = local_candidates_recent_popular(&conn, 1, 60, 100).unwrap();
+        let ids = local_candidates_recent_popular(&conn, 50.0, 60, 100).unwrap();
         // Only qualifying posts may be returned: non-deleted, preview_url set, recent, fav >= MAX(1,50*0.6=30).
         assert!(!ids.is_empty());
         assert!(ids.len() <= 100);
@@ -961,7 +1247,7 @@ pub(crate) mod tests {
         // With 100 qualifying posts the window + fallback must fill to the limit.
         assert_eq!(ids.len(), 100, "expected full fill, got {}", ids.len());
         // idempotent: repeated calls still respect the guarantee.
-        let ids2 = local_candidates_recent_popular(&conn, 1, 60, 100).unwrap();
+        let ids2 = local_candidates_recent_popular(&conn, 50.0, 60, 100).unwrap();
         assert_eq!(ids2.len(), 100);
     }
 
@@ -998,10 +1284,326 @@ pub(crate) mod tests {
             )
             .unwrap();
         }
-        let ids = local_candidates_for_top_tags(&conn, 1, "artist", 5, 10).unwrap();
+        let ids = local_candidates_for_tag_names(&conn, &["artist_tag_1".to_string()], 10).unwrap();
         assert_eq!(ids.len(), 10, "sample fills to limit");
         for id in &ids {
-            assert!((1..=40).contains(id), "id {id} out of range");
+            assert!((1..=20).contains(id), "id {id} out of range");
         }
+        // Union across tags: both artist tags together must reach the wider set.
+        let both = local_candidates_for_tag_names(
+            &conn,
+            &["artist_tag_1".to_string(), "artist_tag_2".to_string()],
+            40,
+        )
+        .unwrap();
+        assert_eq!(both.len(), 40, "union covers both tags");
+        // A tag nobody carries yields nothing rather than an error.
+        assert!(
+            local_candidates_for_tag_names(&conn, &["general_1".to_string()], 10)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            local_candidates_for_tag_names(&conn, &[], 10)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn the_tag_window_is_the_first_matches_after_the_anchor_in_rowid_order() {
+        // The stream promises "the first `limit` matches at or after the anchor,
+        // in rowid order". The `EXISTS` rewrite replaced a join + `DISTINCT`
+        // (which materialised every match) with a rowid scan, and a scan that
+        // dropped `ORDER BY` — or an `EXISTS` that restarted the window per tag
+        // — would still return *matching* ids while breaking that promise. So
+        // pin the promise itself, with the anchor fixed rather than drawn at
+        // random: a random anchor can only ever test this probabilistically.
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE posts (
+                id INTEGER PRIMARY KEY, created_at TEXT NOT NULL, score_total INTEGER NOT NULL,
+                fav_count INTEGER NOT NULL, rating TEXT NOT NULL, last_seen_at TEXT NOT NULL,
+                is_deleted INTEGER NOT NULL DEFAULT 0, preview_url TEXT
+             );
+             CREATE TABLE tags (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, group_type TEXT NOT NULL);
+             CREATE TABLE tags_posts (tag_id INTEGER NOT NULL, post_id INTEGER NOT NULL);
+             INSERT INTO tags (name, group_type) VALUES ('wtag','artist');",
+        )
+        .unwrap();
+        // 42 posts all carrying the tag, so the window is the only thing that
+        // decides membership. Two of them must never surface: 41 is deleted and
+        // 42 has no preview. The preview must also be rendered by a separate
+        // statement because `REFERENTIAL`-less in-memory SQLite needs the rows
+        // first.
+        conn.execute_batch(
+            "INSERT INTO posts (id, created_at, score_total, fav_count, rating, last_seen_at, is_deleted, preview_url)
+             SELECT v, '2026-08-13T00:00:00Z', 50, 5, 'q', '2026-08-13T00:00:00Z',
+                    CASE WHEN v = 41 THEN 1 ELSE 0 END,
+                    CASE WHEN v = 42 THEN NULL ELSE 'p/'||v||'.jpg' END
+             FROM (WITH RECURSIVE seq(v) AS (SELECT 1 UNION ALL SELECT v+1 FROM seq WHERE v < 42) SELECT v FROM seq);
+             INSERT INTO tags_posts (tag_id, post_id)
+             SELECT 1, v FROM (WITH RECURSIVE seq(v) AS (SELECT 1 UNION ALL SELECT v+1 FROM seq WHERE v < 42) SELECT v FROM seq);",
+        )
+        .unwrap();
+
+        let tags = vec!["wtag".to_string()];
+
+        // A window wide enough to hold every eligible post: the window prefix
+        // must be exactly the non-deleted, preview-bearing rows in rowid order.
+        // Only the prefix is pinned: because 40 < limit the top-up also fires
+        // and may repeat ids the window already returned. That is harmless —
+        // `collect_candidate_ids` dedups through `seen` and charges only new
+        // insertions against a stream's budget — but it does mean the tail of
+        // this vector is not ordered.
+        let all = local_candidates_for_tag_names_from(&conn, &tags, 100, 1).unwrap();
+        assert_eq!(
+            &all[..40],
+            &(1..=40).collect::<Vec<i64>>()[..],
+            "the window must return every eligible match in rowid order"
+        );
+        assert!(
+            all.iter().all(|id| (1..=40).contains(id)),
+            "neither deleted post 41 nor preview-less post 42 may appear"
+        );
+
+        // A window that fills exactly.
+        let full = local_candidates_for_tag_names_from(&conn, &tags, 10, 11).unwrap();
+        assert_eq!(full, (11..=20).collect::<Vec<i64>>());
+
+        // A window that cannot fill: the top-up may add anything, but the
+        // window's own prefix must survive, in order, ahead of it.
+        let short = local_candidates_for_tag_names_from(&conn, &tags, 10, 35).unwrap();
+        assert_eq!(short.len(), 10, "the top-up must still fill to the limit");
+        assert_eq!(
+            &short[..6],
+            &[35, 36, 37, 38, 39, 40],
+            "the window prefix must stay ordered and come first"
+        );
+
+        // An anchor past every post yields no window at all, so the result is
+        // purely the top-up — which must respect the same filters.
+        let beyond = local_candidates_for_tag_names_from(&conn, &tags, 100, 100_000).unwrap();
+        assert_eq!(
+            beyond.len(),
+            40,
+            "only the 40 eligible posts may be topped up"
+        );
+        assert!(
+            !beyond.contains(&41) && !beyond.contains(&42),
+            "the top-up must not resurrect a deleted or preview-less post"
+        );
+    }
+
+    #[test]
+    fn idf_ranking_prefers_specific_tags_over_generic_ones() {
+        // 1000 posts carry `generic`, 50 carry `specific`. Ranking on raw count
+        // alone would take `generic` first and collapse every account's pool
+        // onto the same globally popular posts.
+        let mut df = HashMap::new();
+        df.insert("generic".to_string(), 9000);
+        df.insert("specific".to_string(), 10);
+        let idf = IdfIndex::from_df(&df, 10_000);
+        let rows = vec![("generic".to_string(), 1000), ("specific".to_string(), 50)];
+        assert_eq!(
+            rank_tags_by_idf(rows, &idf, 1),
+            vec!["specific".to_string()],
+            "the specific tag must outrank the generic one"
+        );
+    }
+
+    #[test]
+    fn idf_ranking_is_deterministic_on_ties() {
+        // The anchor set decides the pool, and the pool decides the calibration
+        // channel-cache key, so equal scores must not reorder between runs.
+        let mut df = HashMap::new();
+        df.insert("a".to_string(), 10);
+        df.insert("b".to_string(), 10);
+        let idf = IdfIndex::from_df(&df, 1000);
+        let rows = vec![("b".to_string(), 7), ("a".to_string(), 7)];
+        let expected = vec!["a".to_string(), "b".to_string()];
+        assert_eq!(rank_tags_by_idf(rows.clone(), &idf, 2), expected);
+        assert_eq!(rank_tags_by_idf(rows, &idf, 2), expected);
+    }
+
+    #[test]
+    fn stream_cap_never_starves_a_stream() {
+        let tuning = CandidatePoolTuning {
+            anchor_tags: 20,
+            recent_days: 60,
+            stream_share: 0.0,
+            preferred_limit: 10,
+            cooccurrence_limit: 10,
+            cooccurrence_min_cooc: 2,
+        };
+        assert_eq!(
+            tuning.stream_cap(0),
+            1,
+            "a zero share still allows one post"
+        );
+        assert_eq!(tuning.stream_cap(400), 20, "share is floored at 0.05");
+        let full = CandidatePoolTuning {
+            stream_share: 1.0,
+            ..tuning
+        };
+        assert_eq!(full.stream_cap(400), 400);
+    }
+
+    /// Regression: the pool used to come out of a single stream. The loop
+    /// tracked the pool's *total* size against the cap, so the first (densest)
+    /// stream filled it and every later stream broke out on its first element —
+    /// a 400-post pool measured 134 posts of artist anchors and nothing else.
+    #[test]
+    fn every_stream_contributes_to_the_pool() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE posts (
+                id INTEGER PRIMARY KEY, created_at TEXT NOT NULL, score_total INTEGER NOT NULL,
+                fav_count INTEGER NOT NULL, rating TEXT NOT NULL, last_seen_at TEXT NOT NULL,
+                is_deleted INTEGER NOT NULL DEFAULT 0, preview_url TEXT
+             );
+             CREATE TABLE tags (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, group_type TEXT NOT NULL);
+             CREATE TABLE tags_posts (tag_id INTEGER NOT NULL, post_id INTEGER NOT NULL);",
+        )
+        .unwrap();
+        let now = Utc::now().to_rfc3339();
+        // 1-100 carry the dense artist anchor, 101-120 the sparse character
+        // anchor, 121-160 nothing but are recent and popular.
+        for i in 1..=160i64 {
+            let fav = if i > 120 { 50 } else { 0 };
+            conn.execute(
+                "INSERT INTO posts (id, created_at, score_total, fav_count, rating, last_seen_at, is_deleted, preview_url)
+                 VALUES (?1,?2,100,?3,'q',?2,0,'p/'||?1||'.jpg')",
+                rusqlite::params![i, now, fav],
+            )
+            .unwrap();
+        }
+        conn.execute_batch(
+            "INSERT INTO tags (name, group_type) VALUES ('art','artist'),('chr','character');",
+        )
+        .unwrap();
+        for i in 1..=100i64 {
+            conn.execute(
+                "INSERT INTO tags_posts (tag_id, post_id) VALUES (1,?1)",
+                [i],
+            )
+            .unwrap();
+        }
+        for i in 101..=120i64 {
+            conn.execute(
+                "INSERT INTO tags_posts (tag_id, post_id) VALUES (2,?1)",
+                [i],
+            )
+            .unwrap();
+        }
+
+        let idf = IdfIndex::from_df(&HashMap::new(), 1000);
+        let input = CandidatePoolInput {
+            tag_counts: vec![
+                ("art".to_string(), "artist".to_string(), 100),
+                ("chr".to_string(), "character".to_string(), 20),
+            ],
+            cooccurrence: Vec::new(),
+            preferred: Vec::new(),
+            fav_baseline: 50.0,
+        };
+        let tuning = CandidatePoolTuning {
+            anchor_tags: 20,
+            recent_days: 60,
+            stream_share: 0.3,
+            preferred_limit: 50,
+            cooccurrence_limit: 50,
+            cooccurrence_min_cooc: 2,
+        };
+
+        let pool = collect_candidate_ids(&conn, &input, &idf, &tuning, 60).unwrap();
+        assert!(!pool.is_empty());
+        assert!(pool.len() <= 60);
+
+        // cap = ceil(60 * 0.3) = 18, so the artist stream cannot take more than
+        // 18 of the 60 slots however many posts it could match.
+        let from_artist = pool.iter().filter(|id| (1..=100).contains(*id)).count();
+        assert!(
+            from_artist <= 18,
+            "artist stream overran its cap with {from_artist} posts"
+        );
+        assert!(
+            pool.iter().any(|id| (101..=120).contains(id)),
+            "character stream contributed nothing"
+        );
+        assert!(
+            pool.iter().any(|id| *id > 120),
+            "recent-popular stream contributed nothing"
+        );
+    }
+
+    /// The preferred and co-occurrence streams are the account's own signals;
+    /// before this they reached the scorer but never the candidate pool.
+    #[test]
+    fn preferred_and_cooccurrence_streams_seed_the_pool() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE posts (
+                id INTEGER PRIMARY KEY, created_at TEXT NOT NULL, score_total INTEGER NOT NULL,
+                fav_count INTEGER NOT NULL, rating TEXT NOT NULL, last_seen_at TEXT NOT NULL,
+                is_deleted INTEGER NOT NULL DEFAULT 0, preview_url TEXT
+             );
+             CREATE TABLE tags (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, group_type TEXT NOT NULL);
+             CREATE TABLE tags_posts (tag_id INTEGER NOT NULL, post_id INTEGER NOT NULL);",
+        )
+        .unwrap();
+        let now = Utc::now().to_rfc3339();
+        for i in 1..=40i64 {
+            conn.execute(
+                "INSERT INTO posts (id, created_at, score_total, fav_count, rating, last_seen_at, is_deleted, preview_url)
+                 VALUES (?1,?2,100,0,'q',?2,0,'p/'||?1||'.jpg')",
+                rusqlite::params![i, now],
+            )
+            .unwrap();
+        }
+        conn.execute_batch(
+            "INSERT INTO tags (name, group_type) VALUES ('fav_tag','general'),('neigh_tag','general');",
+        )
+        .unwrap();
+        for i in 1..=20i64 {
+            conn.execute(
+                "INSERT INTO tags_posts (tag_id, post_id) VALUES (1,?1)",
+                [i],
+            )
+            .unwrap();
+        }
+        for i in 21..=40i64 {
+            conn.execute(
+                "INSERT INTO tags_posts (tag_id, post_id) VALUES (2,?1)",
+                [i],
+            )
+            .unwrap();
+        }
+
+        let idf = IdfIndex::from_df(&HashMap::new(), 1000);
+        let input = CandidatePoolInput {
+            tag_counts: Vec::new(),
+            cooccurrence: vec!["neigh_tag".to_string()],
+            preferred: vec!["fav_tag".to_string()],
+            fav_baseline: 0.0,
+        };
+        let tuning = CandidatePoolTuning {
+            anchor_tags: 20,
+            recent_days: 1,
+            stream_share: 0.34,
+            preferred_limit: 50,
+            cooccurrence_limit: 50,
+            cooccurrence_min_cooc: 2,
+        };
+
+        let pool = collect_candidate_ids(&conn, &input, &idf, &tuning, 60).unwrap();
+        assert!(
+            pool.iter().any(|id| (1..=20).contains(id)),
+            "preferred-tags stream contributed nothing"
+        );
+        assert!(
+            pool.iter().any(|id| (21..=40).contains(id)),
+            "co-occurrence stream contributed nothing"
+        );
     }
 }
