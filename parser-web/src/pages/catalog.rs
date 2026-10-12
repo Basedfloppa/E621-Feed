@@ -115,7 +115,11 @@ struct SavedGroup {
 }
 
 /// Human-readable byte size (e.g. `2.1 GB`) for the queue status.
-fn human_bytes(n: i64) -> String {
+///
+/// `pub(crate)` because the owner console shows the same media-cache byte
+/// count and this repository already carries more than enough copies of this
+/// helper (`read_display_setting` ×6, `fetch_json` ×2) without adding a third.
+pub(crate) fn human_bytes(n: i64) -> String {
     let n = n.max(0) as f64;
     let units = ["B", "KB", "MB", "GB", "TB"];
     let mut i = 0;

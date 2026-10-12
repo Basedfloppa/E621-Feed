@@ -135,6 +135,56 @@ the same predicate — and offers the secret field only when a secret is
 configured; on an open instance it says so instead of showing a form that could
 only answer 400.
 
+## Owner console — `/admin`
+
+`parser-web/src/pages/admin.rs` over `GET /api/admin/overview`
+(`parser-api/src/routes/admin.rs`). It is a **view over the accounts this
+browser already owns**, not a second authority: the rows come from the same
+`account_device_links` filter `/accounts` applies, so the page grants nothing a
+linked account could not already read. The nav entry follows the same rule as
+the Catalog tab — `models::ownership::owns_any_account` is the single predicate
+behind both `catalog_entry_visible` and `admin_entry_visible`, and a browser
+that owns nothing gets the "link an account" ask from the pages that already
+say it.
+
+The overview carries the owner-scoped totals (accounts, **distinct** saved
+posts, accounts with a stored key, running jobs), the instance-wide media
+counters, the configured `[buckets.*]` names, and one page of accounts with
+their per-account job state. Two details are deliberate:
+
+- `saved_posts` counts **distinct** posts, not `accounts_post` rows: one post
+  saved by two of your accounts is one post.
+- the media counters are **instance-wide** and the panel says so —
+  `db::media::queue_stats()` has no owner filter yet (TODO §4.5).
+
+### A/B bucket assignment
+
+`PUT /api/account/<id>/experiment_bucket` with `{"bucket": "variant"}` pins an
+account to one arm; `DELETE` clears the pin so it falls back to the
+deterministic hash of `account_id` (`Config::pick_bucket`). Before this route
+the buckets existed only in config and were assigned by that hash, with no way
+to say "put *this* account in *that* arm" — the field was read-only, exposed
+through `/feed_settings` and the export.
+
+Two behaviours are load-bearing:
+
+- **An unknown name is refused with 400 and the list of valid names.**
+  `pick_bucket` silently ignores an explicit name that is not in
+  `[buckets.*]`, so storing one would look like success and change nothing.
+  On an instance with no buckets configured the refusal says exactly that.
+- **An ownership miss is 404, not 500.** The route checks
+  `db::accounts::account_is_linked` and maps the miss itself, because
+  `ApiError::from_string` files any unrecognised error string under `Internal`
+  — see the note on that pattern in `db/accounts.rs`.
+
+The overview reports both `bucket_explicit` (what the database holds) and
+`bucket` (what scoring actually uses). They differ when a pin names a bucket
+the instance no longer configures; the console renders that as
+`Stale pin: legacy-arm → control` and offers it as a
+`legacy-arm (not configured)` option, because a `<select>` with nothing
+selected displays its first option and would otherwise read "Hash (no pin)"
+while the pin is still there.
+
 ## Profile backup / restore
 
 `GET /api/account/<id>/export` produces a JSON snapshot including blacklist,

@@ -2,6 +2,7 @@
 //! `openapi_get_routes_spec!` macro in `main.rs`.
 
 pub(crate) mod account;
+pub(crate) mod admin;
 pub(crate) mod browse;
 pub(crate) mod catalog;
 pub(crate) mod catalog_manage;
@@ -29,6 +30,7 @@ pub(crate) fn get_metrics() -> String {
 pub fn integration_test_routes() -> Vec<rocket::Route> {
     rocket::routes![
         account::list_accounts,
+        admin::admin_overview,
         account::get_account_tag_counts,
         account::get_account_profile,
         account::get_session_devices,
@@ -37,6 +39,8 @@ pub fn integration_test_routes() -> Vec<rocket::Route> {
         account::test_account_key,
         account::delete_account_key,
         account::get_account_key_state,
+        account::set_account_experiment_bucket,
+        account::clear_account_experiment_bucket,
         account::create_account,
         account::sync_account_route,
         account::get_sync_status,

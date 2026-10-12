@@ -40,14 +40,30 @@ pub fn owns_catalog(state: &OwnershipState) -> bool {
     state.owned_accounts > 0
 }
 
-/// Whether the Catalog nav entry belongs in the menu.
+/// Does this browser own at least one account?
 ///
-/// Unknown ownership stays hidden: the read can only fail if the API itself is
-/// unreachable (same origin, same cookie as every other call), and a nav entry
-/// that appears for a visitor who owns nothing is precisely what this gate is
-/// for. Callers therefore treat `None` as "no".
+/// The single predicate behind every owner-only nav entry. The catalog and the
+/// admin console are both views over the accounts this browser owns, so both
+/// ask this question and both must answer "hidden" while it is unknown — the
+/// read can only fail if the API itself is unreachable (same origin, same
+/// cookie as every other call), and a nav entry that appears for a visitor who
+/// owns nothing is precisely what the gate exists to prevent.
+pub fn owns_any_account(state: &Option<OwnershipState>) -> bool {
+    state.as_ref().is_some_and(|s| s.owned_accounts > 0)
+}
+
+/// Whether the Catalog nav entry belongs in the menu.
 pub fn catalog_entry_visible(state: &Option<OwnershipState>) -> bool {
-    state.as_ref().is_some_and(owns_catalog)
+    owns_any_account(state)
+}
+
+/// Whether the owner console (`/admin`) belongs in the menu.
+///
+/// Same rule as the catalog, and for the same reason: on a claimed instance a
+/// visitor who owns nothing can only be told to prove ownership first, and
+/// that instruction already lives on the page the menu would send them to.
+pub fn admin_entry_visible(state: &Option<OwnershipState>) -> bool {
+    owns_any_account(state)
 }
 
 /// Read the state once. `None` means "could not tell", never "owns nothing".
@@ -141,5 +157,20 @@ mod tests {
         };
         assert!(!catalog_entry_visible(&Some(waiting.clone())));
         assert!(!owns_catalog(&waiting));
+    }
+
+    /// The console is owner-only for the same reason the catalog is, so the two
+    /// entries must never disagree — a menu that offers one and hides the other
+    /// would be the bug this pins.
+    #[test]
+    fn the_admin_entry_follows_the_same_rule_as_the_catalog() {
+        for candidate in [None, Some(state(0)), Some(state(1)), Some(state(37))] {
+            assert_eq!(
+                admin_entry_visible(&candidate),
+                catalog_entry_visible(&candidate),
+                "the two owner entries must agree"
+            );
+        }
+        assert!(admin_entry_visible(&Some(state(1))));
     }
 }

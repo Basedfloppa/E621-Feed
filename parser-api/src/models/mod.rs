@@ -1,9 +1,11 @@
+mod admin;
 mod catalog;
 mod config;
 mod posts;
 mod tags_info;
 mod users;
 
+pub use admin::*;
 pub use catalog::*;
 pub use config::*;
 pub use posts::*;

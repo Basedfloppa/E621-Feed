@@ -1,3 +1,4 @@
+mod admin;
 mod api_client;
 mod api_error;
 mod catalog;
@@ -8,6 +9,7 @@ mod post;
 mod session;
 mod tour;
 
+pub use admin::*;
 pub use api_client::*;
 pub use api_error::*;
 pub use catalog::*;

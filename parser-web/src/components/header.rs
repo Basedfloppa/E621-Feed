@@ -2,7 +2,8 @@ use crate::components::{
     IconGithub, IconPerson, IconQuestion, IconSliders, QuickSettingsModal, ThemeToggle,
 };
 use crate::models::{
-    AttachTo, Button, Step, catalog_entry_visible, read_config_from_head, start_tour, use_ownership,
+    AttachTo, Button, Step, admin_entry_visible, catalog_entry_visible, read_config_from_head,
+    start_tour, use_ownership,
 };
 use yew::{
     Callback, Html, MouseEvent, classes, function_component, html, use_effect_with, use_state,
@@ -66,6 +67,10 @@ pub fn header() -> Html {
             .unwrap_or_default(),
     );
     let show_catalog = catalog_entry_visible(&ownership);
+    // The console is owner-only for the same reason and by the same predicate;
+    // a visitor who owns nothing gets the "link an account" ask from the pages
+    // that already say it, not a menu of pages that can only repeat it.
+    let show_admin = admin_entry_visible(&ownership);
 
     use_effect_with((), |_| {
         if !should_run_tour() {
@@ -417,6 +422,14 @@ pub fn header() -> Html {
                                     {"Catalog"}
                                 </a>
                             }
+                            if show_admin {
+                                <a role="tab"
+                                    class={classes!("tab", is_active("/admin").then_some("tab-active"))}
+                                    href="/admin"
+                                >
+                                    {"Admin"}
+                                </a>
+                            }
                         </div>
                     </div>
                     <div class="navbar-end gap-1">
@@ -544,6 +557,16 @@ pub fn header() -> Html {
                                 href="/catalog"
                             >
                                 {"Catalog"}
+                            </a>
+                        </li>
+                    }
+                    if show_admin {
+                        <li>
+                            <a
+                                class={classes!("text-base-content", is_active("/admin").then_some("menu-active"))}
+                                href="/admin"
+                            >
+                                {"Admin"}
                             </a>
                         </li>
                     }

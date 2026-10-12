@@ -219,6 +219,21 @@ await check('a malformed owner cookie is rejected as a bad request', async () =>
 // presence identifies the build.
 const debugBuild = await request('/api/openapi.json').then((r) => r.status === 200).catch(() => false);
 
+// Hoisted out of the check below so the owner-console checks can reuse the same
+// device. Each `bootstrap` mints a *new* token, and on an instance with no
+// `[instance].owner_secret` the first one adopts every unowned account — so
+// minting a second one here would quietly create a second owner.
+let mintedToken = null;
+
+function ownerHeaders(extra = {}) {
+  expect(Boolean(mintedToken), 'no owner token was minted earlier in this run');
+  // A browser sends `Origin` on an unsafe method, and in a release build
+  // `csrf_origin_is_allowed` demands it match the request host; a debug build
+  // would have the request diverted by the debug-only CORS fairing, so the
+  // header is mode-dependent (same rule as the bootstrap check below).
+  return { cookie: `owner_token=${mintedToken}`, ...(debugBuild ? {} : { origin: baseUrl }), ...extra };
+}
+
 await check('session/bootstrap mints a cookie that authenticates the API', async () => {
   // A browser sends `Origin` on an unsafe method, and in a release build
   // `csrf_origin_is_allowed` demands it match the request host. A debug build
@@ -238,6 +253,7 @@ await check('session/bootstrap mints a cookie that authenticates the API', async
   expect(accounts.status === 200, `/api/accounts with a minted cookie answered ${accounts.status}`);
   const json = JSON.parse(accounts.body);
   expect(Array.isArray(json), '/api/accounts did not return a JSON array');
+  mintedToken = token;
   return `minted token authenticates, ${json.length} account(s)`;
 });
 
@@ -255,6 +271,59 @@ await check('session/state reports what claiming the instance would link', async
   expect(typeof json.instance_locked === 'boolean', 'instance_locked is not a boolean');
   expect(Number.isInteger(json.adoptable_accounts), 'adoptable_accounts is not an integer');
   return `locked=${json.instance_locked} owned=${json.owned_accounts} adoptable=${json.adoptable_accounts}`;
+});
+
+await check('/api/admin/overview requires the owner cookie', async () => {
+  const { status } = await request('/api/admin/overview');
+  expect(status === 401, `expected 401 without a cookie, got ${status}`);
+  return `${status} without cookie`;
+});
+
+await check('the owner console counts exactly the accounts the cookie owns', async () => {
+  const headers = ownerHeaders();
+  const { status, body, type } = await request('/api/admin/overview', { headers });
+  expect(status === 200, `admin/overview answered ${status}`);
+  expect(type.includes('application/json'), `admin/overview answered ${type}`);
+  const json = JSON.parse(body);
+  for (const field of ['instance_locked', 'adoptable_accounts', 'totals', 'buckets', 'media', 'accounts']) {
+    expect(field in json, `admin/overview is missing ${field}`);
+  }
+  expect(Array.isArray(json.buckets), 'buckets is not an array');
+  expect(Array.isArray(json.accounts), 'accounts is not an array');
+  // §3.2 claims the console is "a UI, not new routes": it is a view over the
+  // same set `/accounts` returns. If the two ever disagree that claim is false,
+  // and the console is showing somebody else's library.
+  const listed = JSON.parse((await request('/api/accounts', { headers })).body);
+  expect(
+    json.totals.accounts === listed.length,
+    `admin/overview counts ${json.totals.accounts} accounts, /accounts returned ${listed.length}`,
+  );
+  return `accounts=${json.totals.accounts} buckets=${json.buckets.length} stored=${json.media.stored}`;
+});
+
+await check('an unassignable bucket is refused, not stored and ignored', async () => {
+  // `Config::pick_bucket` falls back to the hash whenever the pinned name is
+  // not in `[buckets.*]`, so storing an unknown name would look like success
+  // and change nothing. The name is validated before ownership, which makes
+  // this check deterministic regardless of whether this instance has buckets.
+  const headers = ownerHeaders({ 'content-type': 'application/json' });
+  const { status, body } = await request('/api/account/1/experiment_bucket', {
+    method: 'PUT',
+    headers,
+    body: JSON.stringify({ bucket: 'definitely-not-a-configured-bucket' }),
+  });
+  expect(status === 400, `expected 400 for an unknown bucket, got ${status}`);
+  expect(body.includes('bucket'), `the refusal does not mention buckets: ${body}`);
+
+  // Clearing an account this cookie does not own is an authorization miss, and
+  // must read as one (200 when it is ours, 404 when it is not) — never a 500,
+  // which is what `ApiError::from_string` would make of it.
+  const cleared = await request('/api/account/1/experiment_bucket', { method: 'DELETE', headers });
+  expect(
+    cleared.status === 404 || cleared.status === 200,
+    `clearing a bucket on an unowned account answered ${cleared.status}`,
+  );
+  return `${status} unknown, ${cleared.status} clear`;
 });
 
 await check('a request carrying the app origin is not answered with index.html', async () => {
