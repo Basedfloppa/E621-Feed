@@ -127,6 +127,14 @@ It is compared in constant time (`auth::secret_matches`) and the route is
 rate-limited to 5 attempts/minute per IP. Implementation:
 `db::accounts::adopt_unowned_accounts`.
 
+In the SPA this is **Settings → Instance ownership**
+(`parser-web/src/components/instance_card.rs`). The card reads
+`GET /api/session/state` — `instance_locked`, `owned_accounts` and
+`adoptable_accounts`, the last being the count enrollment would link, taken from
+the same predicate — and offers the secret field only when a secret is
+configured; on an open instance it says so instead of showing a form that could
+only answer 400.
+
 ## Profile backup / restore
 
 `GET /api/account/<id>/export` produces a JSON snapshot including blacklist,

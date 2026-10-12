@@ -1,6 +1,7 @@
 // pi-lens-ignore: E0432
 use crate::components::{
-    AccountKeyCard, IconSliders, PostCard, SavedAccountsSelect, SessionDevicesCard, StorageCard,
+    AccountKeyCard, IconSliders, InstanceCard, PostCard, SavedAccountsSelect, SessionDevicesCard,
+    StorageCard,
 };
 use crate::models::{
     Post, Rating, Score, Stats, Tags, api_get, api_patch, humanize_error_body,
@@ -596,6 +597,8 @@ pub fn settings_page() -> Html {
                             }
                         </div>
                     </div>
+
+                    <InstanceCard backend_url={backend_url.clone()} />
 
                     <StorageCard />
 

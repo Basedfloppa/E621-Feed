@@ -241,6 +241,22 @@ await check('session/bootstrap mints a cookie that authenticates the API', async
   return `minted token authenticates, ${json.length} account(s)`;
 });
 
+await check('session/state reports what claiming the instance would link', async () => {
+  // The settings card reads this before offering the secret field, and it must
+  // answer for a visitor who has no cookie yet — otherwise the card could not
+  // decide between the enroll form and the "this instance is open" note.
+  const { status, body, type } = await request('/api/session/state');
+  expect(status === 200, `session/state answered ${status}`);
+  expect(type.includes('application/json'), `session/state answered ${type}`);
+  const json = JSON.parse(body);
+  for (const field of ['instance_locked', 'owned_accounts', 'adoptable_accounts']) {
+    expect(field in json, `session/state is missing ${field}`);
+  }
+  expect(typeof json.instance_locked === 'boolean', 'instance_locked is not a boolean');
+  expect(Number.isInteger(json.adoptable_accounts), 'adoptable_accounts is not an integer');
+  return `locked=${json.instance_locked} owned=${json.owned_accounts} adoptable=${json.adoptable_accounts}`;
+});
+
 await check('a request carrying the app origin is not answered with index.html', async () => {
   if (debugBuild) {
     return skip('debug build: rocket_cors redirects non-allowlisted origins to /cors/403, which the SPA fallback answers with index.html (TODO §11.8); run against a release build to exercise this');

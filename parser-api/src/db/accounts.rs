@@ -635,6 +635,48 @@ fn adopt_unowned_accounts_conn(
     .map_err(|e| format!("adopt unowned accounts: {e}"))
 }
 
+/// `(accounts linked to `owner`, accounts owned by nobody)`.
+///
+/// The second count is what [`adopt_unowned_accounts`] would take, so the
+/// settings card can say how many accounts an enrollment links *before* the
+/// owner has proved the secret. The predicate is duplicated on purpose;
+/// `the_adoptable_count_is_what_adoption_takes` keeps the two in step.
+pub fn account_ownership_counts(
+    owner: Option<&str>,
+    seed_owner_token: &str,
+) -> Result<(i64, i64), String> {
+    let conn = open_db()?;
+    account_ownership_counts_conn(&conn, owner, seed_owner_token)
+}
+
+fn account_ownership_counts_conn(
+    conn: &rusqlite::Connection,
+    owner: Option<&str>,
+    seed_owner_token: &str,
+) -> Result<(i64, i64), String> {
+    let owned = match owner {
+        Some(token) => conn
+            .query_row(
+                "SELECT COUNT(*) FROM account_device_links WHERE owner_token = ?1",
+                params![token],
+                |row| row.get(0),
+            )
+            .map_err(|e| format!("count owned accounts: {e}"))?,
+        None => 0,
+    };
+    let adoptable = conn
+        .query_row(
+            "SELECT COUNT(*) FROM accounts a
+              WHERE NOT EXISTS (
+                    SELECT 1 FROM account_device_links adl
+                     WHERE adl.account_id = a.id AND adl.owner_token <> ?1)",
+            params![seed_owner_token],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("count adoptable accounts: {e}"))?;
+    Ok((owned, adoptable))
+}
+
 pub fn cleanup_orphan_accounts() -> Result<i64, String> {
     let deleted = super::with_write_tx(|tx| {
         tx.execute(
@@ -1316,5 +1358,48 @@ mod tests {
         )
         .unwrap();
         assert_eq!(again, 0);
+    }
+
+    #[test]
+    fn the_adoptable_count_is_what_adoption_takes() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE accounts (id INTEGER PRIMARY KEY, name TEXT);
+             CREATE TABLE account_device_links (
+                 owner_token TEXT NOT NULL,
+                 account_id INTEGER NOT NULL,
+                 linked_at TEXT NOT NULL,
+                 last_seen_at TEXT NOT NULL,
+                 PRIMARY KEY(owner_token, account_id)
+             );
+             INSERT INTO accounts (id, name) VALUES
+                 (1,'unlinked'), (2,'seeded'), (3,'someone'),
+                 (4,'seeded+someone'), (5,'seeded2');
+             INSERT INTO account_device_links VALUES
+                 ('calibration-seed', 2, 't', 't'),
+                 ('calibration-seed', 4, 't', 't'),
+                 ('calibration-seed', 5, 't', 't'),
+                 ('someone-else',     3, 't', 't'),
+                 ('someone-else',     4, 't', 't');",
+        )
+        .unwrap();
+
+        // A browser that has not enrolled yet holds no link at all.
+        let (owned, adoptable) =
+            account_ownership_counts_conn(&conn, None, "calibration-seed").unwrap();
+        assert_eq!(owned, 0);
+        assert_eq!(adoptable, 3, "1 is unlinked, 2 and 5 are seed-only");
+
+        let adopted =
+            adopt_unowned_accounts_conn(&conn, "owner", "calibration-seed", "2026-01-01T00:00:00Z")
+                .unwrap();
+        // The number the card shows before enrolling is the number enrollment
+        // actually links — otherwise it would be a promise it cannot keep.
+        assert_eq!(usize::try_from(adoptable).unwrap(), adopted);
+
+        let (owned, adoptable) =
+            account_ownership_counts_conn(&conn, Some("owner"), "calibration-seed").unwrap();
+        assert_eq!(owned, 3);
+        assert_eq!(adoptable, 0, "nothing is left for the next one to take");
     }
 }

@@ -358,6 +358,33 @@ async fn session_enroll(
     ))
 }
 
+/// Read-only ownership state for the instance card in the SPA.
+///
+/// `instance_locked` decides whether the UI offers the enroll form at all: with
+/// no `[instance].owner_secret` there is nothing to prove, because the first
+/// `/session/bootstrap` claims the instance by itself. `adoptable_accounts` is
+/// the count `/session/enroll` would link, so the card can say what claiming the
+/// instance does before the owner types anything.
+#[openapi(skip)]
+#[get("/session/state")]
+async fn session_state(cookies: &CookieJar<'_>) -> Result<Json<serde_json::Value>, ApiError> {
+    let locked = cfg().instance.ownership_requires_secret();
+    let seed_token = cfg().backtest.seed_owner_token.clone();
+    let owner_token = cookies
+        .get(auth::OWNER_TOKEN_COOKIE)
+        .filter(|c| validation::validate_owner_token(c.value()).is_ok())
+        .map(|c| c.value().to_string());
+    let (owned, adoptable) = db_blocking(move || {
+        e621_account_parser_api::db::account_ownership_counts(owner_token.as_deref(), &seed_token)
+    })
+    .await?;
+    Ok(Json(serde_json::json!({
+        "instance_locked": locked,
+        "owned_accounts": owned,
+        "adoptable_accounts": adoptable,
+    })))
+}
+
 /// Explicit logout — clear the cookie AND record the revocation
 /// server-side so a leaked cookie can't be replayed. Idempotent.
 #[openapi(tag = "Session")]
@@ -585,6 +612,7 @@ async fn build_rocket() -> rocket::Rocket<rocket::Build> {
         session_bootstrap,
         session_clear,
         session_enroll,
+        session_state,
         routes::tag_relations::resolve_tag,
         routes::tag_relations::resolve_tag_autocomplete,
         routes::tag_relations::resolve_tag_batch,
