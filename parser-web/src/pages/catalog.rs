@@ -143,6 +143,32 @@ fn write_groupings(groups: &[SavedGroup]) {
     }
 }
 
+/// Heading and body for the "this browser owns no accounts" state.
+///
+/// Split by whether the instance is claimed, because the two are different
+/// asks: on a claimed instance the visitor has to prove ownership in Settings
+/// first, whereas on an open instance (no `[instance].owner_secret`) linking an
+/// e621 account *is* the way in. A free function so both wordings can be pinned
+/// by a test that needs no DOM.
+fn empty_catalog_notice(instance_locked: bool) -> (&'static str, &'static str) {
+    if instance_locked {
+        (
+            "This instance is claimed by its owner",
+            "The local catalog is a view over the saved posts of the accounts this \
+             browser owns, and it owns none. If you are the owner, claim the instance \
+             with the [instance].owner_secret from config.toml, then link an e621 \
+             account — its favourites become searchable here.",
+        )
+    } else {
+        (
+            "No accounts linked yet",
+            "The local catalog is a view over the saved posts of the accounts this \
+             browser owns. Link an e621 account and its favourites become searchable \
+             here; no instance secret is needed while the instance is open.",
+        )
+    }
+}
+
 /// Local catalog browser: the owner's saved posts, with tag search (same tag
 /// alias suggestions as the Search page) and user-defined named groupings.
 ///
@@ -178,6 +204,16 @@ pub fn catalog_page() -> Html {
     let backend_url = read_config_from_head()
         .map(|c| c.backend_domain)
         .unwrap_or_default();
+
+    // Ownership gate. The catalog is a view over the accounts this browser
+    // owns, and every `/catalog/*` route rejects a token that owns none of
+    // them — so a visitor who owns nothing must not be shown an account
+    // selector with nothing in it, and must not be able to press "Clear
+    // cache". `None` means the read has not landed yet; that renders as
+    // "Loading…" rather than as an accusation.
+    let ownership = use_ownership(&backend_url);
+    let has_catalog = ownership.as_ref().is_some_and(owns_catalog);
+    let instance_locked = ownership.as_ref().is_some_and(|s| s.instance_locked);
 
     let on_retry = {
         let tick = tick.clone();
@@ -476,9 +512,14 @@ pub fn catalog_page() -> Html {
         )
     });
 
+    // Only meaningful once we know the browser owns something; the notice is
+    // computed unconditionally so both branches stay cheap.
+    let (notice_title, notice_body) = empty_catalog_notice(instance_locked);
+
     html! {
         <div class="m-4">
             <h1 class="text-2xl font-semibold text-base-content mb-3">{ "Local Catalog" }</h1>
+            if has_catalog {
             <p class="text-sm text-base-content/70 mb-3">
                 { "Your saved posts, searchable by tag. Favourites are collected when [catalog].save_favourites is on (and by /process); posts from /search /trending /digest additionally when save_all is on. Full-size media downloads follow what is collected." }
             </p>
@@ -617,6 +658,43 @@ pub fn catalog_page() -> Html {
             } else {
                 <p class="text-base-content/70 text-center my-8">{ "Select an account to browse the local catalog." }</p>
             }
+            } else if ownership.is_none() {
+                <p class="text-base-content/70 text-center my-8">{ "Loading…" }</p>
+            } else {
+                <div class="card bg-base-100 border border-base-300">
+                    <div class="card-body text-base-content">
+                        <h2 class="card-title text-xl">{ notice_title }</h2>
+                        <p class="text-sm text-base-content/70">{ notice_body }</p>
+                        <div class="card-actions justify-end mt-2">
+                            <a class="btn btn-sm btn-primary" href="/account">{ "Link an e621 account" }</a>
+                            if instance_locked {
+                                <a class="btn btn-sm btn-outline" href="/settings">{ "Claim this instance" }</a>
+                            }
+                        </div>
+                    </div>
+                </div>
+            }
         </div>
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::empty_catalog_notice;
+
+    /// The two states are different asks, and the copy has to say so: on a
+    /// claimed instance linking an account does nothing until ownership is
+    /// proved, on an open one linking *is* the way in.
+    #[test]
+    fn the_empty_catalog_notice_follows_whether_the_instance_is_claimed() {
+        let (locked_title, locked_body) = empty_catalog_notice(true);
+        let (open_title, open_body) = empty_catalog_notice(false);
+
+        assert_ne!(locked_title, open_title);
+        assert!(locked_title.contains("claimed"));
+        assert!(!open_title.contains("claimed"));
+        // The secret is only worth mentioning when there is one to type.
+        assert!(locked_body.contains("owner_secret"));
+        assert!(!open_body.contains("owner_secret"));
     }
 }

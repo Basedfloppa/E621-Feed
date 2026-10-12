@@ -8,22 +8,14 @@
 //! card is the only way to perform it from a browser, since `/session/enroll`
 //! would otherwise be API-only.
 
-use serde::Deserialize;
 use wasm_bindgen_futures::spawn_local;
 use web_sys::HtmlInputElement;
 use yew::prelude::*;
 
 use crate::models::{
-    api_get, api_post, dispatch_account_list_changed, humanize_error_body, humanize_network_error,
+    OwnershipState, api_get, api_post, dispatch_account_list_changed, humanize_error_body,
+    humanize_network_error,
 };
-
-/// `GET /session/state`.
-#[derive(Clone, Deserialize, PartialEq)]
-struct InstanceState {
-    instance_locked: bool,
-    owned_accounts: i64,
-    adoptable_accounts: i64,
-}
 
 #[derive(Clone, PartialEq, Properties)]
 pub struct InstanceCardProps {
@@ -47,13 +39,13 @@ fn accounts_summary(owned: i64, adoptable: i64) -> String {
     }
 }
 
-async fn fetch_state(backend_url: &str) -> Result<InstanceState, String> {
+async fn fetch_state(backend_url: &str) -> Result<OwnershipState, String> {
     match api_get(&format!("{backend_url}/session/state"))
         .send()
         .await
     {
         Ok(resp) if resp.ok() => resp
-            .json::<InstanceState>()
+            .json::<OwnershipState>()
             .await
             .map_err(|_| "Could not read the instance state.".to_string()),
         Ok(resp) => {
@@ -67,7 +59,7 @@ async fn fetch_state(backend_url: &str) -> Result<InstanceState, String> {
 
 #[function_component(InstanceCard)]
 pub fn instance_card(props: &InstanceCardProps) -> Html {
-    let state = use_state(|| None::<InstanceState>);
+    let state = use_state(|| None::<OwnershipState>);
     let load_error = use_state(String::new);
     let secret = use_state(String::new);
     let busy = use_state(|| false);

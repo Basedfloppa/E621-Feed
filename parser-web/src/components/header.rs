@@ -1,7 +1,9 @@
 use crate::components::{
     IconGithub, IconPerson, IconQuestion, IconSliders, QuickSettingsModal, ThemeToggle,
 };
-use crate::models::{AttachTo, Button, Step, read_config_from_head, start_tour};
+use crate::models::{
+    AttachTo, Button, Step, catalog_entry_visible, read_config_from_head, start_tour, use_ownership,
+};
 use yew::{
     Callback, Html, MouseEvent, classes, function_component, html, use_effect_with, use_state,
 };
@@ -53,6 +55,17 @@ pub fn header() -> Html {
             path == p || path.starts_with(&format!("{p}/"))
         }
     };
+
+    // The Catalog tab is a view over the accounts *this browser* owns, so it is
+    // only advertised to an owner. Every `/catalog/*` route is already
+    // owner-gated on the server; without this the menu instead leads a visitor
+    // who owns nothing to a page whose account selector has no accounts in it.
+    let ownership = use_ownership(
+        &read_config_from_head()
+            .map(|c| c.backend_domain)
+            .unwrap_or_default(),
+    );
+    let show_catalog = catalog_entry_visible(&ownership);
 
     use_effect_with((), |_| {
         if !should_run_tour() {
@@ -396,12 +409,14 @@ pub fn header() -> Html {
                             >
                                 {"History"}
                             </a>
-                            <a role="tab"
-                                class={classes!("tab", is_active("/catalog").then_some("tab-active"))}
-                                href="/catalog"
-                            >
-                                {"Catalog"}
-                            </a>
+                            if show_catalog {
+                                <a role="tab"
+                                    class={classes!("tab", is_active("/catalog").then_some("tab-active"))}
+                                    href="/catalog"
+                                >
+                                    {"Catalog"}
+                                </a>
+                            }
                         </div>
                     </div>
                     <div class="navbar-end gap-1">
@@ -522,14 +537,16 @@ pub fn header() -> Html {
                             {"History"}
                         </a>
                     </li>
-                    <li>
-                        <a
-                            class={classes!("text-base-content", is_active("/catalog").then_some("menu-active"))}
-                            href="/catalog"
-                        >
-                            {"Catalog"}
-                        </a>
-                    </li>
+                    if show_catalog {
+                        <li>
+                            <a
+                                class={classes!("text-base-content", is_active("/catalog").then_some("menu-active"))}
+                                href="/catalog"
+                            >
+                                {"Catalog"}
+                            </a>
+                        </li>
+                    }
                 </ul>
             </div>
         </div>
