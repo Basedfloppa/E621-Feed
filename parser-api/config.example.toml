@@ -356,3 +356,14 @@ save_favourites = false            # also download originals for saved posts (li
 media_cache_max_bytes = 0          # 0 = unlimited; else LRU-evict oldest originals beyond this (folder is fixed at media/)
 pool_membership = false            # persist pool membership locally for offline pool navigation
 save_all = false                   # additionally collect encountered posts: /digest /search /trending (and feed)
+
+# ── Instance ownership ────────────────────────────────────────────────
+# The secret that claims this instance (its accounts and the whole library).
+# Empty = trusted single-owner self-hosting: the first /session/bootstrap
+# adopts every account that belongs to nobody, which is also how a
+# `seed`-populated library is recovered after clearing cookies. Set it to a
+# non-empty value on any host other people can reach: /session/bootstrap then
+# mints only an empty guest token, and POST /api/session/enroll with this
+# value is the only way to claim ownership.
+[instance]
+owner_secret = ""

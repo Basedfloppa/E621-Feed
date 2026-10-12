@@ -593,6 +593,48 @@ pub fn delete_device_link(owner_token: &str, account_id: i32) -> Result<usize, S
     Ok(removed)
 }
 
+/// Link every account that belongs to nobody into `owner_token`.
+///
+/// "Nobody" means either no device link at all, or a link only to
+/// `seed_owner_token`. That second case is the common one in practice:
+/// `seed`/`calibrate` link everything they write
+/// (`backtest.seed_owner_token`, default `"calibration-seed"`), so a library
+/// built by those binaries does have a device link — just no human behind it.
+///
+/// This is also the only way an owner recovers a library after clearing
+/// cookies, since ownership is the cookie alone. Accounts linked to any *other*
+/// token are never touched, so a regular visitor's library cannot be taken, and
+/// the call is idempotent. Returns the number of accounts linked.
+pub fn adopt_unowned_accounts(owner_token: &str, seed_owner_token: &str) -> Result<i64, String> {
+    let now = Utc::now().to_rfc3339();
+    let linked = super::with_write_tx(|tx| {
+        adopt_unowned_accounts_conn(tx, owner_token, seed_owner_token, &now)
+    })?;
+    Ok(linked as i64)
+}
+
+/// The adoption statement itself, split out so it can be exercised against an
+/// in-memory connection (`with_write_tx` needs the process-global pool).
+fn adopt_unowned_accounts_conn(
+    conn: &rusqlite::Connection,
+    owner_token: &str,
+    seed_owner_token: &str,
+    now: &str,
+) -> Result<usize, String> {
+    conn.execute(
+        "INSERT OR IGNORE INTO account_device_links
+             (owner_token, account_id, linked_at, last_seen_at)
+         SELECT ?1, a.id, ?2, ?2
+           FROM accounts a
+          WHERE NOT EXISTS (
+                SELECT 1 FROM account_device_links adl
+                 WHERE adl.account_id = a.id AND adl.owner_token <> ?3
+          )",
+        params![owner_token, now, seed_owner_token],
+    )
+    .map_err(|e| format!("adopt unowned accounts: {e}"))
+}
+
 pub fn cleanup_orphan_accounts() -> Result<i64, String> {
     let deleted = super::with_write_tx(|tx| {
         tx.execute(
@@ -1201,5 +1243,78 @@ mod tests {
             !earlier_date_sorts_below,
             "an earlier date sorts below regardless of its separator"
         );
+    }
+
+    /// Adoption must move the accounts that belong to *nobody* and leave every
+    /// other library alone. The seed token is the subtle part: `seed` and
+    /// `calibrate` link what they write, so a library built by those binaries
+    /// is not "no device link" at all — it just has no human behind it, and
+    /// adopting only the unlinked rows would hand the owner an empty library.
+    ///
+    /// Several rows move in one statement, which also makes this the regression
+    /// test for an `INSERT ... SELECT` that reads its own target table.
+    #[test]
+    fn adopt_moves_only_accounts_owned_by_nobody() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE accounts (id INTEGER PRIMARY KEY, name TEXT);
+             CREATE TABLE account_device_links (
+                 owner_token TEXT NOT NULL,
+                 account_id INTEGER NOT NULL,
+                 linked_at TEXT NOT NULL,
+                 last_seen_at TEXT NOT NULL,
+                 PRIMARY KEY(owner_token, account_id)
+             );
+             INSERT INTO accounts (id, name) VALUES
+                 (1,'unlinked'), (2,'seeded'), (3,'someone'),
+                 (4,'seeded+someone'), (5,'seeded2');
+             INSERT INTO account_device_links VALUES
+                 ('calibration-seed', 2, 't', 't'),
+                 ('calibration-seed', 4, 't', 't'),
+                 ('calibration-seed', 5, 't', 't'),
+                 ('someone-else',     3, 't', 't'),
+                 ('someone-else',     4, 't', 't');",
+        )
+        .unwrap();
+
+        let adopted =
+            adopt_unowned_accounts_conn(&conn, "owner", "calibration-seed", "2026-01-01T00:00:00Z")
+                .unwrap();
+        // 1 (never linked) plus 2 and 5 (seed-only). 4 also has a real owner.
+        assert_eq!(adopted, 3, "unlinked + seed-only accounts must all move");
+
+        let owned: Vec<i64> = conn
+            .prepare(
+                "SELECT account_id FROM account_device_links \
+                  WHERE owner_token = 'owner' ORDER BY account_id",
+            )
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(owned, vec![1, 2, 5]);
+
+        // Another library is untouched, and the seed links are not stolen from
+        // the seed token either — adoption adds a link, it does not move one.
+        let others: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM account_device_links WHERE owner_token = 'someone-else'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(others, 2);
+
+        // Idempotent: by now nothing is owned by nobody, so a second claim
+        // adopts nothing rather than re-linking.
+        let again = adopt_unowned_accounts_conn(
+            &conn,
+            "owner2",
+            "calibration-seed",
+            "2026-01-01T00:00:00Z",
+        )
+        .unwrap();
+        assert_eq!(again, 0);
     }
 }

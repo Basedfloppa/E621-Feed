@@ -95,6 +95,11 @@ pub struct Config {
     /// app collects for scoring.
     #[serde(default)]
     pub catalog: CatalogConfig,
+
+    /// Instance ownership policy (TODO §4.5). Optional; omitting the section
+    /// keeps the trusted single-owner self-hosting behaviour.
+    #[serde(default)]
+    pub instance: InstanceConfig,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -147,6 +152,38 @@ impl CatalogConfig {
     /// bytes on disk, plus the `save_all` encountered scope.
     pub fn media_cache_enabled(&self) -> bool {
         self.save_favourites || self.save_all
+    }
+}
+
+/// Instance ownership policy (TODO §4.5).
+///
+/// Ownership is one HttpOnly cookie that `POST /session/bootstrap` mints for
+/// anybody, so the only thing that separates the instance owner from a visitor
+/// is the ability to *claim* the accounts that carry no device link (the ones
+/// `seed`/`calibrate` wrote, or a library whose cookie was cleared). This
+/// section decides how that claim is proven.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct InstanceConfig {
+    /// Shared secret the operator hands to the instance owner. Empty (the
+    /// default) keeps trusted single-owner self-hosting: the first
+    /// `/session/bootstrap` adopts every unlinked account. Set it on anything
+    /// reachable by others — `bootstrap` then mints only an empty guest token
+    /// and `POST /session/enroll` becomes the sole way to claim the instance.
+    ///
+    /// Deliberately *not* reusing `e621_key_encryption_secret` or `admin_api`:
+    /// both are unrotatable in practice (the first hashes straight into the
+    /// at-rest key, so changing it orphans every stored e621 key; the second is
+    /// a third-party credential only e621 can reissue), and neither could be
+    /// locked again after a leak. This value rotates on its own.
+    #[serde(default)]
+    pub owner_secret: String,
+}
+
+impl InstanceConfig {
+    /// Whether claiming the instance requires proving `owner_secret`.
+    #[must_use]
+    pub fn ownership_requires_secret(&self) -> bool {
+        !self.owner_secret.is_empty()
     }
 }
 
@@ -1397,6 +1434,10 @@ impl std::fmt::Debug for RedactedSecrets<'_> {
             .field("buckets", &self.0.buckets.keys().collect::<Vec<_>>())
             .field("runtime", &self.0.runtime)
             .field("catalog", &self.0.catalog)
+            .field(
+                "instance.owner_secret",
+                &shown(&self.0.instance.owner_secret),
+            )
             .field("priors", &self.0.priors)
             .finish_non_exhaustive()
     }
@@ -1620,6 +1661,38 @@ max_retries = 1
         // `Default` (0 / false); field-level serde defaults apply only when the
         // section is present (covered by the override test above).
         assert!(!cfg.catalog.save_all);
+    }
+
+    #[test]
+    fn instance_defaults_to_trusted_self_hosting() {
+        // No `[instance]` section: the first bootstrap claims the instance.
+        let cfg = parse_toml(MINIMAL_TOML).unwrap();
+        assert!(cfg.instance.owner_secret.is_empty());
+        assert!(!cfg.instance.ownership_requires_secret());
+    }
+
+    #[test]
+    fn instance_owner_secret_switches_to_proof_of_secret() {
+        let cfg = parse_toml(&format!(
+            "{MINIMAL_TOML}\n\n[instance]\nowner_secret = \"hunter2\"\n"
+        ))
+        .unwrap();
+        assert_eq!(cfg.instance.owner_secret, "hunter2");
+        assert!(cfg.instance.ownership_requires_secret());
+    }
+
+    #[test]
+    fn redacted_debug_masks_the_owner_secret() {
+        // The redacted view is what gets logged, and this secret is the only
+        // value that can claim the instance — a leak here is a leak of the
+        // instance itself.
+        let cfg = parse_toml(&format!(
+            "{MINIMAL_TOML}\n\n[instance]\nowner_secret = \"hunter2\"\n"
+        ))
+        .unwrap();
+        let shown = format!("{:?}", cfg.redacted());
+        assert!(!shown.contains("hunter2"), "owner secret leaked: {shown}");
+        assert!(shown.contains("<redacted, 7 chars>"), "{shown}");
     }
 
     // ── merge_priors ───────────────────────────────────────────────────

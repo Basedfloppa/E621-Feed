@@ -99,6 +99,34 @@ with multi-device installs managed by one operator:
 The settings page surfaces both in a “Devices & sessions” card
 (`parser-web/src/components/session_devices_card.rs`).
 
+### Instance ownership
+
+Ownership *is* the `owner_token` cookie — there is no account login — so the
+only thing separating the instance owner from a fresh visitor is who may claim
+the accounts that carry no personal device link. That is governed by
+`[instance].owner_secret`:
+
+- **Empty (default)** — trusted single-owner self-hosting. The first
+  `POST /api/session/bootstrap` adopts every account that belongs to nobody:
+  no device link at all, or a link only to `[backtest].seed_owner_token`
+  (which is what `seed` / `calibrate` write). This is also the only way back to
+  a library after clearing cookies. The response carries `adopted` and
+  `instance_locked`.
+- **Set** — `bootstrap` mints only an empty guest token and reports
+  `instance_locked: true`; `POST /api/session/enroll` with
+  `{ "secret": "…" }` mints (or reuses the caller's valid cookie) and adopts
+  the unowned accounts into that token. Accounts already linked to any other
+  token are never touched, so enrolling cannot strand an existing browser
+  library.
+
+Deliberately a dedicated value rather than `e621_key_encryption_secret` or
+`admin_api`: those two cannot be rotated without either re-encrypting every
+stored e621 key or rotating a third-party credential, so a leak of either would
+leave no way to lock the instance again. The owner secret rotates on its own.
+It is compared in constant time (`auth::secret_matches`) and the route is
+rate-limited to 5 attempts/minute per IP. Implementation:
+`db::accounts::adopt_unowned_accounts`.
+
 ## Profile backup / restore
 
 `GET /api/account/<id>/export` produces a JSON snapshot including blacklist,

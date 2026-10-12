@@ -241,12 +241,14 @@ fn get_default_blacklist() -> Json<serde_json::Value> {
 /// of admin-authenticated e621 calls.
 #[openapi(skip)]
 #[post("/session/bootstrap")]
-fn session_bootstrap(
+async fn session_bootstrap(
     _same_origin: auth::SameOrigin,
     cookies: &CookieJar<'_>,
     client_ip: ClientIp,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     ratelimit::check(&format!("bootstrap:ip:{}", client_ip.0), 5, 5)?;
+
+    let locked = cfg().instance.ownership_requires_secret();
 
     // Bootstrap mints/rotates the device `owner_token` cookie, which doubles
     // as the sole account-ownership identity. A cross-site POST (form auto-
@@ -256,18 +258,104 @@ fn session_bootstrap(
     if let Some(c) = cookies.get(auth::OWNER_TOKEN_COOKIE) {
         if validation::validate_owner_token(c.value()).is_ok() {
             cookies.add(auth::build_owner_cookie(c.value().to_string()));
-            return Ok(Json(serde_json::json!({ "minted": false })));
+            return Ok(Json(serde_json::json!({
+                "minted": false,
+                "adopted": 0,
+                "instance_locked": locked,
+            })));
         }
         cookies.add(auth::build_owner_cookie_clear());
     }
 
     // 32 random bytes → base64url ≈ 43 chars (≈256 bits entropy).
     let token = mint_owner_token();
+    // Trusted self-hosting (no `[instance].owner_secret`): the first bootstrap
+    // claims the instance by adopting the accounts that belong to nobody. With
+    // a secret configured this MUST stay zero, or any anonymous visitor would
+    // walk away owning the whole instance.
+    let adopted = if locked {
+        0
+    } else {
+        let token_for_adopt = token.clone();
+        db_blocking(move || adopt_unowned_accounts(&token_for_adopt)).await?
+    };
     cookies.add(auth::build_owner_cookie(token));
     audit::event("session.bootstrap")
         .field("minted", true)
+        .field("adopted", adopted)
+        .field("instance_locked", locked)
         .emit();
-    Ok(Json(serde_json::json!({ "minted": true })))
+    Ok(Json(serde_json::json!({
+        "minted": true,
+        "adopted": adopted,
+        "instance_locked": locked,
+    })))
+}
+
+/// Adopt every account that belongs to nobody into `owner_token`.
+///
+/// Lives here rather than in `db` because the seed token is a config value.
+fn adopt_unowned_accounts(owner_token: &str) -> Result<i64, String> {
+    let seed_token = cfg().backtest.seed_owner_token.clone();
+    e621_account_parser_api::db::adopt_unowned_accounts(owner_token, &seed_token)
+}
+
+/// Body of `POST /session/enroll`.
+#[derive(serde::Deserialize)]
+struct EnrollRequest {
+    secret: String,
+}
+
+/// Claim instance ownership by proving `[instance].owner_secret`.
+///
+/// `/session/bootstrap` cannot be the ownership primitive once a secret is
+/// configured — it is anonymous and only mints cookies. Here the caller proves
+/// the secret, and the accounts that belong to nobody are adopted into their
+/// token. A valid cookie the caller already holds is reused, so enrolling adds
+/// ownership to whatever this browser had instead of replacing it.
+#[openapi(skip)]
+#[post("/session/enroll", data = "<body>")]
+async fn session_enroll(
+    _same_origin: auth::SameOrigin,
+    cookies: &CookieJar<'_>,
+    client_ip: ClientIp,
+    body: Json<EnrollRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    // Far tighter than `bootstrap` (5/min): this is the one endpoint that takes
+    // a guessable secret, so the rate limit is a real defence rather than just
+    // amplification control.
+    ratelimit::check(&format!("enroll:ip:{}", client_ip.0), 5, 3)?;
+
+    let config = cfg();
+    let expected = &config.instance.owner_secret;
+    if expected.is_empty() {
+        return Err(ApiError::BadRequest(
+            "this instance has no [instance].owner_secret: ownership is claimed by the first /session/bootstrap"
+                .into(),
+        ));
+    }
+    if !auth::secret_matches(&body.secret, expected) {
+        audit::event("session.enroll")
+            .field("outcome", "rejected")
+            .field("client_ip", client_ip.0.clone())
+            .emit();
+        return Err(ApiError::Forbidden("invalid owner secret".into()));
+    }
+
+    let token = match cookies.get(auth::OWNER_TOKEN_COOKIE) {
+        Some(c) if validation::validate_owner_token(c.value()).is_ok() => c.value().to_string(),
+        _ => mint_owner_token(),
+    };
+    let token_for_adopt = token.clone();
+    let adopted = db_blocking(move || adopt_unowned_accounts(&token_for_adopt)).await?;
+    cookies.add(auth::build_owner_cookie(token));
+    audit::event("session.enroll")
+        .field("outcome", "granted")
+        .field("adopted", adopted)
+        .emit();
+    Ok(Json(
+        serde_json::json!({ "enrolled": true, "adopted": adopted }),
+    ))
 }
 
 /// Explicit logout — clear the cookie AND record the revocation
@@ -496,6 +584,7 @@ async fn build_rocket() -> rocket::Rocket<rocket::Build> {
         get_default_blacklist,
         session_bootstrap,
         session_clear,
+        session_enroll,
         routes::tag_relations::resolve_tag,
         routes::tag_relations::resolve_tag_autocomplete,
         routes::tag_relations::resolve_tag_batch,

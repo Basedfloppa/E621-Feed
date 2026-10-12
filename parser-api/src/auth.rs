@@ -71,6 +71,43 @@ pub fn revoke(token: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Constant-time comparison for the instance owner secret.
+///
+/// The candidate comes straight from a request body, so a short-circuiting
+/// `==` would leak a byte-by-byte timing oracle. Returning early on a length
+/// mismatch is deliberate and safe: `expected` is the operator's own config
+/// value, so its length is not the secret. The byte loop itself never exits
+/// early.
+#[must_use]
+pub fn secret_matches(candidate: &str, expected: &str) -> bool {
+    let (a, b) = (candidate.as_bytes(), expected.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
+#[cfg(test)]
+mod secret_tests {
+    use super::secret_matches;
+
+    #[test]
+    fn secret_matches_accepts_only_the_exact_value() {
+        assert!(secret_matches("hunter2", "hunter2"));
+        // Same length, one byte off — the case a length check alone misses.
+        assert!(!secret_matches("hunter3", "hunter2"));
+        // Both directions of a length mismatch.
+        assert!(!secret_matches("hunter", "hunter2"));
+        assert!(!secret_matches("hunter22", "hunter2"));
+        assert!(!secret_matches("", "hunter2"));
+        assert!(!secret_matches("hunter2", ""));
+    }
+}
+
 pub(crate) fn csrf_origin_is_allowed(req: &Request<'_>) -> bool {
     // Defense-in-depth alongside the `SameSite=Strict` owner cookie (the
     // primary boundary). `Sec-Fetch-Site` is sent by browsers on every fetch
