@@ -88,19 +88,22 @@ pub struct Config {
     #[serde(default)]
     pub backtest: BacktestConfig,
 
-    /// Local catalog & offline-serving knobs (TODO §4.1 / docs/offline-catalog.md).
-    /// All fields default off so existing deployments behave exactly as today.
+    /// Offline-serving knobs (TODO §4.1 / docs/offline-catalog.md): originals
+    /// on disk, pool membership, encountered-post collection. The user's
+    /// library (`accounts_post`) is *not* gated here — it is core and always
+    /// imported — so defaulting every field off changes nothing about what the
+    /// app collects for scoring.
     #[serde(default)]
     pub catalog: CatalogConfig,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct CatalogConfig {
-    /// Collect favourites into the local catalog: posts served by
-    /// `/browse/favorites` and imported by `/process` (favourites sync) are
-    /// persisted (posts + `accounts_post` + tags), and the background media
-    /// worker downloads their originals. `save_all` implies this scope.
-    /// Default `false`.
+    /// Cache originals on disk for the owner's saved posts (the background
+    /// media worker). The library itself — `accounts_post`, which every
+    /// taste/scoring read derives from — is imported unconditionally by
+    /// `/process`, the direct sync and `/browse/favorites`; this toggle only
+    /// decides whether their *bytes* are downloaded. Default `false`.
     #[serde(default = "default_catalog_save_favourites")]
     pub save_favourites: bool,
 
@@ -135,11 +138,14 @@ fn default_catalog_pool_membership() -> bool {
 }
 
 impl CatalogConfig {
-    /// Any local collection is active when at least one persistence toggle is
-    /// on. This gates the favourites scope (`/browse/favorites`, `/process`,
-    /// direct sync) and the media-cache worker; with both off nothing is
-    /// collected and the worker idles.
-    pub fn persistence_enabled(&self) -> bool {
+    /// Whether the media-cache worker may download originals.
+    ///
+    /// This used to gate the library import too (`/process`, direct sync,
+    /// `/browse/favorites`), which made the optional offline cache a
+    /// prerequisite for the core — with both toggles off `/process` refused
+    /// outright. Those paths are unconditional now; what remains opt-in is the
+    /// bytes on disk, plus the `save_all` encountered scope.
+    pub fn media_cache_enabled(&self) -> bool {
         self.save_favourites || self.save_all
     }
 }

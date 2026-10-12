@@ -402,12 +402,10 @@ pub(crate) async fn get_favorites(
         .await
         .map_err(ApiError::from_string)?;
 
-    // Сохраняем в каталог И привязываем к аккаунту — это фавориты
-    // пользователя (favourites scope: `save_favourites` или `save_all`).
-    // Fire-and-forget, не задерживает ответ.
-    if cfg().catalog.persistence_enabled() {
-        spawn_browse_persist(posts.clone(), "favorites", account_id, true);
-    }
+    // Unconditional, unlike the `save_all` call sites above: `accounts_post`
+    // is the user's library, not the offline cache. Fire-and-forget, so the
+    // response is not delayed.
+    spawn_browse_persist(posts.clone(), "favorites", account_id, true);
 
     e621_account_parser_api::metrics::METRICS
         .browse_views_total

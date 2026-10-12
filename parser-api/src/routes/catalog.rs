@@ -1,9 +1,11 @@
 //! Local catalog routes (docs/offline-catalog.md).
 //!
 //! The catalog is a view over the owner's saved posts (`accounts_post`),
-//! searched directly. Post info is always collected (account sync is never
-//! gated), so these routes are always available; the catalog persistence
-//! toggles only control the local media-cache build (media_fetch_worker).
+//! searched directly. That library is core and always populated — `/process`,
+//! the direct sync and `/browse/favorites` import it unconditionally — so
+//! these routes are always available and answer with whatever has been
+//! imported so far. The `[catalog]` toggles only add the offline layer on top:
+//! originals on disk (`media_fetch_worker`) and the `save_all` scope.
 
 use rocket::serde::json::Json;
 use rocket_okapi::openapi;

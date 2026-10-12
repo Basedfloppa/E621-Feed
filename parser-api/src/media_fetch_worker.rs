@@ -224,8 +224,20 @@ pub fn spawn_media_fetcher() {
         }
     };
     rocket::tokio::spawn(async move {
-        info!("[media-worker] started (saved-posts scope, media folder: media/)");
+        // The toggles are hot-reloadable, so report the gate on every change
+        // instead of once at startup: an idle worker otherwise logs exactly
+        // like a downloading one, and "started" says nothing about whether
+        // originals are being collected.
+        let mut collecting = None;
         loop {
+            let enabled = models::cfg().catalog.media_cache_enabled();
+            if collecting != Some(enabled) {
+                info!(
+                    "[media-worker] originals {} (media folder: media/)",
+                    if enabled { "enabled" } else { "disabled" }
+                );
+                collecting = Some(enabled);
+            }
             if !worker_paused() {
                 match run_pass(&client).await {
                     Ok(0) => {}
@@ -250,7 +262,7 @@ async fn run_pass(client: &reqwest::Client) -> Result<usize, String> {
     // toggle comes back. Hot-reload aware — flipping the toggles starts or
     // stops downloads on the next pass.
     let c = &models::cfg().catalog;
-    if !c.persistence_enabled() {
+    if !c.media_cache_enabled() {
         return Ok(0);
     }
     let pending =

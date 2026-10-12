@@ -142,17 +142,13 @@ pub async fn run_process_with_mode(
     owner_token: String,
     mode: ProcessMode,
 ) -> Result<(), String> {
-    // /process is the favourites-collection scope: it persists the account's
-    // favourites into the local catalog only when a collection toggle is on
-    // (`save_favourites` or `save_all`). With both off there is nothing to
-    // import for, so refuse here (job-level, not a route 400) instead of
-    // silently collecting rows the operator asked not to keep.
-    if !cfg().catalog.persistence_enabled() {
-        return Err(
-            "local catalog collection is disabled: set [catalog].save_favourites (or save_all) to import favourites via /process"
-                .to_string(),
-        );
-    }
+    // `/process` imports the account's favourites into `accounts_post` — the
+    // user's library, which every taste/scoring read derives from and which
+    // predates the catalog (`V1__init.sql`). It therefore does NOT depend on
+    // the `[catalog]` toggles: those only add the offline layer (originals on
+    // disk, pool membership, encountered posts). Refusing here made the
+    // optional cache a prerequisite for the core, which is the bug this
+    // comment used to describe as intended behaviour.
     audit::event("process.start")
         .field("account_id", account_id)
         .field("requested_mode", mode.as_str())

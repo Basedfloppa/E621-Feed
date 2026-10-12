@@ -60,8 +60,8 @@ fn install_mock_config(mock_uri: &str) -> tempfile::NamedTempFile {
     // admin creds — placeholder values; mock server ignores auth.
     let modified = swap_toml_field(&modified, "admin_user", "\"test_admin\"");
     let modified = swap_toml_field(&modified, "admin_api", "\"test_api_key\"");
-    // /process is the favourites-collection scope — enable save_favourites so
-    // the pipeline persists favourites (collection off would refuse the job).
+    // These tests exercise the offline layer as well, so turn the media-cache
+    // toggle on. The library import itself no longer depends on it.
     let modified = swap_toml_field(&modified, "save_favourites", "true");
 
     let mut file = tempfile::NamedTempFile::new().expect("temp file");
@@ -74,40 +74,74 @@ fn install_mock_config(mock_uri: &str) -> tempfile::NamedTempFile {
     file
 }
 
-/// `/process` is the favourites-collection scope: with both collection
-/// toggles off (`save_favourites` and `save_all`) it must refuse at the
-/// pipeline gate — before any e621 call — with a message naming the toggles.
+/// The library import must not depend on the offline toggles: with both
+/// `[catalog]` toggles off (the `config.example.toml` default) `/process`
+/// still imports the account's favourites into `accounts_post`.
+///
+/// This was a hard refusal before — the pipeline gate made the optional
+/// media cache a prerequisite for the core, so a fresh install could not
+/// import favourites at all.
 #[rocket::async_test]
-async fn process_refused_when_collection_toggles_off() {
+async fn process_imports_favourites_with_collection_toggles_off() {
     let _guard = pipeline_lock().lock().await;
     ensure_migrations();
-    // config.example.toml has save_favourites = false and save_all = false;
-    // keep the isolated test DB path so cfg() points at the right file.
+    let server = MockServer::start().await;
+
+    // Same base as `install_mock_config`, except `save_favourites` / `save_all`
+    // keep the example's `false`.
     let example = std::fs::read_to_string(example_config_path()).expect("read config.example.toml");
     let modified = swap_toml_field(
         &example,
         "db_path",
         &format!("\"{}\"", e621_account_parser_api::models::cfg().db_path),
     );
-    let modified = swap_toml_field(&modified, "posts_domain", "\"https://e621.invalid\"");
+    let modified = swap_toml_field(&modified, "posts_domain", &format!("\"{}\"", server.uri()));
+    let modified = swap_toml_field(&modified, "posts_limit", "4");
+    let modified = swap_toml_field(&modified, "process_fetch_concurrency", "1");
+    let modified = swap_toml_field(&modified, "admin_user", "\"test_admin\"");
+    let modified = swap_toml_field(&modified, "admin_api", "\"test_api_key\"");
     let mut file = tempfile::NamedTempFile::new().expect("temp file");
     use std::io::Write;
     file.write_all(modified.as_bytes())
         .expect("write temp config");
     file.flush().expect("flush temp config");
     e621_account_parser_api::models::reload_from(file.path()).expect("reload config");
-
-    let err = pipeline::run_process_with_mode(
-        9_200_999,
-        "pipeline_owner".to_string(),
-        pipeline::ProcessMode::Auto,
-    )
-    .await
-    .expect_err("collection off must refuse /process at the pipeline gate");
+    let catalog = &e621_account_parser_api::models::cfg().catalog;
     assert!(
-        err.contains("save_favourites") || err.contains("catalog"),
-        "refusal should name the collection toggles, got: {err}"
+        !catalog.save_favourites && !catalog.save_all,
+        "this test only means something with the offline toggles off"
     );
+
+    let account_id = 9_201_001;
+    wipe_account(account_id);
+    Mock::given(method("GET"))
+        .and(path(format!("/users/{account_id}.json")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(fake_user_json(account_id, 2)))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/favorites.json"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+            fake_post_json(92101, &["a"], &["t"]),
+            fake_post_json(92102, &["a"], &["t"]),
+        ])))
+        .mount(&server)
+        .await;
+
+    db::set_account("off_toggles_owner", account_id, "test_user", "").unwrap();
+    drop(jobs::try_begin(account_id));
+    pipeline::run_process(account_id, "off_toggles_owner".to_string())
+        .await
+        .expect("library import must not depend on the [catalog] toggles");
+    jobs::finish(account_id, Ok(()));
+
+    let owned = db::get_owned_post_ids(account_id).unwrap();
+    for id in [92101_i64, 92102] {
+        assert!(
+            owned.contains(&id),
+            "favourite {id} must be imported with the offline toggles off, got {owned:?}"
+        );
+    }
 }
 
 /// Replace `key = ...` line in a TOML doc with `key = new`. Naive — only

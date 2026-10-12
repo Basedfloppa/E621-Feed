@@ -114,22 +114,35 @@ pub async fn sync_account_direct(
 
     // Import favorites. e621 pages favourites in stable reverse-chronological
     // order; sync pulls the first pages (most recent) which is what the
-    // personalised feed actually needs. Favourites collection is the
-    // `save_favourites` (or `save_all`) scope: with both off the sync still
-    // imports the owner's blacklist below but persists no favourites.
+    // personalised feed actually needs. This is the user's library
+    // (`accounts_post`), so it is unconditional — the `[catalog]` toggles only
+    // add the offline layer on top (originals on disk, pool membership).
     let mut favorites_persisted = 0usize;
-    if cfg().catalog.persistence_enabled() {
-        let max_pages = ((user.favorite_count as i32 / cfg().posts_limit) + 1).clamp(1, 200);
-        for page in 1..=max_pages {
-            let posts = crate::api::get_favorites_with_key(&account, &key, page)
-                .await
-                .map_err(|e| SyncError::Other(format!("favorites page {page}: {e}")))?;
-            if posts.is_empty() {
-                break;
-            }
-            let n = persist_favorites(account_id, &account, posts).map_err(SyncError::Other)?;
-            favorites_persisted += n;
+    let max_pages = ((user.favorite_count as i32 / cfg().posts_limit) + 1).clamp(1, 200);
+    for page in 1..=max_pages {
+        let posts = crate::api::get_favorites_with_key(&account, &key, page)
+            .await
+            .map_err(|e| SyncError::Other(format!("favorites page {page}: {e}")))?;
+        if posts.is_empty() {
+            break;
         }
+        let n = persist_favorites(account_id, &account, posts).map_err(SyncError::Other)?;
+        favorites_persisted += n;
+    }
+
+    // Derive the profile (tag counts, rating/media/quality/recency/uploader)
+    // from what was just imported. `/process` does this at the end of its run;
+    // direct sync is the other way favourites enter the library, and without it
+    // the account has rows in `accounts_post` but an empty profile, so every
+    // scored view degrades to unpersonalised results. Cooccurrence is built
+    // incrementally by `persist_favorites`, hence the `_skip_cooc` variant.
+    if favorites_persisted > 0 {
+        db_blocking(move || {
+            crate::db::refresh_account_profiles_skip_cooc(account_id)
+                .map_err(|e| format!("Failed to refresh account profiles: {e}"))
+        })
+        .await
+        .map_err(SyncError::Other)?;
     }
 
     // Import the owner's real blacklist (private, only visible with their key).

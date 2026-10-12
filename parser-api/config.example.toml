@@ -352,7 +352,7 @@ calibrate_threads = 0                 # 0 = auto = nproc/2
 # Collection is scoped by these toggles; the media cache follows what is
 # collected. With both off, nothing is collected.
 [catalog]
-save_favourites = false            # favourites scope: collect /favourites + /process (+ direct sync)
+save_favourites = false            # also download originals for saved posts (library import is always on)
 media_cache_max_bytes = 0          # 0 = unlimited; else LRU-evict oldest originals beyond this (folder is fixed at media/)
 pool_membership = false            # persist pool membership locally for offline pool navigation
 save_all = false                   # additionally collect encountered posts: /digest /search /trending (and feed)

@@ -31,9 +31,11 @@ aren't in the local catalog.
 
 ## Enabling
 
-The feature lives in the `[catalog]` section of `config.toml`. Two toggles
-control **which sources are collected** into the local DB (posts, tags,
-`accounts_post`); the media cache then follows what was collected:
+Your **library** — the favourites linked to your accounts in `accounts_post` —
+is core and always imported: `/process`, the direct sync and
+`/browse/favorites` write it regardless of configuration, and every
+personalised view (recommendations, scored browse, digest, taste profile)
+reads it. The `[catalog]` section only adds the *offline* layer on top.
 
 ```toml
 [catalog]
@@ -44,16 +46,18 @@ media_cache_max_bytes = 0  # 0 = unlimited; else LRU-evict oldest beyond this ma
 
 ### A. Collection scopes
 
-* **`save_favourites = true`** — the favourites scope: posts served by
-  `/browse/favorites` and imported by `/process` (and the direct sync) are
-  persisted (posts + `accounts_post` + tags) and become the searchable local
-  catalog.
+* **Library (always on)** — favourites imported by `/process`, the direct sync
+  and `/browse/favorites` are persisted (posts + `accounts_post` + tags) and
+  become the searchable local catalog. Not a toggle: it is what the taste model
+  and the scorer are built on, and it predates the offline feature.
+* **`save_favourites = true`** — additionally keeps the *files*: the background
+  media worker downloads the originals of saved posts. With it off the library
+  still fills up; only the bytes stay on e621.
 * **`save_all = true`** — additionally the encountered scope: posts shown on
   `/digest`, `/search` and `/trending` (and the feed) are collected too.
-  `save_all` implies the favourites scope.
-* **Both off** — nothing is collected: `/process` refuses with a clear job
-  error, favourites/encountered sources don't persist, and the `/catalog` page
-  stays empty.
+  `save_all` implies the favourites media scope.
+* **Both off** — no offline layer at all: no originals are downloaded, nothing
+  encountered is kept, and `/catalog` still finds your imported favourites.
 
 ### B. Media cache (download full-size originals)
 
