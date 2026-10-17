@@ -192,10 +192,6 @@ pub(super) fn save_posts_tags_batch_in_tx(
     // (name, group) pairs in a 320-post batch. Caching collapses repeats to
     // a HashMap hit and avoids the upsert+RETURNING round-trip.
     let mut tag_id_cache: HashMap<(String, &'static str), i64> = HashMap::new();
-    // Reverse map: tag_id → (name, group) for incremental account cooc.
-    // Built at the end of the post loop when account_id is Some.
-    let mut tag_id_to_meta: HashMap<i64, (String, &'static str)> = HashMap::new();
-
     {
         // The `DO UPDATE SET name = name` no-op forces RETURNING to fire on
         // the conflict path, so we always get a row back.
@@ -256,14 +252,6 @@ pub(super) fn save_posts_tags_batch_in_tx(
                         let id: i64 = upsert_tag
                             .query_row(params![&cache_key.0, group], |r| r.get(0))
                             .map_err(|e| format!("upsert tag {}:{group}: {e}", cache_key.0))?;
-                        // Record the reverse mapping while we still own the
-                        // name. `tag_id_to_meta` is keyed by id, so it needs
-                        // the name/group we already have here; recovering them
-                        // later meant a linear scan over `tag_id_cache` per
-                        // tag per post. A cache hit below always implies this
-                        // insert already ran in this batch, so the map is
-                        // complete for every id in `post_tag_ids`.
-                        tag_id_to_meta.insert(id, (cache_key.0.clone(), group));
                         tag_id_cache.insert(cache_key, id);
                         id
                     };
@@ -301,26 +289,16 @@ pub(super) fn save_posts_tags_batch_in_tx(
             // Class G: incremental account-level cooccurrence update.
             // Since we cleared account_tag_cooccurrence in drop_account_posts,
             // every post's tag pairs are fresh; ON CONFLICT handles dedup.
-            // `tag_id_to_meta` is filled at tag-upsert time above, so every
-            // id in `post_tag_ids` already has its (name, group).
+            // The table is keyed by tag ids, so nothing has to be translated
+            // back to names on the write path.
             if let Some(account_id) = account_id
                 && track_cooccurrence
                 && has_multi_tags
             {
-                // Build the per-post meta map from our global reverse map.
-                let id_to_meta: std::collections::HashMap<i64, (String, String)> = post_tag_ids
-                    .iter()
-                    .filter_map(|&tid| {
-                        tag_id_to_meta
-                            .get(&tid)
-                            .map(|(n, g)| (tid, (n.clone(), g.to_string())))
-                    })
-                    .collect();
                 super::cooccurrence::upsert_account_cooccurrence_pairs(
                     tx,
                     account_id,
                     &post_tag_ids,
-                    &id_to_meta,
                 )?;
             }
         }

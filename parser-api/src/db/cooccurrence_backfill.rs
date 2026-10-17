@@ -42,12 +42,25 @@ pub fn spawn_tag_cooccurrence_backfill_if_needed() {
 /// graph, and calibrating against it silently measures every `tag_relation_*`
 /// knob as inert. See `db::mod.rs` for the boot-time caller.
 pub fn run_tag_cooccurrence_backfill_if_needed() -> Result<(), String> {
-    let conn = open_db()?;
+    let started = std::time::Instant::now();
+    // Announce the thread before touching the database. A silent early return
+    // used to be indistinguishable from a thread that never started: a
+    // database holding hundreds of accounts with no `account_tag_cooccurrence`
+    // rows produced no `[cooc-backfill]` output whatsoever, so there was no way
+    // to tell "nothing to do" from "died before the first check".
+    info!("[cooc-backfill] checking whether a backfill is needed");
+    let conn = open_db().map_err(|e| format!("open a connection: {e}"))?;
 
     let needs_global = needs_global_backfill(&conn)?;
     let pending_accounts = accounts_needing_cooc(&conn)?;
+    info!(
+        "[cooc-backfill] global={needs_global}, account-level pending={}, probe took {:.2}s",
+        pending_accounts.len(),
+        started.elapsed().as_secs_f32()
+    );
 
     if !needs_global && pending_accounts.is_empty() {
+        info!("[cooc-backfill] nothing to do");
         return Ok(());
     }
 
@@ -70,14 +83,27 @@ pub fn run_tag_cooccurrence_backfill_if_needed() -> Result<(), String> {
         info!("[cooc-backfill] global backfill complete");
     }
 
-    for account_id in pending_accounts {
-        info!("[cooc-backfill] backfilling account {account_id}");
+    let total = pending_accounts.len();
+    let mut failed = 0usize;
+    for (i, account_id) in pending_accounts.into_iter().enumerate() {
+        info!("[cooc-backfill] account {account_id}: {}/{total}", i + 1);
         if let Err(e) = set_account_tag_cooccurrence(account_id) {
+            failed += 1;
             error!("[cooc-backfill] account {account_id} failed: {e}");
         }
     }
 
-    info!("[cooc-backfill] all done");
+    if failed == 0 {
+        info!(
+            "[cooc-backfill] all done: {total} account(s) in {:.1}s",
+            started.elapsed().as_secs_f32()
+        );
+    } else {
+        warn!(
+            "[cooc-backfill] done: {failed}/{total} account(s) failed after {:.1}s",
+            started.elapsed().as_secs_f32()
+        );
+    }
     Ok(())
 }
 
@@ -85,14 +111,14 @@ pub fn run_tag_cooccurrence_backfill_if_needed() -> Result<(), String> {
 ///
 /// `calibrate graph` uses this when MMR is off: the grid reads the *global*
 /// graph (`tag_relation_*`), while `account_tag_cooccurrence` feeds MMR and the
-/// taste profile only, and each of its rows carries four tag-name/group strings
-/// instead of two integer ids.
+/// taste profile only.
 pub fn run_global_tag_cooccurrence_backfill() -> Result<(), String> {
     let conn = open_db()?;
     let needs_global = needs_global_backfill(&conn)?;
     drop(conn);
 
     if !needs_global {
+        info!("[cooc-backfill] global graph is already complete; nothing to do");
         return Ok(());
     }
     // Same double-count hazard as the full entry point: a concurrent

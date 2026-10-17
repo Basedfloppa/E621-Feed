@@ -12,15 +12,18 @@ const COOC_PAIRS_PER_STATEMENT: usize = 200;
 /// Incremental upsert into `account_tag_cooccurrence` for the given
 /// account and tag pairs. Called from `save_posts_tags_batch` to avoid
 /// the full DELETE + INSERT SELECT rebuild in `set_account_tag_cooccurrence`.
-/// Needs the reverse map from `tag_id → (name, group)`.
-/// Each pair increments `cooc_count` by 1.
+/// Pairs are keyed by tag ids, so the write path needs nothing but the ids
+/// it already has. Each pair increments `cooc_count` by 1.
+///
+/// `SQLite`'s default `SQLITE_MAX_VARIABLE_NUMBER` is 999; a pair spends two
+/// of them (plus one shared `account_id`), so 100 pairs per statement keeps a
+/// wide margin.
 const COOC_ACCOUNT_PAIRS_PER_STMT: usize = 100;
 
 pub(super) fn upsert_account_cooccurrence_pairs(
     tx: &rusqlite::Connection,
     account_id: i32,
     tag_ids: &[i64],
-    tag_id_to_meta: &std::collections::HashMap<i64, (String, String)>,
 ) -> Result<(), String> {
     if tag_ids.len() < 2 {
         return Ok(());
@@ -39,52 +42,35 @@ pub(super) fn upsert_account_cooccurrence_pairs(
 
     for chunk in pairs.chunks(COOC_ACCOUNT_PAIRS_PER_STMT) {
         let mut sql = String::from(
-            "INSERT INTO account_tag_cooccurrence (account_id, tag1_name, tag1_group, tag2_name, tag2_group, cooc_count) VALUES ",
+            "INSERT INTO account_tag_cooccurrence (account_id, tag1_id, tag2_id, cooc_count) VALUES ",
         );
-        // Use ?1 for account_id (shared), then 4 sequential ? per pair.
+        // ?1 is the shared account_id; each pair then binds two tag ids.
         let mut param_idx = 2usize;
-        for (i, _) in chunk.iter().enumerate() {
+        for i in 0..chunk.len() {
             if i > 0 {
                 sql.push(',');
             }
-            // (?1, ?P, ?P+1, ?P+2, ?P+3, 1) where P = param_idx
+            // (?1, ?P, ?P+1, 1)
             sql.push_str(&format!(
-                "(?1, ?{p}, ?{p1}, ?{p2}, ?{p3}, 1)",
+                "(?1, ?{p}, ?{p1}, 1)",
                 p = param_idx,
-                p1 = param_idx + 1,
-                p2 = param_idx + 2,
-                p3 = param_idx + 3
+                p1 = param_idx + 1
             ));
-            param_idx += 4;
+            param_idx += 2;
         }
         sql.push_str(
-            " ON CONFLICT(account_id, tag1_name, tag1_group, tag2_name, tag2_group) DO UPDATE SET cooc_count = cooc_count + 1"
+            " ON CONFLICT(account_id, tag1_id, tag2_id) DO UPDATE SET cooc_count = cooc_count + 1",
         );
 
         let mut stmt = tx
             .prepare(&sql)
             .map_err(|e| format!("prepare account cooc batch: {e}"))?;
-        let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = Vec::with_capacity(chunk.len() * 4 + 1);
+        let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = Vec::with_capacity(chunk.len() * 2 + 1);
         params_vec.push(Box::new(account_id));
         for (a, b) in chunk {
-            let (na, ga) = tag_id_to_meta
-                .get(a)
-                .ok_or_else(|| format!("missing tag_id {a} in account cooc meta map"))?;
-            let (nb, gb) = tag_id_to_meta
-                .get(b)
-                .ok_or_else(|| format!("missing tag_id {b} in account cooc meta map"))?;
-            // Canonical ordering by (name, group) strings
-            if (na, ga) <= (nb, gb) {
-                params_vec.push(Box::new(na.clone()));
-                params_vec.push(Box::new(ga.clone()));
-                params_vec.push(Box::new(nb.clone()));
-                params_vec.push(Box::new(gb.clone()));
-            } else {
-                params_vec.push(Box::new(nb.clone()));
-                params_vec.push(Box::new(gb.clone()));
-                params_vec.push(Box::new(na.clone()));
-                params_vec.push(Box::new(ga.clone()));
-            }
+            // `pairs` is already in canonical (smaller, larger) id order.
+            params_vec.push(Box::new(*a));
+            params_vec.push(Box::new(*b));
         }
         let params_refs: Vec<&dyn rusqlite::ToSql> =
             params_vec.iter().map(std::convert::AsRef::as_ref).collect();
@@ -141,7 +127,7 @@ pub(super) fn upsert_cooccurrence_pairs(
     Ok(())
 }
 
-pub fn set_account_tag_cooccurrence(account_id: i32) -> Result<(), String> {
+pub fn set_account_tag_cooccurrence(account_id: i32) -> Result<u64, String> {
     // The existing per-account row count can reach millions; folding the
     // DELETE into the same tx as the INSERT-SELECT held the writer mutex
     // for the entire scan. Wipe first (the table is indexed on
@@ -149,32 +135,42 @@ pub fn set_account_tag_cooccurrence(account_id: i32) -> Result<(), String> {
     // its own short tx.
     super::drop_account_cooccurrence(account_id, |_| {})?;
 
-    super::with_write_tx(|tx| {
+    let started = std::time::Instant::now();
+    let pairs = super::with_write_tx(|tx| {
+        // Both sides are tag ids, so the rebuild no longer has to resolve the
+        // pair through `tags` on the way in — the two name/group joins that
+        // used to dominate this statement are gone.
         tx.execute(
             "
             INSERT INTO account_tag_cooccurrence (
-                account_id, tag1_name, tag1_group, tag2_name, tag2_group, cooc_count
+                account_id, tag1_id, tag2_id, cooc_count
             )
             SELECT
                 ?1,
-                t1.name, t1.group_type,
-                t2.name, t2.group_type,
+                tp1.tag_id,
+                tp2.tag_id,
                 COUNT(*)
             FROM accounts_post ap
             INNER JOIN tags_posts tp1 ON tp1.post_id = ap.post_id
             INNER JOIN tags_posts tp2
                 ON tp2.post_id = ap.post_id
                AND tp1.tag_id < tp2.tag_id
-            INNER JOIN tags t1 ON t1.id = tp1.tag_id
-            INNER JOIN tags t2 ON t2.id = tp2.tag_id
             WHERE ap.account_id = ?1
-            GROUP BY t1.name, t1.group_type, t2.name, t2.group_type
+            GROUP BY tp1.tag_id, tp2.tag_id
             ",
             params![account_id],
         )
-        .map_err(|e| format!("Failed to populate account tag cooccurrence: {e}"))?;
-        Ok(())
-    })
+        .map_err(|e| format!("Failed to populate account tag cooccurrence: {e}"))
+    })?;
+
+    // Logged here rather than at the call sites so both the boot-time backfill
+    // and the profile-refresh path report the same observable outcome: how many
+    // pairs the rebuild actually produced, and how long it took.
+    info!(
+        "[cooc] account {account_id}: rebuilt {pairs} tag pairs in {:.2}s",
+        started.elapsed().as_secs_f32()
+    );
+    Ok(pairs as u64)
 }
 
 /// Two-pass loader: tags first (sets marginals + builds an SQLite-id →
@@ -343,19 +339,17 @@ pub fn get_account_tag_relation_graph(
         .prepare(
             "
             SELECT
-                atc.tag1_name, atc.tag1_group,
-                atc.tag2_name, atc.tag2_group,
+                t1.name, t1.group_type,
+                t2.name, t2.group_type,
                 atc.cooc_count,
                 COALESCE(c.cooc_count, 0)               AS global_cooc,
                 COALESCE(t1.df, 0)                      AS df1,
                 COALESCE(t2.df, 0)                      AS df2
             FROM account_tag_cooccurrence atc
-            LEFT JOIN tags t1
-                   ON t1.name = atc.tag1_name AND t1.group_type = atc.tag1_group
-            LEFT JOIN tags t2
-                   ON t2.name = atc.tag2_name AND t2.group_type = atc.tag2_group
+            INNER JOIN tags t1 ON t1.id = atc.tag1_id
+            INNER JOIN tags t2 ON t2.id = atc.tag2_id
             LEFT JOIN tag_cooccurrence c
-                   ON c.tag1_id = t1.id AND c.tag2_id = t2.id
+                   ON c.tag1_id = atc.tag1_id AND c.tag2_id = atc.tag2_id
             WHERE atc.account_id = ?1
               AND atc.cooc_count >= ?2
             ORDER BY atc.cooc_count DESC
@@ -466,10 +460,12 @@ pub fn load_account_tag_relation_conn(
     let mut stmt = conn
         .prepare(
             "
-            SELECT tag1_name, tag1_group, tag2_name, tag2_group, cooc_count
-            FROM account_tag_cooccurrence
-            WHERE account_id = ?1
-            ORDER BY cooc_count DESC
+            SELECT t1.name, t1.group_type, t2.name, t2.group_type, atc.cooc_count
+            FROM account_tag_cooccurrence atc
+            INNER JOIN tags t1 ON t1.id = atc.tag1_id
+            INNER JOIN tags t2 ON t2.id = atc.tag2_id
+            WHERE atc.account_id = ?1
+            ORDER BY atc.cooc_count DESC
             LIMIT ?2
             ",
         )
@@ -508,15 +504,32 @@ mod tests {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         conn.execute_batch(
             "CREATE TABLE accounts_post (account_id INTEGER NOT NULL, post_id INTEGER NOT NULL);
+             CREATE TABLE tags (
+                id         INTEGER PRIMARY KEY,
+                name       TEXT NOT NULL,
+                group_type TEXT NOT NULL,
+                df         INTEGER DEFAULT 0
+             );
              CREATE TABLE account_tag_cooccurrence (
                 account_id INTEGER NOT NULL,
-                tag1_name TEXT NOT NULL, tag1_group TEXT NOT NULL,
-                tag2_name TEXT NOT NULL, tag2_group TEXT NOT NULL,
+                tag1_id    INTEGER NOT NULL,
+                tag2_id    INTEGER NOT NULL,
                 cooc_count INTEGER NOT NULL
              );",
         )
         .unwrap();
         conn
+    }
+
+    /// Insert one tag and return the id the readers will have to join back to
+    /// a name through.
+    fn tag(conn: &rusqlite::Connection, name: &str, group: &str) -> i64 {
+        conn.execute(
+            "INSERT INTO tags (name, group_type) VALUES (?1, ?2)",
+            rusqlite::params![name, group],
+        )
+        .unwrap();
+        conn.last_insert_rowid()
     }
 
     #[test]
@@ -530,14 +543,12 @@ mod tests {
             .unwrap();
             // pair (artist_{i}, artist_{i+1}) — cooc_count grows with i, so the
             // top-5 pairs are i = 18..=14 (descending by cooc_count).
+            let a = tag(&conn, &format!("a{i}"), "artist");
+            let b = tag(&conn, &format!("b{i}"), "artist");
             conn.execute(
-                "INSERT INTO account_tag_cooccurrence (account_id, tag1_name, tag1_group, tag2_name, tag2_group, cooc_count)
-                 VALUES (1, ?1, 'artist', ?2, 'artist', ?3)",
-                rusqlite::params![
-                    format!("a{i}"),
-                    format!("b{i}"),
-                    100 + i * 10
-                ],
+                "INSERT INTO account_tag_cooccurrence (account_id, tag1_id, tag2_id, cooc_count)
+                 VALUES (1, ?1, ?2, ?3)",
+                rusqlite::params![a.min(b), a.max(b), 100 + i * 10],
             )
             .unwrap();
         }
@@ -566,10 +577,12 @@ mod tests {
         )
         .unwrap();
         for i in 0..3i64 {
+            let a = tag(&conn, &format!("x{i}"), "artist");
+            let b = tag(&conn, &format!("y{i}"), "artist");
             conn.execute(
-                "INSERT INTO account_tag_cooccurrence (account_id, tag1_name, tag1_group, tag2_name, tag2_group, cooc_count)
-                 VALUES (1, ?1, 'artist', ?2, 'artist', ?3)",
-                rusqlite::params![format!("x{i}"), format!("y{i}"), 5],
+                "INSERT INTO account_tag_cooccurrence (account_id, tag1_id, tag2_id, cooc_count)
+                 VALUES (1, ?1, ?2, 5)",
+                rusqlite::params![a.min(b), a.max(b)],
             )
             .unwrap();
         }

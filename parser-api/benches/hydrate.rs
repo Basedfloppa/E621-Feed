@@ -76,6 +76,24 @@ fn install_isolated_db_config() {
     std::mem::forget(file); // keep the NamedTempFile alive so the path stays valid
 }
 
+/// Insert `n` fresh artist tags named `<prefix>_<i>` and return their ids.
+///
+/// `account_tag_cooccurrence` is keyed by tag ids, and its readers recover the
+/// names by joining `tags` — so a benchmark that wants a graph of a given size
+/// has to create the tags that carry it, not just the pairs.
+fn cooc_tags(tx: &rusqlite::Transaction<'_>, prefix: &str, n: usize) -> Vec<i64> {
+    let mut ins = tx
+        .prepare("INSERT INTO tags (name, group_type) VALUES (?1, 'artist')")
+        .expect("prep cooc tags");
+    let mut ids = Vec::with_capacity(n);
+    for i in 0..n {
+        ins.execute(rusqlite::params![format!("{prefix}_{i}")])
+            .expect("insert cooc tag");
+        ids.push(tx.last_insert_rowid());
+    }
+    ids
+}
+
 fn seed() {
     let path = cfg().db_path.clone();
     let conn = rusqlite::Connection::open(&path).expect("open seed db");
@@ -233,25 +251,19 @@ fn seed() {
     }
 
     {
-        // account_tag_cooccurrence: full upper-triangle of 400-artist graph (~80k pairs).
+        // account_tag_cooccurrence: full upper-triangle of a 400-tag graph
+        // (~80k pairs) — a realistic heavy-account co-occurrence table.
+        let ids = cooc_tags(&tx, "cooc", 400);
         let mut ins = tx
             .prepare(
-                "INSERT INTO account_tag_cooccurrence (account_id, tag1_name, tag1_group, tag2_name, tag2_group, cooc_count)
-                 VALUES (1,?1,?2,?3,?4,?5)",
+                "INSERT INTO account_tag_cooccurrence (account_id, tag1_id, tag2_id, cooc_count)
+                 VALUES (1,?1,?2,?3)",
             )
             .expect("prep cooc");
-        // Full upper-triangle of the 400-artist graph (~80k unique canonical
-        // pairs) — a realistic heavy-account co-occurrence table.
-        for a in 0..400 {
-            for b in (a + 1)..400 {
-                ins.execute(rusqlite::params![
-                    format!("artist_{a}"),
-                    "artist",
-                    format!("artist_{b}"),
-                    "artist",
-                    10 + (a % 20)
-                ])
-                .expect("insert cooc");
+        for a in 0..ids.len() {
+            for b in (a + 1)..ids.len() {
+                ins.execute(rusqlite::params![ids[a], ids[b], 10 + (a as i64 % 20)])
+                    .expect("insert cooc");
             }
         }
         drop(ins);
@@ -263,21 +275,21 @@ fn seed() {
         // is bounded by the edge cap rather than the full table size.
         tx.execute("INSERT INTO accounts (id, name) VALUES (2, 'big')", [])
             .expect("insert big account");
+        // C(801, 2) = 320_400 distinct canonical pairs.
+        let ids = cooc_tags(&tx, "big", 801);
         let mut ins = tx
             .prepare(
-                "INSERT INTO account_tag_cooccurrence (account_id, tag1_name, tag1_group, tag2_name, tag2_group, cooc_count)
-                 VALUES (2,?1,?2,?3,?4,?5)",
+                "INSERT INTO account_tag_cooccurrence (account_id, tag1_id, tag2_id, cooc_count)
+                 VALUES (2,?1,?2,?3)",
             )
             .expect("prep big cooc");
-        for i in 0..320_000i64 {
-            ins.execute(rusqlite::params![
-                format!("big_a{i}"),
-                "artist",
-                format!("big_b{i}"),
-                "artist",
-                i
-            ])
-            .expect("insert big cooc");
+        let mut count = 0i64;
+        for a in 0..ids.len() {
+            for b in (a + 1)..ids.len() {
+                ins.execute(rusqlite::params![ids[a], ids[b], count])
+                    .expect("insert big cooc");
+                count += 1;
+            }
         }
         drop(ins);
     }

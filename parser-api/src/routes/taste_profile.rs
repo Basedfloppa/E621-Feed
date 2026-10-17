@@ -58,11 +58,9 @@ pub(crate) async fn get_taste_profile(
     }
 
     let result = db_blocking(move || {
-        get_account_by_id(&owner_token, account_id)
-            .map_err(|e| format!("account access: {e}"))?;
+        get_account_by_id(&owner_token, account_id).map_err(|e| format!("account access: {e}"))?;
 
-        let tag_counts = get_tag_counts(account_id)
-            .map_err(|e| format!("get_tag_counts: {e}"))?;
+        let tag_counts = get_tag_counts(account_id).map_err(|e| format!("get_tag_counts: {e}"))?;
 
         let candidate_tags: Vec<String> = tag_counts
             .iter()
@@ -107,35 +105,37 @@ pub(crate) async fn get_taste_profile(
                     }
                 }
                 // Co-occurrences
-                let allowed: HashSet<String> = tag_counts.iter()
+                let allowed: HashSet<String> = tag_counts
+                    .iter()
                     .filter(|t| matches!(t.group_type.as_str(), "general" | "lore" | "species"))
                     .map(|t| t.name.to_ascii_lowercase())
                     .collect();
 
                 if let Ok(mut stmt) = conn.prepare(
-                    "SELECT atc.tag1_name, atc.tag1_group, atc.tag2_name, atc.tag2_group, atc.cooc_count
+                    "SELECT t1.name, t1.group_type, t2.name, t2.group_type, atc.cooc_count
                      FROM account_tag_cooccurrence atc
-                     WHERE atc.account_id = ?1 AND atc.cooc_count >= ?2"
-                )
-                    && let Ok(rows) = stmt.query_map(params![account_id, min_cooc_val], |row| {
-                        Ok((
-                            row.get::<_, String>(0)?,
-                            row.get::<_, String>(1)?,
-                            row.get::<_, String>(2)?,
-                            row.get::<_, String>(3)?,
-                            row.get::<_, i64>(4)?,
-                        ))
-                    }) {
-                        for (t1, g1, t2, g2, cooc) in rows.flatten() {
-                            let t1l = t1.to_ascii_lowercase();
-                            let t2l = t2.to_ascii_lowercase();
-                            if allowed.contains(&t1l) && allowed.contains(&t2l) {
-                                let gk1 = group_key(&g1);
-                                let gk2 = group_key(&g2);
-                                g.insert_pair(gk1, &t1l, gk2, &t2l, cooc);
-                            }
+                     INNER JOIN tags t1 ON t1.id = atc.tag1_id
+                     INNER JOIN tags t2 ON t2.id = atc.tag2_id
+                     WHERE atc.account_id = ?1 AND atc.cooc_count >= ?2",
+                ) && let Ok(rows) = stmt.query_map(params![account_id, min_cooc_val], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, i64>(4)?,
+                    ))
+                }) {
+                    for (t1, g1, t2, g2, cooc) in rows.flatten() {
+                        let t1l = t1.to_ascii_lowercase();
+                        let t2l = t2.to_ascii_lowercase();
+                        if allowed.contains(&t1l) && allowed.contains(&t2l) {
+                            let gk1 = group_key(&g1);
+                            let gk2 = group_key(&g2);
+                            g.insert_pair(gk1, &t1l, gk2, &t2l, cooc);
                         }
                     }
+                }
             }
             g
         };
@@ -169,7 +169,8 @@ pub(crate) async fn get_taste_profile(
                 .map(|t| (t.name.to_ascii_lowercase(), t.count))
                 .collect();
             global_names.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-            let mut global_names: Vec<String> = global_names.into_iter().map(|(name, _)| name).collect();
+            let mut global_names: Vec<String> =
+                global_names.into_iter().map(|(name, _)| name).collect();
             global_names.dedup();
             global_names.truncate(top_val);
             let placeholders = std::iter::repeat_n("?", global_names.len())
@@ -185,8 +186,18 @@ pub(crate) async fn get_taste_profile(
                    AND t2.name IN ({placeholders})"
             );
             let mut query_params = vec![rusqlite::types::Value::Integer(min_g)];
-            query_params.extend(global_names.iter().cloned().map(rusqlite::types::Value::Text));
-            query_params.extend(global_names.iter().cloned().map(rusqlite::types::Value::Text));
+            query_params.extend(
+                global_names
+                    .iter()
+                    .cloned()
+                    .map(rusqlite::types::Value::Text),
+            );
+            query_params.extend(
+                global_names
+                    .iter()
+                    .cloned()
+                    .map(rusqlite::types::Value::Text),
+            );
             if let Ok(mut stmt) = conn.prepare(&sql)
                 && let Ok(rows) = stmt.query_map(rusqlite::params_from_iter(query_params), |row| {
                     Ok((
@@ -194,20 +205,22 @@ pub(crate) async fn get_taste_profile(
                         row.get::<_, String>(1)?,
                         row.get::<_, i64>(2)?,
                     ))
-                }) {
-                    for (t1, t2, cooc) in rows.flatten() {
-                        if cooc < min_g { continue; }
-                        let t1l = t1.to_ascii_lowercase();
-                        let t2l = t2.to_ascii_lowercase();
-                        if let (Some(&(_, df1)), Some(&(_, df2))) = (
-                            tag_id_df_map.get(&t1l),
-                            tag_id_df_map.get(&t2l),
-                        ) {
-                            let key = taste_themes::canonical_pair_key(&t1l, &t2l);
-                            global_cooc_map.insert(key, (cooc, df1, df2));
-                        }
+                })
+            {
+                for (t1, t2, cooc) in rows.flatten() {
+                    if cooc < min_g {
+                        continue;
+                    }
+                    let t1l = t1.to_ascii_lowercase();
+                    let t2l = t2.to_ascii_lowercase();
+                    if let (Some(&(_, df1)), Some(&(_, df2))) =
+                        (tag_id_df_map.get(&t1l), tag_id_df_map.get(&t2l))
+                    {
+                        let key = taste_themes::canonical_pair_key(&t1l, &t2l);
+                        global_cooc_map.insert(key, (cooc, df1, df2));
                     }
                 }
+            }
         }
 
         let tag_df_map: HashMap<String, i64> = tag_id_df_map
@@ -233,9 +246,7 @@ pub(crate) async fn get_taste_profile(
             min_cooc_val,
         );
 
-        Ok(TasteProfileResponse {
-            themes,
-        })
+        Ok(TasteProfileResponse { themes })
     })
     .await?;
 

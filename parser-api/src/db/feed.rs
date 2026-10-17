@@ -1045,8 +1045,11 @@ fn load_candidate_pool_input(
     // account holds millions of rows and only the top few dozen partners are
     // ever used. `cooc_count >= ?2` keeps the scan on
     // `idx_atc_account_cooc(account_id, cooc_count)` rather than a full table
-    // walk, and both directions of a pair are folded together because the
-    // table's ordering is not guaranteed to be canonical.
+    // walk. Both members of a pair are folded together because the table
+    // stores each pair once, canonically as `tag1_id < tag2_id`: a tag that
+    // only ever lands in the `tag2_id` column would otherwise lose every one
+    // of its counts. Names come back from `tags`, since the caller matches
+    // them against tag counts keyed by name.
     //
     // The index does not make the *aggregate* cheap: measured on the production
     // DB, accounts holding 2.6–2.7 M co-occurrence rows take **1.25–1.64 s**
@@ -1061,13 +1064,15 @@ fn load_candidate_pool_input(
         .prepare(
             "SELECT partner, SUM(c) AS total
              FROM (
-                 SELECT tag1_name AS partner, cooc_count AS c
-                 FROM account_tag_cooccurrence
-                 WHERE account_id = ?1 AND cooc_count >= ?2
+                 SELECT t1.name AS partner, atc.cooc_count AS c
+                 FROM account_tag_cooccurrence atc
+                 INNER JOIN tags t1 ON t1.id = atc.tag1_id
+                 WHERE atc.account_id = ?1 AND atc.cooc_count >= ?2
                  UNION ALL
-                 SELECT tag2_name AS partner, cooc_count AS c
-                 FROM account_tag_cooccurrence
-                 WHERE account_id = ?1 AND cooc_count >= ?2
+                 SELECT t2.name AS partner, atc.cooc_count AS c
+                 FROM account_tag_cooccurrence atc
+                 INNER JOIN tags t2 ON t2.id = atc.tag2_id
+                 WHERE atc.account_id = ?1 AND atc.cooc_count >= ?2
              )
              GROUP BY partner
              ORDER BY total DESC, partner ASC

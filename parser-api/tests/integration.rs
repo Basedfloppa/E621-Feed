@@ -106,14 +106,14 @@ fn incremental_cooccurrence_roundtrip() {
     // Stronger content check: count only assertions hid the cooc_dirty
     // self-pair bug. Verify a specific cross-group pair landed AND that
     // no row is a degenerate self-pair (canonical ordering guarantees
-    // tag1 ≠ tag2, but we double-check).
+    // tag1_id < tag2_id, but we double-check).
     let pair_present: i64 = {
         let conn = db::open_db_for_calibration().unwrap();
         conn.query_row(
-            "SELECT COUNT(*) FROM account_tag_cooccurrence \
-             WHERE account_id = ?1 \
-               AND ((tag1_name = 'skeb' AND tag2_name = 'furry') \
-                 OR (tag1_name = 'furry' AND tag2_name = 'skeb'))",
+            "SELECT COUNT(*) FROM account_tag_cooccurrence atc \
+             WHERE atc.account_id = ?1 \
+               AND atc.tag1_id IN (SELECT id FROM tags WHERE name IN ('skeb', 'furry')) \
+               AND atc.tag2_id IN (SELECT id FROM tags WHERE name IN ('skeb', 'furry'))",
             rusqlite::params![account_id],
             |r| r.get(0),
         )
@@ -128,8 +128,7 @@ fn incremental_cooccurrence_roundtrip() {
         conn.query_row(
             "SELECT COUNT(*) FROM account_tag_cooccurrence \
              WHERE account_id = ?1 \
-               AND tag1_name = tag2_name \
-               AND tag1_group = tag2_group",
+               AND tag1_id = tag2_id",
             rusqlite::params![account_id],
             |r| r.get(0),
         )
@@ -580,7 +579,7 @@ fn drop_account_cooccurrence_removes_every_row() {
 /// cartesian pair loop would emit `(tag, tag)` self-pairs into
 /// `account_tag_cooccurrence`. This test seeds a batch where post 1
 /// goes through the global branch and post 2 follows; we then verify
-/// no row has `tag1_name = tag2_name AND tag1_group = tag2_group`.
+/// no row has `tag1_id = tag2_id`.
 #[test]
 fn save_posts_tags_batch_no_self_pairs() {
     let account_id = 90009;
@@ -602,8 +601,7 @@ fn save_posts_tags_batch_no_self_pairs() {
         conn.query_row(
             "SELECT COUNT(*) FROM account_tag_cooccurrence \
              WHERE account_id = ?1 \
-               AND tag1_name = tag2_name \
-               AND tag1_group = tag2_group",
+               AND tag1_id = tag2_id",
             rusqlite::params![account_id],
             |r| r.get(0),
         )
