@@ -1,6 +1,13 @@
 [default]
 address = "0.0.0.0"
 port = 8181
+# Rocket's *release* profile default is `critical`, i.e. max-level `warn`, and
+# `ignite()` installs that level over the whole process. Every `info!` in this
+# crate goes through Rocket's logger macros, so without this line all operational
+# progress (scan cycle, tag import, co-occurrence backfill) is dropped silently
+# in release builds while `warn!`/`error!` still show up. `normal` restores
+# `info` without turning on `debug` (hyper/rustls/r2d2 stay quiet).
+log_level = "normal"
 
 [default.limits]
 json = "64 KiB"
