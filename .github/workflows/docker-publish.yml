@@ -10,7 +10,8 @@
 #   * The Dockerfile (parser-api/Dockerfile) needs BuildKit for its cache
 #     mounts; setup-buildx + the `type=gha` cache keep rebuilds fast.
 #   * Build context is the repo ROOT (docker-compose uses `context: ..`),
-#     so the root .dockerignore applies — it excludes the 71 GB database.db.
+#     so the root .dockerignore applies — it excludes parser-api/data/ (the DB
+#     plus its -wal/-shm) and the multi-GB parser-api/media/ cache.
 #   * The image is smoke-tested (GET / must answer 200) before the job
 #     completes; a boot regression fails loudly even though the push already
 #     happened.

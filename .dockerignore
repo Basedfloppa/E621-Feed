@@ -7,11 +7,12 @@ parser-web/dist
 # ==== JS deps (installed via `npm ci` inside the build) ====
 **/node_modules
 
-# ==== Local SQLite database — 71GB, mounted at runtime via docker-compose ====
-parser-api/database.db
-parser-api/database.db-journal
-parser-api/database.db-wal
-parser-api/database.db-shm
+# ==== Local database + media cache — tens of GB, mounted at runtime by compose ====
+# The directory covers database.db together with the -wal/-shm SQLite keeps
+# beside it; ignoring only the .db file would ship a multi-GB -wal into the
+# build context (and `COPY parser-api/ .` would carry the media cache in too).
+parser-api/data/
+parser-api/media/
 
 # ==== Editor / IDE ====
 .idea/

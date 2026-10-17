@@ -26,12 +26,26 @@ pub fn install_isolated_db_config() {
             module_path!().replace("::", "-")
         ));
         let db_path = db_path.to_string_lossy().replace('\\', "\\\\");
-        let config = example.replacen(
-            "db_path = \"database.db\"",
-            &format!("db_path = \"{db_path}\""),
-            1,
-        );
-        assert_ne!(config, example, "config.example.toml is missing db_path");
+        // Rewrite the line by key, not by the value it happens to hold: matching
+        // the literal `database.db` stops replacing the moment the example moves
+        // the file (it now lives under `data/`), and the suite would then run
+        // against the developer's real catalog instead of a per-process temp file.
+        let mut replaced = false;
+        let mut config = String::with_capacity(example.len());
+        for line in example.lines() {
+            let trimmed = line.trim_start();
+            if !replaced
+                && trimmed.starts_with("db_path")
+                && trimmed["db_path".len()..].trim_start().starts_with('=')
+            {
+                config.push_str(&format!("db_path = \"{db_path}\"\n"));
+                replaced = true;
+            } else {
+                config.push_str(line);
+                config.push('\n');
+            }
+        }
+        assert!(replaced, "config.example.toml is missing db_path");
 
         let mut file = NamedTempFile::new().expect("create temporary test config");
         file.write_all(config.as_bytes())

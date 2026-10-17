@@ -66,13 +66,15 @@ curl -fsSL -o config.toml \
 #                                   still shows a "uri.com" placeholder; fix it if present
 #   user_agent contact              replace you@example.com with a reachable address
 # Everything else is safe to leave as-is.
-touch database.db   # docker only bind-mounts existing files; a missing path becomes a directory
+# the database lives in data/, together with the -wal/-shm SQLite keeps beside
+# it (docker creates the folder if missing; the image then runs as its owner)
+mkdir -p data
 # optional: -v "$PWD/media:/app/media" adds a persistent folder for the offline
 # media cache (only used if you enable the [catalog] media settings later)
 docker run -d --name e621-feed --restart unless-stopped \
   -p 8181:8181 \
   -v "$PWD/config.toml:/app/config.toml:ro" \
-  -v "$PWD/database.db:/app/database.db" \
+  -v "$PWD/data:/app/data" \
   -v "$PWD/media:/app/media" \
   ghcr.io/basedfloppa/e621-feed:latest
 ```
@@ -85,9 +87,10 @@ image locally instead of pulling, see [docs/deployment.md](docs/deployment.md).
 > Apple Silicon runs it via built-in emulation automatically; on ARM Linux
 > (e.g. a Raspberry Pi) it won't start — build from source there.
 >
-> **Note:** the container runs as root, so on Linux the folders it creates
-> inside the bind mounts (e.g. `media/`) end up root-owned — use `sudo` to
-> delete or edit them later.
+> **Note:** the container starts as root only long enough to adopt the owner of
+> the mounted `config.toml`, then drops to that uid. Files it writes into
+> `data/` and `media/` therefore belong to you — no `sudo`, and no uid to
+> configure per machine.
 
 #### Windows (PowerShell)
 
@@ -103,12 +106,12 @@ Set-Location "$HOME\e621-feed"
 curl.exe -fsSL -o config.toml `
   https://raw.githubusercontent.com/Basedfloppa/E621-Feed/master/parser-api/config.example.toml
 # edit config.toml (same required fields as above)
-New-Item -ItemType File -Force database.db   # docker only bind-mounts existing files
+New-Item -ItemType Directory -Force -Path data | Out-Null   # DB + its -wal/-shm
 # optional: -v "$PWD\media:/app/media" adds the persistent offline media cache
 docker run -d --name e621-feed --restart unless-stopped `
   -p 8181:8181 `
   -v "$PWD\config.toml:/app/config.toml:ro" `
-  -v "$PWD\database.db:/app/database.db" `
+  -v "$PWD\data:/app/data" `
   -v "$PWD\media:/app/media" `
   ghcr.io/basedfloppa/e621-feed:latest
 ```
@@ -119,9 +122,9 @@ Stop/start/logs: `docker stop e621-feed`, `docker start e621-feed`,
 `docker logs -f e621-feed`.
 
 For **cmd.exe** use the PowerShell commands above with these swaps: `mkdir
-%USERPROFILE%\e621-feed` + `cd /d %USERPROFILE%\e621-feed`, `type nul >
-database.db`, and run the whole `docker run` on **one line** using
-`%CD%\config.toml` / `%CD%\database.db` instead of `$PWD\…`.
+%USERPROFILE%\e621-feed` + `cd /d %USERPROFILE%\e621-feed`, `mkdir data`, and
+run the whole `docker run` on **one line** using `%CD%\config.toml` /
+`%CD%\data` instead of `$PWD\…`.
 
 ### 1. Configure the backend (build from source)
 

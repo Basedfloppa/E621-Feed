@@ -126,9 +126,17 @@ COPY parser-api/migrations ./migrations
 COPY parser-api/config.example.toml /app/config.toml
 COPY parser-api/Rocket.toml /app/Rocket.toml
 
+# Runs the binary as the owner of the host bind mounts instead of as root — a
+# root-owned database.db/-wal/-shm cannot be read or repaired from the host
+# without sudo. The script's header explains why no fixed uid can be correct.
+# ENTRYPOINT (not CMD) so every compose service and a bare `docker run` get it.
+COPY parser-api/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+
 ENV RUST_BACKTRACE=1
 
 # The binary binds to /app/Rocket.toml's :8181 (the actual listening port).
 EXPOSE 8181
 
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 CMD ["/usr/local/bin/e621-account-parser-api"]

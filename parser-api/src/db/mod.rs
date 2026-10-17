@@ -95,9 +95,26 @@ pub type DbConn = r2d2::PooledConnection<SqliteConnectionManager>;
 
 static POOL: OnceLock<DbPool> = OnceLock::new();
 
+/// `SQLite` creates a missing database file but never its directory, and the
+/// shipped config keeps the DB in `data/`. Without this, a fresh checkout (or a
+/// first `docker run` before the mount source exists) died inside
+/// `Connection::open` with nothing but "open writer connection" to show for it.
+fn ensure_db_dir(path: &str) {
+    let Some(parent) = std::path::Path::new(path)
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+    else {
+        return;
+    };
+    if let Err(e) = std::fs::create_dir_all(parent) {
+        eprintln!("db: cannot create {}: {e}", parent.display());
+    }
+}
+
 fn pool() -> &'static DbPool {
     POOL.get_or_init(|| {
         let path = crate::models::cfg().db_path.clone();
+        ensure_db_dir(&path);
         let manager = SqliteConnectionManager::file(&path).with_init(|conn| {
             conn.execute_batch(
                 "
@@ -168,6 +185,7 @@ fn acquire_db_writer_lock(path: &str) -> Result<(), String> {
 fn write_conn() -> &'static Mutex<rusqlite::Connection> {
     WRITE_CONN.get_or_init(|| {
         let path = crate::models::cfg().db_path.clone();
+        ensure_db_dir(&path);
         // Cross-process writer guard: abort this process rather than risk a
         // second concurrent writer corrupting the WAL database.
         #[cfg(unix)]
@@ -356,7 +374,21 @@ pub(super) fn parse_db_datetime(raw: &str) -> Result<DateTime<Utc>, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::ensure_embedded_migrations_cover_db;
+    use super::{ensure_db_dir, ensure_embedded_migrations_cover_db};
+
+    #[test]
+    fn ensure_db_dir_creates_the_missing_parent_of_a_path() {
+        let root = std::env::temp_dir().join(format!("e621-dbdir-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        ensure_db_dir(root.join("data/database.db").to_str().unwrap());
+        assert!(
+            root.join("data").is_dir(),
+            "parent directory was not created"
+        );
+        // A bare filename has no directory component; it must not create one.
+        ensure_db_dir("database.db");
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     fn mem() -> rusqlite::Connection {
         rusqlite::Connection::open_in_memory().unwrap()

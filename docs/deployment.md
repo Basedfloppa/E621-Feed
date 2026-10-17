@@ -184,8 +184,12 @@ networking and binds the app directly to the host port via `ROCKET_PORT=8181`
 > the binary FATALs at startup without a parseable `config.toml` (the config
 > `LazyLock` exits on first access), and Rocket's own default bind is
 > `127.0.0.1:8000`. docker-compose mounts the real `config.toml` /
-> `Rocket.toml` / `database.db` **over** the baked files at runtime (bind
-> mounts fully shadow image content), so production behaviour is unchanged.
+> `Rocket.toml` / `data` **over** the baked files at runtime (bind mounts
+> fully shadow image content), so production behaviour is unchanged. `data/`
+> is a *directory* mount because SQLite writes `-wal`/`-shm` next to the
+> database; the image's entrypoint then runs the binary as the owner of
+> `config.toml` (not root), so those files need no `sudo` on the host and no
+> uid has to be configured per machine.
 > The published image is `linux/amd64` only — on ARM Linux hosts build
 > locally (native) or run under QEMU/binfmt; Docker Desktop on Apple Silicon
 > emulates it automatically.
@@ -376,8 +380,8 @@ builds the image with BuildKit on GitHub runners and publishes it to **GHCR**
   inputs (e.g. `jemalloc`).
 
 Build context is the repo root (same as docker-compose's `context: ..`), so
-the root `.dockerignore` applies (it excludes the local `parser-api/database.db`
-catalog, which is multi-GB). The
+the root `.dockerignore` applies (it excludes the local `parser-api/data/`
+catalog and the multi-GB `parser-api/media/` cache). The
 `type=gha` BuildKit cache keeps the cargo/trunk layers warm between runs.
 
 After pushing, the workflow **smoke-tests the image**: it runs the container

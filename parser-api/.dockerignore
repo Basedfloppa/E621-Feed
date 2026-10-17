@@ -1,11 +1,9 @@
 # Cargo build artifacts
 target/
 
-# Local SQLite database. Mounted at runtime via docker-compose.
-database.db
-database.db-journal
-database.db-wal
-database.db-shm
+# Local database + media cache. Mounted at runtime by docker-compose.
+data/
+media/
 
 # Editor / IDE
 .idea/

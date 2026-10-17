@@ -18,8 +18,10 @@ admin_api = "api_key"
 e621_key_encryption_secret = ""
 
 # --- Top-level ---------------------------------------------------------------
-# SQLite database file path (relative or absolute).
-db_path = "database.db"
+# SQLite database file path (relative or absolute). Kept inside `data/` so the
+# `-wal`/`-shm` files SQLite writes beside it are covered by the same mount (and
+# the same backup); docker-compose mounts that directory.
+db_path = "data/database.db"
 
 # Set to true ONLY when a trusted reverse proxy (nginx/Caddy) sits in front and
 # overwrites X-Forwarded-For from the real socket address (our nginx-template and

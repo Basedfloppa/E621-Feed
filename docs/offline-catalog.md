@@ -186,26 +186,32 @@ that aren't present.
 The database is one SQLite file; media is a folder on disk.
 
 ```sh
-# 1. Stop the server (clean stop checkpoints the WAL into database.db)
+# 1. Stop the server (clean stop checkpoints the WAL into data/database.db)
 # 2. Copy the DB and the media folder
-cp database.db  backup-$(date +%s).db
-cp -r media     media-backup-$(date +%s)/   # if you use the media cache
+cp data/database.db  backup-$(date +%s).db
+cp -r media          media-backup-$(date +%s)/   # if you use the media cache
 ```
 
 After a **hard kill** (not a clean stop), un-checkpointed pages may still be in
-`database.db-wal` — copy it too, or open the file once and run
+`data/database.db-wal` — copy it too, or open the file once and run
 `PRAGMA wal_checkpoint(FULL)` before copying.
 
 ---
 
 ## Docker notes
 
-`docker-compose.yml` bind-mounts `./database.db` and `./media` into the
-container, so both persist on the host under `parser-api/`. The container runs
-as the image's default user (the Dockerfile creates an `app` user but never
-switches to it with `USER`, and the compose file sets no `user:`), so files it
-writes into those mounts are owned by root on the host — `E621_UID`/`E621_GID`
-in `.env` are not consumed by `docker-compose.yml`. The hardcoded `media/`
+`docker-compose.yml` bind-mounts `./data` and `./media` into the container, so
+both persist on the host under `parser-api/`. They are mounted as
+**directories**, not files: SQLite keeps `database.db-wal` and
+`database.db-shm` beside the database, and with a file bind mount those two
+would live in the container's writable layer instead — dropped, together with
+any transactions they still hold, by the next `docker compose up --build`.
+
+The image's `docker-entrypoint.sh` starts as root only long enough to read the
+owner of the host mounts (`config.toml` first) and then drops to that uid, so
+files written into `data/` and `media/` belong to your host user and need no
+`sudo`. Nothing is configured per machine — a uid in `.env` cannot be correct
+on more than one host, which is why none is read. The hardcoded `media/`
 folder resolves inside the container to `/app/media` (the mounted host folder).
 
 The config file sets paths (`db_path`, ...), interpreted relative to the
@@ -215,8 +221,8 @@ launch directory. The env overrides that exist are:
 
 There is **no** `DB_PATH` or `MEDIA_CACHE_DIR` env override — the DB path
 comes from the config and the media folder is always `media/`, both relative
-to wherever the app is launched (bind `database.db` / `media` there if you
-want them elsewhere).
+to wherever the app is launched (bind `data/` / `media` there if you want
+them elsewhere).
 
 ---
 
