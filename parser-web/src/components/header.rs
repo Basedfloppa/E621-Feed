@@ -57,19 +57,19 @@ pub fn header() -> Html {
         }
     };
 
-    // The Catalog tab is a view over the accounts *this browser* owns, so it is
-    // only advertised to an owner. Every `/catalog/*` route is already
-    // owner-gated on the server; without this the menu instead leads a visitor
-    // who owns nothing to a page whose account selector has no accounts in it.
+    // The Catalog tab acts on the instance — the shared media worker and the
+    // shared on-disk cache — so it is only advertised to a browser that operates
+    // the instance. Every `/catalog/*` control and `/admin/overview` are gated on
+    // the server by the same rule; without this the menu would lead a visitor who
+    // cannot operate anything to a page that can only say so.
     let ownership = use_ownership(
         &read_config_from_head()
             .map(|c| c.backend_domain)
             .unwrap_or_default(),
     );
     let show_catalog = catalog_entry_visible(&ownership);
-    // The console is owner-only for the same reason and by the same predicate;
-    // a visitor who owns nothing gets the "link an account" ask from the pages
-    // that already say it, not a menu of pages that can only repeat it.
+    // The console follows the same predicate, and it must: a menu that offers one
+    // and hides the other would be the bug both entries exist to prevent.
     let show_admin = admin_entry_visible(&ownership);
 
     use_effect_with((), |_| {
@@ -81,6 +81,7 @@ pub fn header() -> Html {
         let domain = read_config_from_head()
             .map(|c| c.posts_domain)
             .unwrap_or_else(|| "https://e621.net".to_string());
+
         // ── Tour steps ────────────────────────────────────────────
         // Each step has: id, title, text, route (navigates there),
         // attach_to (element selector + position), buttons.
@@ -101,6 +102,10 @@ pub fn header() -> Html {
                 must_be_visible: Some(true),
             },
             // ── Account (the most important step — start here) ──
+            // This walks to the general account-linking form, which is not the
+            // administration door: that one is the owner claim on the settings
+            // page, and `[runtime].admin_user` is refused on the server to
+            // everyone who has not proved the key there.
             Step {
                 id: "account-page".into(),
                 title: Some("Add your e621 account".into()),
@@ -442,6 +447,12 @@ pub fn header() -> Html {
                         >
                             <IconSliders />
                         </button>
+                        // `/account` is the general linking page — it links any
+                        // account, with or without a key — so every reader gets
+                        // the entry. The administration door is not here: it is
+                        // the owner claim on the settings page, and the server
+                        // refuses `[runtime].admin_user` to anyone who has not
+                        // proved the key there.
                         <a
                             class={classes!("btn", "btn-ghost", "btn-sm", account_active.then_some("btn-active"))}
                             aria-label="Account settings"
@@ -487,6 +498,8 @@ pub fn header() -> Html {
                         </a>
                     </li>
                     <li>
+                        // Same rule as the toolbar icon above, and it must be the
+                        // same: the drawer entry and the icon open the same page.
                         <a
                             class={classes!("text-base-content", is_active("/account").then_some("menu-active"))}
                             href="/account"

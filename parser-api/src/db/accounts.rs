@@ -7,6 +7,7 @@ use crate::models::{
     TruncatedAccount, cfg,
 };
 
+use super::instance::{IS_OWNER_SQL, MAY_ADDRESS_SQL, VISIBLE_ACCOUNTS_SQL, console_accounts_sql};
 use super::open_db;
 
 /// A device (owner token) is reported as "active" if it was last seen within
@@ -374,30 +375,51 @@ pub fn update_device_blacklist(
     // callers can skip the process-wide e621 cache flush on a no-op write
     // (replaying an unchanged blacklist must not keep the shared cache cold).
     let changed = super::with_write_tx(|tx| {
-        let existing: Option<String> = tx
+        // Where the value lives depends on whether this browser holds a link:
+        // `account_device_links.blacklisted_tags` is the per-device override and
+        // `accounts.blacklisted_tags` the account-wide value, and the read path
+        // resolves exactly this COALESCE. Writing to the other row would look
+        // like a save that did nothing. The instance owner addresses accounts
+        // they hold no link to, and for those the account-wide column is what is
+        // read back.
+        let found: Option<(bool, String)> = tx
             .query_row(
-                "SELECT blacklisted_tags FROM account_device_links \
-                 WHERE owner_token = ?1 AND account_id = ?2",
+                &format!(
+                    "SELECT adl.owner_token IS NOT NULL,
+                            COALESCE(NULLIF(adl.blacklisted_tags, ''), a.blacklisted_tags, '')
+                       FROM accounts a
+                       LEFT JOIN account_device_links adl
+                              ON adl.account_id = a.id AND adl.owner_token = ?1
+                      WHERE a.id = ?2 AND (adl.owner_token IS NOT NULL OR {IS_OWNER_SQL})"
+                ),
                 params![owner_token, account_id],
-                |r| r.get(0),
+                |r| Ok((r.get(0)?, r.get(1)?)),
             )
-            .ok();
-        match existing {
-            None => Err("No account found for this device token".to_string()),
-            Some(cur) if cur == resolved => Ok(false),
-            Some(_) => {
-                tx.execute(
-                    "
-            UPDATE account_device_links
-            SET blacklisted_tags = ?3, last_seen_at = ?4
-            WHERE owner_token = ?1 AND account_id = ?2
-            ",
-                    params![owner_token, account_id, resolved, Utc::now().to_rfc3339(),],
-                )
-                .map_err(|e| format!("Failed to update device blacklist: {e}"))?;
-                Ok(true)
-            }
+            .optional()
+            .map_err(|e| format!("Failed to read the current blacklist: {e}"))?;
+
+        let Some((linked, current)) = found else {
+            return Err("No account found for this device token".to_string());
+        };
+        if current == resolved {
+            return Ok(false);
         }
+        if linked {
+            tx.execute(
+                "UPDATE account_device_links
+                    SET blacklisted_tags = ?3, last_seen_at = ?4
+                  WHERE owner_token = ?1 AND account_id = ?2",
+                params![owner_token, account_id, resolved, Utc::now().to_rfc3339()],
+            )
+            .map_err(|e| format!("Failed to update device blacklist: {e}"))?;
+        } else {
+            tx.execute(
+                "UPDATE accounts SET blacklisted_tags = ?1 WHERE id = ?2",
+                params![resolved, account_id],
+            )
+            .map_err(|e| format!("Failed to update account blacklist: {e}"))?;
+        }
+        Ok(true)
     })?;
 
     let account = get_account_by_id(owner_token, account_id)?;
@@ -412,15 +434,16 @@ pub fn get_accounts_for_owner(owner_token: &str) -> Result<Vec<TruncatedAccount>
     // contended with the writer mutex via SQLite's busy_timeout, holding
     // pool slots and blocking unrelated reads under load.
     let mut stmt = conn
-        .prepare(
+        .prepare(&format!(
             r"
         SELECT a.id, a.name, COALESCE(NULLIF(adl.blacklisted_tags, ''), a.blacklisted_tags, '')
         FROM accounts a
-        INNER JOIN account_device_links adl ON adl.account_id = a.id
-        WHERE adl.owner_token = ?
+        LEFT JOIN account_device_links adl
+               ON adl.account_id = a.id AND adl.owner_token = ?1
+        WHERE adl.owner_token IS NOT NULL OR {IS_OWNER_SQL}
         ORDER BY adl.last_seen_at DESC, a.name ASC
-        ",
-        )
+        "
+        ))
         .map_err(|e| format!("Failed to construct query: {e}"))?;
 
     stmt.query_map([owner_token], |row| {
@@ -470,20 +493,36 @@ pub fn get_account_by_name(owner_token: &str, name: String) -> Result<TruncatedA
 
 pub fn get_account_by_id(owner_token: &str, id: i32) -> Result<TruncatedAccount, String> {
     let conn = open_db()?;
+    get_account_by_id_conn(&conn, owner_token, id)
+}
 
+/// Body of [`get_account_by_id`], split out so the scope rule can be pinned
+/// against an in-memory schema. This is the single access check behind the
+/// catalog, catalog_manage, browse, feed, digest and taste_profile routes, which
+/// is why the rule lives here and not in each of them.
+///
+/// `LEFT JOIN` on the caller's *own* link keeps the per-account blacklist
+/// override when it exists and yields exactly one row either way — for the
+/// instance owner `adl` is simply NULL on the accounts they hold no link to.
+fn get_account_by_id_conn(
+    conn: &rusqlite::Connection,
+    owner_token: &str,
+    id: i32,
+) -> Result<TruncatedAccount, String> {
     let mut stmt = conn
-        .prepare(
+        .prepare(&format!(
             r"
         SELECT a.id, a.name, COALESCE(NULLIF(adl.blacklisted_tags, ''), a.blacklisted_tags, '')
         FROM accounts a
-        INNER JOIN account_device_links adl ON adl.account_id = a.id
-        WHERE a.id = ?1 AND adl.owner_token = ?2
-        ",
-        )
+        LEFT JOIN account_device_links adl
+               ON adl.account_id = a.id AND adl.owner_token = ?1
+        WHERE a.id = ?2 AND (adl.owner_token IS NOT NULL OR {IS_OWNER_SQL})
+        "
+        ))
         .map_err(|e| format!("Failed to construct query: {e}"))?;
 
     let accounts = stmt
-        .query_map(params![id, owner_token], |row| {
+        .query_map(params![owner_token, id], |row| {
             Ok(TruncatedAccount {
                 id: row.get(0)?,
                 name: row.get(1)?,
@@ -501,18 +540,68 @@ pub fn get_account_by_id(owner_token: &str, id: i32) -> Result<TruncatedAccount,
     }
 }
 
-/// Whether `owner_token` is currently linked to `account_id`. Returns a DB
-/// error on failure; `Ok(false)` means the link does not exist (callers map
-/// that to 403/404 rather than a 500).
-pub fn account_is_linked(owner_token: &str, account_id: i32) -> Result<bool, String> {
+/// May `owner_token` address `account_id`?
+///
+/// This is *scope*, not a link count: the instance owner addresses every
+/// account on the instance while holding no link at all, and everyone else only
+/// the accounts linked to their token. Returns a DB error on failure;
+/// `Ok(false)` means the account is out of scope (callers map that to 403/404
+/// rather than a 500).
+pub fn account_in_scope(owner_token: &str, account_id: i32) -> Result<bool, String> {
     let conn = open_db()?;
+    account_in_scope_conn(&conn, owner_token, account_id)
+}
+
+fn account_in_scope_conn(
+    conn: &rusqlite::Connection,
+    owner_token: &str,
+    account_id: i32,
+) -> Result<bool, String> {
     conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM account_device_links \
-         WHERE owner_token = ?1 AND account_id = ?2)",
+        &format!("SELECT {MAY_ADDRESS_SQL}"),
         params![owner_token, account_id],
         |r| r.get(0),
     )
     .map_err(|e| format!("Failed to check account ownership: {e}"))
+}
+
+/// Record that `owner_token` proved `[runtime].admin_api` for `account_id`.
+///
+/// The grant is deliberately a property of the *link*, not of the account: the
+/// same account can be linked by several browsers, and only the one that
+/// presented the key becomes an operator. `fingerprint` is what binds the grant
+/// to the key that wrote it, so a later rotation of `admin_api` retires it
+/// without anyone having to revoke anything by hand.
+///
+/// Returns an error when there is no link to grant, rather than silently doing
+/// nothing: a caller that has just written the link and still sees no row has a
+/// bug, and reporting success would hide it until the guard answered 403.
+pub fn set_account_admin_grant(
+    owner_token: &str,
+    account_id: i32,
+    fingerprint: &str,
+) -> Result<(), String> {
+    super::with_write_tx(|tx| {
+        let n = tx
+            .execute(
+                "UPDATE account_device_links \
+                 SET admin_granted_at = ?1, admin_key_fingerprint = ?2 \
+                 WHERE owner_token = ?3 AND account_id = ?4",
+                params![
+                    Utc::now().to_rfc3339(),
+                    fingerprint,
+                    owner_token,
+                    account_id
+                ],
+            )
+            .map_err(|e| format!("Failed to record the administration grant: {e}"))?;
+        if n == 0 {
+            return Err(format!(
+                "no device link for account {account_id} to grant administration on"
+            ));
+        }
+        Ok(())
+    })
 }
 
 /// Sever the device → account link, leaving the `accounts` row alone
@@ -594,88 +683,29 @@ pub fn delete_device_link(owner_token: &str, account_id: i32) -> Result<usize, S
     Ok(removed)
 }
 
-/// Link every account that belongs to nobody into `owner_token`.
+/// Accounts `owner` can address.
 ///
-/// "Nobody" means either no device link at all, or a link only to
-/// `seed_owner_token`. That second case is the common one in practice:
-/// `seed`/`calibrate` link everything they write
-/// (`backtest.seed_owner_token`, default `"calibration-seed"`), so a library
-/// built by those binaries does have a device link — just no human behind it.
-///
-/// This is also the only way an owner recovers a library after clearing
-/// cookies, since ownership is the cookie alone. Accounts linked to any *other*
-/// token are never touched, so a regular visitor's library cannot be taken, and
-/// the call is idempotent. Returns the number of accounts linked.
-pub fn adopt_unowned_accounts(owner_token: &str, seed_owner_token: &str) -> Result<i64, String> {
-    let now = Utc::now().to_rfc3339();
-    let linked = super::with_write_tx(|tx| {
-        adopt_unowned_accounts_conn(tx, owner_token, seed_owner_token, &now)
-    })?;
-    Ok(linked as i64)
-}
-
-/// The adoption statement itself, split out so it can be exercised against an
-/// in-memory connection (`with_write_tx` needs the process-global pool).
-fn adopt_unowned_accounts_conn(
-    conn: &rusqlite::Connection,
-    owner_token: &str,
-    seed_owner_token: &str,
-    now: &str,
-) -> Result<usize, String> {
-    conn.execute(
-        "INSERT OR IGNORE INTO account_device_links
-             (owner_token, account_id, linked_at, last_seen_at)
-         SELECT ?1, a.id, ?2, ?2
-           FROM accounts a
-          WHERE NOT EXISTS (
-                SELECT 1 FROM account_device_links adl
-                 WHERE adl.account_id = a.id AND adl.owner_token <> ?3
-          )",
-        params![owner_token, now, seed_owner_token],
-    )
-    .map_err(|e| format!("adopt unowned accounts: {e}"))
-}
-
-/// `(accounts linked to `owner`, accounts owned by nobody)`.
-///
-/// The second count is what [`adopt_unowned_accounts`] would take, so the
-/// settings card can say how many accounts an enrollment links *before* the
-/// owner has proved the secret. The predicate is duplicated on purpose;
-/// `the_adoptable_count_is_what_adoption_takes` keeps the two in step.
-pub fn account_ownership_counts(
-    owner: Option<&str>,
-    seed_owner_token: &str,
-) -> Result<(i64, i64), String> {
+/// The definition of "address" is [`VISIBLE_ACCOUNTS_SQL`], so this count,
+/// `/accounts`, the owner console and the settings card cannot drift apart.
+/// `None` (no cookie at all) addresses nothing.
+pub fn visible_account_count(owner: Option<&str>) -> Result<i64, String> {
     let conn = open_db()?;
-    account_ownership_counts_conn(&conn, owner, seed_owner_token)
+    visible_account_count_conn(&conn, owner)
 }
 
-fn account_ownership_counts_conn(
+fn visible_account_count_conn(
     conn: &rusqlite::Connection,
     owner: Option<&str>,
-    seed_owner_token: &str,
-) -> Result<(i64, i64), String> {
-    let owned = match owner {
-        Some(token) => conn
-            .query_row(
-                "SELECT COUNT(*) FROM account_device_links WHERE owner_token = ?1",
-                params![token],
-                |row| row.get(0),
-            )
-            .map_err(|e| format!("count owned accounts: {e}"))?,
-        None => 0,
+) -> Result<i64, String> {
+    let Some(token) = owner else {
+        return Ok(0);
     };
-    let adoptable = conn
-        .query_row(
-            "SELECT COUNT(*) FROM accounts a
-              WHERE NOT EXISTS (
-                    SELECT 1 FROM account_device_links adl
-                     WHERE adl.account_id = a.id AND adl.owner_token <> ?1)",
-            params![seed_owner_token],
-            |row| row.get(0),
-        )
-        .map_err(|e| format!("count adoptable accounts: {e}"))?;
-    Ok((owned, adoptable))
+    conn.query_row(
+        &format!("SELECT COUNT(*) FROM accounts WHERE id IN {VISIBLE_ACCOUNTS_SQL}"),
+        params![token],
+        |row| row.get(0),
+    )
+    .map_err(|e| format!("count visible accounts: {e}"))
 }
 
 pub fn cleanup_orphan_accounts() -> Result<i64, String> {
@@ -704,24 +734,33 @@ pub fn get_account_experiment_bucket(account_id: i32) -> Result<Option<String>, 
     })
 }
 
-/// Every account id linked to `owner_token`.
+/// Every account id the console covers for `owner_token`.
 ///
-/// Used by the owner console to count running `/process` jobs across the whole
-/// library rather than only the page it is showing: job state is in-process, so
-/// the only thing that has to come from SQL is the set of ids, and that is one
-/// indexed read of `account_device_links`'s primary key.
-pub fn owned_account_ids(owner_token: &str) -> Result<Vec<i32>, String> {
+/// Used to count running `/process` jobs across everything the console shows
+/// rather than only the page it is showing: job state is in-process, so the only
+/// thing that has to come from SQL is the set of ids — and for an operator that
+/// set is the instance, not their links (`instance::console_accounts_sql`).
+///
+/// Deliberately not the account picker's scope: what the console *displays* and
+/// what this browser may *act as* are different sets.
+pub fn console_account_ids(owner_token: &str) -> Result<Vec<i32>, String> {
     let conn = open_db()?;
+    let fingerprint = crate::crypto::admin_key_fingerprint(&cfg().admin_api);
     let mut stmt = conn
-        .prepare("SELECT account_id FROM account_device_links WHERE owner_token = ?1")
-        .map_err(|e| format!("Failed to construct owned-ids query: {e}"))?;
-    stmt.query_map([owner_token], |row| row.get::<_, i32>(0))
-        .map_err(|e| format!("Failed to enumerate owned account ids: {e}"))?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| format!("Failed to collect owned account ids: {e}"))
+        .prepare(&format!(
+            "SELECT id FROM accounts WHERE id IN {}",
+            console_accounts_sql()
+        ))
+        .map_err(|e| format!("Failed to construct console-ids query: {e}"))?;
+    stmt.query_map(params![owner_token, fingerprint], |row| {
+        row.get::<_, i32>(0)
+    })
+    .map_err(|e| format!("Failed to enumerate console account ids: {e}"))?
+    .collect::<Result<Vec<_>, _>>()
+    .map_err(|e| format!("Failed to collect console account ids: {e}"))
 }
 
-/// One row of the owner console's account table (TODO §3.2).
+/// One row of the operator console's account table (TODO §3.2).
 ///
 /// Deliberately flat and SQL-only: the route adds the two pieces that are not
 /// database state — the *effective* bucket (needs `Config`) and the
@@ -736,11 +775,30 @@ pub struct OwnedAccountRow {
     pub bucket_explicit: Option<String>,
     pub has_key: bool,
     pub saved_posts: i64,
+    /// Does this browser hold a *direct* link to the account?
+    ///
+    /// The console's unlink action can only remove a link that exists, and the
+    /// instance owner addresses accounts they hold no link to, so the action is
+    /// offered from this flag rather than from "the row is visible".
+    pub linked: bool,
+    /// May this browser *address* the account — sync it, export it, start a
+    /// `/process` run, pin its bucket?
+    ///
+    /// Wider than [`Self::linked`] in one direction (the instance owner
+    /// addresses accounts it holds no link to) and identical otherwise. A row
+    /// can be visible without being addressable: an operator's console covers
+    /// the instance, but operating the machine is not the same as holding the
+    /// libraries on it — that is what a link is for. Every per-row action needs
+    /// this flag, because each one lands on a route that re-checks
+    /// `account_in_scope`.
+    pub addressable: bool,
 }
 
-/// A page of owned accounts plus totals over **all** of them.
+/// A page of console accounts plus totals over **all** of them.
 ///
-/// Totals are counted over every owned account, not over the page: a panel
+/// The scope is the console's, not the account picker's: an operator sees every
+/// account on the instance while still addressing only its own links. Totals are
+/// counted over every account in that scope, not over the page: a panel
 /// that adds up only the visible rows under-reports as soon as the list is
 /// long enough to paginate, which is precisely the state a 900-account library
 /// is in.
@@ -750,86 +808,103 @@ pub struct OwnedAccountRow {
 /// `idx_ap_acc_post(account_id, post_id)` (`V1__init.sql:79`), so counting one
 /// account's rows is an index range scan, while grouping the whole table would
 /// read every library row in the database to answer a question about one page.
-pub fn owner_accounts_overview(
+pub fn console_accounts_overview(
     owner_token: &str,
     limit: i64,
     offset: i64,
 ) -> Result<(Vec<OwnedAccountRow>, AdminTotals), String> {
     let mut conn = open_db()?;
+    let fingerprint = crate::crypto::admin_key_fingerprint(&cfg().admin_api);
     // One read transaction so the page and the totals describe one snapshot
     // (same reasoning as `get_account_feed_settings`).
     let tx = conn
         .transaction()
         .map_err(|e| format!("Failed to begin read transaction: {e}"))?;
-    owner_accounts_overview_tx(&tx, owner_token, limit, offset)
+    console_accounts_overview_tx(&tx, owner_token, &fingerprint, limit, offset)
 }
 
-/// Body of [`owner_accounts_overview`], separated from connection setup so the
+/// Body of [`console_accounts_overview`], separated from connection setup so the
 /// paging/total semantics can be pinned against an in-memory schema — those
 /// semantics are the whole point of the function and are invisible in a
 /// single-page smoke test.
-fn owner_accounts_overview_tx(
+///
+/// The fingerprint is a parameter for the same reason it is one in
+/// `instance::admin_grant_exists`: the scope rule has to be exercisable without a
+/// loaded config, and "the grant matches the key" should stay visible here.
+fn console_accounts_overview_tx(
     tx: &rusqlite::Transaction<'_>,
     owner_token: &str,
+    fingerprint: &str,
     limit: i64,
     offset: i64,
 ) -> Result<(Vec<OwnedAccountRow>, AdminTotals), String> {
+    // Bound once and borrowed by the `format!` calls below; through the whole
+    // function `?1` is the token and `?2` the fingerprint.
+    let scope = console_accounts_sql();
     let accounts = tx
         .query_row(
-            "SELECT COUNT(*) FROM account_device_links WHERE owner_token = ?1",
-            params![owner_token],
+            &format!("SELECT COUNT(*) FROM accounts WHERE id IN {scope}"),
+            params![owner_token, fingerprint],
             |r| r.get::<_, i64>(0),
         )
-        .map_err(|e| format!("count owned accounts: {e}"))?;
+        .map_err(|e| format!("count console accounts: {e}"))?;
     let saved_posts = tx
         .query_row(
-            "SELECT COUNT(DISTINCT ap.post_id)
-               FROM accounts_post ap
-               JOIN account_device_links adl ON adl.account_id = ap.account_id
-              WHERE adl.owner_token = ?1",
-            params![owner_token],
+            &format!(
+                "SELECT COUNT(DISTINCT ap.post_id)
+                   FROM accounts_post ap
+                  WHERE ap.account_id IN {scope}"
+            ),
+            params![owner_token, fingerprint],
             |r| r.get::<_, i64>(0),
         )
-        .map_err(|e| format!("count owned library posts: {e}"))?;
+        .map_err(|e| format!("count console library posts: {e}"))?;
     let accounts_with_key = tx
         .query_row(
-            "SELECT COUNT(*)
-               FROM accounts a
-               JOIN account_device_links adl ON adl.account_id = a.id
-              WHERE adl.owner_token = ?1 AND a.e621_api_key_encrypted IS NOT NULL",
-            params![owner_token],
+            &format!(
+                "SELECT COUNT(*)
+                   FROM accounts a
+                  WHERE a.e621_api_key_encrypted IS NOT NULL
+                    AND a.id IN {scope}"
+            ),
+            params![owner_token, fingerprint],
             |r| r.get::<_, i64>(0),
         )
-        .map_err(|e| format!("count owned accounts with keys: {e}"))?;
+        .map_err(|e| format!("count console accounts with keys: {e}"))?;
 
     let mut stmt = tx
-        .prepare(
+        .prepare(&format!(
             r"
         SELECT a.id, a.name, a.experiment_bucket,
                (a.e621_api_key_encrypted IS NOT NULL),
-               (SELECT COUNT(*) FROM accounts_post ap WHERE ap.account_id = a.id)
+               (SELECT COUNT(*) FROM accounts_post ap WHERE ap.account_id = a.id),
+               (adl.owner_token IS NOT NULL),
+               (adl.owner_token IS NOT NULL OR {IS_OWNER_SQL})
         FROM accounts a
-        INNER JOIN account_device_links adl ON adl.account_id = a.id
-        WHERE adl.owner_token = ?1
+        LEFT JOIN account_device_links adl
+               ON adl.account_id = a.id AND adl.owner_token = ?1
+        WHERE a.id IN {scope}
         ORDER BY adl.last_seen_at DESC, a.name ASC, a.id ASC
-        LIMIT ?2 OFFSET ?3
-        ",
-        )
+        LIMIT ?3 OFFSET ?4
+        "
+        ))
         .map_err(|e| format!("Failed to construct overview query: {e}"))?;
 
     let rows = stmt
-        .query_map(params![owner_token, limit, offset], |row| {
+        .query_map(params![owner_token, fingerprint, limit, offset], |row| {
             Ok(OwnedAccountRow {
                 id: row.get(0)?,
                 name: row.get(1)?,
                 bucket_explicit: row.get(2)?,
                 has_key: row.get(3)?,
                 saved_posts: row.get(4)?,
+                linked: row.get(5)?,
+                addressable: row.get(6)?,
             })
         })
-        .map_err(|e| format!("Failed to enumerate owned accounts: {e}"))?
+        .map_err(|e| format!("Failed to enumerate console accounts: {e}"))?
         .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| format!("Failed to collect owned accounts: {e}"))?;
+        .map_err(|e| format!("Failed to collect console accounts: {e}"))?;
 
     // `stmt` borrows the transaction and is dropped at the end of the scope;
     // the caller owns the connection, so the read snapshot is released there.
@@ -867,15 +942,14 @@ fn set_account_experiment_bucket_tx(
     account_id: i32,
     bucket: Option<&str>,
 ) -> Result<(), String> {
-    let linked: i64 = tx
+    let in_scope: bool = tx
         .query_row(
-            "SELECT COUNT(*) FROM account_device_links
-              WHERE owner_token = ?1 AND account_id = ?2",
+            &format!("SELECT {MAY_ADDRESS_SQL}"),
             params![owner_token, account_id],
             |r| r.get(0),
         )
         .map_err(|e| format!("verify account access: {e}"))?;
-    if linked == 0 {
+    if !in_scope {
         // Wording matches `get_account_by_id`, so callers that already
         // special-case "No account found" keep working.
         return Err("No account found for this device token".to_string());
@@ -902,27 +976,29 @@ pub fn get_account_feed_settings(
         .transaction()
         .map_err(|e| format!("Failed to begin read transaction: {e}"))?;
 
-    // Verify device ownership first.
-    tx.query_row(
-        "SELECT 1 FROM account_device_links WHERE owner_token = ?1 AND account_id = ?2",
-        params![owner_token, account_id],
-        |_| Ok(()),
-    )
-    .map_err(|e| match e {
-        rusqlite::Error::QueryReturnedNoRows => {
-            "No account found for this device token".to_string()
-        }
-        other => format!("Failed to verify account access: {other}"),
-    })?;
+    // Verify the account is in scope: linked to this device, or the instance
+    // owner, who addresses every account on the instance.
+    let in_scope: bool = tx
+        .query_row(
+            &format!("SELECT {MAY_ADDRESS_SQL}"),
+            params![owner_token, account_id],
+            |r| r.get(0),
+        )
+        .map_err(|e| format!("Failed to verify account access: {e}"))?;
+    if !in_scope {
+        return Err("No account found for this device token".to_string());
+    }
 
-    // 1) Blacklist: device-specific with global fallback.
+    // 1) Blacklist: device-specific with global fallback. The account is known
+    // to be in scope by now, so this is a plain read of the override.
     let blacklist: String = tx
         .query_row(
             r"
             SELECT COALESCE(NULLIF(adl.blacklisted_tags, ''), a.blacklisted_tags, '')
             FROM accounts a
-            INNER JOIN account_device_links adl ON adl.account_id = a.id
-            WHERE a.id = ?1 AND adl.owner_token = ?2
+            LEFT JOIN account_device_links adl
+                   ON adl.account_id = a.id AND adl.owner_token = ?2
+            WHERE a.id = ?1
             ",
             params![account_id, owner_token],
             |r| r.get(0),
@@ -986,16 +1062,16 @@ pub fn set_preferred_tags(
     preferred_tags: &[PreferredTag],
 ) -> Result<(), String> {
     super::with_write_tx(|tx| {
-        let linked: bool = tx
+        let in_scope: bool = tx
             .query_row(
-                "SELECT EXISTS(SELECT 1 FROM account_device_links WHERE owner_token = ?1 AND account_id = ?2)",
+                &format!("SELECT {MAY_ADDRESS_SQL}"),
                 params![owner_token, account_id],
                 |row| row.get(0),
             )
             .map_err(|e| format!("Failed to verify account ownership: {e}"))?;
 
-        if !linked {
-            return Err("Account is not linked to this device token".to_string());
+        if !in_scope {
+            return Err("Account is not in scope for this device token".to_string());
         }
 
         tx.execute(
@@ -1163,32 +1239,31 @@ fn count_active_within_conn(conn: &rusqlite::Connection, window_days: i64) -> Re
 //
 // ACCOUNT-scoped: an e621 account has ONE canonical API key (the owner's),
 // stored on the `accounts` row so it is available to every linked device for
-// direct sync. Ownership is enforced at ACCESS time via `account_device_links`
-// (`require_device_link`) — a token must be linked to the account to view or
+// direct sync. Ownership is enforced at ACCESS time via `require_account_scope`
+// — a token must be linked to the account, or own the instance, to view or
 // manage the key — but the key is a single shared account resource, so sync
-// works from any linked device. (The admin_user account syncs with the shared
+// works from any device in scope. (The admin_user account syncs with the shared
 // admin_api and needs no stored key.) The raw key is AES-256-GCM encrypted
 // (`crypto`), never returned over the API, and never exported (the export is
 // built from explicit fields and omits these columns).
 // ---------------------------------------------------------------------------
 
-/// Verify that `owner_token` is linked to `account_id`; errors otherwise.
+/// Verify that `owner_token` may address `account_id`; errors otherwise.
 /// Shared by every key accessor so the ownership rule lives in one place.
-fn require_device_link(
+fn require_account_scope(
     conn: &rusqlite::Connection,
     owner_token: &str,
     account_id: i32,
 ) -> Result<(), String> {
-    let linked: bool = conn
+    let in_scope: bool = conn
         .query_row(
-            "SELECT EXISTS(SELECT 1 FROM account_device_links \
-             WHERE owner_token = ?1 AND account_id = ?2)",
+            &format!("SELECT {MAY_ADDRESS_SQL}"),
             params![owner_token, account_id],
             |r| r.get(0),
         )
         .map_err(|e| format!("Failed to verify account ownership: {e}"))?;
-    if !linked {
-        return Err("Account is not linked to this device token".to_string());
+    if !in_scope {
+        return Err("Account is not in scope for this device token".to_string());
     }
     Ok(())
 }
@@ -1204,7 +1279,7 @@ pub fn set_account_e621_key(owner_token: &str, account_id: i32, key: &str) -> Re
         "Failed to encrypt e621 key".to_string()
     })?;
     super::with_write_tx(|tx| {
-        require_device_link(tx, owner_token, account_id)?;
+        require_account_scope(tx, owner_token, account_id)?;
         tx.execute(
             "UPDATE accounts SET e621_api_key_encrypted = ?1, e621_api_key_added_at = ?2 \
              WHERE id = ?3",
@@ -1221,7 +1296,7 @@ pub fn set_account_e621_key(owner_token: &str, account_id: i32, key: &str) -> Re
 /// API except by deliberately-scoped internal callers (key/test, sync).
 pub fn get_account_e621_key(owner_token: &str, account_id: i32) -> Result<Option<String>, String> {
     let conn = open_db()?;
-    require_device_link(&conn, owner_token, account_id)?;
+    require_account_scope(&conn, owner_token, account_id)?;
     let encrypted: Option<String> = conn
         .query_row(
             "SELECT e621_api_key_encrypted FROM accounts WHERE id = ?1",
@@ -1247,7 +1322,7 @@ pub fn get_account_e621_key(owner_token: &str, account_id: i32) -> Result<Option
 /// key/state endpoint and sync/status without exposing any key material.
 pub fn has_account_e621_key(owner_token: &str, account_id: i32) -> Result<bool, String> {
     let conn = open_db()?;
-    require_device_link(&conn, owner_token, account_id)?;
+    require_account_scope(&conn, owner_token, account_id)?;
     let has: bool = conn
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM accounts \
@@ -1271,7 +1346,7 @@ pub struct AccountKeyMeta {
 
 pub fn get_account_key_meta(owner_token: &str, account_id: i32) -> Result<AccountKeyMeta, String> {
     let conn = open_db()?;
-    require_device_link(&conn, owner_token, account_id)?;
+    require_account_scope(&conn, owner_token, account_id)?;
     let row: Option<(bool, Option<String>, Option<String>)> = conn
         .query_row(
             "SELECT e621_api_key_encrypted IS NOT NULL, e621_api_key_added_at, \
@@ -1304,7 +1379,7 @@ pub fn get_account_key_meta(owner_token: &str, account_id: i32) -> Result<Accoun
 /// (used by `key/test` and each sync pass). Access-gated.
 pub fn mark_e621_key_verified(owner_token: &str, account_id: i32) -> Result<(), String> {
     super::with_write_tx(|tx| {
-        require_device_link(tx, owner_token, account_id)?;
+        require_account_scope(tx, owner_token, account_id)?;
         tx.execute(
             "UPDATE accounts SET e621_api_key_verified_at = ?1 WHERE id = ?2",
             params![Utc::now().to_rfc3339(), account_id],
@@ -1318,7 +1393,7 @@ pub fn mark_e621_key_verified(owner_token: &str, account_id: i32) -> Result<(), 
 /// device. Clear is account-wide (a single shared key per account).
 pub fn clear_account_e621_key(owner_token: &str, account_id: i32) -> Result<(), String> {
     super::with_write_tx(|tx| {
-        require_device_link(tx, owner_token, account_id)?;
+        require_account_scope(tx, owner_token, account_id)?;
         tx.execute(
             "UPDATE accounts SET e621_api_key_encrypted = NULL, e621_api_key_added_at = NULL, \
              e621_api_key_verified_at = NULL WHERE id = ?1",
@@ -1333,7 +1408,7 @@ pub fn clear_account_e621_key(owner_token: &str, account_id: i32) -> Result<(), 
 /// Sets `last_direct_synced_at` (account-wide); used by sync/status.
 pub fn mark_account_direct_synced(owner_token: &str, account_id: i32) -> Result<(), String> {
     super::with_write_tx(|tx| {
-        require_device_link(tx, owner_token, account_id)?;
+        require_account_scope(tx, owner_token, account_id)?;
         tx.execute(
             "UPDATE accounts SET last_direct_synced_at = ?1 WHERE id = ?2",
             params![Utc::now().to_rfc3339(), account_id],
@@ -1350,7 +1425,7 @@ pub fn get_direct_sync_state(
     account_id: i32,
 ) -> Result<DirectSyncState, String> {
     let conn = open_db()?;
-    require_device_link(&conn, owner_token, account_id)?;
+    require_account_scope(&conn, owner_token, account_id)?;
     let row: Option<(Option<String>, bool)> = conn
         .query_row(
             "SELECT last_direct_synced_at, e621_api_key_encrypted IS NOT NULL \
@@ -1472,120 +1547,208 @@ mod tests {
         );
     }
 
-    /// Adoption must move the accounts that belong to *nobody* and leave every
-    /// other library alone. The seed token is the subtle part: `seed` and
-    /// `calibrate` link what they write, so a library built by those binaries
-    /// is not "no device link" at all — it just has no human behind it, and
-    /// adopting only the unlinked rows would hand the owner an empty library.
-    ///
-    /// Several rows move in one statement, which also makes this the regression
-    /// test for an `INSERT ... SELECT` that reads its own target table.
-    #[test]
-    fn adopt_moves_only_accounts_owned_by_nobody() {
+    /// Schema for the scope tests: three accounts (linked to the seed token, to
+    /// somebody else, and to nobody), the claim table, and the two columns the
+    /// overview reads.
+    fn scope_fixture() -> rusqlite::Connection {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         conn.execute_batch(
-            "CREATE TABLE accounts (id INTEGER PRIMARY KEY, name TEXT);
+            "CREATE TABLE accounts (
+                 id INTEGER PRIMARY KEY,
+                 name TEXT,
+                 blacklisted_tags TEXT,
+                 experiment_bucket TEXT,
+                 e621_api_key_encrypted BLOB
+             );
              CREATE TABLE account_device_links (
                  owner_token TEXT NOT NULL,
                  account_id INTEGER NOT NULL,
                  linked_at TEXT NOT NULL,
                  last_seen_at TEXT NOT NULL,
+                 blacklisted_tags TEXT,
+                 admin_granted_at TEXT,
+                 admin_key_fingerprint TEXT,
                  PRIMARY KEY(owner_token, account_id)
              );
-             INSERT INTO accounts (id, name) VALUES
-                 (1,'unlinked'), (2,'seeded'), (3,'someone'),
-                 (4,'seeded+someone'), (5,'seeded2');
-             INSERT INTO account_device_links VALUES
-                 ('calibration-seed', 2, 't', 't'),
-                 ('calibration-seed', 4, 't', 't'),
-                 ('calibration-seed', 5, 't', 't'),
-                 ('someone-else',     3, 't', 't'),
-                 ('someone-else',     4, 't', 't');",
+             CREATE TABLE instance_ownership (
+                 id INTEGER PRIMARY KEY CHECK (id = 1),
+                 owner_token TEXT NOT NULL,
+                 claimed_at TEXT NOT NULL,
+                 claim_method TEXT NOT NULL CHECK (claim_method IN ('bootstrap','secret'))
+             );
+             CREATE TABLE accounts_post (account_id INTEGER NOT NULL, post_id INTEGER NOT NULL);
+             INSERT INTO accounts (id, name, blacklisted_tags) VALUES
+                 (1,'unlinked','acct-default'), (2,'seeded',NULL), (3,'someone',NULL);
+             INSERT INTO account_device_links
+                 (owner_token, account_id, linked_at, last_seen_at, blacklisted_tags) VALUES
+                 ('calibration-seed', 2, '2026-01-01T00:00:00Z', '2026-01-02T00:00:00Z', NULL),
+                 ('someone-else',     3, '2026-01-01T00:00:00Z', '2026-01-02T00:00:00Z', NULL);
+             INSERT INTO accounts_post (account_id, post_id) VALUES (1,10),(2,10),(2,11),(3,12);",
         )
         .unwrap();
+        conn
+    }
 
-        let adopted =
-            adopt_unowned_accounts_conn(&conn, "owner", "calibration-seed", "2026-01-01T00:00:00Z")
-                .unwrap();
-        // 1 (never linked) plus 2 and 5 (seed-only). 4 also has a real owner.
-        assert_eq!(adopted, 3, "unlinked + seed-only accounts must all move");
-
-        let owned: Vec<i64> = conn
-            .prepare(
-                "SELECT account_id FROM account_device_links \
-                  WHERE owner_token = 'owner' ORDER BY account_id",
-            )
-            .unwrap()
-            .query_map([], |r| r.get(0))
-            .unwrap()
-            .collect::<Result<_, _>>()
-            .unwrap();
-        assert_eq!(owned, vec![1, 2, 5]);
-
-        // Another library is untouched, and the seed links are not stolen from
-        // the seed token either — adoption adds a link, it does not move one.
-        let others: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM account_device_links WHERE owner_token = 'someone-else'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(others, 2);
-
-        // Idempotent: by now nothing is owned by nobody, so a second claim
-        // adopts nothing rather than re-linking.
-        let again = adopt_unowned_accounts_conn(
-            &conn,
-            "owner2",
-            "calibration-seed",
-            "2026-01-01T00:00:00Z",
+    fn claim_instance_for(conn: &rusqlite::Connection, token: &str) {
+        conn.execute(
+            "INSERT INTO instance_ownership (id, owner_token, claimed_at, claim_method)
+             VALUES (1, ?1, '2026-01-01T00:00:00Z', 'secret')",
+            params![token],
         )
         .unwrap();
-        assert_eq!(again, 0);
+    }
+
+    /// The scope rule as every account-addressed route sees it. `get_account_by_id`
+    /// is the single check behind catalog, catalog_manage, browse, feed, digest and
+    /// taste_profile, so the owner/non-owner matrix is pinned here rather than once
+    /// per route.
+    #[test]
+    fn account_by_id_follows_the_instance_claim_not_the_links() {
+        let conn = scope_fixture();
+
+        // No claim: scope is exactly the links.
+        assert_eq!(
+            get_account_by_id_conn(&conn, "calibration-seed", 2)
+                .unwrap()
+                .id,
+            2
+        );
+        assert!(get_account_by_id_conn(&conn, "calibration-seed", 1).is_err());
+        assert!(get_account_by_id_conn(&conn, "stranger", 1).is_err());
+
+        claim_instance_for(&conn, "owner");
+
+        // The owner holds no link at all and still reaches every account.
+        for id in [1, 2, 3] {
+            assert_eq!(get_account_by_id_conn(&conn, "owner", id).unwrap().id, id);
+        }
+        // The claim grants nothing to anybody else.
+        assert!(get_account_by_id_conn(&conn, "stranger", 1).is_err());
+        assert!(get_account_by_id_conn(&conn, "calibration-seed", 1).is_err());
+        // An unlinked account has no per-device override, so the account-wide
+        // blacklist is what comes back — the same COALESCE the write path uses.
+        assert_eq!(
+            get_account_by_id_conn(&conn, "owner", 1).unwrap().blacklist,
+            "acct-default"
+        );
     }
 
     #[test]
-    fn the_adoptable_count_is_what_adoption_takes() {
-        let conn = rusqlite::Connection::open_in_memory().unwrap();
-        conn.execute_batch(
-            "CREATE TABLE accounts (id INTEGER PRIMARY KEY, name TEXT);
-             CREATE TABLE account_device_links (
-                 owner_token TEXT NOT NULL,
-                 account_id INTEGER NOT NULL,
-                 linked_at TEXT NOT NULL,
-                 last_seen_at TEXT NOT NULL,
-                 PRIMARY KEY(owner_token, account_id)
-             );
-             INSERT INTO accounts (id, name) VALUES
-                 (1,'unlinked'), (2,'seeded'), (3,'someone'),
-                 (4,'seeded+someone'), (5,'seeded2');
-             INSERT INTO account_device_links VALUES
-                 ('calibration-seed', 2, 't', 't'),
-                 ('calibration-seed', 4, 't', 't'),
-                 ('calibration-seed', 5, 't', 't'),
-                 ('someone-else',     3, 't', 't'),
-                 ('someone-else',     4, 't', 't');",
+    fn visible_account_count_follows_the_claim() {
+        let conn = scope_fixture();
+
+        assert_eq!(
+            visible_account_count_conn(&conn, Some("calibration-seed")).unwrap(),
+            1
+        );
+        // No cookie at all addresses nothing — `None` is not "everyone".
+        assert_eq!(visible_account_count_conn(&conn, None).unwrap(), 0);
+
+        claim_instance_for(&conn, "owner");
+
+        assert_eq!(visible_account_count_conn(&conn, Some("owner")).unwrap(), 3);
+        assert_eq!(
+            visible_account_count_conn(&conn, Some("stranger")).unwrap(),
+            0
+        );
+    }
+
+    /// The console's `linked` flag decides whether "unlink" can do anything at
+    /// all: the instance owner addresses accounts they hold no link to, and
+    /// `delete_device_link` removes links, so offering the action on an unlinked
+    /// row would promise a 404.
+    #[test]
+    fn the_overview_marks_which_rows_are_actually_linked() {
+        let mut conn = scope_fixture();
+        claim_instance_for(&conn, "owner");
+        let tx = conn.transaction().unwrap();
+
+        let (rows, totals) = console_accounts_overview_tx(&tx, "owner", "fp", 10, 0).unwrap();
+        assert_eq!(totals.accounts, 3, "the owner sees the whole instance");
+        assert_eq!(totals.saved_posts, 3, "distinct posts 10, 11 and 12");
+        assert_eq!(rows.len(), 3);
+        assert!(
+            rows.iter().all(|r| !r.linked),
+            "the owner holds no direct link"
+        );
+        assert!(
+            rows.iter().all(|r| r.addressable),
+            "and still addresses every account it holds no link to"
+        );
+
+        let (rows, totals) =
+            console_accounts_overview_tx(&tx, "calibration-seed", "fp", 10, 0).unwrap();
+        assert_eq!(totals.accounts, 1);
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].linked, "this row really is linked");
+        assert!(rows[0].addressable);
+        assert_eq!(rows[0].id, 2);
+
+        drop(tx);
+    }
+
+    /// The operator case the split exists for: the console covers every account
+    /// on the instance even though this browser holds a link to only one of
+    /// them — and the extra rows carry no link, which is what keeps "unlink" off
+    /// them and keeps them out of the account picker.
+    #[test]
+    fn an_operator_sees_the_instance_without_gaining_any_links() {
+        let mut conn = scope_fixture();
+        conn.execute(
+            "UPDATE account_device_links SET admin_granted_at = '2026-01-01T00:00:00Z', \
+             admin_key_fingerprint = 'fp' WHERE owner_token = 'calibration-seed' AND account_id = 2",
+            [],
         )
         .unwrap();
 
-        // A browser that has not enrolled yet holds no link at all.
-        let (owned, adoptable) =
-            account_ownership_counts_conn(&conn, None, "calibration-seed").unwrap();
-        assert_eq!(owned, 0);
-        assert_eq!(adoptable, 3, "1 is unlinked, 2 and 5 are seed-only");
+        // The picker still covers exactly the one link.
+        assert_eq!(
+            visible_account_count_conn(&conn, Some("calibration-seed")).unwrap(),
+            1,
+            "the console scope must not widen the account picker"
+        );
 
-        let adopted =
-            adopt_unowned_accounts_conn(&conn, "owner", "calibration-seed", "2026-01-01T00:00:00Z")
-                .unwrap();
-        // The number the card shows before enrolling is the number enrollment
-        // actually links — otherwise it would be a promise it cannot keep.
-        assert_eq!(usize::try_from(adoptable).unwrap(), adopted);
+        let tx = conn.transaction().unwrap();
+        let (rows, totals) =
+            console_accounts_overview_tx(&tx, "calibration-seed", "fp", 10, 0).unwrap();
+        assert_eq!(totals.accounts, 3, "the console covers the instance");
+        assert_eq!(rows.len(), 3);
+        assert_eq!(
+            rows.iter()
+                .filter(|r| r.linked)
+                .map(|r| r.id)
+                .collect::<Vec<_>>(),
+            vec![2],
+            "only a real link may be offered unlink"
+        );
+        assert_eq!(
+            rows.iter()
+                .filter(|r| r.addressable)
+                .map(|r| r.id)
+                .collect::<Vec<_>>(),
+            vec![2],
+            "operating the instance must not make a library addressable"
+        );
+    }
 
-        let (owned, adoptable) =
-            account_ownership_counts_conn(&conn, Some("owner"), "calibration-seed").unwrap();
-        assert_eq!(owned, 3);
-        assert_eq!(adoptable, 0, "nothing is left for the next one to take");
+    /// A grant is bound to the key that wrote it, so a rotated `admin_api`
+    /// narrows the console back to the links without touching the rows.
+    #[test]
+    fn a_rotated_key_narrows_the_console_back_to_the_links() {
+        let mut conn = scope_fixture();
+        conn.execute(
+            "UPDATE account_device_links SET admin_granted_at = '2026-01-01T00:00:00Z', \
+             admin_key_fingerprint = 'fp' WHERE owner_token = 'calibration-seed' AND account_id = 2",
+            [],
+        )
+        .unwrap();
+
+        let tx = conn.transaction().unwrap();
+        let (rows, totals) =
+            console_accounts_overview_tx(&tx, "calibration-seed", "rotated", 10, 0).unwrap();
+        assert_eq!(totals.accounts, 1, "the old grant is not a grant");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, 2);
     }
 
     /// The console's page and its totals answer different questions, and the
@@ -1607,13 +1770,22 @@ mod tests {
                  account_id INTEGER NOT NULL,
                  linked_at TEXT NOT NULL,
                  last_seen_at TEXT NOT NULL,
+                 admin_granted_at TEXT,
+                 admin_key_fingerprint TEXT,
                  PRIMARY KEY(owner_token, account_id)
+             );
+             CREATE TABLE instance_ownership (
+                 id INTEGER PRIMARY KEY CHECK (id = 1),
+                 owner_token TEXT NOT NULL,
+                 claimed_at TEXT NOT NULL,
+                 claim_method TEXT NOT NULL CHECK (claim_method IN ('bootstrap','secret'))
              );
              CREATE TABLE accounts_post (post_id INTEGER NOT NULL, account_id INTEGER NOT NULL);
              INSERT INTO accounts (id, name, experiment_bucket, e621_api_key_encrypted) VALUES
                  (1,'a',NULL,NULL), (2,'b','control',NULL), (3,'c',NULL,'sealed'),
                  (9,'other',NULL,NULL);
-             INSERT INTO account_device_links VALUES
+             INSERT INTO account_device_links
+                 (owner_token, account_id, linked_at, last_seen_at) VALUES
                  ('me',1,'t','2026-01-03'), ('me',2,'t','2026-01-02'),
                  ('me',3,'t','2026-01-01'), ('other',9,'t','2026-01-09');
              -- Post 100 is saved by two of my accounts: one post, not two.
@@ -1624,7 +1796,7 @@ mod tests {
         let tx = conn.transaction().unwrap();
 
         // One row on the page...
-        let (page, totals) = owner_accounts_overview_tx(&tx, "me", 1, 1).unwrap();
+        let (page, totals) = console_accounts_overview_tx(&tx, "me", "fp", 1, 1).unwrap();
         assert_eq!(page.len(), 1);
         assert_eq!(page[0].id, 2, "second row in last_seen order");
         assert_eq!(page[0].saved_posts, 2, "account 2 saved 100 and 101");
@@ -1638,7 +1810,7 @@ mod tests {
         );
         assert_eq!(totals.accounts_with_key, 1);
 
-        let (all, _) = owner_accounts_overview_tx(&tx, "me", 10, 0).unwrap();
+        let (all, _) = console_accounts_overview_tx(&tx, "me", "fp", 10, 0).unwrap();
         assert_eq!(
             all.iter().map(|r| r.id).collect::<Vec<_>>(),
             vec![1, 2, 3],
@@ -1647,6 +1819,10 @@ mod tests {
         assert!(all[2].has_key, "account 3 carries the only stored key");
         assert!(all[0].bucket_explicit.is_none());
         assert!(all[0].name == "a");
+        assert!(
+            all.iter().all(|r| r.linked),
+            "every row here really is linked, so unlink is offered on all of them"
+        );
     }
 
     /// The bucket write is ownership-checked inside the transaction, so a valid
@@ -1669,6 +1845,12 @@ mod tests {
                  last_seen_at TEXT NOT NULL,
                  PRIMARY KEY(owner_token, account_id)
              );
+             CREATE TABLE instance_ownership (
+                 id INTEGER PRIMARY KEY CHECK (id = 1),
+                 owner_token TEXT NOT NULL,
+                 claimed_at TEXT NOT NULL,
+                 claim_method TEXT NOT NULL CHECK (claim_method IN ('bootstrap','secret'))
+             );
              INSERT INTO accounts (id, name, experiment_bucket, e621_api_key_encrypted) VALUES
                  (1,'mine',NULL,NULL), (2,'theirs',NULL,NULL);
              INSERT INTO account_device_links VALUES
@@ -1690,6 +1872,19 @@ mod tests {
             tx.commit().unwrap();
         }
 
+        // The instance owner holds no link to account 2 and still may pin it:
+        // the write path takes the claim, not the links.
+        conn.execute(
+            "INSERT INTO instance_ownership (id, owner_token, claimed_at, claim_method)
+             VALUES (1, 'owner', 't', 'secret')",
+            [],
+        )
+        .unwrap();
+        {
+            let tx = conn.transaction().unwrap();
+            set_account_experiment_bucket_tx(&tx, "owner", 2, Some("control")).unwrap();
+            tx.commit().unwrap();
+        }
         let mine: Option<String> = conn
             .query_row(
                 "SELECT experiment_bucket FROM accounts WHERE id = 1",
@@ -1698,6 +1893,8 @@ mod tests {
             )
             .unwrap();
         assert_eq!(mine.as_deref(), Some("variant"));
+        // Account 2 carries the owner's pin, so `me`'s rejected write clearly did
+        // not land — and the rejection happened while the column was still NULL.
         let theirs: Option<String> = conn
             .query_row(
                 "SELECT experiment_bucket FROM accounts WHERE id = 2",
@@ -1705,7 +1902,7 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert!(theirs.is_none(), "the refused write must not have landed");
+        assert_eq!(theirs.as_deref(), Some("control"));
 
         // `None` is how the console clears a pin: the account goes back to the
         // hash assignment rather than to a bucket named "".

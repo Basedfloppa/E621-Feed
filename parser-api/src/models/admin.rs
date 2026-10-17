@@ -1,17 +1,19 @@
 //! Owner-console response types (`GET /admin/overview`, TODO §3.2).
 //!
-//! The admin page is a *view over the accounts this browser already owns*, not
-//! a second authority: every account row here comes from the same
-//! `account_device_links` filter `/accounts` uses, so the endpoint can only
-//! show what the owner token could already read. The genuinely new capability
-//! is the bucket assignment — `PUT /account/<id>/experiment_bucket` — which is
-//! what turns the previously read-only `[buckets.*]` machinery into something
-//! an owner can actually run an experiment with.
+//! The admin page is a view over the *instance*, not a second authority: its
+//! rows come from the same account scope `/accounts` uses, which for the
+//! instance owner is every account on the instance. The endpoint itself requires
+//! the instance claim (`auth::require_instance_owner`), because everything on it
+//! — the media cache, the job registry, the bucket pins — is instance state. The
+//! genuinely new capability is the bucket assignment —
+//! `PUT /account/<id>/experiment_bucket` — which is what turns the previously
+//! read-only `[buckets.*]` machinery into something an owner can actually run an
+//! experiment with.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-/// One owned account, with the per-row state the console renders.
+/// One account in scope, with the per-row state the console renders.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct AdminAccount {
     pub id: i32,
@@ -29,6 +31,19 @@ pub struct AdminAccount {
     pub has_key: bool,
     /// Rows in `accounts_post` for this account: its saved-post library.
     pub saved_posts: i64,
+    /// Whether this browser holds a *direct* link to the account.
+    ///
+    /// The instance owner addresses accounts they hold no link to, and the
+    /// console's unlink action removes links — so the action is offered from
+    /// this flag, not from the row being visible.
+    pub linked: bool,
+    /// Whether this browser may *act* on the account at all.
+    ///
+    /// Every per-row action (sync, export, `/process`, the bucket pin) lands on a
+    /// route that re-checks `db::account_in_scope`, so the console offers them
+    /// from this flag. It is wider than [`Self::linked`] for the instance owner
+    /// and narrower than "the row is visible" for a mere operator.
+    pub addressable: bool,
     /// The in-process `/process` job for this account, when this server knows
     /// one. Absent after a restart — job state is deliberately in-memory.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -46,18 +61,19 @@ pub struct AdminJob {
     pub error: Option<String>,
 }
 
-/// Instance-wide totals, counted over **every** owned account rather than the
+/// Instance-wide totals, counted over **every** account in scope rather than the
 /// returned page.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 pub struct AdminTotals {
-    /// Accounts linked to this owner token.
+    /// Accounts this browser can address. For the instance owner that is every
+    /// account on the instance.
     pub accounts: i64,
     /// Distinct posts in those accounts' libraries. Distinct, not summed: one
     /// post saved by two of your accounts is one post.
     pub saved_posts: i64,
     /// Accounts with an e621 API key stored (direct-sync capable).
     pub accounts_with_key: i64,
-    /// `/process` jobs currently running for this owner's accounts.
+    /// `/process` jobs currently running for those accounts.
     pub jobs_running: i64,
 }
 
@@ -83,14 +99,14 @@ pub struct AdminMedia {
 pub struct AdminOverview {
     /// `[instance].owner_secret` is set, so claiming requires proof.
     pub instance_locked: bool,
-    /// Accounts this claim would link, before the secret is proved.
-    pub adoptable_accounts: i64,
+    /// Accounts on this instance. The denominator of what owning it covers.
+    pub instance_accounts: i64,
     pub totals: AdminTotals,
     /// Bucket names configured in `[buckets.*]`, sorted. Empty = A/B is off,
     /// and no bucket can be pinned.
     pub buckets: Vec<String>,
     pub media: AdminMedia,
-    /// One page of owned accounts, newest-seen first (same order as
+    /// One page of accounts in scope, newest-seen first (same order as
     /// `GET /accounts`).
     pub accounts: Vec<AdminAccount>,
 }

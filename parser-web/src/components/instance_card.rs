@@ -1,12 +1,11 @@
 //! "Instance ownership" card for the settings page.
 //!
 //! There is no account login in this app: the `HttpOnly` owner cookie *is* the
-//! identity, and a fresh browser starts with one that owns nothing. On a
-//! single-owner instance that is invisible, because the first
-//! `/session/bootstrap` claims every account that belongs to nobody. Once
-//! `[instance].owner_secret` is set, claiming becomes an explicit act — and this
-//! card is the only way to perform it from a browser, since `/session/enroll`
-//! would otherwise be API-only.
+//! identity, and a fresh browser starts with one that owns nothing. Ownership is
+//! a claim on the instance — it links no accounts — so this card is where the
+//! operator's `[instance].owner_secret` is turned into that claim. It is also
+//! the recovery path: proving the secret moves an existing claim to this browser,
+//! which is what makes clearing cookies harmless.
 
 use wasm_bindgen_futures::spawn_local;
 use web_sys::HtmlInputElement;
@@ -22,20 +21,41 @@ pub struct InstanceCardProps {
     pub backend_url: String,
 }
 
-/// What this browser holds and what is still claimed by nobody.
+/// What this browser holds and what the instance is.
 ///
-/// A free function rather than inline markup so the plural forms can be pinned
-/// by a test that needs no DOM.
-fn accounts_summary(owned: i64, adoptable: i64) -> String {
-    let mine = match owned {
-        0 => "This browser owns no accounts yet.".to_string(),
-        1 => "This browser owns 1 account.".to_string(),
-        n => format!("This browser owns {n} accounts."),
+/// A free function rather than inline markup so the wording can be pinned by a
+/// test that needs no DOM.
+fn ownership_summary(state: &OwnershipState) -> String {
+    let accounts = match state.instance_accounts {
+        0 => "no accounts".to_string(),
+        1 => "1 account".to_string(),
+        n => format!("{n} accounts"),
     };
-    match adoptable {
-        0 => mine,
-        1 => format!("{mine} 1 account belongs to nobody."),
-        n => format!("{mine} {n} accounts belong to nobody."),
+    if state.is_owner {
+        return format!("This browser owns this instance, so it can address all {accounts} on it.");
+    }
+    if state.instance_claimed {
+        return format!(
+            "This instance is owned by another browser and holds {accounts}. Proving the secret \
+             below moves the ownership here."
+        );
+    }
+    format!("This instance is unclaimed and holds {accounts}.")
+}
+
+/// What the server said a successful `POST /session/enroll` did.
+///
+/// The three cases are genuinely different outcomes for the operator, so they do
+/// not collapse into one "done": `transferred` in particular means another
+/// browser just lost the claim.
+fn claim_message(claim: &str) -> &'static str {
+    match claim {
+        "transferred" => {
+            "Moved here: this browser is now the instance owner. The browser that held it no \
+             longer is."
+        }
+        "already-owned" => "This instance was already yours.",
+        _ => "Claimed: this browser is now the instance owner.",
     }
 }
 
@@ -65,8 +85,8 @@ pub fn instance_card(props: &InstanceCardProps) -> Html {
     let busy = use_state(|| false);
     let message = use_state(String::new);
     let is_error = use_state(|| false);
-    // Bumped after a successful claim: ownership changed, so the counts the
-    // card shows have to be read again.
+    // Bumped after a successful claim: ownership changed, so the state the card
+    // shows has to be read again.
     let reload = use_state(|| 0u32);
 
     let backend_url = props.backend_url.clone();
@@ -118,21 +138,19 @@ pub fn instance_card(props: &InstanceCardProps) -> Html {
                     .await;
                 match result {
                     Ok(resp) if resp.ok() => {
-                        let adopted = resp
+                        let claim = resp
                             .json::<serde_json::Value>()
                             .await
                             .ok()
-                            .and_then(|v| v.get("adopted").and_then(serde_json::Value::as_i64))
-                            .unwrap_or(0);
+                            .and_then(|v| {
+                                v.get("claim")
+                                    .and_then(serde_json::Value::as_str)
+                                    .map(str::to_string)
+                            })
+                            .unwrap_or_default();
                         // The secret must not stay in the DOM once it worked.
                         secret.set(String::new());
-                        message.set(match adopted {
-                            0 => "Claimed. This instance was already yours.".to_string(),
-                            1 => "Claimed: 1 account is now linked to this browser.".to_string(),
-                            n => {
-                                format!("Claimed: {n} accounts are now linked to this browser.")
-                            }
-                        });
+                        message.set(claim_message(&claim).to_string());
                         dispatch_account_list_changed();
                         reload.set(reload.wrapping_add(1));
                     }
@@ -154,11 +172,9 @@ pub fn instance_card(props: &InstanceCardProps) -> Html {
 
     let loaded = (*state).clone();
     let has_state = loaded.is_some();
+    let is_owner = loaded.as_ref().is_some_and(|s| s.is_owner);
     let locked = loaded.as_ref().is_some_and(|s| s.instance_locked);
-    let summary = loaded
-        .as_ref()
-        .map(|s| accounts_summary(s.owned_accounts, s.adoptable_accounts))
-        .unwrap_or_default();
+    let summary = loaded.as_ref().map(ownership_summary).unwrap_or_default();
     let status_class = if *is_error {
         "alert-error"
     } else {
@@ -170,7 +186,9 @@ pub fn instance_card(props: &InstanceCardProps) -> Html {
             <div class="card-body text-base-content">
                 <h2 class="card-title text-xl">{ "Instance ownership" }</h2>
                 <p class="text-sm text-base-content/70">
-                    { "This app has no account login: the cookie in this browser is the identity, and a new one owns nothing." }
+                    { "This app has no account login: the cookie in this browser is the identity. \
+                       The claim is about the instance — it links no accounts and it does not open \
+                       the console or the catalog, which answer to the administration key below." }
                 </p>
                 if !message.is_empty() {
                     <div role="alert" class={format!("alert {status_class} text-sm py-2")}>
@@ -184,9 +202,16 @@ pub fn instance_card(props: &InstanceCardProps) -> Html {
                 }
                 if has_state {
                     <p class="text-sm">{ summary }</p>
-                    if locked {
+                    if is_owner {
                         <p class="text-sm text-base-content/70">
-                            { "This instance is claimed by its owner. If that is you, prove it with the instance secret: the accounts that belong to nobody are then linked to this browser." }
+                            { "Nothing to prove: every account on the instance is in scope for this \
+                               browser. The console and the local catalog are a separate, narrower \
+                               credential — see the owner claim below." }
+                        </p>
+                    } else if locked {
+                        <p class="text-sm text-base-content/70">
+                            { "Prove it with the instance secret from config.toml. This writes no \
+                               account links." }
                         </p>
                         <div class="flex items-center gap-2">
                             <input type="password" class="input input-sm w-full"
@@ -201,11 +226,14 @@ pub fn instance_card(props: &InstanceCardProps) -> Html {
                             </button>
                         </div>
                         <p class="text-xs text-base-content/60">
-                            { "The [instance].owner_secret from config.toml. Accounts already linked to another browser are never taken." }
+                            { "The [instance].owner_secret from config.toml. Proving it moves the \
+                               claim to this browser — the previous one loses it." }
                         </p>
                     } else {
                         <p class="text-sm text-base-content/70">
-                            { "This instance is open: it has no owner secret, so the first browser to open it claims everything that belongs to nobody. Set [instance].owner_secret to require proof before claiming." }
+                            { "This instance has no owner secret, so the first browser to open it \
+                               claims it. Set [instance].owner_secret to require proof before \
+                               claiming." }
                         </p>
                     }
                 } else if load_error.is_empty() {
@@ -220,16 +248,47 @@ pub fn instance_card(props: &InstanceCardProps) -> Html {
 mod tests {
     use super::*;
 
+    /// The card only ever renders the *ownership* half of the session state, so
+    /// the administration flags are constant here: this card says who holds the
+    /// claim, and the console says who operates the instance.
+    fn state(is_owner: bool, claimed: bool, accounts: i64) -> OwnershipState {
+        OwnershipState {
+            instance_locked: true,
+            instance_claimed: claimed,
+            is_owner,
+            is_admin: false,
+            admin_available: false,
+            owned_accounts: if is_owner { accounts } else { 0 },
+            instance_accounts: accounts,
+        }
+    }
+
     #[test]
-    fn the_summary_counts_accounts_in_every_plural_form() {
-        assert_eq!(accounts_summary(0, 0), "This browser owns no accounts yet.");
+    fn the_summary_names_the_three_states() {
         assert_eq!(
-            accounts_summary(1, 1),
-            "This browser owns 1 account. 1 account belongs to nobody."
+            ownership_summary(&state(true, true, 1)),
+            "This browser owns this instance, so it can address all 1 account on it."
         );
-        assert_eq!(
-            accounts_summary(2, 900),
-            "This browser owns 2 accounts. 900 accounts belong to nobody."
+        assert!(
+            ownership_summary(&state(false, true, 900)).contains("owned by another browser"),
+            "a claimed instance this browser does not own has to say so"
         );
+        assert!(
+            ownership_summary(&state(false, false, 0)).contains("unclaimed"),
+            "an unclaimed instance is a different state again"
+        );
+        assert!(ownership_summary(&state(true, true, 0)).contains("no accounts"));
+    }
+
+    /// Transferring is the outcome that changes something for somebody else, so
+    /// it must not read like a first claim.
+    #[test]
+    fn the_claim_message_distinguishes_a_transfer() {
+        assert!(claim_message("transferred").contains("no longer is"));
+        assert!(claim_message("already-owned").contains("already"));
+        assert!(claim_message("claimed").contains("now the instance owner"));
+        // Unknown labels fall back to the neutral success wording rather than
+        // claiming a transfer that may not have happened.
+        assert!(claim_message("").contains("now the instance owner"));
     }
 }

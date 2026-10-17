@@ -637,6 +637,13 @@ pub fn account_creator() -> Html {
     let accounts_list = (*saved_accounts).clone();
     let current_edit = *editing_id;
 
+    // Linking an account is not the same errand as claiming the instance. This
+    // form is the general one: it links whatever account the reader cares about,
+    // with or without a key. The administration tier is *not* offered here —
+    // proving `[runtime].admin_api` is the owner claim on the settings page, and
+    // the server refuses the administration account to everyone who has not
+    // proved it. Keeping the two apart is what stops this page from advertising
+    // the console to somebody who can never open it.
     let pending_label = pending_remove
         .as_ref()
         .map(|u| format!("'{}' (ID {})", u.name, u.id))

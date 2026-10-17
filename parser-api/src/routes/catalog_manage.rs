@@ -1,16 +1,23 @@
 //! Catalog manage + media queue control routes (docs/offline-catalog.md).
 //!
-//! Owner-gated read/mutating controls for the local catalog and the background
-//! media download worker: queue status, pause/resume/kick, queued-item listing,
+//! Read/mutating controls for the local catalog and the background media
+//! download worker: queue status, pause/resume/kick, queued-item listing,
 //! deleting a saved post from the catalog, and (re)categorizing a post by
 //! pinning it to an explicit group tag.
+//!
+//! Two gates, and the difference is the point. Controls scoped to *one account*
+//! (`read_guard`, `write_guard`) check that this browser may address that
+//! account. Controls that act on the *shared worker and the shared on-disk
+//! cache* (`instance_write_guard`) are administration: they take
+//! `[runtime].admin_user` linked with `[runtime].admin_api`, not the instance
+//! claim, because the catalog is an operator surface.
 
 use rocket::serde::json::Json;
 use rocket_okapi::openapi;
 
 use crate::db_blocking;
 use e621_account_parser_api::{
-    auth::OwnerToken,
+    auth::{OwnerToken, require_instance_admin},
     db::{
         delete_catalog_post, get_account_by_id, pending_saved_original_posts, post_still_saved,
         queue_stats,
@@ -59,6 +66,24 @@ async fn write_guard(
     Ok(())
 }
 
+/// Guard for the *instance-wide* media controls — pause, resume, kick, clear.
+///
+/// These act on the shared worker and the shared on-disk cache, not on one
+/// account's data, so they take the administration tier rather than a link to
+/// the account named in the path: a browser that only linked an account has no
+/// business stopping downloads for the whole instance, and neither does one
+/// that merely holds the instance claim — the catalog is an operator surface.
+/// The path account is still checked, so a stale account id is a 404 rather
+/// than a silent success.
+async fn instance_write_guard(
+    owner: &OwnerToken,
+    client_ip: &ClientIp,
+    account_id: i32,
+) -> Result<(), ApiError> {
+    require_instance_admin(owner).await?;
+    write_guard(owner, client_ip, account_id).await
+}
+
 /// Current queue/worker status as JSON.
 fn status_json() -> Result<Json<MediaQueueStatus>, ApiError> {
     let (pending, stored, bytes) = queue_stats().map_err(ApiError::from_string)?;
@@ -90,7 +115,7 @@ pub(crate) async fn pause_media_worker(
     owner: OwnerToken,
     client_ip: ClientIp,
 ) -> Result<Json<MediaQueueStatus>, ApiError> {
-    write_guard(&owner, &client_ip, account_id).await?;
+    instance_write_guard(&owner, &client_ip, account_id).await?;
     set_worker_paused(true);
     crate::audit::event("catalog.media.pause")
         .field("account_id", account_id)
@@ -106,7 +131,7 @@ pub(crate) async fn resume_media_worker(
     owner: OwnerToken,
     client_ip: ClientIp,
 ) -> Result<Json<MediaQueueStatus>, ApiError> {
-    write_guard(&owner, &client_ip, account_id).await?;
+    instance_write_guard(&owner, &client_ip, account_id).await?;
     set_worker_paused(false);
     kick_worker();
     crate::audit::event("catalog.media.resume")
@@ -123,7 +148,7 @@ pub(crate) async fn kick_media_worker(
     owner: OwnerToken,
     client_ip: ClientIp,
 ) -> Result<Json<MediaQueueStatus>, ApiError> {
-    write_guard(&owner, &client_ip, account_id).await?;
+    instance_write_guard(&owner, &client_ip, account_id).await?;
     kick_worker();
     crate::audit::event("catalog.media.kick")
         .field("account_id", account_id)
@@ -141,7 +166,7 @@ pub(crate) async fn delete_media_cache(
     owner: OwnerToken,
     client_ip: ClientIp,
 ) -> Result<Json<MediaQueueStatus>, ApiError> {
-    write_guard(&owner, &client_ip, account_id).await?;
+    instance_write_guard(&owner, &client_ip, account_id).await?;
     let cleared = db_blocking(media_store::clear_cache)
         .await
         .map_err(ApiError::from_string)?;

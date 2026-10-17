@@ -12,11 +12,11 @@ use rocket::serde::json::{Json, serde_json};
 use rocket_okapi::openapi;
 
 use crate::db_blocking;
-use e621_account_parser_api::auth::OwnerToken;
+use e621_account_parser_api::auth::{OwnerToken, secret_matches};
 use e621_account_parser_api::{
     api,
     db::{
-        self, account_is_linked, delete_all_device_links_for_token, find_device_token_by_id,
+        self, account_in_scope, delete_all_device_links_for_token, find_device_token_by_id,
         get_account_by_id, get_account_by_name, get_account_feed_settings,
         get_account_interactions_for_export, get_account_preference_profile,
         get_account_tag_relation_graph, get_accounts_for_owner, get_tag_counts,
@@ -132,7 +132,7 @@ pub(crate) async fn revoke_device_session(
 async fn ensure_account_owned(owner_token: &str, account_id: i32) -> Result<(), ApiError> {
     let token = owner_token.to_string();
     let linked =
-        db_blocking(move || e621_account_parser_api::db::account_is_linked(&token, account_id))
+        db_blocking(move || e621_account_parser_api::db::account_in_scope(&token, account_id))
             .await?;
     if linked {
         Ok(())
@@ -500,8 +500,9 @@ pub(crate) async fn create_account(
     // that account); when absent, the account is linked without a key (key
     // ops and sync report "no key configured"). Ownership is not mandated at
     // claim time — anyone can still link an account, matching the codebase's
-    // shared-account model. If a key IS provided, it is always checked against
-    // e621 first so a bad key can't be stored.
+    // shared-account model — with one deliberate exception, the administration
+    // account, handled below. If a key IS provided, it is always checked
+    // against e621 first so a bad key can't be stored.
     let ownership_key = acc
         .api_key
         .as_deref()
@@ -529,6 +530,42 @@ pub(crate) async fn create_account(
     }
     let canonical_name = resolved_name;
 
+    // The administration account is named in configuration, and only the key
+    // that operates this instance may link it. Two consequences, both deliberate:
+    //
+    //   * every *other* account still links with or without a key, so a browser
+    //     can still follow the accounts it cares about;
+    //   * `[runtime].admin_user` links **only** with `[runtime].admin_api`, so a
+    //     visitor cannot attach it at all — not without a key, and not with a
+    //     wrong one — and the console and the local catalog stay closed to
+    //     everyone but the operator.
+    //
+    // Proving the key here is what grants administration; the grant is written
+    // onto the device link below, bound to a fingerprint of the key, so rotating
+    // `admin_api` retires it. The decision is taken before the key is verified
+    // against e621 further down, so a wrong key is refused without spending that
+    // upstream request. (The name lookup above still happens: it is what
+    // establishes that this *is* the administration account.)
+    let config = cfg();
+    let is_admin_account = canonical_name.eq_ignore_ascii_case(config.admin_user.trim());
+    let admin_proven = is_admin_account
+        && ownership_key
+            .as_deref()
+            .is_some_and(|k| secret_matches(k, config.admin_api.as_str()));
+    if is_admin_account && !admin_proven {
+        e621_account_parser_api::audit::event("account.set")
+            .field("account_id", acc.id)
+            .field("outcome", "admin_key_required")
+            .emit();
+        return Err(ApiError::Forbidden(format!(
+            "{} is this instance's administration account: it can only be linked with the \
+             [runtime].admin_api key from config.toml",
+            config.admin_user
+        )));
+    }
+    let admin_fingerprint = admin_proven
+        .then(|| e621_account_parser_api::crypto::admin_key_fingerprint(&config.admin_api));
+
     // If a key was provided, prove ownership by verifying it authenticates as
     // this account (independent of the public name lookup above); a mismatch is
     // rejected before anything is stored.
@@ -554,6 +591,7 @@ pub(crate) async fn create_account(
 
     let acc_id_for_audit = acc.id;
     let name_for_audit = canonical_name.clone();
+    let is_admin_for_audit = admin_fingerprint.is_some();
     let key_for_store = ownership_key;
     let result = db_blocking(move || {
         let acc_out = set_account(&owner_token, acc.id, &canonical_name, &normalized_blacklist)
@@ -568,12 +606,20 @@ pub(crate) async fn create_account(
             e621_account_parser_api::db::set_account_e621_key(&owner_token, acc.id, k)
                 .map_err(|e| format!("Failed to store e621 key: {e}"))?;
         }
+        // Administration rides on the link that was just written, so a failure
+        // here fails the whole link rather than leaving an operator who looks
+        // authorised in the audit log and gets 403 from every surface.
+        if let Some(fingerprint) = &admin_fingerprint {
+            e621_account_parser_api::db::set_account_admin_grant(&owner_token, acc.id, fingerprint)
+                .map_err(|e| format!("Failed to record the administration grant: {e}"))?;
+        }
         Ok(acc_out)
     })
     .await?;
     e621_account_parser_api::audit::event("account.set")
         .field("account_id", acc_id_for_audit)
         .field("name", name_for_audit)
+        .field("is_admin", is_admin_for_audit)
         .emit();
     e621_account_parser_api::metrics::METRICS
         .accounts_created_total
@@ -781,16 +827,16 @@ async fn resolve_bucket_write(
     }
 
     // A valid cookie that owns nothing must not be able to write to an
-    // arbitrary account id. `account_is_linked` is the predicate the DB layer
+    // arbitrary account id. `account_in_scope` is the predicate the DB layer
     // documents for this; answering 404 here keeps an ordinary authorization
     // miss out of the 5xx bucket that `ApiError::from_string` would file it in.
-    let linked = db_blocking({
+    let in_scope = db_blocking({
         let owner_token = owner_token.clone();
-        move || account_is_linked(&owner_token, account_id)
+        move || account_in_scope(&owner_token, account_id)
     })
     .await
     .map_err(ApiError::from_string)?;
-    if !linked {
+    if !in_scope {
         return Err(ApiError::NotFound(
             "No account found for this device token".into(),
         ));

@@ -1,9 +1,9 @@
 //! Owner-console models (mirrors `GET /api/admin/overview`, TODO §3.2).
 //!
-//! The console is a view over the accounts this browser owns — the server
-//! derives every row from the same `account_device_links` filter `/accounts`
-//! uses — so there is nothing here that a linked account could not already
-//! read. The one write is the A/B bucket pin.
+//! The console is a view over the *instance*: the endpoint requires the instance
+//! claim, and every row comes from the same account scope `/accounts` uses —
+//! which for the instance owner is every account on the instance. The one write
+//! is the A/B bucket pin.
 
 use serde::Deserialize;
 
@@ -20,7 +20,7 @@ pub struct AdminJob {
     pub error: Option<String>,
 }
 
-/// One owned account, as the console's table row.
+/// One account in scope, as the console's table row.
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct AdminAccount {
     pub id: i32,
@@ -33,11 +33,24 @@ pub struct AdminAccount {
     pub bucket: Option<String>,
     pub has_key: bool,
     pub saved_posts: i64,
+    /// Whether this browser holds a *direct* link to the account. The instance
+    /// owner addresses accounts they hold no link to, and unlinking removes a
+    /// link — so the row's action is offered from this flag, not from the row
+    /// being visible.
+    #[serde(default)]
+    pub linked: bool,
+    /// Whether this browser may *act* on the account: sync it, export it, start
+    /// a `/process` run, pin its bucket. Wider than [`Self::linked`] for the
+    /// instance owner, which addresses accounts it holds no link to — and
+    /// narrower than "the row is visible", because an operator's console covers
+    /// the instance without handing over the libraries on it.
+    #[serde(default)]
+    pub addressable: bool,
     #[serde(default)]
     pub job: Option<AdminJob>,
 }
 
-/// Totals over **all** owned accounts, not just the returned page.
+/// Totals over **all** accounts in scope, not just the returned page.
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
 pub struct AdminTotals {
     pub accounts: i64,
@@ -62,7 +75,8 @@ pub struct AdminMedia {
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct AdminOverview {
     pub instance_locked: bool,
-    pub adoptable_accounts: i64,
+    /// Accounts on this instance — what holding the claim covers.
+    pub instance_accounts: i64,
     pub totals: AdminTotals,
     /// Bucket names from `[buckets.*]`. Empty = A/B is off on this instance.
     pub buckets: Vec<String>,
@@ -141,6 +155,8 @@ mod tests {
             bucket: effective.map(str::to_string),
             has_key: false,
             saved_posts: 0,
+            linked: true,
+            addressable: true,
             job: None,
         }
     }

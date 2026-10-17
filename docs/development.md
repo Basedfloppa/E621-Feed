@@ -101,23 +101,32 @@ The settings page surfaces both in a “Devices & sessions” card
 
 ### Instance ownership
 
-Ownership *is* the `owner_token` cookie — there is no account login — so the
-only thing separating the instance owner from a fresh visitor is who may claim
-the accounts that carry no personal device link. That is governed by
-`[instance].owner_secret`:
+Ownership *is* the `owner_token` cookie — there is no account login. What the
+cookie holds is a **claim on the instance**, not a set of account links: the
+claim is one row in `instance_ownership` (a singleton, `V34`), and the account
+scope is derived from it. An owner addresses every account on the instance;
+everyone else addresses only the accounts linked to their token. Claiming writes
+no links, which is why the two questions — "who runs this instance?" and "which
+accounts may this browser address?" — can no longer be confused for one another.
+
+The claim covers what this browser may **read** — every account on the instance —
+and the instance-wide actions that outlive a single browser session (starting a
+`/process` run). It does **not** open the Catalog tab or `/admin`: those act on
+the machine rather than on the library, and they take the administration tier
+described below. `db::account_in_scope` / the `MAY_ADDRESS_SQL` predicate decide
+per-account reads; `auth::require_instance_owner` (and
+`auth::require_instance_operator`, which accepts either credential) decides the
+instance-wide ones. `[instance].owner_secret` governs how the claim is taken:
 
 - **Empty (default)** — trusted single-owner self-hosting. The first
-  `POST /api/session/bootstrap` adopts every account that belongs to nobody:
-  no device link at all, or a link only to `[backtest].seed_owner_token`
-  (which is what `seed` / `calibrate` write). This is also the only way back to
-  a library after clearing cookies. The response carries `adopted` and
-  `instance_locked`.
-- **Set** — `bootstrap` mints only an empty guest token and reports
-  `instance_locked: true`; `POST /api/session/enroll` with
-  `{ "secret": "…" }` mints (or reuses the caller's valid cookie) and adopts
-  the unowned accounts into that token. Accounts already linked to any other
-  token are never touched, so enrolling cannot strand an existing browser
-  library.
+  `POST /api/session/bootstrap` claims the instance for that cookie
+  (`ClaimOutcome::Claimed`); a later anonymous bootstrap is `Refused`, never a
+  takeover. The response carries `claimed`, `is_owner` and `instance_locked`.
+- **Set** — `bootstrap` mints a guest token and reports `instance_locked: true`;
+  `POST /api/session/enroll` with `{ "secret": "…" }` claims the instance, or
+  **moves** an existing claim to the caller's cookie (`Transferred`). That move
+  is the recovery path: nothing about the library was ever tied to the old
+  cookie, so re-proving the secret restores everything.
 
 Deliberately a dedicated value rather than `e621_key_encryption_secret` or
 `admin_api`: those two cannot be rotated without either re-encrypting every
@@ -125,37 +134,96 @@ stored e621 key or rotating a third-party credential, so a leak of either would
 leave no way to lock the instance again. The owner secret rotates on its own.
 It is compared in constant time (`auth::secret_matches`) and the route is
 rate-limited to 5 attempts/minute per IP. Implementation:
-`db::accounts::adopt_unowned_accounts`.
+`db::instance::{claim_instance, is_instance_owner}`.
 
 In the SPA this is **Settings → Instance ownership**
 (`parser-web/src/components/instance_card.rs`). The card reads
-`GET /api/session/state` — `instance_locked`, `owned_accounts` and
-`adoptable_accounts`, the last being the count enrollment would link, taken from
-the same predicate — and offers the secret field only when a secret is
-configured; on an open instance it says so instead of showing a form that could
-only answer 400.
+`GET /api/session/state` — `instance_locked`, `instance_claimed`, `is_owner`,
+`is_admin`, `admin_available`, `owned_accounts` (what this
+browser can address) and `instance_accounts` (what the claim covers) — and offers
+the secret field only when a secret is configured and this browser does not
+already own the instance; on an open instance it says so instead of showing a
+form that could only answer 400.
+
+### Administration — the operator tier
+
+Owning the instance is not operating it, and the two are deliberately separate
+credentials. The operator is named in configuration: a browser becomes one by
+linking `[runtime].admin_user` **with** a key matching `[runtime].admin_api`
+(checked in constant time in `routes::account::create_account`, before the e621
+verification, and refused outright otherwise — with no key, or a wrong one, that
+account cannot be linked at all).
+
+`V35` records the grant on the device link (`admin_granted_at`,
+`admin_key_fingerprint`), where the guard can test it with one indexed lookup
+(`db::is_instance_admin`). The fingerprint is what makes the grant **revocable by
+configuration**: it is the domain-separated SHA-256 of the key that wrote it, so
+rotating `[runtime].admin_api` retires every grant made under the old value and
+re-opens the tier (`db::admin_available`) without anyone revoking anything by
+hand. `[instance].owner_secret` cannot do this, which is exactly why the console
+is not behind it.
+
+The tier gates the operator surfaces — the local catalog (`/catalog`, including
+the instance-wide media pause/resume/kick/clear) and the console
+(`/admin`, `GET /api/admin/overview`) — through
+`auth::require_instance_admin`.
+
+The credential is proved in **Settings → Owner claim**
+(`parser-web/src/components/owner_claim_card.rs`), and that card is the only
+place the tier is advertised: no nav entry, no drawer entry and no onboarding
+step points at it. The tour's account steps walk to `/account`, which is the
+general linking form and not this card. It renders only while
+`admin_available` is true and this browser is not already the operator.
+
+`GET /api/session/state` says whether the tier is open (`admin_available`) and
+whether this browser holds it (`is_admin`) — nothing else about it. In particular
+it does **not** name `[runtime].admin_user`: a browser that has not proved the key
+is never told which account holds the machine, so the claim form always asks for
+the account id, the username and the key. Three fields instead of one is the
+price, and it buys a `/session/state` that discloses nothing about who operates
+the instance.
+
+`/account` is the general account-linking page, not a route into this tier: it
+links whatever account the reader cares about, with or without a key, and the
+server refuses `[runtime].admin_user` to anyone who has not proved
+`[runtime].admin_api`. When `/catalog` and `/admin` are refused they explain the
+rule rather than offering a call to action.
 
 ## Owner console — `/admin`
 
 `parser-web/src/pages/admin.rs` over `GET /api/admin/overview`
-(`parser-api/src/routes/admin.rs`). It is a **view over the accounts this
-browser already owns**, not a second authority: the rows come from the same
-`account_device_links` filter `/accounts` applies, so the page grants nothing a
-linked account could not already read. The nav entry follows the same rule as
-the Catalog tab — `models::ownership::owns_any_account` is the single predicate
-behind both `catalog_entry_visible` and `admin_entry_visible`, and a browser
-that owns nothing gets the "link an account" ask from the pages that already
-say it.
+(`parser-api/src/routes/admin.rs`). It is a view over the **instance** — the
+media queue, the job registry, the bucket pins — so the endpoint requires the
+administration grant (`require_instance_admin`) and answers 403 otherwise. The
+rows come from the console's own scope (`db::instance::console_accounts_sql`) —
+every account on the instance — which is deliberately **wider** than the account
+picker's: an operator sees the whole instance without gaining the ability to act
+as accounts it holds no link to. Because of that gap each row carries two flags,
+not one: `linked` (unlink would find something to remove) and `addressable` (the
+account is in the scope `account_in_scope` recognises, so sync, export,
+`/process` and the bucket pin would actually be accepted). The console renders
+every per-row control from `addressable`, because each of those routes re-checks
+it — a row that is merely *visible* offers nothing to click and says `view only`.
+Rotating `[runtime].admin_api` narrows the scope back to the links. The nav entry
+follows the same rule
+as the Catalog tab: `models::ownership::is_admin` is the single predicate behind
+both `catalog_entry_visible` and `admin_entry_visible`, and a browser that is not
+the operator is told which credential opens the console rather than being sent to
+link an account or to claim the instance, neither of which would help.
 
-The overview carries the owner-scoped totals (accounts, **distinct** saved
-posts, accounts with a stored key, running jobs), the instance-wide media
-counters, the configured `[buckets.*]` names, and one page of accounts with
-their per-account job state. Two details are deliberate:
+The overview carries the totals (accounts in scope, **distinct** saved posts,
+accounts with a stored key, running jobs), the instance-wide media counters, the
+configured `[buckets.*]` names, and one page of accounts with their per-account
+job state. Three details are deliberate:
 
 - `saved_posts` counts **distinct** posts, not `accounts_post` rows: one post
-  saved by two of your accounts is one post.
+  saved by two accounts is one post.
 - the media counters are **instance-wide** and the panel says so —
-  `db::media::queue_stats()` has no owner filter yet (TODO §4.5).
+  `db::media::queue_stats()` has no tenant filter yet (TODO §4.5).
+- the console scope is the whole instance for any operator, so `totals.accounts`
+  and `instance_accounts` agree. They stay separate fields because they answer
+  different questions — "how many are in scope" and "how many exist here" — and
+  they agree by construction rather than by coincidence.
 
 ### A/B bucket assignment
 
@@ -173,7 +241,7 @@ Two behaviours are load-bearing:
   `[buckets.*]`, so storing one would look like success and change nothing.
   On an instance with no buckets configured the refusal says exactly that.
 - **An ownership miss is 404, not 500.** The route checks
-  `db::accounts::account_is_linked` and maps the miss itself, because
+  `db::accounts::account_in_scope` and maps the miss itself, because
   `ApiError::from_string` files any unrecognised error string under `Internal`
   — see the note on that pattern in `db/accounts.rs`.
 
@@ -218,12 +286,13 @@ returned over the API, or included in the export payload (the export is built
 from explicit fields and omits these columns) — only booleans and timestamps
 are exposed.
 
-Keys are **account-scoped**, not device-scoped: any device linked to the
-account (via `account_device_links`, enforced on every key accessor) can
-read/manage it and run sync with it. This is deliberate so direct sync works
-from whichever device is active. The **admin_user account is special-cased in
-sync**: it syncs with the shared `admin_api` directly and needs no stored
-per-account key (see *Read-only direct sync*).
+Keys are **account-scoped**, not device-scoped: every device the account is in
+scope for — the ones linked to it, plus the instance owner — can read/manage it
+and run sync with it (`require_account_scope`, enforced on every key accessor).
+This is deliberate so direct sync works from whichever device is active. The
+**admin_user account is special-cased in sync**: it syncs with the shared
+`admin_api` directly and needs no stored per-account key (see *Read-only direct
+sync*).
 
 ### Ownership proof (M2) — optional at claim time
 
@@ -238,10 +307,11 @@ Per provided key: a malformed key is `400`, a key that doesn't
 authenticate the claimed account is `403`, and an e621 outage during
 verification fails with `503` (our `ApiError::Upstream` maps to HTTP 503).
 Every link (with or without a key) still gates reads (`tag_counts` / profile /
-`export` / interactions / …) by `account_device_links` ownership, so an
-anonymous token cannot claim an arbitrary public account and read its
-accumulated parser data (closes the piolium M2 finding — ownership proof is
-offered as an option, not imposed as a hard requirement).
+`export` / interactions / …) by account **scope** — the `account_device_links`
+link, or the instance claim — so an anonymous token cannot claim an arbitrary
+public account and read its accumulated parser data (closes the piolium M2
+finding — ownership proof is offered as an option, not imposed as a hard
+requirement).
 
 ### Key management endpoints
 

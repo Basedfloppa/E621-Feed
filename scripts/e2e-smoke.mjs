@@ -221,8 +221,9 @@ const debugBuild = await request('/api/openapi.json').then((r) => r.status === 2
 
 // Hoisted out of the check below so the owner-console checks can reuse the same
 // device. Each `bootstrap` mints a *new* token, and on an instance with no
-// `[instance].owner_secret` the first one adopts every unowned account — so
-// minting a second one here would quietly create a second owner.
+// `[instance].owner_secret` the first one *claims* the instance — the claim is a
+// single row about the instance and links no accounts — so a second bootstrap is
+// exactly how the gate gets a guaranteed non-owner to test against.
 let mintedToken = null;
 
 function ownerHeaders(extra = {}) {
@@ -257,7 +258,7 @@ await check('session/bootstrap mints a cookie that authenticates the API', async
   return `minted token authenticates, ${json.length} account(s)`;
 });
 
-await check('session/state reports what claiming the instance would link', async () => {
+await check('session/state reports who owns the instance', async () => {
   // The settings card reads this before offering the secret field, and it must
   // answer for a visitor who has no cookie yet — otherwise the card could not
   // decide between the enroll form and the "this instance is open" note.
@@ -265,40 +266,124 @@ await check('session/state reports what claiming the instance would link', async
   expect(status === 200, `session/state answered ${status}`);
   expect(type.includes('application/json'), `session/state answered ${type}`);
   const json = JSON.parse(body);
-  for (const field of ['instance_locked', 'owned_accounts', 'adoptable_accounts']) {
+  for (const field of [
+    'instance_locked',
+    'instance_claimed',
+    'is_owner',
+    'is_admin',
+    'admin_available',
+    'owned_accounts',
+    'instance_accounts',
+  ]) {
     expect(field in json, `session/state is missing ${field}`);
   }
   expect(typeof json.instance_locked === 'boolean', 'instance_locked is not a boolean');
-  expect(Number.isInteger(json.adoptable_accounts), 'adoptable_accounts is not an integer');
-  return `locked=${json.instance_locked} owned=${json.owned_accounts} adoptable=${json.adoptable_accounts}`;
+  expect(typeof json.is_owner === 'boolean', 'is_owner is not a boolean');
+  expect(typeof json.is_admin === 'boolean', 'is_admin is not a boolean');
+  expect(Number.isInteger(json.instance_accounts), 'instance_accounts is not an integer');
+  // The administration account must not be named to a browser that has not
+  // proved the key: the card asks for it instead of being told.
+  expect(
+    !('admin_account' in json),
+    `session/state must not disclose the administration account: ${body}`,
+  );
+  expect(json.is_owner === false, 'an anonymous read must never claim the instance');
+  expect(json.is_admin === false, 'an anonymous read must never report administration');
+  return `locked=${json.instance_locked} claimed=${json.instance_claimed} owner=${json.is_owner} admin=${json.is_admin} accounts=${json.instance_accounts}`;
 });
 
-await check('/api/admin/overview requires the owner cookie', async () => {
+await check('a browser without the instance claim is refused the instance surfaces', async () => {
+  // A second bootstrap: whoever holds the claim, it is not this token.
+  const headers = debugBuild ? {} : { origin: baseUrl };
+  const boot = await request('/api/session/bootstrap', { method: 'POST', headers });
+  expect(boot.status === 200, `the second bootstrap answered ${boot.status}`);
+  const setCookies = boot.res.headers.getSetCookie?.() ?? [];
+  const cookie = setCookies.find((c) => c.startsWith('owner_token='));
+  expect(Boolean(cookie), 'the second bootstrap did not set a cookie');
+  const stranger = cookie.split(';')[0].split('=').slice(1).join('=');
+  const strangerHeaders = {
+    cookie: `owner_token=${stranger}`,
+    ...(debugBuild ? {} : { origin: baseUrl }),
+  };
+
+  const state = JSON.parse((await request('/api/session/state', { headers: strangerHeaders })).body);
+  expect(state.is_owner === false, 'a token that never claimed the instance reports is_owner');
+
+  // Neither linking accounts nor claiming the instance is how you reach the
+  // console. The catalog, the console and the process runner take the
+  // administration grant — `[runtime].admin_user` linked with `[runtime].admin_api`
+  // — and this token has proved neither.
+  const admin = await request('/api/admin/overview', { headers: strangerHeaders });
+  expect(admin.status === 403, `admin/overview for a non-operator answered ${admin.status}`);
+
+  const process = await request('/api/process/1', { method: 'POST', headers: strangerHeaders });
+  expect(process.status === 403, `starting a run as a non-operator answered ${process.status}`);
+
+  const clear = await request('/api/catalog/1/media', { method: 'DELETE', headers: strangerHeaders });
+  expect(clear.status === 403, `clearing the media cache as a non-operator answered ${clear.status}`);
+
+  return 'is_owner=false; 403 on admin, /process and the media cache';
+});
+
+await check('the instance claim alone does not open the console', async () => {
+  // The rule this pins: ownership widens *reads* — it exists so the owner can
+  // recover access after clearing cookies — and must not also be the key to the
+  // machine. If this ever passes, the two tiers have collapsed back into one.
+  const headers = ownerHeaders();
+  const own = JSON.parse((await request('/api/session/state', { headers })).body);
+  if (!own.is_owner) {
+    return skip('this instance is owned by another browser, so there is no claim to test');
+  }
+  expect(own.is_admin === false, 'a token that only claimed the instance reports is_admin');
+
+  const admin = await request('/api/admin/overview', { headers });
+  expect(admin.status === 403, `admin/overview for the owner without the grant answered ${admin.status}`);
+
+  const pause = await request('/api/catalog/1/media/pause', { method: 'POST', headers });
+  expect(pause.status === 403, `pausing the media worker as the owner answered ${pause.status}`);
+
+  return 'is_owner=true is_admin=false; 403 on admin and the media worker';
+});
+
+await check('/api/admin/overview requires the operator cookie', async () => {
   const { status } = await request('/api/admin/overview');
   expect(status === 401, `expected 401 without a cookie, got ${status}`);
   return `${status} without cookie`;
 });
 
-await check('the owner console counts exactly the accounts the cookie owns', async () => {
+await check('the operator console counts exactly the accounts in scope', async () => {
+  // Reaching this route takes the administration grant — `[runtime].admin_user`
+  // linked with `[runtime].admin_api` — which this script deliberately cannot
+  // obtain: it has no e621 key, and asking for one would make the smoke test
+  // depend on live credentials. So the check runs only where the instance is
+  // *already* operated by whoever is running it, and skips with the reason
+  // otherwise. Everything up to the door is asserted by the two checks above.
   const headers = ownerHeaders();
+  const own = JSON.parse((await request('/api/session/state', { headers })).body);
+  if (!own.is_admin) {
+    return skip(
+      'this browser is not the instance operator: the console needs [runtime].admin_user '
+        + 'linked with [runtime].admin_api, which a smoke run does not have',
+    );
+  }
   const { status, body, type } = await request('/api/admin/overview', { headers });
   expect(status === 200, `admin/overview answered ${status}`);
   expect(type.includes('application/json'), `admin/overview answered ${type}`);
   const json = JSON.parse(body);
-  for (const field of ['instance_locked', 'adoptable_accounts', 'totals', 'buckets', 'media', 'accounts']) {
+  for (const field of ['instance_locked', 'instance_accounts', 'totals', 'buckets', 'media', 'accounts']) {
     expect(field in json, `admin/overview is missing ${field}`);
   }
   expect(Array.isArray(json.buckets), 'buckets is not an array');
   expect(Array.isArray(json.accounts), 'accounts is not an array');
-  // §3.2 claims the console is "a UI, not new routes": it is a view over the
-  // same set `/accounts` returns. If the two ever disagree that claim is false,
-  // and the console is showing somebody else's library.
+  // The console is a view over the same account scope `/accounts` returns. If
+  // the two ever disagree, the console is showing something the cookie cannot
+  // read.
   const listed = JSON.parse((await request('/api/accounts', { headers })).body);
   expect(
     json.totals.accounts === listed.length,
     `admin/overview counts ${json.totals.accounts} accounts, /accounts returned ${listed.length}`,
   );
-  return `accounts=${json.totals.accounts} buckets=${json.buckets.length} stored=${json.media.stored}`;
+  return `accounts=${json.totals.accounts} of ${json.instance_accounts} instance-wide, buckets=${json.buckets.length} stored=${json.media.stored}`;
 });
 
 await check('an unassignable bucket is refused, not stored and ignored', async () => {

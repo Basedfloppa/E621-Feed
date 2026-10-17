@@ -1,16 +1,19 @@
-//! Owner console — `/admin` (TODO §3.2).
+//! Operator console — `/admin` (TODO §3.2).
 //!
-//! The console is a view over the accounts this browser owns: there is no
-//! separate admin login, because the `HttpOnly` owner cookie already *is* the
-//! identity and `GET /accounts` already filters by it. What was missing was a
-//! place to *act* on those accounts — run `/process`, see its progress, unlink,
-//! and (the first real consumer of the `BucketOverride` machinery) pin an
-//! account to an A/B arm instead of living with the hash assignment.
+//! The console is a view over the *instance*. There is no separate login screen,
+//! because the `HttpOnly` owner cookie already *is* the identity — but the gate
+//! is the administration grant, not the instance claim and not a link count:
+//! `admin_entry_visible` hides the entry unless this browser linked
+//! `[runtime].admin_user` with a key matching `[runtime].admin_api`, and
+//! `GET /api/admin/overview` answers 403 otherwise. What the console is for is
+//! *acting* on the instance — run `/process`, see its progress, unlink, and (the
+//! first real consumer of the `BucketOverride` machinery) pin an account to an
+//! A/B arm instead of living with the hash assignment.
 //!
-//! Ownership gating happens twice, deliberately: the nav entry is hidden for a
-//! browser that owns nothing (`admin_entry_visible`), and the page itself
-//! explains the situation rather than rendering an empty table, so a bookmark
-//! or a shared URL does not show a broken screen.
+//! Gating happens twice, deliberately: the nav entry is hidden for a browser that
+//! does not operate the instance (`admin_entry_visible`), and the page itself
+//! explains the situation rather than rendering an empty table, so a bookmark or
+//! a shared URL does not show a broken screen.
 
 use gloo_timers::callback::Interval;
 use reqwasm::http::Request;
@@ -32,25 +35,51 @@ const POLL_MS: u32 = 3000;
 /// was actually asked for.
 const PAGE_LIMIT: i64 = 100;
 
-/// The two asks, split by whether the instance is claimed — same distinction
-/// the catalog makes, because the next step differs. On an open instance
-/// linking an account *is* the way in; on a claimed one ownership has to be
-/// proved first, and the secret to prove it with is named only when one exists.
-fn empty_admin_notice(instance_locked: bool) -> (&'static str, &'static str) {
-    if instance_locked {
+/// The two asks, split by whether the administration tier is still open — the
+/// same distinction the catalog makes.
+///
+/// The console is not behind the instance claim, and saying that it is would
+/// send the reader to `[instance].owner_secret`, which does not open it. While
+/// nobody operates the instance the credential is worth naming; once somebody
+/// does, the link that would grant it is refused, so the reader is told who
+/// holds it instead of being invited to try.
+fn empty_admin_notice(admin_available: bool) -> (&'static str, &'static str) {
+    if admin_available {
         (
-            "This instance is claimed by its owner",
-            "The console manages the accounts this browser owns, and it owns none. If you are \
-             the owner, claim the instance with the [instance].owner_secret from config.toml, \
-             then link an e621 account.",
+            "This browser does not operate the instance",
+            "The console shows instance state — the media queue, the job registry, the bucket \
+             pins — so it takes the [runtime].admin_api key from config.toml, proved in the \
+             owner claim on the settings page. The instance claim does not open it.",
         )
     } else {
         (
-            "No accounts linked yet",
-            "The console manages the accounts this browser owns. Link an e621 account to run \
-             /process for it, pin it to an experiment bucket and watch its job state; no \
-             instance secret is needed while the instance is open.",
+            "Another browser operates this instance",
+            "The console takes [runtime].admin_user linked with the [runtime].admin_api key, and \
+             that account is already linked under the current key.",
         )
+    }
+}
+
+/// The operator reached the console and the instance has no accounts yet.
+///
+/// Deliberately a *different* card from [`empty_admin_notice`]: the console is
+/// only reachable as an operator, so an empty table means an empty instance.
+/// Telling the operator "you do not operate this" would be a lie, and telling
+/// them to link what they already linked would be a loop.
+///
+/// No call to action. The account-linking form is not advertised anywhere — the
+/// console is reachable only once that link exists, so a button here would be
+/// unreachable for everyone who could still use it, and an advertisement to
+/// everyone who cannot.
+fn empty_instance_card() -> Html {
+    html! {
+        <>
+            <h2 class="card-title text-xl">{ "No accounts on this instance yet" }</h2>
+            <p class="text-sm text-base-content/70">
+                { "The console covers every account on the instance. Accounts appear here as they \
+                   are collected, with their library size and their /process state." }
+            </p>
+        </>
     }
 }
 
@@ -104,8 +133,18 @@ pub fn admin_page() -> Html {
         .map(|cfg| cfg.backend_domain)
         .unwrap_or_default();
 
+    // Same source the nav gate reads, so the card the page shows and the menu
+    // entry it hides can never disagree about who operates the instance. Needed
+    // separately from the overview because a 403 carries no body to read it from.
+    let ownership = use_ownership(&backend_url);
+    let admin_available = ownership.as_ref().is_some_and(|s| s.admin_available);
+
     let overview = use_state(|| Option::<AdminOverview>::None);
     let load_error = use_state(|| Option::<String>::None);
+    // The API answers 403 without the instance claim. That is an expected state
+    // with its own card, not an error banner: a visitor who does not own the
+    // instance is being told how to, not shown a failure.
+    let forbidden = use_state(|| false);
     let loaded = use_state(|| false);
     let message = use_state(String::new);
     let is_error = use_state(|| false);
@@ -119,6 +158,7 @@ pub fn admin_page() -> Html {
     {
         let overview = overview.clone();
         let load_error = load_error.clone();
+        let forbidden = forbidden.clone();
         let loaded = loaded.clone();
         let backend_url = backend_url.clone();
         use_effect_with(
@@ -126,6 +166,7 @@ pub fn admin_page() -> Html {
             move |(backend_url, _, offset)| {
                 let backend_url = backend_url.clone();
                 let offset = *offset;
+                let forbidden = forbidden.clone();
                 spawn_local(async move {
                     let url =
                         format!("{backend_url}/admin/overview?limit={PAGE_LIMIT}&offset={offset}");
@@ -134,11 +175,16 @@ pub fn admin_page() -> Html {
                             Ok(fresh) => {
                                 overview.set(Some(fresh));
                                 load_error.set(None);
+                                forbidden.set(false);
                             }
                             Err(_) => load_error.set(Some(
                                 "The console data could not be read. Try again.".to_string(),
                             )),
                         },
+                        Ok(resp) if resp.status() == 403 => {
+                            forbidden.set(true);
+                            load_error.set(None);
+                        }
                         Ok(resp) => {
                             let status = resp.status();
                             let body = resp.text().await.unwrap_or_default();
@@ -347,7 +393,7 @@ pub fn admin_page() -> Html {
         <div id="admin-page" class="m-4">
             <h1 class="text-2xl font-semibold text-base-content mb-1">{ "Owner console" }</h1>
             <p class="text-sm text-base-content/70 mb-3">
-                { "Everything here is scoped to the accounts this browser owns — there is no separate admin login, the cookie is the identity." }
+                { "Everything here is instance state: the media queue, the job registry and the bucket pins. There is no separate admin login — the [runtime].admin_api key proved in Settings is the gate, and the cookie is the identity." }
             </p>
 
             if !message.is_empty() {
@@ -357,11 +403,17 @@ pub fn admin_page() -> Html {
                 <div role="alert" class="alert alert-error text-sm py-2 mb-3">{ err.clone() }</div>
             }
 
-            if let Some(o) = &*overview {
+            if *forbidden {
+                <div class="card bg-base-100 border border-base-300">
+                    <div class="card-body text-base-content">
+                        { empty_notice_card(admin_available) }
+                    </div>
+                </div>
+            } else if let Some(o) = &*overview {
                 if o.totals.accounts == 0 {
                     <div class="card bg-base-100 border border-base-300">
                         <div class="card-body text-base-content">
-                            { empty_notice_card(o.instance_locked) }
+                            { empty_instance_card() }
                         </div>
                     </div>
                 } else {
@@ -369,16 +421,14 @@ pub fn admin_page() -> Html {
                         <div class="stat">
                             <div class="stat-title">{ "Accounts" }</div>
                             <div class="stat-value text-2xl">{ o.totals.accounts }</div>
-                            if o.adoptable_accounts > 0 {
-                                <div class="stat-desc">
-                                    { format!("{} on this instance belong to nobody", o.adoptable_accounts) }
-                                </div>
-                            }
+                            <div class="stat-desc">
+                                { format!("every account on this instance ({})", o.instance_accounts) }
+                            </div>
                         </div>
                         <div class="stat">
                             <div class="stat-title">{ "Saved posts" }</div>
                             <div class="stat-value text-2xl">{ o.totals.saved_posts }</div>
-                            <div class="stat-desc">{ "distinct across your accounts" }</div>
+                            <div class="stat-desc">{ "distinct across the instance" }</div>
                         </div>
                         <div class="stat">
                             <div class="stat-title">{ "e621 keys stored" }</div>
@@ -514,7 +564,7 @@ pub fn admin_page() -> Html {
                                                                 <span class={classes!("text-xs", if stale { "text-warning" } else { "text-base-content/60" })}>
                                                                     { bucket_cell(a) }
                                                                 </span>
-                                                                if !o.buckets.is_empty() {
+                                                                if !o.buckets.is_empty() && a.addressable {
                                                                     // `id` + `aria-label`: a bare control with neither is
                                                                     // both unnamed for a screen reader and flagged by the
                                                                     // browser's own form-field audit, and there is one of
@@ -553,25 +603,51 @@ pub fn admin_page() -> Html {
                                                         <td class="text-xs">{ job_cell(&a.job) }</td>
                                                         <td>
                                                             <div class="flex flex-wrap gap-1">
-                                                                <button type="button" class="btn btn-xs"
-                                                                    disabled={row_busy || running}
-                                                                    onclick={on_process_row}>
-                                                                    { if running { "Running…" } else { "Process" } }
-                                                                </button>
-                                                                <button type="button" class="btn btn-xs btn-ghost"
-                                                                    disabled={row_busy}
-                                                                    onclick={on_sync_row}>
-                                                                    { "Sync" }
-                                                                </button>
-                                                                <a class="btn btn-xs btn-ghost"
-                                                                    href={format!("{}/account/{}/export", backend_url, a.id)}>
-                                                                    { "Export" }
-                                                                </a>
-                                                                <button type="button" class="btn btn-xs btn-ghost"
-                                                                    disabled={row_busy}
-                                                                    onclick={on_unlink_row}>
-                                                                    { "Unlink" }
-                                                                </button>
+                                                                // Every one of these lands on a route that
+                                                                // re-checks `account_in_scope`, so a row the
+                                                                // console merely *shows* must not offer them —
+                                                                // the control would be a guaranteed 404.
+                                                                if a.addressable {
+                                                                    <button type="button" class="btn btn-xs"
+                                                                        disabled={row_busy || running}
+                                                                        onclick={on_process_row}>
+                                                                        { if running { "Running…" } else { "Process" } }
+                                                                    </button>
+                                                                    <button type="button" class="btn btn-xs btn-ghost"
+                                                                        disabled={row_busy}
+                                                                        onclick={on_sync_row}>
+                                                                        { "Sync" }
+                                                                    </button>
+                                                                    <a class="btn btn-xs btn-ghost"
+                                                                        href={format!("{}/account/{}/export", backend_url, a.id)}>
+                                                                        { "Export" }
+                                                                    </a>
+                                                                }
+                                                                if a.linked {
+                                                                    <button type="button" class="btn btn-xs btn-ghost"
+                                                                        disabled={row_busy}
+                                                                        onclick={on_unlink_row}>
+                                                                        { "Unlink" }
+                                                                    </button>
+                                                                } else if a.addressable {
+                                                                    // The instance owner addresses accounts this
+                                                                    // browser holds no link to, and unlinking removes
+                                                                    // a link — so the action would be a guaranteed
+                                                                    // 404. Saying why beats a dead button.
+                                                                    <span class="text-xs text-base-content/60 self-center"
+                                                                        title="This account is in scope through the instance claim, not through a link from this browser, so there is nothing to unlink.">
+                                                                        { "no direct link" }
+                                                                    </span>
+                                                                } else {
+                                                                    // Shown because this browser operates the
+                                                                    // instance, not because it may act as the
+                                                                    // account: operating the machine is not the same
+                                                                    // as holding the libraries on it.
+                                                                    <span class="text-xs text-base-content/60 self-center"
+                                                                        title="Visible because this browser operates the instance. Acting as this account — syncing it or starting a run — needs a link to it, which this browser does not hold.">
+                                                                        { "view only" }
+                                                                    </span>
+                                                                }
                                                             </div>
                                                         </td>
                                                     </tr>
@@ -615,19 +691,20 @@ pub fn admin_page() -> Html {
     }
 }
 
-/// The "you own nothing" card, kept as a function so the two wordings can be
-/// pinned by a test without a DOM.
-fn empty_notice_card(instance_locked: bool) -> Html {
-    let (title, body) = empty_admin_notice(instance_locked);
+/// The "you do not operate this instance" card, kept as a function so the two
+/// wordings can be pinned by a test without a DOM.
+///
+/// No action link at all — not to the account form, and not to the instance
+/// claim. The account form is the credential, and the claim does not open the
+/// console; offering either would advertise a door the reader cannot open.
+fn empty_notice_card(admin_available: bool) -> Html {
+    let (title, body) = empty_admin_notice(admin_available);
     html! {
         <>
             <h2 class="card-title text-xl">{ title }</h2>
             <p class="text-sm text-base-content/70">{ body }</p>
             <div class="card-actions justify-end mt-2">
-                <a class="btn btn-sm" href="/account">{ "Link an e621 account" }</a>
-                if instance_locked {
-                    <a class="btn btn-sm btn-outline" href="/settings">{ "Claim this instance" }</a>
-                }
+                <a class="btn btn-sm btn-ghost" href="/">{ "Back to the feed" }</a>
             </div>
         </>
     }
@@ -637,18 +714,31 @@ fn empty_notice_card(instance_locked: bool) -> Html {
 mod tests {
     use super::*;
 
-    /// Same distinction the catalog draws: on a claimed instance linking an
-    /// account achieves nothing until ownership is proved, so the secret has to
-    /// be named; on an open one there is no secret to name.
+    /// Same distinction the catalog draws: while the tier is open the credential
+    /// has to be named, and once it is taken there is nothing to name — the reader
+    /// is told who holds it instead of being invited to try.
+    ///
+    /// Neither wording may mention `owner_secret`. The claim does not open the
+    /// console, so naming it would send the reader to the wrong form — which is
+    /// exactly the conflation this tier was split out of.
     #[test]
-    fn the_empty_notice_follows_whether_the_instance_is_claimed() {
-        let (locked_title, locked_body) = empty_admin_notice(true);
-        let (open_title, open_body) = empty_admin_notice(false);
+    fn the_empty_notice_follows_whether_the_administration_tier_is_open() {
+        let (offered_title, offered_body) = empty_admin_notice(true);
+        let (taken_title, taken_body) = empty_admin_notice(false);
 
-        assert_ne!(locked_title, open_title);
-        assert!(locked_title.contains("claimed"));
-        assert!(!open_title.contains("claimed"));
-        assert!(locked_body.contains("owner_secret"));
-        assert!(!open_body.contains("owner_secret"));
+        assert_ne!(offered_title, taken_title);
+        assert!(offered_title.contains("does not operate the instance"));
+        assert!(taken_title.contains("Another browser operates"));
+        assert!(offered_body.contains("admin_api"));
+        // While the tier is open the reader is sent to the one place that can
+        // grant it, rather than left to guess which page holds the form.
+        assert!(offered_body.contains("owner claim"));
+        assert!(offered_body.contains("settings page"));
+        // Once the tier is taken the wording must not invite the reader to go and
+        // link anything: that is the state where the server would refuse them.
+        assert!(taken_body.contains("already linked"));
+        assert!(!taken_body.contains("config.toml"));
+        assert!(!offered_body.contains("owner_secret"));
+        assert!(!taken_body.contains("owner_secret"));
     }
 }

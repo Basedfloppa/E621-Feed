@@ -1,21 +1,29 @@
-//! Owner console — `GET /api/admin/overview` (TODO §3.2).
+//! Operator console — `GET /api/admin/overview` (TODO §3.2).
 //!
-//! This is the owner's view of *their own* instance, so it adds no new
-//! authority: the account rows come from the same `account_device_links`
-//! filter `/accounts` already applies, which is why §3.2 says the console
-//! needs a UI rather than new routes. The one genuinely new capability — the
-//! A/B bucket assignment — lives next to the read-only bucket route in
-//! `routes::account`, and this endpoint is what makes `[buckets.*]` visible at
-//! all: `pick_bucket` silently ignores an explicit name that is not configured,
-//! so the console has to be told which names exist.
+//! This is the view of *the machine*: the media cache, the job registry, the
+//! bucket pins. It is gated on the administration tier
+//! (`auth::require_instance_admin`) — the browser must have linked
+//! `[runtime].admin_user` with the matching `[runtime].admin_api` — and not on
+//! the instance claim. Owning the instance widens what a browser may *read*;
+//! operating it is a separate, narrower thing, and conflating the two would put
+//! the console behind `[instance].owner_secret`, a secret whose whole job is to
+//! *recover* access after clearing cookies. The account rows come from the
+//! console's own scope — every account on the instance — which is deliberately
+//! wider than the account picker's: an operator sees the whole instance without
+//! gaining the ability to act as accounts it holds no link to. The one genuinely
+//! new capability — the A/B bucket assignment —
+//! lives next to the read-only bucket route in `routes::account`, and this
+//! endpoint is what makes `[buckets.*]` visible at all: `pick_bucket` silently
+//! ignores an explicit name that is not configured, so the console has to be
+//! told which names exist.
 
 use rocket::serde::json::Json;
 use rocket_okapi::openapi;
 
 use crate::db_blocking;
 use e621_account_parser_api::{
-    auth::OwnerToken,
-    db::{account_ownership_counts, owned_account_ids, owner_accounts_overview, queue_stats},
+    auth::{OwnerToken, require_instance_admin},
+    db::{console_account_ids, console_accounts_overview, instance_account_count, queue_stats},
     errors::ApiError,
     jobs::{self, ProcessJobPhase},
     media_fetch_worker::worker_paused,
@@ -27,7 +35,7 @@ use e621_account_parser_api::{
 /// paginates because rendering 900 rows is a DOM problem, not a data one.
 const ADMIN_PAGE_LIMIT: i64 = 100;
 
-/// Owner-scoped console snapshot: accounts, totals, buckets, media, jobs.
+/// Operator-scoped console snapshot: accounts, totals, buckets, media, jobs.
 #[openapi(tag = "Admin")]
 #[get("/admin/overview?<limit>&<offset>")]
 pub(crate) async fn admin_overview(
@@ -35,40 +43,39 @@ pub(crate) async fn admin_overview(
     limit: Option<i64>,
     offset: Option<i64>,
 ) -> Result<Json<AdminOverview>, ApiError> {
+    require_instance_admin(&owner).await?;
     let owner_token = owner.0;
     ratelimit::check(&format!("read:owner:{owner_token}"), 240, 60)?;
     let limit = limit.unwrap_or(ADMIN_PAGE_LIMIT).clamp(1, 500);
     let offset = offset.unwrap_or(0).max(0);
-    let seed_token = cfg().backtest.seed_owner_token.clone();
 
     let (rows, mut totals) = db_blocking({
         let owner_token = owner_token.clone();
-        move || owner_accounts_overview(&owner_token, limit, offset)
+        move || console_accounts_overview(&owner_token, limit, offset)
     })
     .await
     .map_err(ApiError::from_string)?;
 
-    // `adoptable_accounts` is the same helper `/session/state` uses, so the
-    // console and the settings card can never disagree about what a claim
-    // would link.
-    let (_, adoptable) = db_blocking({
-        let owner_token = owner_token.clone();
-        move || account_ownership_counts(Some(&owner_token), &seed_token)
-    })
-    .await
-    .map_err(ApiError::from_string)?;
+    // Now the same number as `totals.accounts`, because the console scope is the
+    // instance for any operator. Kept separate because it answers a different
+    // question — how many accounts exist here, not how many are in scope — and
+    // the two agree by construction rather than by coincidence.
+    let instance_accounts = db_blocking(instance_account_count)
+        .await
+        .map_err(ApiError::from_string)?;
 
-    // Running jobs are counted over *every* owned account, not just the page:
+    // Running jobs are counted over *every* account the console covers, not just
+    // the page:
     // the page is a rendering limit, and a metric that changes when you scroll
     // is not a metric.
-    let owned_ids = db_blocking({
+    let visible_ids = db_blocking({
         let owner_token = owner_token.clone();
-        move || owned_account_ids(&owner_token)
+        move || console_account_ids(&owner_token)
     })
     .await
     .map_err(ApiError::from_string)?;
     totals.jobs_running = i64::try_from(
-        owned_ids
+        visible_ids
             .iter()
             .filter(|id| jobs::get_state(**id).is_some_and(|s| s.phase == ProcessJobPhase::Running))
             .count(),
@@ -105,6 +112,8 @@ pub(crate) async fn admin_overview(
                 bucket,
                 has_key: row.has_key,
                 saved_posts: row.saved_posts,
+                linked: row.linked,
+                addressable: row.addressable,
                 job,
             }
         })
@@ -116,7 +125,7 @@ pub(crate) async fn admin_overview(
 
     Ok(Json(AdminOverview {
         instance_locked: config.instance.ownership_requires_secret(),
-        adoptable_accounts: adoptable,
+        instance_accounts,
         totals,
         buckets,
         media: AdminMedia {

@@ -1,0 +1,26 @@
+-- The administration tier: a grant on a *device link*, not on the instance.
+--
+-- Instance ownership (`instance_ownership`, V34) answers "whose instance is
+-- this?" and widens what a browser may *read*. The console and the local
+-- catalog answer a different question — "who operates this machine?" — and the
+-- operator is named in configuration: `[runtime].admin_user` linked with
+-- `[runtime].admin_api`. Ownership alone must not open them, and a browser that
+-- merely linked an account must not either.
+--
+-- The grant lives on the link row because that is where "this browser proved
+-- the key for that account" is already recorded, and it is what the request
+-- guard can test with one indexed lookup.
+--
+-- `admin_key_fingerprint` is the domain-separated SHA-256 of the `admin_api`
+-- that was proven when the grant was written. It is not a second secret (the
+-- key itself is stored separately, AES-GCM encrypted); it is what makes the
+-- grant *revocable by configuration*: rotating `admin_api` retires every grant
+-- written under the old value, because the fingerprint in the row no longer
+-- matches the one derived from the config. Without it a rotated key would leave
+-- the previous holder an admin forever.
+--
+-- Both columns are NULL on every pre-existing link, so this migration grants
+-- nobody anything: on an existing instance the console stays closed until the
+-- operator links `admin_user` with the matching key.
+ALTER TABLE account_device_links ADD COLUMN admin_granted_at TEXT;
+ALTER TABLE account_device_links ADD COLUMN admin_key_fingerprint TEXT;

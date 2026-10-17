@@ -73,6 +73,39 @@ pub fn encrypt(plaintext: &[u8]) -> Result<String, String> {
     Ok(B64.encode(&blob))
 }
 
+/// Opaque, stable fingerprint of an `[runtime].admin_api` value.
+///
+/// The administration grant has to be *revocable by configuration*: a browser
+/// that proved the key is an operator **for that key**, and rotating
+/// `admin_api` must retire it rather than leave the previous holder an admin
+/// forever. Storing the key itself on the link row would mean a second copy of
+/// a secret outside the AES-GCM blob that already holds it, so the grant stores
+/// this digest instead and the guard compares it with the one derived from the
+/// live config.
+///
+/// Domain-separated and salted with the encryption secret so the digest is not
+/// a bare hash of a value an attacker could guess from elsewhere in the system.
+/// Falls back to the same compile-time salt `encryption_key` uses when the
+/// operator left the secret empty, so a debug/test instance still works.
+pub fn admin_key_fingerprint(admin_api: &str) -> String {
+    let salt = cfg().e621_key_encryption_secret.clone();
+    let salt: &[u8] = if salt.is_empty() {
+        FALLBACK_SECRET
+    } else {
+        salt.as_bytes()
+    };
+    let mut hasher = Sha256::new();
+    hasher.update(b"e621-account-parser:admin-grant:v1\0");
+    hasher.update(salt);
+    hasher.update(b"\0");
+    hasher.update(admin_api.as_bytes());
+    hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
 /// Decrypt a `base64(nonce || ciphertext)` blob produced by [`encrypt`].
 pub fn decrypt(encoded: &str) -> Result<Vec<u8>, String> {
     let blob = B64
@@ -122,5 +155,29 @@ mod tests {
         bytes[idx] ^= 0x01;
         let corrupted = B64.encode(&bytes);
         assert!(decrypt(&corrupted).is_err(), "tampered blob must fail auth");
+    }
+
+    /// The administration grant is bound to the key that produced it. If this
+    /// digest were constant, rotating `admin_api` would leave the previous
+    /// holder an operator — which is the whole reason it exists.
+    #[test]
+    fn admin_fingerprint_tracks_the_key_it_was_derived_from() {
+        let first = admin_key_fingerprint("key-one");
+        assert_eq!(
+            first,
+            admin_key_fingerprint("key-one"),
+            "the same key must fingerprint identically, or a grant written at \
+             link time would never match the guard"
+        );
+        assert_ne!(
+            first,
+            admin_key_fingerprint("key-two"),
+            "rotating the key must retire grants written under the old one"
+        );
+        assert!(
+            !first.contains("key-one"),
+            "the fingerprint must not carry the plaintext"
+        );
+        assert_eq!(first.len(), 64, "lowercase hex sha256");
     }
 }

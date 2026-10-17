@@ -579,8 +579,11 @@ async fn queue_stats_reports_counts() {
     assert!(bytes >= 100);
 }
 
-/// The catalog-manage HTTP routes (queue status, pause/resume, delete post)
-/// are owner-gated and mutate/read consistently.
+/// The catalog-manage HTTP routes (queue status, pause/resume, delete post) are
+/// gated in two tiers, and the test walks all three states: a linked device is
+/// refused the instance controls, owning the instance is *still* refused them,
+/// and only the administration grant allows them. Per-account controls (queue
+/// status, deleting a saved post) keep working with the link alone.
 #[rocket::async_test]
 async fn media_manage_routes_work() {
     install_catalog_config();
@@ -616,7 +619,64 @@ async fn media_manage_routes_work() {
     let v: serde_json::Value = resp.into_json().await.unwrap();
     assert!(v["pending"].as_i64().unwrap() >= 1);
 
-    // Pause flips the global worker flag; resume clears it.
+    // Pausing the worker is an *instance* operation — it stops downloads for
+    // every account — so a device that merely linked an account is refused.
+    let resp = client
+        .post(format!("/api/catalog/{account_id}/media/pause"))
+        .cookie(cookie.clone())
+        .dispatch()
+        .await;
+    assert_eq!(
+        resp.status(),
+        Status::Forbidden,
+        "a linked device that does not operate the instance must not pause the worker"
+    );
+    assert!(
+        !e621_account_parser_api::media_fetch_worker::worker_paused(),
+        "the refused request must not have flipped the flag"
+    );
+
+    // Claiming the instance is not enough either. The claim widens *reads* and
+    // exists so the owner can recover access after clearing cookies; the catalog
+    // acts on the machine, and that takes proving `[runtime].admin_api` for
+    // `[runtime].admin_user`. This is the assertion that keeps the two tiers from
+    // collapsing back into one.
+    e621_account_parser_api::db::claim_instance(
+        owner,
+        e621_account_parser_api::db::ClaimMethod::Secret,
+    )
+    .unwrap();
+
+    let resp = client
+        .post(format!("/api/catalog/{account_id}/media/pause"))
+        .cookie(cookie.clone())
+        .dispatch()
+        .await;
+    assert_eq!(
+        resp.status(),
+        Status::Forbidden,
+        "owning the instance must not open the catalog"
+    );
+    assert!(
+        !e621_account_parser_api::media_fetch_worker::worker_paused(),
+        "the refused request must not have flipped the flag"
+    );
+
+    // Now do what `POST /api/account` does once the key checks out: link the
+    // configured administration account and record the grant against the
+    // fingerprint of the configured key. With that in place the same request is
+    // allowed, and pause/resume still drive the flag.
+    let admin_user = e621_account_parser_api::models::cfg().admin_user.clone();
+    let admin_api = e621_account_parser_api::models::cfg().admin_api.clone();
+    let admin_account_id = 54009;
+    e621_account_parser_api::db::set_account(owner, admin_account_id, &admin_user, "").unwrap();
+    e621_account_parser_api::db::set_account_admin_grant(
+        owner,
+        admin_account_id,
+        &e621_account_parser_api::crypto::admin_key_fingerprint(&admin_api),
+    )
+    .unwrap();
+
     let resp = client
         .post(format!("/api/catalog/{account_id}/media/pause"))
         .cookie(cookie.clone())

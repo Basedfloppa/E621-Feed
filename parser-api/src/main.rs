@@ -36,7 +36,7 @@ use serde::Serialize;
 use e621_account_parser_api::{
     audit,
     auth::{self, OwnerToken},
-    db::{DbInit, get_account_by_id},
+    db::{ClaimMethod, ClaimOutcome, DbInit, claim_instance, get_account_by_id, is_instance_owner},
     db_blocking,
     errors::ApiError,
     jobs,
@@ -174,6 +174,14 @@ async fn process_posts(
     client_ip: ClientIp,
 ) -> Result<Json<ProcessJobState>, ApiError> {
     validation::validate_account_id(account_id)?;
+    // Starting a run is an *instance* operation — it spends the shared e621
+    // client and the shared job registry — so it takes the instance claim or the
+    // administration grant, not merely a link to the account. A browser that
+    // only linked an account can read that account's data but cannot set work in
+    // motion on the instance. The union exists because the console's own
+    // Start/Refresh buttons call this route: gating them on the claim alone
+    // would hand an operator a console whose buttons answer 403.
+    auth::require_instance_operator(&owner).await?;
     let owner_token = owner.0;
     // /process kicks off a long-running e621 fetch loop on the admin
     // token; cap per-owner and per-IP so click-storms can't lap us.
@@ -239,6 +247,11 @@ fn get_default_blacklist() -> Json<serde_json::Value> {
 /// token if absent. The per-IP cap stops bootstrap from being a free
 /// token-mint primitive that XFF rotation could combo into amplification
 /// of admin-authenticated e621 calls.
+///
+/// On an instance with no `[instance].owner_secret` this also *claims* the
+/// instance for the caller if nobody has yet (trusted self-hosting, TOFU). The
+/// claim is a row about the instance — it links no accounts — so the response
+/// says whether this call established it rather than how many accounts moved.
 #[openapi(skip)]
 #[post("/session/bootstrap")]
 async fn session_bootstrap(
@@ -250,54 +263,51 @@ async fn session_bootstrap(
 
     let locked = cfg().instance.ownership_requires_secret();
 
-    // Bootstrap mints/rotates the device `owner_token` cookie, which doubles
-    // as the sole account-ownership identity. A cross-site POST (form auto-
-    // submit) must not be able to silently replace the victim's token and strand
-    // their linked accounts — hence the `SameOrigin` guard above.
+    // Bootstrap mints/rotates the device `owner_token` cookie, which is the
+    // account's identity on this instance. A cross-site POST (form auto-submit)
+    // must not be able to silently replace the victim's token and strand their
+    // linked accounts — hence the `SameOrigin` guard above.
 
-    if let Some(c) = cookies.get(auth::OWNER_TOKEN_COOKIE) {
-        if validation::validate_owner_token(c.value()).is_ok() {
-            cookies.add(auth::build_owner_cookie(c.value().to_string()));
-            return Ok(Json(serde_json::json!({
-                "minted": false,
-                "adopted": 0,
-                "instance_locked": locked,
-            })));
+    // Reuse a valid cookie, otherwise mint. 32 random bytes → base64url ≈ 43
+    // chars (≈256 bits entropy).
+    let (token, minted) = match cookies.get(auth::OWNER_TOKEN_COOKIE) {
+        Some(c) if validation::validate_owner_token(c.value()).is_ok() => {
+            (c.value().to_string(), false)
         }
-        cookies.add(auth::build_owner_cookie_clear());
-    }
-
-    // 32 random bytes → base64url ≈ 43 chars (≈256 bits entropy).
-    let token = mint_owner_token();
-    // Trusted self-hosting (no `[instance].owner_secret`): the first bootstrap
-    // claims the instance by adopting the accounts that belong to nobody. With
-    // a secret configured this MUST stay zero, or any anonymous visitor would
-    // walk away owning the whole instance.
-    let adopted = if locked {
-        0
-    } else {
-        let token_for_adopt = token.clone();
-        db_blocking(move || adopt_unowned_accounts(&token_for_adopt)).await?
+        Some(_) => {
+            cookies.add(auth::build_owner_cookie_clear());
+            (mint_owner_token(), true)
+        }
+        None => (mint_owner_token(), true),
     };
+
+    // Trusted self-hosting: the first bootstrap claims the instance. With a
+    // secret configured this must stay inert, or any anonymous visitor would
+    // walk away owning the whole instance.
+    let outcome = if locked {
+        ClaimOutcome::Refused
+    } else {
+        let token_for_claim = token.clone();
+        db_blocking(move || claim_instance(&token_for_claim, ClaimMethod::Bootstrap)).await?
+    };
+    let is_owner = db_blocking({
+        let token_for_check = token.clone();
+        move || is_instance_owner(&token_for_check)
+    })
+    .await?;
+
     cookies.add(auth::build_owner_cookie(token));
     audit::event("session.bootstrap")
-        .field("minted", true)
-        .field("adopted", adopted)
+        .field("minted", minted)
+        .field("claim", outcome.as_str())
         .field("instance_locked", locked)
         .emit();
     Ok(Json(serde_json::json!({
-        "minted": true,
-        "adopted": adopted,
+        "minted": minted,
+        "claimed": outcome == ClaimOutcome::Claimed,
+        "is_owner": is_owner,
         "instance_locked": locked,
     })))
-}
-
-/// Adopt every account that belongs to nobody into `owner_token`.
-///
-/// Lives here rather than in `db` because the seed token is a config value.
-fn adopt_unowned_accounts(owner_token: &str) -> Result<i64, String> {
-    let seed_token = cfg().backtest.seed_owner_token.clone();
-    e621_account_parser_api::db::adopt_unowned_accounts(owner_token, &seed_token)
 }
 
 /// Body of `POST /session/enroll`.
@@ -310,9 +320,12 @@ struct EnrollRequest {
 ///
 /// `/session/bootstrap` cannot be the ownership primitive once a secret is
 /// configured — it is anonymous and only mints cookies. Here the caller proves
-/// the secret, and the accounts that belong to nobody are adopted into their
-/// token. A valid cookie the caller already holds is reused, so enrolling adds
-/// ownership to whatever this browser had instead of replacing it.
+/// the secret and becomes the instance owner. This writes no account links:
+/// ownership is a claim on the instance, and the account scope follows from it.
+///
+/// Proving the secret also *moves* an existing claim to the caller. That is the
+/// documented recovery path after clearing cookies: nothing about the library
+/// was ever tied to the old cookie, so re-enrolling restores everything.
 #[openapi(skip)]
 #[post("/session/enroll", data = "<body>")]
 async fn session_enroll(
@@ -342,46 +355,101 @@ async fn session_enroll(
         return Err(ApiError::Forbidden("invalid owner secret".into()));
     }
 
+    // A valid cookie the caller already holds is reused, so enrolling adds the
+    // claim to whatever this browser is instead of replacing its identity.
     let token = match cookies.get(auth::OWNER_TOKEN_COOKIE) {
         Some(c) if validation::validate_owner_token(c.value()).is_ok() => c.value().to_string(),
         _ => mint_owner_token(),
     };
-    let token_for_adopt = token.clone();
-    let adopted = db_blocking(move || adopt_unowned_accounts(&token_for_adopt)).await?;
+    let outcome = db_blocking({
+        let token_for_claim = token.clone();
+        move || claim_instance(&token_for_claim, ClaimMethod::Secret)
+    })
+    .await?;
     cookies.add(auth::build_owner_cookie(token));
     audit::event("session.enroll")
         .field("outcome", "granted")
-        .field("adopted", adopted)
+        .field("claim", outcome.as_str())
         .emit();
-    Ok(Json(
-        serde_json::json!({ "enrolled": true, "adopted": adopted }),
-    ))
+    Ok(Json(serde_json::json!({
+        "enrolled": true,
+        "claim": outcome.as_str(),
+        "transferred": outcome == ClaimOutcome::Transferred,
+    })))
 }
 
-/// Read-only ownership state for the instance card in the SPA.
+/// Read-only session state for the instance card in the SPA.
 ///
-/// `instance_locked` decides whether the UI offers the enroll form at all: with
-/// no `[instance].owner_secret` there is nothing to prove, because the first
-/// `/session/bootstrap` claims the instance by itself. `adoptable_accounts` is
-/// the count `/session/enroll` would link, so the card can say what claiming the
-/// instance does before the owner types anything.
+/// Two independent answers, and keeping them apart is the point:
+///
+/// * `is_owner` — this browser holds the instance claim. It is what widens
+///   *reads* to every account on the instance, and it is what
+///   `[instance].owner_secret` moves between browsers.
+/// * `is_admin` — this browser linked `[runtime].admin_user` with a key matching
+///   `[runtime].admin_api`. Only this opens the console and the local catalog.
+///
+/// `admin_available` says whether the administration tier has been taken *under
+/// the current key*, which is what tells the settings card whether offering the
+/// claim is still worth anything; rotating `admin_api` makes it true again.
+/// Nothing here names `[runtime].admin_user` — the card does not need it, and a
+/// browser that has not proved the key is not told which account holds the
+/// machine. And `instance_accounts` is what owning the instance covers, so the
+/// card can say what a claim reaches before the owner types anything.
 #[openapi(skip)]
 #[get("/session/state")]
 async fn session_state(cookies: &CookieJar<'_>) -> Result<Json<serde_json::Value>, ApiError> {
     let locked = cfg().instance.ownership_requires_secret();
-    let seed_token = cfg().backtest.seed_owner_token.clone();
     let owner_token = cookies
         .get(auth::OWNER_TOKEN_COOKIE)
         .filter(|c| validation::validate_owner_token(c.value()).is_ok())
         .map(|c| c.value().to_string());
-    let (owned, adoptable) = db_blocking(move || {
-        e621_account_parser_api::db::account_ownership_counts(owner_token.as_deref(), &seed_token)
+
+    let (claimed, is_owner, instance_accounts) = {
+        let token = owner_token.clone();
+        db_blocking(move || {
+            let claimed = e621_account_parser_api::db::instance_claim()?.is_some();
+            let is_owner = match token.as_deref() {
+                Some(t) => e621_account_parser_api::db::is_instance_owner(t)?,
+                None => false,
+            };
+            let accounts = e621_account_parser_api::db::instance_account_count()?;
+            Ok((claimed, is_owner, accounts))
+        })
+        .await?
+    };
+    // The administration tier travels with the same read as the claim, so the
+    // console entry cannot flicker in after a second round trip — and so the
+    // SPA never has to guess whether it is allowed to offer the surfaces.
+    //
+    // Which account the tier is about is deliberately *not* part of this read:
+    // the settings card only needs to know whether the tier is still open, and
+    // naming `[runtime].admin_user` to a browser that has not proved the key
+    // would leak which account holds the machine for no gain.
+    let (is_admin, admin_available) = {
+        let token = owner_token.clone();
+        db_blocking(move || {
+            let is_admin = match token.as_deref() {
+                Some(t) => e621_account_parser_api::db::is_instance_admin(t)?,
+                None => false,
+            };
+            let available = e621_account_parser_api::db::admin_available()?;
+            Ok((is_admin, available))
+        })
+        .await?
+    };
+    let visible = db_blocking(move || {
+        e621_account_parser_api::db::visible_account_count(owner_token.as_deref())
     })
     .await?;
+
     Ok(Json(serde_json::json!({
         "instance_locked": locked,
-        "owned_accounts": owned,
-        "adoptable_accounts": adoptable,
+        "instance_claimed": claimed,
+        "is_owner": is_owner,
+        "is_admin": is_admin,
+        "admin_available": admin_available,
+        "owned_accounts": visible,
+        "instance_accounts": instance_accounts,
     })))
 }
 

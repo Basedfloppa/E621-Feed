@@ -5,6 +5,7 @@ use std::collections::{HashMap, HashSet};
 use crate::models::{FeedInteractionRequest, FeedInteractionType, InteractionHistoryItem};
 use crate::utils::IdfIndex;
 
+use super::instance::MAY_ADDRESS_SQL;
 use super::{hydrate_cache, open_db};
 
 /// Fixed `session_id` used when restoring interactions from an export, so the
@@ -17,21 +18,18 @@ pub fn record_feed_interaction(
     interaction: &FeedInteractionRequest,
 ) -> Result<(), String> {
     super::with_write_tx(|tx| {
-        let linked: bool = tx
+        // Scope, not a link: the instance owner addresses every account, so
+        // "does this browser hold a link row" is the wrong question here.
+        let in_scope: bool = tx
             .query_row(
-                "
-                SELECT EXISTS(
-                    SELECT 1 FROM account_device_links
-                    WHERE owner_token = ?1 AND account_id = ?2
-                )
-                ",
+                &format!("SELECT {MAY_ADDRESS_SQL}"),
                 params![owner_token, interaction.account_id],
                 |row| row.get(0),
             )
             .map_err(|e| format!("Failed to validate feed interaction owner link: {e}"))?;
 
-        if !linked {
-            return Err("Account is not linked to this device token".to_string());
+        if !in_scope {
+            return Err("Account is not in scope for this device token".to_string());
         }
 
         // Resolve the bucket the same way `get_recommendations` does so the
@@ -128,13 +126,15 @@ pub fn remove_feed_interaction(
     interaction: &FeedInteractionRequest,
 ) -> Result<bool, String> {
     let removed = super::with_write_tx(|tx| {
-        let linked: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM account_device_links WHERE owner_token = ?1 AND account_id = ?2)",
-            params![owner_token, interaction.account_id],
-            |row| row.get(0),
-        ).map_err(|e| format!("Failed to validate interaction owner link: {e}"))?;
-        if !linked {
-            return Err("Account is not linked to this device token".to_string());
+        let in_scope: bool = tx
+            .query_row(
+                &format!("SELECT {MAY_ADDRESS_SQL}"),
+                params![owner_token, interaction.account_id],
+                |row| row.get(0),
+            )
+            .map_err(|e| format!("Failed to validate interaction owner link: {e}"))?;
+        if !in_scope {
+            return Err("Account is not in scope for this device token".to_string());
         }
         let deleted = tx.execute(
             "DELETE FROM feed_interactions WHERE account_id = ?1 AND post_id = ?2 AND event_type = ?3 AND session_id = ?4",
@@ -348,15 +348,15 @@ fn rebuild_account_tag_feedback(account_id: i32) -> Result<(), String> {
 /// this device. Favorites, blacklist, profile, and account links are retained.
 pub fn clear_feed_interactions(owner_token: &str, account_id: i32) -> Result<usize, String> {
     let deleted = super::with_write_tx(|tx| {
-        let linked: bool = tx
+        let in_scope: bool = tx
             .query_row(
-                "SELECT EXISTS(SELECT 1 FROM account_device_links WHERE owner_token = ?1 AND account_id = ?2)",
+                &format!("SELECT {MAY_ADDRESS_SQL}"),
                 params![owner_token, account_id],
                 |row| row.get(0),
             )
             .map_err(|e| format!("Failed to validate interaction-clear owner link: {e}"))?;
-        if !linked {
-            return Err("Account is not linked to this device token".to_string());
+        if !in_scope {
+            return Err("Account is not in scope for this device token".to_string());
         }
 
         let deleted = tx
@@ -417,15 +417,17 @@ pub fn record_feed_interactions_batch(
         let distinct_accounts: HashSet<i32> = interactions.iter().map(|i| i.account_id).collect();
         // Build a single query per account.
         for aid in &distinct_accounts {
-            let linked: bool = tx
+            let in_scope: bool = tx
                 .query_row(
-                    "SELECT EXISTS(SELECT 1 FROM account_device_links WHERE owner_token = ?1 AND account_id = ?2)",
+                    &format!("SELECT {MAY_ADDRESS_SQL}"),
                     params![owner_token, aid],
                     |row| row.get(0),
                 )
                 .map_err(|e| format!("Failed to validate feed interaction owner link: {e}"))?;
-            if !linked {
-                return Err(format!("Account {aid} is not linked to this device token"));
+            if !in_scope {
+                return Err(format!(
+                    "Account {aid} is not in scope for this device token"
+                ));
             }
         }
 

@@ -91,6 +91,79 @@ pub fn secret_matches(candidate: &str, expected: &str) -> bool {
     diff == 0
 }
 
+/// Reject the request unless the caller owns the instance.
+///
+/// Instance ownership is a claim on the instance (`instance_ownership`), not a
+/// set of account links, and it is what widens *reads* to every account on the
+/// instance (`db::VISIBLE_ACCOUNTS_SQL`) and what `[instance].owner_secret`
+/// moves between browsers. A browser that merely linked an account is not the
+/// owner and gets nothing here.
+///
+/// It is *not* what gates the console or the local catalog — those act on the
+/// machine rather than on the library, and take [`require_instance_admin`].
+pub async fn require_instance_owner(owner: &OwnerToken) -> Result<(), ApiError> {
+    let token = owner.0.clone();
+    match crate::db_blocking(move || db::is_instance_owner(&token)).await {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(ApiError::Forbidden(
+            "this instance is owned by another browser: claim it with the [instance].owner_secret"
+                .into(),
+        )),
+        Err(e) => Err(ApiError::Internal(e)),
+    }
+}
+
+/// The administration tier: this browser linked `[runtime].admin_user` with a
+/// key that matched `[runtime].admin_api`.
+///
+/// Deliberately *not* the same thing as [`require_instance_owner`]. The claim on
+/// the instance answers "whose library is this?" and widens what a browser may
+/// read; the console and the local catalog act on the machine itself, and the
+/// operator is the account named in configuration. Gating them on the claim
+/// would mean anyone who learns `owner_secret` — a secret that exists to
+/// *recover* access after clearing cookies — also gets to run the instance.
+///
+/// The grant is bound to the key that wrote it, so rotating `[runtime].admin_api`
+/// retires it: the browser must prove the new key.
+pub async fn require_instance_admin(owner: &OwnerToken) -> Result<(), ApiError> {
+    let token = owner.0.clone();
+    match crate::db_blocking(move || db::is_instance_admin(&token)).await {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(ApiError::Forbidden(
+            "the administration surfaces take the [runtime].admin_user account, linked with its \
+             [runtime].admin_api key"
+                .into(),
+        )),
+        Err(e) => Err(ApiError::Internal(e)),
+    }
+}
+
+/// Either credential: the instance claim, or the administration grant.
+///
+/// Used by the instance operations the console itself triggers — starting a
+/// `/process` run — so that an operator who reached the console from a browser
+/// that never claimed the instance can still use it. Both checks run in one
+/// blocking task so the common (owner) path is a single round trip.
+pub async fn require_instance_operator(owner: &OwnerToken) -> Result<(), ApiError> {
+    let token = owner.0.clone();
+    match crate::db_blocking(move || {
+        if db::is_instance_owner(&token)? {
+            return Ok(true);
+        }
+        db::is_instance_admin(&token)
+    })
+    .await
+    {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(ApiError::Forbidden(
+            "starting work on this instance takes the instance claim or the \
+             [runtime].admin_user account linked with its [runtime].admin_api key"
+                .into(),
+        )),
+        Err(e) => Err(ApiError::Internal(e)),
+    }
+}
+
 #[cfg(test)]
 mod secret_tests {
     use super::secret_matches;
