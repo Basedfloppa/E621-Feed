@@ -60,8 +60,3 @@ domain.com {
 		output file /var/log/caddy/parser.access.log
 	}
 }
-
-# www
-www.domain.com {
-	redir https://domain.com{uri}
-}
