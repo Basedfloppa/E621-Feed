@@ -1062,7 +1062,7 @@
       },
       "targets": [
         {
-          "expr": "max_over_time({container=~\"app-jemalloc|e621.*|.*feed.*|.*parser.*\"} |= \"\\\"trace\\\":\\\"scoring\\\"\" | json | trace=\"scoring\" | unwrap total_ms [5m]) by (endpoint)",
+          "expr": "max_over_time({service=\"e621-feed\"} |= \"\\\"trace\\\":\\\"scoring\\\"\" | json | trace=\"scoring\" | unwrap total_ms [5m]) by (endpoint)",
           "legendFormat": "{{endpoint}}",
           "datasource": {
             "type": "loki",
@@ -1099,7 +1099,7 @@
       },
       "targets": [
         {
-          "expr": "max_over_time({container=~\"app-jemalloc|e621.*|.*feed.*|.*parser.*\"} |= \"\\\"trace\\\":\\\"scoring\\\"\" | json | trace=\"scoring\" | unwrap top_channel_ms [5m]) by (top_channel)",
+          "expr": "max_over_time({service=\"e621-feed\"} |= \"\\\"trace\\\":\\\"scoring\\\"\" | json | trace=\"scoring\" | unwrap top_channel_ms [5m]) by (top_channel)",
           "legendFormat": "{{top_channel}}",
           "datasource": {
             "type": "loki",
@@ -1136,7 +1136,7 @@
       },
       "targets": [
         {
-          "expr": "{container=~\"app-jemalloc|e621.*|.*feed.*|.*parser.*\"} |= \"\\\"trace\\\":\\\"scoring\\\"\" | json | trace=\"scoring\"",
+          "expr": "{service=\"e621-feed\"} |= \"\\\"trace\\\":\\\"scoring\\\"\" | json | trace=\"scoring\"",
           "refId": "A",
           "datasource": {
             "type": "loki",
@@ -1171,7 +1171,7 @@
       },
       "targets": [
         {
-          "expr": "max_over_time({container=~\"app-jemalloc|e621.*|.*feed.*|.*parser.*\"} |= \"\\\"trace\\\":\\\"scoring\\\"\" | json | trace=\"scoring\" | unwrap phase_db_hydrate [5m]) by (endpoint)",
+          "expr": "max_over_time({service=\"e621-feed\"} |= \"\\\"trace\\\":\\\"scoring\\\"\" | json | trace=\"scoring\" | unwrap phase_db_hydrate [5m]) by (endpoint)",
           "legendFormat": "{{endpoint}}",
           "datasource": {
             "type": "loki",
@@ -1208,7 +1208,7 @@
       },
       "targets": [
         {
-          "expr": "max_over_time({container=~\"app-jemalloc|e621.*|.*feed.*|.*parser.*\"} |= \"\\\"trace\\\":\\\"scoring\\\"\" | json | trace=\"scoring\" | unwrap phase_diversify_post [5m]) by (endpoint)",
+          "expr": "max_over_time({service=\"e621-feed\"} |= \"\\\"trace\\\":\\\"scoring\\\"\" | json | trace=\"scoring\" | unwrap phase_diversify_post [5m]) by (endpoint)",
           "legendFormat": "{{endpoint}}",
           "datasource": {
             "type": "loki",
@@ -1245,7 +1245,7 @@
       },
       "targets": [
         {
-          "expr": "max_over_time({container=~\"app-jemalloc|e621.*|.*feed.*|.*parser.*\"} |= \"\\\"trace\\\":\\\"scoring\\\"\" | json | trace=\"scoring\" | unwrap phase_e621_fetch [5m]) by (endpoint)",
+          "expr": "max_over_time({service=\"e621-feed\"} |= \"\\\"trace\\\":\\\"scoring\\\"\" | json | trace=\"scoring\" | unwrap phase_e621_fetch [5m]) by (endpoint)",
           "legendFormat": "{{endpoint}}",
           "datasource": {
             "type": "loki",
@@ -1282,7 +1282,7 @@
       },
       "targets": [
         {
-          "expr": "max_over_time({container=~\"app-jemalloc|e621.*|.*feed.*|.*parser.*\"} |= \"\\\"trace\\\":\\\"scoring\\\"\" | json | trace=\"scoring\" | unwrap phase_cache_build [5m]) by (endpoint)",
+          "expr": "max_over_time({service=\"e621-feed\"} |= \"\\\"trace\\\":\\\"scoring\\\"\" | json | trace=\"scoring\" | unwrap phase_cache_build [5m]) by (endpoint)",
           "legendFormat": "{{endpoint}}",
           "datasource": {
             "type": "loki",
@@ -1319,7 +1319,7 @@
       },
       "targets": [
         {
-          "expr": "max_over_time({container=~\"app-jemalloc|e621.*|.*feed.*|.*parser.*\"} |= \"\\\"trace\\\":\\\"scoring\\\"\" | json | trace=\"scoring\" | unwrap phase_scoring [5m]) by (endpoint)",
+          "expr": "max_over_time({service=\"e621-feed\"} |= \"\\\"trace\\\":\\\"scoring\\\"\" | json | trace=\"scoring\" | unwrap phase_scoring [5m]) by (endpoint)",
           "legendFormat": "{{endpoint}}",
           "datasource": {
             "type": "loki",

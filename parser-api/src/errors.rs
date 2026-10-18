@@ -36,6 +36,17 @@ pub struct ApiErrorBody {
 /// e621 itself is unavailable instead of showing a generic 500.
 pub const UPSTREAM_ERR_MARKER: &str = "e621-upstream-unavailable: ";
 
+/// Marker embedded in DB-layer error strings to flag "this owner token may not
+/// address that account". [`get_account_by_id`](crate::db::get_account_by_id) is
+/// the single access check behind the catalog, browse, feed, digest and
+/// taste-profile routes; on a miss it can only return a `String`, so without
+/// this marker `ApiError::from_string` filed the ordinary "not yours" answer as
+/// a `500 Internal`.
+///
+/// Mapped to `404 Not Found`, not `403`: the same lookup also answers for ids
+/// that do not exist, and a distinct status would reveal which ones do.
+pub const NOT_FOUND_ERR_MARKER: &str = "account-not-found: ";
+
 #[derive(Debug)]
 pub enum ApiError {
     BadRequest(String),
@@ -75,16 +86,25 @@ impl ApiError {
         }
     }
 
-    /// Classify an e621-layer error string: if it carries the upstream marker
-    /// (position-independent, so contextual prefixes are preserved), map it to
-    /// `Upstream` (503); otherwise it is our own internal error (500).
+    /// Classify an error string by its marker, position-independent so that
+    /// contextual prefixes (`format!("Failed to …: {e}")`) are preserved:
+    ///
+    /// * upstream marker → `Upstream` (503);
+    /// * [`NOT_FOUND_ERR_MARKER`] → `NotFound` (404) — an ownership miss, not a
+    ///   server fault;
+    /// * anything else → `Internal` (500). Unmarked strings stay 500 on
+    ///   purpose: guessing 4xx from prose was removed, so a marker is the only
+    ///   way a `String` can ask for a different status.
     pub fn from_string(s: String) -> Self {
         if let Some(idx) = s.find(UPSTREAM_ERR_MARKER) {
             let rest = s[idx + UPSTREAM_ERR_MARKER.len()..].trim();
-            ApiError::Upstream(rest.to_string())
-        } else {
-            ApiError::Internal(s)
+            return ApiError::Upstream(rest.to_string());
         }
+        if let Some(idx) = s.find(NOT_FOUND_ERR_MARKER) {
+            let rest = s[idx + NOT_FOUND_ERR_MARKER.len()..].trim();
+            return ApiError::NotFound(rest.to_string());
+        }
+        ApiError::Internal(s)
     }
 }
 
@@ -119,10 +139,11 @@ impl From<rusqlite::Error> for ApiError {
 }
 
 impl From<String> for ApiError {
-    /// All string errors become `Internal` (500), except those carrying the
-    /// upstream marker, which map to `Upstream` (503). Code that needs a typed
-    /// 404 should use `ApiError::NotFound(…)` directly or propagate a
-    /// `rusqlite::Error::QueryReturnedNoRows` through `From<rusqlite::Error>`.
+    /// Unmarked string errors become `Internal` (500). Two markers are the
+    /// exception: the upstream marker maps to `Upstream` (503) and
+    /// [`NOT_FOUND_ERR_MARKER`] to `NotFound` (404). Everything else keeps the
+    /// old behaviour, so a genuine server fault can never be mistaken for a
+    /// 4xx by accident.
     fn from(s: String) -> Self {
         ApiError::from_string(s)
     }
@@ -225,9 +246,10 @@ mod tests {
     }
 
     #[test]
-    fn from_string_is_always_internal() {
-        // After removing the text-search heuristic, all From<String>
-        // errors become Internal (500). Typed 404s must use From<rusqlite::Error>.
+    fn unmarked_string_errors_stay_internal() {
+        // Only an explicit marker may ask for a different status: the old
+        // text-search heuristic ("mentions 'account'" → 404) is gone, so a
+        // plain message stays a server error rather than guessing.
         assert!(matches!(
             ApiError::from("no account found for id 5".to_string()),
             ApiError::Internal(_)
@@ -238,9 +260,28 @@ mod tests {
         ));
     }
 
+    /// The ownership miss from `db::get_account_by_id` is an ordinary 404, and
+    /// a contextual `format!("Failed to …: {e}")` wrapper must not demote it
+    /// back to 500 — half the call sites add exactly such a prefix.
+    #[test]
+    fn not_found_marker_maps_to_404_even_when_wrapped() {
+        let bare = format!("{NOT_FOUND_ERR_MARKER}No account found");
+        match ApiError::from_string(bare) {
+            ApiError::NotFound(m) => assert_eq!(m, "No account found"),
+            other => panic!("expected NotFound, got {other:?}"),
+        }
+
+        let wrapped =
+            format!("Failed to validate account access: {NOT_FOUND_ERR_MARKER}No account found");
+        match ApiError::from(wrapped) {
+            ApiError::NotFound(m) => assert_eq!(m, "No account found"),
+            other => panic!("expected NotFound, got {other:?}"),
+        }
+    }
+
     #[test]
     fn from_str_matches_from_string() {
-        // From<&str> delegates to From<String> → both are Internal now.
+        // From<&str> delegates to From<String> → unmarked text stays Internal.
         assert!(matches!(
             ApiError::from("no account found"),
             ApiError::Internal(_)

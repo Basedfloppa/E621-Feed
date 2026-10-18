@@ -582,19 +582,23 @@ The recommendations trace is emitted from `build_recommendations_shared`
 `build_generic_digest` (`routes/digest.rs`). Source of truth for the format and
 emitter is `ScoringMetrics::emit_json` in `utils/scorer/metrics.rs`.
 
-The shipped dashboard (`docs/grafana-dashboard.json`, uid `adrwh67` in this
+The shipped dashboard (`docs/grafana-dashboard.json`, uid `ad5hhmv` in this
 deployment) already includes Loki panels for this log: a timeseries of
 `total_ms` by endpoint, a timeseries of the bottleneck channel
 (`top_channel_ms` by `top_channel`), one panel per pipeline phase, and a raw
-trace logs panel. They query the
-`loki` datasource (uid `dfkfplmnysw74e`); the container selector
-`container=~"e621.*|.*feed.*|.*parser.*"` may need adjusting to the backend
-container's actual name. They are empty until the backend actually emits
-traces and Alloy forwards stdout to Loki:
+trace logs panel. They query the `loki` datasource (uid `dfkfplmnysw74e`) and
+select the backend by the `service` label rather than by container name:
 
 ```logql
-{container=~"e621.*|.*feed.*|.*parser.*"} |= "\"trace\":\"scoring\"" | json | trace="scoring"
+{service="e621-feed"} |= "\"trace\":\"scoring\"" | json | trace="scoring"
 ```
+
+The label is attached by the Grafana Alloy shipper on the machine that runs
+the backend: its `discovery.relabel` maps the `app` container to
+`service="e621-feed"` and forwards to the central Loki on the monitoring
+host. A host without that rule must add it (or rewrite the selector to match
+its own `container` value) — otherwise the panels stay empty even though the
+backend writes the traces to stdout.
 
 ### A/B experiment tracking
 

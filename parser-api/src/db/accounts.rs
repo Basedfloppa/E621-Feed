@@ -2,6 +2,7 @@ use chrono::{NaiveDate, Utc};
 use rusqlite::{OptionalExtension as _, params};
 use sha2::{Digest, Sha256};
 
+use crate::errors::NOT_FOUND_ERR_MARKER;
 use crate::models::{
     AccountFeedSettings, AdminTotals, DeviceAccountLink, DeviceSession, PreferredTag,
     TruncatedAccount, cfg,
@@ -536,7 +537,10 @@ fn get_account_by_id_conn(
     if let Some(account) = accounts.first() {
         Ok(account.clone())
     } else {
-        Err("No account found".to_string())
+        // Marked so every route that propagates this string (directly or inside
+        // a `format!` wrapper) answers 404 instead of 500: a valid token asking
+        // for an account it does not hold is an ordinary authorization outcome.
+        Err(format!("{NOT_FOUND_ERR_MARKER}No account found"))
     }
 }
 
@@ -1612,6 +1616,13 @@ mod tests {
                 .unwrap()
                 .id,
             2
+        );
+        // The denial is marked, because the routes can only propagate the
+        // string: without the marker `ApiError::from_string` answers 500.
+        let denied = get_account_by_id_conn(&conn, "stranger", 1).unwrap_err();
+        assert!(
+            denied.starts_with(crate::errors::NOT_FOUND_ERR_MARKER),
+            "an ownership miss must carry the 404 marker, got: {denied}"
         );
         assert!(get_account_by_id_conn(&conn, "calibration-seed", 1).is_err());
         assert!(get_account_by_id_conn(&conn, "stranger", 1).is_err());

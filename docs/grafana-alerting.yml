@@ -2,14 +2,30 @@
 #
 # Embedded legacy dashboard alerts for the same 3 conditions live in
 # grafana-dashboard.json. These provisioning rules are the preferred way to
-# alert in current Grafana (unified alerting): place this file under
-#   <grafana>/provisioning/alerting/alerts.yml
-# (or mount it there), then restart Grafana. Update `datasourceUid` to the
-# UID of your Prometheus data source.
+# alert in current Grafana (unified alerting): import them through the
+# provisioning API (`POST /api/v1/provisioning/alert-rules`) or place this file
+# under `<grafana>/provisioning/alerting/alerts.yml`. Update `datasourceUid` to
+# the UID of your Prometheus data source.
 #
 # Metrics referenced already exist and are documented in docs/metrics.md:
 #   e621_process_running_seconds, e621_prefetch_breaker_trips_total,
 #   e621_upstream_errors_total, e621_upstream_request_seconds_count
+#
+# Live deployment (2026-10-18): these three rules are imported into Grafana 13
+# (folder `e621`, group `e621-core`, datasource `dfkfpjj23y03kf`) through the
+# provisioning API rather than a mounted file, so no restart was needed and
+# the API remains the source of truth for edits. They evaluate
+# (`health: ok`, state `inactive`). No contact point exists yet — a firing rule
+# is visible in Alerting only. Add a contact point and a notification policy
+# before relying on paging.
+#
+# Why each rule is three nodes (A query → B reduce → C math): the threshold
+# must NOT live inside the PromQL expression. A query like
+# `e621_process_running_seconds > 1800` returns an EMPTY result while the
+# condition is false, and Grafana reports an empty query as `NoData` (state
+# `pending`), not as healthy — so the rule sits in `pending (NoData)` forever
+# and never tells you the difference between "fine" and "broken". Keeping the
+# raw metric in A and the comparison in C gives a real 0/1 and a real `inactive`.
 apiVersion: 1
 groups:
   - orgId: 1
@@ -19,14 +35,32 @@ groups:
     rules:
       - uid: e621-process-wall-time
         title: /process running > 30 min
-        condition: A
+        condition: C
         data:
           - refId: A
             datasourceUid: REPLACE_WITH_PROMETHEUS_UID
+            relativeTimeRange:
+              from: 600
+              to: 0
             model:
               refId: A
-              expr: e621_process_running_seconds > 1800
+              editorMode: code
+              expr: e621_process_running_seconds
               instant: true
+              range: false
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: reduce
+              expression: A
+              reducer: last
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: math
+              expression: $B > 1800
         for: 5m
         labels:
           severity: warning
@@ -35,14 +69,32 @@ groups:
 
       - uid: e621-prefetch-breaker
         title: Prefetch circuit breaker tripped
-        condition: A
+        condition: C
         data:
           - refId: A
             datasourceUid: REPLACE_WITH_PROMETHEUS_UID
+            relativeTimeRange:
+              from: 600
+              to: 0
             model:
               refId: A
-              expr: rate(e621_prefetch_breaker_trips_total[5m]) > 0
+              editorMode: code
+              expr: rate(e621_prefetch_breaker_trips_total[5m])
               instant: true
+              range: false
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: reduce
+              expression: A
+              reducer: last
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: math
+              expression: $B > 0
         for: 5m
         labels:
           severity: warning
@@ -51,17 +103,38 @@ groups:
 
       - uid: e621-upstream-error-rate
         title: High % of e621 429/5xx errors
-        condition: A
+        condition: C
         data:
           - refId: A
             datasourceUid: REPLACE_WITH_PROMETHEUS_UID
+            relativeTimeRange:
+              from: 600
+              to: 0
             model:
               refId: A
+              editorMode: code
+              # `or vector(0)`: with no 429/5xx series in the window the
+              # numerator is an EMPTY vector, and an empty result is NoData,
+              # not zero. Same for the denominator when nothing scraped.
               expr: |
-                sum(rate(e621_upstream_errors_total{class=~"429|5xx"}[5m]))
-                / clamp_min(sum(rate(e621_upstream_request_seconds_count[5m])), 1)
-                * 100 > 20
+                (sum(rate(e621_upstream_errors_total{class=~"429|5xx"}[5m])) or vector(0))
+                / clamp_min((sum(rate(e621_upstream_request_seconds_count[5m])) or vector(0)), 1)
+                * 100
               instant: true
+              range: false
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: reduce
+              expression: A
+              reducer: last
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: math
+              expression: $B > 20
         for: 5m
         labels:
           severity: warning
