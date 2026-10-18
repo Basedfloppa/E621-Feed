@@ -383,8 +383,22 @@ mod api_mount_tests {
         assert_eq!(r.status(), rocket::http::Status::Ok);
         assert_eq!(String::from_utf8(r.into_bytes().unwrap()).unwrap(), "pong");
 
-        // Root path serves the SPA.
+        // Root path serves the SPA — but only when the frontend was embedded at
+        // build time. A clean checkout has no `parser-web/dist`, so `index`
+        // answers 503 "Frontend not embedded" there by design (see
+        // `index_payload`); the route-precedence assertion above is the part
+        // that has to hold in both build shapes. Asserting 200 unconditionally
+        // made this the one test in the file that failed on CI.
         let r = c.get("/").dispatch();
-        assert_eq!(r.status(), rocket::http::Status::Ok);
+        if super::EMBEDDED {
+            assert_eq!(r.status(), rocket::http::Status::Ok);
+        } else {
+            assert_eq!(r.status(), rocket::http::Status::ServiceUnavailable);
+            let body = String::from_utf8(r.into_bytes().unwrap()).unwrap();
+            assert!(
+                body.contains("Frontend not embedded"),
+                "unexpected body: {body}"
+            );
+        }
     }
 }
