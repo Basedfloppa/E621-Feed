@@ -13,6 +13,13 @@ parser-web/dist
 # build context (and `COPY parser-api/ .` would carry the media cache in too).
 parser-api/data/
 parser-api/media/
+# A database left at the repository root (the pre-`data/` layout, or a stray
+# copy) is not an input to the build either: shipping 30 GB into the builder
+# stage turned a 22 s context transfer into 22 GB, ~150 s, plus a 30 GB layer
+# in the build cache. `**/` so it also covers a nested copy.
+**/*.db
+**/*.db-wal
+**/*.db-shm
 
 # ==== Editor / IDE ====
 .idea/
