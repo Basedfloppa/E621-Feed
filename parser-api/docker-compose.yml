@@ -4,14 +4,23 @@
 # to the host port (ROCKET_PORT=8181) and `ports:` is not used. This works on
 # any Docker host; it just bypasses the default bridge bridge/NAT layer.
 #
-# The database is bind-mounted as a FILE below, so SQLite keeps
-# `database.db-wal` / `-shm` in the container's writable layer and `down` /
-# `up --build` discards them together with the container. The app therefore
-# folds the WAL into the database before exiting (`db::shutdown`), and
-# `stop_grace_period` gives that checkpoint room instead of the 10 s default.
-# Mounting `data/` as a directory would remove the hazard entirely, but only
-# together with `db_path = "data/database.db"` in config.toml: change the two
-# halves together or the app starts on an empty database.
+# The database lives in `data/`, and `data/` + `media/` are bind-mounted as
+# DIRECTORIES. SQLite creates `database.db-wal` / `-shm` next to the database
+# file, so with a directory mount they sit on the host and survive `down` /
+# `up --build`, which recreate the container and its writable layer. A FILE
+# mount (`./database.db:/app/database.db`) instead leaves the journal inside
+# the container: `down` then throws away every transaction since the last
+# checkpoint, and a kill in the middle of a checkpoint leaves the file
+# malformed — that is the 2026-10-13 corruption.
+#
+# This only works as a pair: the mount AND `db_path = "data/database.db"` in
+# config.toml. Change one without the other and the app starts on a fresh,
+# empty database inside the container.
+#
+# Belt and braces, for the paths a mount cannot cover (SIGKILL, OOM, crash):
+# the app also folds the WAL into the database on a clean exit (`db::shutdown`)
+# and `stop_grace_period` gives that checkpoint room instead of the 10 s
+# default.
 services:
   app:
     build:
@@ -23,13 +32,13 @@ services:
     container_name: app
     network_mode: host
     # Ceiling, not a delay: Docker only waits this long if the process is still
-    # running. A clean close checkpoints the WAL first, which on a large journal
-    # does not fit in the 10 s default.
+    # running. It covers draining in-flight requests and the `db::shutdown`
+    # checkpoint, which on a large journal does not fit in the 10 s default.
     stop_grace_period: 1m
     volumes:
       - ./config.toml:/app/config.toml:ro
       - ./Rocket.toml:/app/Rocket.toml:ro
-      - ./database.db:/app/database.db
+      - ./data:/app/data
       - ./media:/app/media
     environment:
       # Under host networking the app binds the host port directly; keep the
@@ -49,13 +58,13 @@ services:
     container_name: app-perf
     network_mode: host
     # Ceiling, not a delay: Docker only waits this long if the process is still
-    # running. A clean close checkpoints the WAL first, which on a large journal
-    # does not fit in the 10 s default.
+    # running. It covers draining in-flight requests and the `db::shutdown`
+    # checkpoint, which on a large journal does not fit in the 10 s default.
     stop_grace_period: 1m
     volumes:
       - ./config.toml:/app/config.toml:ro
       - ./Rocket.toml:/app/Rocket.toml:ro
-      - ./database.db:/app/database.db
+      - ./data:/app/data
       - ./media:/app/media
     environment:
       - MALLOC_ARENA_MAX=2
@@ -71,13 +80,13 @@ services:
     container_name: app-jemalloc
     network_mode: host
     # Ceiling, not a delay: Docker only waits this long if the process is still
-    # running. A clean close checkpoints the WAL first, which on a large journal
-    # does not fit in the 10 s default.
+    # running. It covers draining in-flight requests and the `db::shutdown`
+    # checkpoint, which on a large journal does not fit in the 10 s default.
     stop_grace_period: 1m
     volumes:
       - ./config.toml:/app/config.toml:ro
       - ./Rocket.toml:/app/Rocket.toml:ro
-      - ./database.db:/app/database.db
+      - ./data:/app/data
       - ./media:/app/media
     environment:
       # Return freed pages to the kernel promptly after cache eviction.
@@ -94,13 +103,13 @@ services:
     container_name: app-full
     network_mode: host
     # Ceiling, not a delay: Docker only waits this long if the process is still
-    # running. A clean close checkpoints the WAL first, which on a large journal
-    # does not fit in the 10 s default.
+    # running. It covers draining in-flight requests and the `db::shutdown`
+    # checkpoint, which on a large journal does not fit in the 10 s default.
     stop_grace_period: 1m
     volumes:
       - ./config.toml:/app/config.toml:ro
       - ./Rocket.toml:/app/Rocket.toml:ro
-      - ./database.db:/app/database.db
+      - ./data:/app/data
       - ./media:/app/media
     environment:
       - MALLOC_CONF=dirty_decay_ms:0,muzzy_decay_ms:0

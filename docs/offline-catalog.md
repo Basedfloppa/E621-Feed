@@ -202,24 +202,32 @@ After a **hard kill** (not a clean stop), un-checkpointed pages may still be in
 
 ## Docker notes
 
-`docker-compose.yml` bind-mounts the database as a **file**
-(`./database.db:/app/database.db`) and `./media` as a directory, next to the
-read-only `config.toml` / `Rocket.toml`.
+`docker-compose.yml` bind-mounts `./data` and `./media` as **directories**, next
+to the read-only `config.toml` / `Rocket.toml`. The database is
+`data/database.db` (`db_path` in `config.toml`).
 
-A file bind mount leaves `database.db-wal` and `database.db-shm` in the
-container's writable layer, and `docker compose down` / `up --build` throws them
-away with the container. Two things keep that from losing data:
+The database lives inside a mounted directory on purpose. SQLite creates
+`database.db-wal` and `database.db-shm` **beside** the database file, so a file
+mount (`./database.db:/app/database.db`) leaves the journal in the container's
+writable layer, and `docker compose down` / `up --build` throws it away with the
+container. That loses everything committed since the last checkpoint, and a kill
+in the middle of a checkpoint leaves the database file malformed — the
+2026-10-13 corruption. With `data/` mounted, the journal sits on the host and
+survives both.
 
-- the app **checkpoints the WAL into the database on every clean exit**
-  (`db::shutdown`), so `docker compose stop` or `down` loses nothing;
-- `stop_grace_period: 1m` gives that checkpoint time to finish instead of
-  Docker's 10-second default.
+Two things are needed for this to be safe, and they are one decision, not two:
 
-A `SIGKILL`, an OOM kill, or a crash *during* that checkpoint still loses what
-was in the WAL. Mounting `data/` as a **directory** removes the hazard instead
-of mitigating it — but only together with `db_path = "data/database.db"` in
-`config.toml`; change one without the other and the app starts against an empty
-database inside the container.
+- the mount (`./data:/app/data`), and
+- `db_path = "data/database.db"` in `config.toml`.
+
+Change one without the other and the app starts against a fresh, empty database
+inside the container.
+
+On top of that, the app **checkpoints the WAL into the database on every clean
+exit** (`db::shutdown`), and `stop_grace_period: 1m` gives that checkpoint time
+to finish instead of Docker's 10-second default. That covers a `SIGKILL` or an
+OOM kill too: the journal is on the host, so the next start recovers from it
+instead of losing it.
 
 The image's `docker-entrypoint.sh` starts as root only long enough to read the
 owner of the host mounts (`config.toml` first) and then drops to that uid, so
