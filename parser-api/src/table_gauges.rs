@@ -137,9 +137,38 @@ mod tests {
     /// unconditionally on a thread: an early `?` here would kill the refresher
     /// and leave every gauge frozen at its startup value with no further
     /// signal. The assertion is that it returns instead of panicking.
+    ///
+    /// The config is swapped for one pointing at an empty temp database and
+    /// restored on the way out. Without that, the call followed `db_path` from
+    /// the loaded config: on a developer machine that is their catalog, and on
+    /// a fresh checkout `cargo test` left a stray `data/database.db` behind.
+    /// The gauges only read, but the file is still opened and created, and the
+    /// side effect was invisible until someone wondered where it came from.
     #[test]
     fn refresh_does_not_panic() {
+        use crate::models::{CONFIG, Config, cfg};
+        use std::sync::Arc;
+
+        struct Restore(Arc<Config>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                CONFIG.store(self.0.clone());
+            }
+        }
+
+        let root = std::env::temp_dir().join(format!("e621-refresh-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let saved = cfg();
+        let mut isolated = (*saved).clone();
+        isolated.db_path = root.join("empty.db").to_string_lossy().into_owned();
+
+        let _restore = Restore(saved);
+        CONFIG.store(Arc::new(isolated));
+
+        // No migrations ran on the empty file, so every count fails; `refresh`
+        // has to log each failure and return rather than propagate it.
         refresh();
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// The windows the dashboard reads must exist under exactly these labels:

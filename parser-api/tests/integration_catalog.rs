@@ -69,12 +69,30 @@ fn install_catalog_config() {
         ));
         let db_path = db_path.to_string_lossy().replace('\\', "\\\\");
 
-        let config = example
-            .replacen(
-                "db_path = \"database.db\"",
-                &format!("db_path = \"{db_path}\""),
-                1,
-            )
+        // Rewrite `db_path` by key, never by the value it happens to hold: the
+        // example moved the file under `data/`, and a literal match then left
+        // this binary on `parser-api/data/database.db`. The suite shares that
+        // one file, so an ownership grant written by an earlier run made later
+        // runs fail with 200 instead of 403, and test rows landed in the
+        // checkout.
+        let mut replaced = false;
+        let mut rewritten = String::with_capacity(example.len());
+        for line in example.lines() {
+            let trimmed = line.trim_start();
+            if !replaced
+                && trimmed.starts_with("db_path")
+                && trimmed["db_path".len()..].trim_start().starts_with('=')
+            {
+                rewritten.push_str(&format!("db_path = \"{db_path}\"\n"));
+                replaced = true;
+            } else {
+                rewritten.push_str(line);
+                rewritten.push('\n');
+            }
+        }
+        assert!(replaced, "config.example.toml is missing db_path");
+
+        let config = rewritten
             .replace("\n[catalog]\n", "\n# [catalog] (test-merged below)\n")
             + "\n[catalog]\nsave_favourites = true\nmedia_cache_max_bytes = 0\npool_membership = true\n";
         let mut file = tempfile::NamedTempFile::new().expect("temp test config");
