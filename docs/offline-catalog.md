@@ -186,7 +186,9 @@ that aren't present.
 The database is one SQLite file; media is a folder on disk.
 
 ```sh
-# 1. Stop the server (clean stop checkpoints the WAL into data/database.db)
+# 1. Stop the server — SIGTERM / `docker compose stop` makes the app checkpoint
+#    the WAL into the database file before exiting (it logs
+#    "Database closed: WAL checkpointed, writer connection released")
 # 2. Copy the DB and the media folder
 cp data/database.db  backup-$(date +%s).db
 cp -r media          media-backup-$(date +%s)/   # if you use the media cache
@@ -200,19 +202,32 @@ After a **hard kill** (not a clean stop), un-checkpointed pages may still be in
 
 ## Docker notes
 
-`docker-compose.yml` bind-mounts `./data` and `./media` into the container, so
-both persist on the host under `parser-api/`. They are mounted as
-**directories**, not files: SQLite keeps `database.db-wal` and
-`database.db-shm` beside the database, and with a file bind mount those two
-would live in the container's writable layer instead — dropped, together with
-any transactions they still hold, by the next `docker compose up --build`.
+`docker-compose.yml` bind-mounts the database as a **file**
+(`./database.db:/app/database.db`) and `./media` as a directory, next to the
+read-only `config.toml` / `Rocket.toml`.
+
+A file bind mount leaves `database.db-wal` and `database.db-shm` in the
+container's writable layer, and `docker compose down` / `up --build` throws them
+away with the container. Two things keep that from losing data:
+
+- the app **checkpoints the WAL into the database on every clean exit**
+  (`db::shutdown`), so `docker compose stop` or `down` loses nothing;
+- `stop_grace_period: 1m` gives that checkpoint time to finish instead of
+  Docker's 10-second default.
+
+A `SIGKILL`, an OOM kill, or a crash *during* that checkpoint still loses what
+was in the WAL. Mounting `data/` as a **directory** removes the hazard instead
+of mitigating it — but only together with `db_path = "data/database.db"` in
+`config.toml`; change one without the other and the app starts against an empty
+database inside the container.
 
 The image's `docker-entrypoint.sh` starts as root only long enough to read the
 owner of the host mounts (`config.toml` first) and then drops to that uid, so
-files written into `data/` and `media/` belong to your host user and need no
-`sudo`. Nothing is configured per machine — a uid in `.env` cannot be correct
-on more than one host, which is why none is read. The hardcoded `media/`
-folder resolves inside the container to `/app/media` (the mounted host folder).
+files written into `media/` (and `data/`, when you mount it) belong to your host
+user and need no `sudo`. Nothing is configured per machine — a uid in `.env`
+cannot be correct on more than one host, which is why none is read. The
+hardcoded `media/` folder resolves inside the container to `/app/media` (the
+mounted host folder).
 
 The config file sets paths (`db_path`, ...), interpreted relative to the
 launch directory. The env overrides that exist are:

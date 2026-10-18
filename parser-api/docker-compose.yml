@@ -4,11 +4,14 @@
 # to the host port (ROCKET_PORT=8181) and `ports:` is not used. This works on
 # any Docker host; it just bypasses the default bridge bridge/NAT layer.
 #
-# `data/` and `media/` are mounted as DIRECTORIES, not files: SQLite keeps
-# `database.db-wal` / `-shm` beside the database, and a file bind mount would
-# leave them in the container's writable layer, where `up --build` silently
-# discards committed transactions. The image's docker-entrypoint.sh then runs
-# the app as the owner of those mounts (not root), so host files belong to you.
+# The database is bind-mounted as a FILE below, so SQLite keeps
+# `database.db-wal` / `-shm` in the container's writable layer and `down` /
+# `up --build` discards them together with the container. The app therefore
+# folds the WAL into the database before exiting (`db::shutdown`), and
+# `stop_grace_period` gives that checkpoint room instead of the 10 s default.
+# Mounting `data/` as a directory would remove the hazard entirely, but only
+# together with `db_path = "data/database.db"` in config.toml: change the two
+# halves together or the app starts on an empty database.
 services:
   app:
     build:
@@ -19,6 +22,10 @@ services:
         FEATURES: ""
     container_name: app
     network_mode: host
+    # Ceiling, not a delay: Docker only waits this long if the process is still
+    # running. A clean close checkpoints the WAL first, which on a large journal
+    # does not fit in the 10 s default.
+    stop_grace_period: 1m
     volumes:
       - ./config.toml:/app/config.toml:ro
       - ./Rocket.toml:/app/Rocket.toml:ro
@@ -41,6 +48,10 @@ services:
         FEATURES: "perf_metrics"
     container_name: app-perf
     network_mode: host
+    # Ceiling, not a delay: Docker only waits this long if the process is still
+    # running. A clean close checkpoints the WAL first, which on a large journal
+    # does not fit in the 10 s default.
+    stop_grace_period: 1m
     volumes:
       - ./config.toml:/app/config.toml:ro
       - ./Rocket.toml:/app/Rocket.toml:ro
@@ -59,6 +70,10 @@ services:
         FEATURES: "jemalloc"
     container_name: app-jemalloc
     network_mode: host
+    # Ceiling, not a delay: Docker only waits this long if the process is still
+    # running. A clean close checkpoints the WAL first, which on a large journal
+    # does not fit in the 10 s default.
+    stop_grace_period: 1m
     volumes:
       - ./config.toml:/app/config.toml:ro
       - ./Rocket.toml:/app/Rocket.toml:ro
@@ -78,6 +93,10 @@ services:
         FEATURES: "jemalloc perf_metrics"
     container_name: app-full
     network_mode: host
+    # Ceiling, not a delay: Docker only waits this long if the process is still
+    # running. A clean close checkpoints the WAL first, which on a large journal
+    # does not fit in the 10 s default.
+    stop_grace_period: 1m
     volumes:
       - ./config.toml:/app/config.toml:ro
       - ./Rocket.toml:/app/Rocket.toml:ro

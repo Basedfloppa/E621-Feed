@@ -142,7 +142,10 @@ fn pool() -> &'static DbPool {
 /// FIFO ordering, frees the pool for readers, and avoids the cascading
 /// "database is locked" / "timed out waiting for connection" failures we
 /// were seeing under concurrent prefetch + cooc-backfill load.
-static WRITE_CONN: OnceLock<Mutex<rusqlite::Connection>> = OnceLock::new();
+/// `None` after [`shutdown`] took the connection: every later write then fails
+/// with "database is shut down" instead of committing a frame into a WAL that
+/// the supervisor is about to discard.
+static WRITE_CONN: OnceLock<Mutex<Option<rusqlite::Connection>>> = OnceLock::new();
 
 /// Static handle that keeps the process-wide DB writer flock alive for the
 /// lifetime of the process. Cross-process only — within one process every
@@ -182,7 +185,7 @@ fn acquire_db_writer_lock(path: &str) -> Result<(), String> {
     }
 }
 
-fn write_conn() -> &'static Mutex<rusqlite::Connection> {
+fn write_conn() -> &'static Mutex<Option<rusqlite::Connection>> {
     WRITE_CONN.get_or_init(|| {
         let path = crate::models::cfg().db_path.clone();
         ensure_db_dir(&path);
@@ -224,8 +227,27 @@ fn write_conn() -> &'static Mutex<rusqlite::Connection> {
             ",
         ))
         .expect("init writer connection");
-        Mutex::new(conn)
+        Mutex::new(Some(conn))
     })
+}
+
+/// Borrow the single writer connection for one operation.
+///
+/// A taken connection (`None`) means [`shutdown`] already ran. Refusing here
+/// rather than recreating the connection is what makes the shutdown final: the
+/// WAL was checkpointed to zero frames, and a late background write must not
+/// put a new one back.
+fn with_writer<R, F>(f: F) -> Result<R, String>
+where
+    F: FnOnce(&mut rusqlite::Connection) -> Result<R, String>,
+{
+    let mut guard = write_conn()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let conn = guard
+        .as_mut()
+        .ok_or_else(|| "database is shut down".to_string())?;
+    f(conn)
 }
 
 /// Run a closure inside an `IMMEDIATE` write transaction on the dedicated
@@ -236,50 +258,114 @@ pub fn with_write_tx<R, F>(f: F) -> Result<R, String>
 where
     F: FnOnce(&rusqlite::Transaction) -> Result<R, String>,
 {
-    let mut guard = write_conn()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let tx = guard
-        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-        .map_err(|e| format!("Failed to begin write transaction: {e}"))?;
-    let result = f(&tx)?;
-    tx.commit()
-        .map_err(|e| format!("Failed to commit write transaction: {e}"))?;
-    Ok(result)
+    with_writer(|conn| {
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| format!("Failed to begin write transaction: {e}"))?;
+        let result = f(&tx)?;
+        tx.commit()
+            .map_err(|e| format!("Failed to commit write transaction: {e}"))?;
+        Ok(result)
+    })
 }
 
 /// Run WAL checkpoint with truncate to keep the WAL file from growing
 /// unbounded. Safe to call frequently — `SQLite` no-ops when there's nothing
 /// to checkpoint. Uses the dedicated writer connection.
 pub fn wal_checkpoint() -> Result<(), String> {
-    let guard = write_conn()
+    with_writer(|conn| {
+        conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+            .map_err(|e| format!("WAL checkpoint failed: {e}"))
+    })
+}
+
+/// Close the database: fold the WAL back into the main file, then take the
+/// writer connection away so nothing can commit after it.
+///
+/// **Why the checkpoint is mandatory and not housekeeping.** Under the shipped
+/// compose file the database is a *file* bind mount, so `-wal`/`-shm` live in
+/// the container's writable layer and `docker compose down` deletes them along
+/// with the container. Every frame still in the WAL is then silently rolled
+/// back on the next start, and a SIGKILL that lands mid-checkpoint leaves
+/// half-written pages with no WAL to recover from — that is the malformed
+/// database of 2026-10-13. Checkpointing before exit makes the next start see
+/// exactly the committed state. (Moving the DB into the `data/` directory
+/// removes the whole class of problem; this makes the file mount safe too.)
+///
+/// **Why the connection is taken, not just checkpointed.** Background workers
+/// (cooc backfill, media fetcher, prefetcher) keep running until the process
+/// dies and every one of them writes through this single connection. Holding
+/// the mutex only for the checkpoint would leave a window in which a worker
+/// commits a fresh frame right after the WAL was truncated. Taking the
+/// connection closes that window by construction: later writes fail with
+/// "database is shut down".
+///
+/// Idempotent, and a no-op when the database was never opened (nothing to
+/// close, and touching it here would create an empty file).
+pub fn shutdown() -> Result<(), String> {
+    let Some(cell) = WRITE_CONN.get() else {
+        return Ok(());
+    };
+    let mut guard = cell
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    guard
-        .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
-        .map_err(|e| format!("WAL checkpoint failed: {e}"))
+    let Some(conn) = guard.take() else {
+        return Ok(());
+    };
+
+    // Bound the lock wait: the whole close has to fit inside the supervisor's
+    // `stop_grace_period`, and the connection's normal 60 s busy_timeout would
+    // let one stalled reader hold the shutdown until SIGKILL.
+    let _ = conn.busy_timeout(Duration::from_secs(15));
+
+    // `wal_checkpoint` reports (busy, frames-in-log, frames-checkpointed).
+    // A non-zero `busy` means a reader held a snapshot and the WAL could not be
+    // fully folded in: report that instead of pretending the close succeeded.
+    let checkpoint = conn.query_row("PRAGMA wal_checkpoint(TRUNCATE);", [], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, i64>(1)?,
+            row.get::<_, i64>(2)?,
+        ))
+    });
+
+    // Close even when the checkpoint failed: at this point the connection is
+    // already out of reach, and `sqlite3_close` does the right thing with a
+    // partial checkpoint (the WAL still holds the data).
+    let close = conn.close();
+
+    let (busy, frames, folded) =
+        checkpoint.map_err(|e| format!("WAL checkpoint on shutdown failed: {e}"))?;
+    close.map_err(|(_, e)| format!("closing the writer connection failed: {e}"))?;
+    if busy != 0 {
+        return Err(format!(
+            "WAL checkpoint on shutdown was blocked by a reader: {folded} of {frames} frame(s) \
+             moved back into the database, {} still in the WAL",
+            frames - folded
+        ));
+    }
+    Ok(())
 }
 
 /// Run migrations on the dedicated writer connection (so they share locking
 /// semantics with all other writers). The pool is not yet initialised when
 /// this runs, so we open the writer ourselves.
 pub fn ensure_sqlite() -> Result<(), String> {
-    let mut guard = write_conn()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    // Guard against pointing a stale/older build at an already-migrated
-    // database BEFORE refinery runs. With `abort_missing` (default) refinery
-    // otherwise just aborts with a terse "migration V21 is missing from the
-    // filesystem" whenever the shared `database.db` was migrated by a newer
-    // build — i.e. its applied history contains a version this binary doesn't
-    // embed. Diagnose that up front so the operator gets an actionable message
-    // ("this binary is older than the schema; rebuild it") instead of an
-    // opaque startup crash.
-    ensure_embedded_migrations_cover_db(&guard)?;
-    embedded::migrations::runner()
-        .run(&mut *guard)
-        .map_err(|e| format!("Failed to run migrations: {e}"))?;
-    Ok(())
+    with_writer(|conn| {
+        // Guard against pointing a stale/older build at an already-migrated
+        // database BEFORE refinery runs. With `abort_missing` (default) refinery
+        // otherwise just aborts with a terse "migration V21 is missing from the
+        // filesystem" whenever the shared `database.db` was migrated by a newer
+        // build — i.e. its applied history contains a version this binary doesn't
+        // embed. Diagnose that up front so the operator gets an actionable message
+        // ("this binary is older than the schema; rebuild it") instead of an
+        // opaque startup crash.
+        ensure_embedded_migrations_cover_db(conn)?;
+        embedded::migrations::runner()
+            .run(conn)
+            .map_err(|e| format!("Failed to run migrations: {e}"))?;
+        Ok(())
+    })
 }
 
 /// Reject starting against a database whose applied schema history this

@@ -810,7 +810,20 @@ async fn main() {
     let rocket = build_rocket().await;
 
     // Ignite first to get a `Rocket<Ignite>` which has the `.shutdown()` handle.
-    let rocket = rocket.ignite().await.expect("Rocket ignition failed");
+    let rocket = match rocket.ignite().await {
+        Ok(rocket) => rocket,
+        Err(e) => {
+            // Migrations may already have run before the failing fairing, so
+            // close the database on this exit path too instead of leaving
+            // committed frames in a WAL the container will discard.
+            error!("Rocket ignition failed: {e}");
+            if let Err(e) = e621_account_parser_api::db::shutdown() {
+                error!("Database shutdown failed: {e}");
+            }
+            eprintln!("FATAL: Rocket ignition failed: {e}");
+            std::process::exit(1);
+        }
+    };
 
     // Spawn a signal watcher that triggers Rocket's built-in graceful
     // shutdown on SIGTERM (Unix) in addition to the default Ctrl+C (SIGINT).
@@ -847,7 +860,20 @@ async fn main() {
     if let Err(e) = rocket.launch().await {
         error!("Server launch failed: {e}");
         eprintln!("FATAL: server launch failed: {e}");
+        // Same clean close on the failure path: migrations have already run, so
+        // the WAL may hold frames even though no request was ever served.
+        if let Err(e) = e621_account_parser_api::db::shutdown() {
+            error!("Database shutdown failed: {e}");
+        }
         std::process::exit(1);
+    }
+    // Fold the WAL into the database file and disarm the writer *before* the
+    // process exits. `docker compose down` deletes the container's `-wal`
+    // together with the container, so whatever is still in it is rolled back
+    // on the next start; see `db::shutdown` for the full reasoning.
+    match e621_account_parser_api::db::shutdown() {
+        Ok(()) => info!("Database closed: WAL checkpointed, writer connection released"),
+        Err(e) => error!("Database shutdown failed: {e}"),
     }
     info!("Shutdown complete");
 }
