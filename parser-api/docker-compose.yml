@@ -22,7 +22,7 @@ services:
     volumes:
       - ./config.toml:/app/config.toml:ro
       - ./Rocket.toml:/app/Rocket.toml:ro
-      - ./data:/app/data
+      - ./database.db:/app/database.db
       - ./media:/app/media
     environment:
       # Under host networking the app binds the host port directly; keep the
@@ -44,7 +44,7 @@ services:
     volumes:
       - ./config.toml:/app/config.toml:ro
       - ./Rocket.toml:/app/Rocket.toml:ro
-      - ./data:/app/data
+      - ./database.db:/app/database.db
       - ./media:/app/media
     environment:
       - MALLOC_ARENA_MAX=2
@@ -62,7 +62,7 @@ services:
     volumes:
       - ./config.toml:/app/config.toml:ro
       - ./Rocket.toml:/app/Rocket.toml:ro
-      - ./data:/app/data
+      - ./database.db:/app/database.db
       - ./media:/app/media
     environment:
       # Return freed pages to the kernel promptly after cache eviction.
@@ -81,7 +81,7 @@ services:
     volumes:
       - ./config.toml:/app/config.toml:ro
       - ./Rocket.toml:/app/Rocket.toml:ro
-      - ./data:/app/data
+      - ./database.db:/app/database.db
       - ./media:/app/media
     environment:
       - MALLOC_CONF=dirty_decay_ms:0,muzzy_decay_ms:0
