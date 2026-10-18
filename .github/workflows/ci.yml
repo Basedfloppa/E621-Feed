@@ -53,6 +53,15 @@ jobs:
           key: ${{ runner.os }}-api-${{ hashFiles('parser-api/Cargo.lock', 'rust-toolchain.toml') }}
           restore-keys: ${{ runner.os }}-api-
 
+      # Hosted runners configure rustup with the minimal profile, and the
+      # toolchain named by `rust-toolchain.toml` is auto-installed with that
+      # profile too — so it arrives without rustfmt or clippy and the first
+      # gate dies with "'cargo-fmt' is not installed for the toolchain".
+      # Adding the components explicitly keeps the gate independent of the
+      # image's rustup settings.
+      - name: Install rustfmt and clippy
+        run: rustup component add rustfmt clippy
+
       - name: cargo fmt --check
         run: cargo fmt --manifest-path parser-api/Cargo.toml --all -- --check
 
@@ -61,6 +70,15 @@ jobs:
 
       # Serial on purpose: the integration suite shares one SQLite file and one
       # global config across tests (see tests/integration.rs).
+      #
+      # The config file has to exist before the first test runs: `models::CONFIG`
+      # is a `LazyLock` that calls `process::exit(1)` when `config.toml` cannot
+      # be read, and the file is gitignored because it carries live credentials.
+      # The committed example has valid placeholders, and every test that cares
+      # rewrites the fields it needs (all of them move `db_path` to a temp file).
+      - name: Provide the config the test binaries load
+        run: cp parser-api/config.example.toml parser-api/config.toml
+
       - name: cargo test (serial)
         run: cargo test --manifest-path parser-api/Cargo.toml -- --test-threads=1
 
@@ -84,6 +102,28 @@ jobs:
             parser-web/target
           key: ${{ runner.os }}-web-${{ hashFiles('parser-web/Cargo.lock', 'rust-toolchain.toml') }}
           restore-keys: ${{ runner.os }}-web-
+
+      # Same rustup profile gap as the `api` job: ask for the components.
+      - name: Install rustfmt and clippy
+        run: rustup component add rustfmt clippy
+
+      # The image ships no `trunk`, and building it from source would rebuild
+      # a large dependency tree on every run. Take the release binary and
+      # verify the published sha256 before putting it on PATH; the version is
+      # pinned so an upstream release cannot silently change the wasm bytes.
+      - name: Install trunk
+        env:
+          TRUNK_VERSION: "0.21.14"
+        run: |
+          set -euo pipefail
+          base="https://github.com/trunk-rs/trunk/releases/download/v${TRUNK_VERSION}"
+          asset="trunk-x86_64-unknown-linux-gnu.tar.gz"
+          curl -sSfL "$base/$asset" -o /tmp/trunk.tar.gz
+          curl -sSfL "$base/$asset.sha256" -o /tmp/trunk.sha256
+          echo "$(cat /tmp/trunk.sha256)  /tmp/trunk.tar.gz" | sha256sum -c -
+          tar xzf /tmp/trunk.tar.gz -C /tmp trunk
+          sudo install -m 0755 /tmp/trunk /usr/local/bin/trunk
+          trunk --version
 
       - name: cargo fmt --check
         run: cargo fmt --manifest-path parser-web/Cargo.toml --all -- --check
