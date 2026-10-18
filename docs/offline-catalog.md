@@ -231,8 +231,8 @@ instead of losing it.
 
 The image's `docker-entrypoint.sh` starts as root only long enough to read the
 owner of the host mounts (`config.toml` first) and then drops to that uid, so
-files written into `media/` (and `data/`, when you mount it) belong to your host
-user and need no `sudo`. Nothing is configured per machine — a uid in `.env`
+files written into `media/` and `data/` belong to your host user and need no
+`sudo`. Nothing is configured per machine — a uid in `.env`
 cannot be correct on more than one host, which is why none is read. The
 hardcoded `media/` folder resolves inside the container to `/app/media` (the
 mounted host folder).
