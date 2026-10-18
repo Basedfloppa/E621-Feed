@@ -23,6 +23,9 @@ personalized feed, daily digest, and search.
 - **Personalized feed** — 12-channel scoring (tag similarity, quality,
   recency, rating, media, popularity, interaction, tag-relation, uploader,
   exclusivity, novelty, artist-discovery) with MMR diversification
+- **No repeats** — a post you already saw or hid stays out of the feed across
+  reloads, redeploys and devices; a sighting is recorded only after the card
+  was actually on screen, never merely because the server picked it
 - **Recommendation breakdowns** — see *why* a post was recommended
 - **Daily digest** — stratified picks (top, trending, exploration, wildcard,
   recent)
@@ -171,7 +174,7 @@ first `/process` import builds your profile.
 | Publishing Docker images to GHCR (GitHub Actions workflow) | [.github/workflows/docker-publish.yml](.github/workflows/docker-publish.yml) |
 | Scoring knobs — "lower vs. higher" guide | [docs/scoring.md](docs/scoring.md) |
 | Offline calibration (`calibrate eval` / `grid`) | [docs/calibration.md](docs/calibration.md) |
-| Technical / development notes (HTTP caching, perf tooling) | [docs/development.md](docs/development.md) |
+| Technical / development notes (HTTP caching, feed dedup, perf tooling) | [docs/development.md](docs/development.md) |
 | Contributing & local quality gate | [CONTRIBUTING.md](CONTRIBUTING.md) |
 
 ---

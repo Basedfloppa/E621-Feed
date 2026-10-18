@@ -189,6 +189,102 @@ server refuses `[runtime].admin_user` to anyone who has not proved
 `[runtime].admin_api`. When `/catalog` and `/admin` are refused they explain the
 rule rather than offering a call to action.
 
+## Feed deduplication
+
+The feed hides what the account has already **seen**, and "seen" has exactly
+two durable sources:
+
+- an interaction row in `feed_interactions` with `event_type` in
+  (`qualified_impression`, `hide`, `open`);
+- a confirmed sighting in `feed_shown_posts` (`V36`), written by
+  `POST /api/feed/<id>/interaction/batch` in the same transaction as the
+  interaction that proves it.
+
+The browser marks a card seen only after at least half of it has been visible
+for 800 ms (`parser-web/src/components/post_card.rs`), so a sighting is the one
+signal that a human actually looked at the post. The queue carrying it is
+flushed on `pagehide` with `keepalive`
+(`parser-web/src/interaction_queue.rs`): a batch still inside the debounce
+window must not die with the document.
+
+**The feed response path never records a sighting.** A response means "the
+server selected this post": the browser renders a window of the list and the
+rest never reaches a screen. Writing the selection into the durable registry
+would hide posts nobody saw for the whole window — the opposite of the goal —
+and `recommendations_response_records_no_exposure`
+(`parser-api/tests/integration_pipeline.rs`) pins that down.
+
+A response does write two things, and only one of them is a filter:
+
+1. It **records** the page it served into the session-scoped cross-page set
+   (`feed_session_posts`), keyed by `(account_id, session_id)` and reaped by
+   `prune_expired_sessions` after `FEED_SESSION_TTL_MIN` (30 min) of
+   inactivity. The account is part of the key because the id is not: the page
+   mints `feed-<ts>-<rand>` once per tab and does not remint it when the
+   account select changes, so a single id can span two accounts. Without the
+   account in the key, switching accounts handed B the posts A was shown (the
+   read used to join on `session_id` alone) and `clear_feed_interactions` for
+   one account wiped the other's scroll set. Its only job is to keep a single
+   scroll from re-serving the page it just rendered; it never feeds the durable
+   windows below. It stores the whole response rather than the rendered window,
+   so inside one scroll it can also hide a tail the user never reached —
+   tolerable only because it dies with the session and is never read as
+   evidence of a sighting.
+2. It **reads** that set back, before building the page, and hands it to the
+   pipeline as one more exclusion.
+
+## Where the drops happen
+
+Every filter — `owned_ids`, both durable windows, the session set, the
+blacklist — is applied **while the candidate pool is assembled**
+(`build_recommendations_shared`, the merge step), before hydration, scoring and
+MMR. This is a correctness requirement, not a tidiness one: MMR enforces its
+artists/characters quota while it builds the list, so posts removed *after* the
+pass leave the surviving top-N free to violate a quota that was computed over a
+pool it no longer covers. Dropping first is also the cheaper order — those posts
+skip a scoring pass and, for local candidates, hydration entirely.
+
+The session set used to be applied to the finished list in
+`get_recommendations`, after `diversify_scored_posts` returned. That is the
+shape the paragraph above rules out; `session_shown_posts_never_reach_the_response`
+drives the real route and pins the observable half (a shown post never comes
+back, the served page is recorded for the next one).
+
+An **expired** session contributes no exclusions: the client is about to rotate
+its `session_id`, so the recorded set describes a scroll that is already over,
+and filtering by it would hide posts nothing would ever record again.
+
+All of these reads are issued in a single `tokio::join!` at the top of the
+pipeline. `get_long_term_seen_post_ids` was the exception: it sat serially
+between the e621 fetch and local hydration — a full round trip in the middle of
+the request, for a set that depends on nothing but the account id.
+
+Two windows read the same statement (`SEEN_POST_IDS_SQL` in `db/feed.rs`) and
+differ only in the cutoff:
+
+| Candidates | Window | Reader |
+|---|---|---|
+| live posts from e621 | `[runtime] dedup_lookback_days` (14) | `get_recently_seen_post_ids` |
+| old local-catalog posts | `LONG_TERM_DEDUP_DAYS` (60) | `get_long_term_seen_post_ids` |
+
+The long window exists because local candidates can be months old: with the
+short cutoff alone the same old post would come back every few weeks. The 60 is
+a code constant (`db/feed.rs`), not a config key, because it is the definition of
+"old enough to keep out of the mix" rather than something tuned per deployment.
+
+`feed_shown_posts` has no TTL of its own; `cache_pruner` deletes rows by
+`last_shown_at` after `SHOWN_RETENTION_DAYS` (90) and counts them in
+`e621_cache_pruned_total{category="shown_posts"}`. Keep `dedup_lookback_days`
+below that, otherwise the pruner drops sightings the window still needs.
+
+Undo (`remove_feed_interaction`) and "clear history"
+(`clear_feed_interactions`) delete the matching sightings too: leaving them
+behind would keep a post filtered after the user asked to forget it, while the
+history page showed nothing. Both id-sets are cached per account by
+`db/hydrate_cache` (`RECENT_SEEN_TTL` 20 s, `LONG_TERM_SEEN_TTL` 30 s); the
+write path merges into the cached sets rather than invalidating them, because
+impressions arrive mid-scroll and a rebuild per batch would re-scan the tables.
+
 ## Owner console — `/admin`
 
 `parser-web/src/pages/admin.rs` over `GET /api/admin/overview`
@@ -272,6 +368,12 @@ The non-interaction parts of the profile (rating/media/quality/recency/
 uploaders) derive from public favourites and are recomputed by `/process` on the
 target install — they are exported for archival value but deliberately not
 imported directly.
+
+`feed_shown_posts` is outside the export on purpose: it records what the feed
+displayed, not something the user authored. A restore therefore starts the
+sighting history over — opened and hidden posts still keep themselves out of
+the feed through their interaction rows, and those are what the taste profile
+is built from.
 
 ## Per-account e621 API key + direct sync
 

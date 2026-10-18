@@ -84,6 +84,10 @@ fn app() -> Html {
 }
 
 fn main() {
+    // Before the first render: the handler has to be in place before any card
+    // can report an impression, otherwise the first reload is the one it
+    // misses.
+    interaction_queue::install_unload_flush();
     wasm_bindgen_futures::spawn_local(async {
         bootstrap_session().await;
         yew::Renderer::<App>::new().render();

@@ -309,8 +309,16 @@ fn wipe_account(id: i32) {
             "DELETE FROM account_media_profile WHERE account_id = ?1",
             "DELETE FROM account_quality_profile WHERE account_id = ?1",
             "DELETE FROM account_tag_feedback WHERE account_id = ?1",
+            // Shown-posts first: V37 put the account in the key and made the
+            // pair a cascading foreign key, so this is exact rather than a
+            // session-id subquery, and it leaves nothing for the session
+            // delete to cascade into.
+            "DELETE FROM feed_session_posts WHERE account_id = ?1",
             "DELETE FROM feed_sessions WHERE account_id = ?1",
-            "DELETE FROM feed_session_posts WHERE session_id IN (SELECT session_id FROM feed_sessions WHERE account_id = ?1)",
+            // Exposure registry (V36): rows are written on every feed response
+            // and are account-scoped, so a leftover row would silently exclude
+            // a post from the next test that reuses this account id.
+            "DELETE FROM feed_shown_posts WHERE account_id = ?1",
             "DELETE FROM accounts WHERE id = ?1",
         ] {
             let _ = conn.execute(stmt, rusqlite::params![id]);
@@ -1339,23 +1347,38 @@ fn feed_interactions_batch_dedups_duplicates() {
 
     // Three identical interactions in one batch — `INSERT OR IGNORE`
     // collapses them to exactly one stored row.
-    let recorded =
+    let batch =
         db::record_feed_interactions_batch("batch_owner", &[make_req(), make_req(), make_req()])
             .unwrap();
     assert_eq!(count_table_for_account("feed_interactions", account_id), 1);
     // ...and the caller is told that exactly one row landed. The Prometheus
     // counters are driven off this list, so reporting the submitted count
     // instead would triple-count a batch the table stored once.
-    assert_eq!(recorded.len(), 1, "only the inserted row may be reported");
-    assert_eq!(recorded[0].event, "open");
+    assert_eq!(
+        batch.interactions.len(),
+        1,
+        "only the inserted row may be reported"
+    );
+    assert_eq!(batch.interactions[0].event, "open");
+    // Same for the exposure written alongside it: one inserted row, one
+    // sighting. Counting submissions instead would make `shown_count` a
+    // measure of retries rather than of how often the post was on screen.
+    assert_eq!(
+        batch.exposures, 1,
+        "one inserted row, one recorded exposure"
+    );
 
     // Same batch again across a second call — still 1 row, and now zero
     // reported rows: a retried batch inserts nothing and must move no counter.
     let replay = db::record_feed_interactions_batch("batch_owner", &[make_req()]).unwrap();
     assert_eq!(count_table_for_account("feed_interactions", account_id), 1);
     assert!(
-        replay.is_empty(),
+        replay.interactions.is_empty(),
         "a replayed batch stored nothing, so it must report nothing"
+    );
+    assert_eq!(
+        replay.exposures, 0,
+        "a replay must not bump shown_count either"
     );
 
     wipe_account(account_id);
@@ -1635,15 +1658,29 @@ async fn recommendations_cross_page_dedup_filters_shown_posts() {
         ).unwrap();
         // Mark posts 101 and 103 as already shown on page 1.
         conn.execute(
-            "INSERT OR IGNORE INTO feed_session_posts (session_id, post_id, position, shown_at)
-             VALUES (?1, ?2, ?3, ?4)",
-            rusqlite::params![session_id, 101_i64, 1, chrono::Utc::now().to_rfc3339()],
+            "INSERT OR IGNORE INTO feed_session_posts \
+             (account_id, session_id, post_id, position, shown_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![
+                account_id,
+                session_id,
+                101_i64,
+                1,
+                chrono::Utc::now().to_rfc3339()
+            ],
         )
         .unwrap();
         conn.execute(
-            "INSERT OR IGNORE INTO feed_session_posts (session_id, post_id, position, shown_at)
-             VALUES (?1, ?2, ?3, ?4)",
-            rusqlite::params![session_id, 103_i64, 2, chrono::Utc::now().to_rfc3339()],
+            "INSERT OR IGNORE INTO feed_session_posts \
+             (account_id, session_id, post_id, position, shown_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![
+                account_id,
+                session_id,
+                103_i64,
+                2,
+                chrono::Utc::now().to_rfc3339()
+            ],
         )
         .unwrap();
     }
@@ -1691,6 +1728,292 @@ async fn recommendations_cross_page_dedup_filters_shown_posts() {
             "post {id} should be in shown set"
         );
     }
+
+    wipe_account(account_id);
+}
+
+/// What the user saw must stay deduped after a client "reloads" — i.e. when
+/// the session-scoped set is gone and only the durable registry remains.
+///
+/// The evidence is the client's own confirmation: the same
+/// `qualified_impression` the WASM client posts through `/interaction/batch`
+/// once a card has been visible long enough to count. Nothing here passes a
+/// session id — that is the point, since the browser mints a new one on every
+/// reload (and every redeploy is one).
+#[tokio::test(flavor = "multi_thread")]
+async fn confirmed_impressions_stay_deduped_without_a_session() {
+    let _guard = pipeline_lock().lock().await;
+    ensure_migrations();
+
+    let account_id = 91051;
+    wipe_account(account_id);
+    db::set_account("dedup_owner", account_id, "test_user", "").unwrap();
+
+    // `feed_interactions` carries a foreign key on `posts`, so the posts have
+    // to exist in the catalog before anything can be recorded against them.
+    let seen_posts: Vec<e621_account_parser_api::models::Post> = [201, 202, 203]
+        .into_iter()
+        .map(|id| e621_account_parser_api::models::Post {
+            id,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            change_seq: 0.0,
+            files: e621_account_parser_api::models::Files::default(),
+            uploader_id: 42,
+            uploader_name: None,
+            approver_id: None,
+            stats: e621_account_parser_api::models::Stats {
+                score: e621_account_parser_api::models::Score {
+                    up: 10,
+                    down: 0,
+                    total: 10,
+                },
+                fav_count: 5,
+                ..Default::default()
+            },
+            flags: e621_account_parser_api::models::Flags::default(),
+            has: e621_account_parser_api::models::Has::default(),
+            relationships: e621_account_parser_api::models::Relationships::default(),
+            pools: vec![],
+            rating: e621_account_parser_api::models::Rating::S,
+            locked_tags: vec![],
+            sources: vec![],
+            description: None,
+            tags: e621_account_parser_api::models::Tags {
+                general: vec!["dedup_tag".into()],
+                ..Default::default()
+            },
+        })
+        .collect();
+    db::save_posts(&seen_posts, account_id).unwrap();
+    db::save_posts_tags_batch(&seen_posts, &std::collections::HashSet::new(), false, None).unwrap();
+
+    let impression = |post_id: i64| e621_account_parser_api::models::FeedInteractionRequest {
+        account_id,
+        post_id,
+        event_type: e621_account_parser_api::models::FeedInteractionType::QualifiedImpression,
+        position: 0,
+        session_id: "reload-sess".into(),
+    };
+    let batch = db::record_feed_interactions_batch(
+        "dedup_owner",
+        &[impression(201), impression(202), impression(203)],
+    )
+    .unwrap();
+    assert_eq!(
+        batch.exposures, 3,
+        "every confirmed impression must record an exposure"
+    );
+
+    // Force the read through the table: the in-process cache surviving would
+    // hide a missing row and make the test pass for the wrong reason.
+    db::clear_seen(i64::from(account_id));
+    let seen = db::get_recently_seen_post_ids(account_id, 14).unwrap();
+    for id in [201, 202, 203] {
+        assert!(
+            seen.contains(&id),
+            "post {id} was seen but is not deduped after a reload: {seen:?}"
+        );
+    }
+
+    // A confirmed sighting is evidence on its own, so it is in the long window
+    // as well — both windows read the same statement, only the cutoff differs.
+    db::clear_seen(i64::from(account_id));
+    let long = db::get_long_term_seen_post_ids(account_id, 60).unwrap();
+    for id in [201, 202, 203] {
+        assert!(
+            long.contains(&id),
+            "post {id} must stay out of the local candidate pool: {long:?}"
+        );
+    }
+
+    // Retention is age-based, so nothing this fresh may be pruned.
+    let (before, after) = db::prune_shown_posts(db::SHOWN_RETENTION_DAYS).unwrap();
+    assert_eq!(before, after, "fresh exposure rows must survive the prune");
+
+    wipe_account(account_id);
+}
+
+/// The opposite direction, and the reason the write lives in the interaction
+/// path: a feed response must not count as "seen".
+///
+/// The server returns a whole page — and on `/recommendations` the entire
+/// candidate pool — while the browser renders a window of it. Recording the
+/// response hid posts the user never reached, which is not what "don't show me
+/// what I've seen" means.
+#[tokio::test(flavor = "multi_thread")]
+async fn recommendations_response_records_no_exposure() {
+    let _guard = pipeline_lock().lock().await;
+    ensure_migrations();
+    let server = MockServer::start().await;
+    let _cfg = install_mock_config(&server.uri());
+    let account_id = 9_200_200;
+    let owner = "route_owner_token_9200200";
+    wipe_account(account_id);
+    db::set_account(owner, account_id, "test_user", "").unwrap();
+    Mock::given(method("GET"))
+        .and(path("/posts.json"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(vec![fake_post_json(
+                9_200_201,
+                &["exposure_artist"],
+                &["exposure_tag"],
+            )]),
+        )
+        .mount(&server)
+        .await;
+    let client = Client::tracked(rocket::build().mount(
+        "/api",
+        e621_account_parser_api::routes::integration_test_routes(),
+    ))
+    .await
+    .unwrap();
+    let cookie = Cookie::new(e621_account_parser_api::auth::OWNER_TOKEN_COOKIE, owner);
+    let response = client
+        .get(format!("/api/recommendations/{account_id}?page=1"))
+        .cookie(cookie)
+        .dispatch()
+        .await;
+    assert_eq!(response.status(), Status::Ok);
+    assert_eq!(
+        count_table_for_account("feed_shown_posts", account_id),
+        0,
+        "a response records what was selected, not what was seen"
+    );
+
+    wipe_account(account_id);
+}
+
+/// The session cut belongs **inside** the pipeline, not on its result.
+///
+/// Filtering the finished list meant MMR spent its redundancy budget and its
+/// diversity quota on posts that were about to be discarded: the quota is
+/// enforced while the list is built, so the survivors could violate it. This
+/// drives the real route and asserts the observable half of the contract — a
+/// post the session already showed never comes back, and the page that *was*
+/// returned is recorded for the next one.
+///
+/// The placement itself (before hydration/scoring rather than after MMR) is not
+/// separately observable from outside: dropping posts changes the response
+/// order only through MMR's redundancy penalties, which cannot be steered
+/// deterministically from a fake e621 without brittle score engineering. The
+/// structural guarantee is that no post-pipeline filter remains in
+/// `get_recommendations` and that every drop happens in the merge step.
+#[tokio::test(flavor = "multi_thread")]
+async fn session_shown_posts_never_reach_the_response() {
+    let _guard = pipeline_lock().lock().await;
+    ensure_migrations();
+    let server = MockServer::start().await;
+    let _cfg = install_mock_config(&server.uri());
+
+    let account_id = 9_200_300;
+    let owner = "route_owner_token_9200300";
+    let session_id = "pre-mmr-9200300";
+    wipe_account(account_id);
+    // Explicit blacklist on purpose. `set_account` with "" falls back to
+    // `config.example.toml`'s default, which contains the compound entry
+    // `young -rating:s` — and the tokenizer strips the dash, yielding the
+    // exclusion `rating:s`, which removes every S-rated post from the pool.
+    // That is a separate defect (see TODO), and it must not be what this test
+    // is measuring: with it in play the response is empty for reasons that have
+    // nothing to do with sessions.
+    db::set_account(owner, account_id, "test_user", "gore\nscat").unwrap();
+
+    // Four live posts with distinct artists, so the pool is not one redundant
+    // group and MMR has something to reorder.
+    Mock::given(method("GET"))
+        .and(path("/posts.json"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(vec![
+            fake_post_json(9_200_301, &["pre_mmr_a"], &["pre_mmr_t1"]),
+            fake_post_json(9_200_302, &["pre_mmr_b"], &["pre_mmr_t2"]),
+            fake_post_json(9_200_303, &["pre_mmr_c"], &["pre_mmr_t3"]),
+            fake_post_json(9_200_304, &["pre_mmr_d"], &["pre_mmr_t4"]),
+        ]))
+        .mount(&server)
+        .await;
+
+    // An Active session whose earlier page already showed 9_200_301. Page 3 is
+    // deliberate: the e621 response cache is keyed by URL, and a page-1 request
+    // with an empty boost query is byte-identical to other tests' requests.
+    {
+        let conn = db::open_db_for_calibration().unwrap();
+        conn.execute(
+            "DELETE FROM feed_session_posts WHERE session_id = ?1",
+            rusqlite::params![session_id],
+        )
+        .unwrap();
+        conn.execute(
+            "DELETE FROM feed_sessions WHERE session_id = ?1",
+            rusqlite::params![session_id],
+        )
+        .unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO feed_sessions (session_id, account_id, created_at, last_accessed_at) \
+             VALUES (?1, ?2, ?3, ?3)",
+            rusqlite::params![session_id, account_id, now],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO feed_session_posts \
+             (account_id, session_id, post_id, position, shown_at) \
+             VALUES (?1, ?2, ?3, 1, ?4)",
+            rusqlite::params![account_id, session_id, 9_200_301_i64, now],
+        )
+        .unwrap();
+    }
+
+    let client = Client::tracked(rocket::build().mount(
+        "/api",
+        e621_account_parser_api::routes::integration_test_routes(),
+    ))
+    .await
+    .unwrap();
+    let cookie = Cookie::new(e621_account_parser_api::auth::OWNER_TOKEN_COOKIE, owner);
+    let response = client
+        .get(format!(
+            "/api/recommendations/{account_id}?page=3&session={session_id}"
+        ))
+        .cookie(cookie)
+        .dispatch()
+        .await;
+    assert_eq!(response.status(), Status::Ok);
+
+    let body = response.into_json::<serde_json::Value>().await.unwrap();
+    let returned: Vec<i64> = body
+        .as_array()
+        .expect("recommendations returns a JSON array")
+        .iter()
+        .map(|scored| {
+            scored["post"]["id"]
+                .as_i64()
+                .expect("every entry carries a post id")
+        })
+        .collect();
+
+    assert!(
+        !returned.contains(&9_200_301),
+        "a post this session already showed must not be returned again: {returned:?}"
+    );
+    for id in [9_200_302, 9_200_303, 9_200_304] {
+        assert!(
+            returned.contains(&id),
+            "post {id} was neither shown before nor filtered out: {returned:?}"
+        );
+    }
+
+    // The returned page is recorded, or the next request would repeat it.
+    let shown_after = db::get_session_shown_post_ids(session_id, account_id).unwrap();
+    for id in &returned {
+        assert!(
+            shown_after.contains(id),
+            "returned post {id} must be recorded for the next page: {shown_after:?}"
+        );
+    }
+    assert!(
+        shown_after.contains(&9_200_301),
+        "the earlier sighting must survive the new page: {shown_after:?}"
+    );
 
     wipe_account(account_id);
 }

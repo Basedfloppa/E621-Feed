@@ -174,12 +174,13 @@ pub fn record_session_shown_posts(
         }
         let mut stmt = tx
             .prepare_cached(
-                "INSERT OR IGNORE INTO feed_session_posts (session_id, post_id, position, shown_at)
-                 VALUES (?1, ?2, ?3, ?4)",
+                "INSERT OR IGNORE INTO feed_session_posts \
+                 (account_id, session_id, post_id, position, shown_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
             )
             .map_err(|e| format!("Failed to prepare session post insert: {e}"))?;
         for (post_id, position) in posts {
-            stmt.execute(params![session_id, post_id, position, now])
+            stmt.execute(params![account_id, session_id, post_id, position, now])
                 .map_err(|e| format!("Failed to record session post: {e}"))?;
         }
         Ok(())
@@ -187,22 +188,27 @@ pub fn record_session_shown_posts(
 }
 
 /// Get all `post_ids` already shown in this session (dedup set).
-/// Scoped to the session owned by `account_id` — a caller cannot read the
-/// dedup namespace of another account's session.
+/// Scoped by `account_id` in the key itself (V37), not by a join on
+/// `feed_sessions`: a session id can be shared by two accounts when the user
+/// switches accounts in one tab, and a join alone would hand account B the
+/// posts account A was shown.
+/// Read the shown-post set for one `(account_id, session_id)` pair.
+///
+/// A constant so the tests below can run the exact statement the production
+/// path runs, against an in-memory database instead of the shared file.
+const SHOWN_POSTS_SQL: &str = "SELECT post_id FROM feed_session_posts \
+     WHERE account_id = ?1 AND session_id = ?2";
+
 pub fn get_session_shown_post_ids(
     session_id: &str,
     account_id: i32,
 ) -> Result<HashSet<i64>, String> {
     let conn = open_db()?;
     let mut stmt = conn
-        .prepare(
-            "SELECT fp.post_id FROM feed_session_posts fp
-             INNER JOIN feed_sessions fs ON fs.session_id = fp.session_id
-             WHERE fp.session_id = ?1 AND fs.account_id = ?2",
-        )
+        .prepare(SHOWN_POSTS_SQL)
         .map_err(|e| format!("Failed to prepare session shown posts query: {e}"))?;
     let rows = stmt
-        .query_map(params![session_id, account_id], |r| r.get::<_, i64>(0))
+        .query_map(params![account_id, session_id], |r| r.get::<_, i64>(0))
         .map_err(|e| format!("Failed to query session shown posts: {e}"))?;
     rows.collect::<Result<HashSet<_>, _>>()
         .map_err(|e| format!("Failed to collect session shown posts: {e}"))
@@ -210,11 +216,19 @@ pub fn get_session_shown_post_ids(
 
 /// SQL for the shown-post cleanup leg of [`prune_expired_sessions`].
 ///
+/// Deletes every row no live session covers — expired *and* orphaned. Rows
+/// whose session never existed are possible because `feed_session_posts` had
+/// no foreign key between V22 and V37, so the sweep cannot assume the join
+/// finds a row; `NOT EXISTS` handles both cases in one statement, and the
+/// `feed_sessions` side is a primary-key probe.
+///
 /// Named constants so the `EXPLAIN QUERY PLAN` regression test below asserts on
 /// the statements that actually run.
 const PRUNE_SESSION_POSTS_SQL: &str = "DELETE FROM feed_session_posts \
-     WHERE session_id IN (SELECT session_id FROM feed_sessions \
-                          WHERE last_accessed_at < ?1)";
+     WHERE NOT EXISTS (SELECT 1 FROM feed_sessions fs \
+                       WHERE fs.session_id = feed_session_posts.session_id \
+                         AND fs.account_id = feed_session_posts.account_id \
+                         AND fs.last_accessed_at >= ?1)";
 
 /// SQL for the session-deletion leg of [`prune_expired_sessions`].
 const PRUNE_SESSIONS_SQL: &str = "DELETE FROM feed_sessions WHERE last_accessed_at < ?1";
@@ -224,12 +238,14 @@ const PRUNE_SESSIONS_SQL: &str = "DELETE FROM feed_sessions WHERE last_accessed_
 pub fn prune_expired_sessions() -> Result<usize, String> {
     let cutoff = (Utc::now() - chrono::Duration::minutes(FEED_SESSION_TTL_MIN)).to_rfc3339();
     with_write_tx(|tx| {
-        // Delete orphaned feed_session_posts first (the FK was removed when
-        // session_id became non-unique in V22). This must NOT be ignored: if it
-        // fails while the session rows below are still deleted, the leftover
-        // `feed_session_posts` rows become permanently unreachable orphans
-        // (`get_session_shown_posts` INNER JOINs `feed_sessions`), so nothing
-        // would ever clean them up.
+        // Sweep the shown posts first. V37 added the composite foreign key
+        // with `ON DELETE CASCADE`, so deleting the session rows below also
+        // removes their posts; this statement is the belt to that suspenders,
+        // and it is the only thing that can collect rows orphaned while the
+        // child table had no foreign key at all (V22–V37). It must NOT be
+        // ignored: if it failed and the session rows were still deleted, any
+        // leftover post rows would be unreachable — nothing reads them without
+        // a live session.
         tx.execute(PRUNE_SESSION_POSTS_SQL, params![cutoff])
             .map_err(|e| format!("Failed to prune expired session posts: {e}"))?;
         let n = tx
@@ -268,32 +284,46 @@ mod tests {
             .join("\n")
     }
 
-    /// Session pruning runs on every feed cycle. Both statements lean on an
-    /// index: `idx_feed_sessions_accessed` turns the TTL filter into a range
-    /// seek, and an index on `session_id` keeps the orphan cleanup from
-    /// scanning the shown-posts table. Losing either silently turns a cheap
-    /// scheduled delete into a full scan — correct, but progressively slower as
-    /// the table grows.
+    /// Run the production read statement against the in-memory database, so
+    /// the account-scoping tests exercise the same SQL the route does without
+    /// touching the shared file.
+    fn shown(conn: &rusqlite::Connection, session_id: &str, account_id: i32) -> HashSet<i64> {
+        let mut stmt = conn.prepare(SHOWN_POSTS_SQL).expect("prepare shown query");
+        stmt.query_map(rusqlite::params![account_id, session_id], |r| {
+            r.get::<_, i64>(0)
+        })
+        .expect("run shown query")
+        .collect::<Result<HashSet<_>, _>>()
+        .expect("collect shown ids")
+    }
+
+    /// Session pruning runs on every feed cycle. The expensive-looking part is
+    /// the child sweep, and it is bounded by design: `feed_session_posts` only
+    /// ever holds what one scroll showed (≈ a page or two per open tab), so a
+    /// single pass over it is cheaper than the alternative — trusting the
+    /// foreign key alone and leaving orphans behind if the pragma is ever off.
+    ///
+    /// What must stay indexed is the parent: `idx_feed_sessions_accessed`
+    /// turns the TTL filter into a range seek, and the child sweep must probe
+    /// `feed_sessions` by primary key instead of scanning it per row.
     #[test]
     fn prune_expired_sessions_plan_uses_indexes() {
         let conn = migrated_memory_db();
 
         let posts_plan = plan(&conn, PRUNE_SESSION_POSTS_SQL);
-        assert!(
-            posts_plan.contains("idx_feed_sessions_accessed"),
-            "session-post cleanup no longer range-seeks the TTL index:\n{posts_plan}"
-        );
-        // The shown-posts side resolves through whichever index leads on
-        // `session_id` — today the `PRIMARY KEY(session_id, post_id)`
-        // autoindex, which makes the named `idx_feed_session_posts_session`
-        // redundant. Assert the shape, not the name.
-        let fsp_line = posts_plan
+        let fs_line = posts_plan
             .lines()
-            .find(|l| l.contains("feed_session_posts"))
-            .expect("plan mentions feed_session_posts");
+            .find(|l| l.contains("feed_sessions") && l.contains("SEARCH"))
+            .unwrap_or_else(|| {
+                panic!("session-post cleanup no longer probes feed_sessions by key:\n{posts_plan}")
+            });
         assert!(
-            fsp_line.contains("SEARCH") && fsp_line.contains("INDEX"),
-            "session-post cleanup no longer uses an index on session_id:\n{posts_plan}"
+            fs_line.contains("PRIMARY KEY") || fs_line.contains("INDEX"),
+            "session-post cleanup probes feed_sessions without an index:\n{posts_plan}"
+        );
+        assert!(
+            !posts_plan.contains("SCAN feed_sessions"),
+            "session-post cleanup scans feed_sessions:\n{posts_plan}"
         );
 
         let sessions_plan = plan(&conn, PRUNE_SESSIONS_SQL);
@@ -301,23 +331,104 @@ mod tests {
             sessions_plan.contains("idx_feed_sessions_accessed"),
             "session deletion no longer uses idx_feed_sessions_accessed:\n{sessions_plan}"
         );
-
-        for (label, p) in [
-            ("session-post cleanup", &posts_plan),
-            ("session deletion", &sessions_plan),
-        ] {
-            for table in ["feed_sessions", "feed_session_posts"] {
-                assert!(
-                    !p.contains(&format!("SCAN {table}")),
-                    "{label} now scans {table} instead of using an index:\n{p}"
-                );
-            }
-        }
+        assert!(
+            !sessions_plan.contains("SCAN feed_sessions"),
+            "session deletion now scans feed_sessions:\n{sessions_plan}"
+        );
     }
 
-    /// V32 dropped the prefix-duplicate index. This is the ratchet: a future
-    /// `CREATE INDEX ... (session_id)` would restore write cost that the
-    /// primary key already pays for, and nothing else would notice.
+    /// The whole point of V37: one session id may be shared by two accounts
+    /// (the browser does not mint a new one when the account select changes),
+    /// and what one account was shown must not filter the other's feed.
+    #[test]
+    fn shown_posts_are_scoped_by_account_not_by_session_id() {
+        let conn = migrated_memory_db();
+        conn.execute_batch("PRAGMA foreign_keys = ON").unwrap();
+        let now = "2026-01-01T00:00:00+00:00";
+        for account_id in [7, 8] {
+            conn.execute(
+                "INSERT INTO accounts (id, name) VALUES (?1, ?2)",
+                rusqlite::params![account_id, format!("user{account_id}")],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO feed_sessions (session_id, account_id, created_at, last_accessed_at) \
+                 VALUES ('shared-tab', ?1, ?2, ?2)",
+                rusqlite::params![account_id, now],
+            )
+            .unwrap();
+        }
+        for (account_id, post_id) in [(7, 101), (8, 202)] {
+            conn.execute(
+                "INSERT INTO feed_session_posts (account_id, session_id, post_id, position, shown_at) \
+                 VALUES (?1, 'shared-tab', ?2, 1, ?3)",
+                rusqlite::params![account_id, post_id, now],
+            )
+            .unwrap();
+        }
+
+        let a = shown(&conn, "shared-tab", 7);
+        let b = shown(&conn, "shared-tab", 8);
+        assert_eq!(
+            a,
+            [101].into_iter().collect(),
+            "account 7 saw only post 101"
+        );
+        assert_eq!(
+            b,
+            [202].into_iter().collect(),
+            "account 8 saw only post 202"
+        );
+    }
+
+    /// V37 made `(session_id, account_id)` a real foreign key with a cascade,
+    /// so "forget this session" can no longer reach another account's rows —
+    /// and no row can outlive its session.
+    #[test]
+    fn pruning_a_session_removes_only_that_accounts_rows() {
+        let conn = migrated_memory_db();
+        conn.execute_batch("PRAGMA foreign_keys = ON").unwrap();
+        let now = "2026-01-01T00:00:00+00:00";
+        for account_id in [7, 8] {
+            conn.execute(
+                "INSERT INTO accounts (id, name) VALUES (?1, ?2)",
+                rusqlite::params![account_id, format!("user{account_id}")],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO feed_sessions (session_id, account_id, created_at, last_accessed_at) \
+                 VALUES ('shared-tab', ?1, ?2, ?2)",
+                rusqlite::params![account_id, now],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO feed_session_posts (account_id, session_id, post_id, position, shown_at) \
+                 VALUES (?1, 'shared-tab', ?2, 1, ?3)",
+                rusqlite::params![account_id, 100 + account_id, now],
+            )
+            .unwrap();
+        }
+
+        conn.execute(
+            "DELETE FROM feed_sessions WHERE session_id = 'shared-tab' AND account_id = 7",
+            [],
+        )
+        .unwrap();
+        assert_eq!(
+            shown(&conn, "shared-tab", 7),
+            HashSet::new(),
+            "deleting account 7's session must take its shown posts"
+        );
+        assert_eq!(
+            shown(&conn, "shared-tab", 8),
+            [108].into_iter().collect(),
+            "account 8's scroll set must survive account 7's cleanup"
+        );
+    }
+
+    /// V32 dropped the prefix-duplicate index and V37 did not bring it back:
+    /// both read paths filter on `(account_id, session_id)`, which is exactly
+    /// the leading part of the primary key.
     #[test]
     fn session_posts_has_no_prefix_duplicate_index() {
         let conn = migrated_memory_db();

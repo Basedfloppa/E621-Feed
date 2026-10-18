@@ -17,7 +17,7 @@ pub fn record_feed_interaction(
     owner_token: &str,
     interaction: &FeedInteractionRequest,
 ) -> Result<(), String> {
-    super::with_write_tx(|tx| {
+    let new_row = super::with_write_tx(|tx| {
         // Scope, not a link: the instance owner addresses every account, so
         // "does this browser hold a link row" is the wrong question here.
         let in_scope: bool = tx
@@ -75,6 +75,10 @@ pub fn record_feed_interaction(
             };
 
             let now_iso = Utc::now().to_rfc3339();
+            // An interaction is proof the card was on screen, so it also
+            // records the exposure. Same transaction: dedup must never learn
+            // about a view whose own event was rolled back.
+            upsert_shown_posts(tx, interaction.account_id, &[interaction.post_id], &now_iso)?;
             tx.execute(
                 "
                 INSERT INTO account_tag_feedback (
@@ -113,9 +117,16 @@ pub fn record_feed_interaction(
             .map_err(|e| format!("Failed to update tag feedback aggregates: {e}"))?;
         }
 
-        Ok(())
+        Ok(inserted > 0)
     })?;
-    hydrate_cache::clear_seen(i64::from(interaction.account_id));
+    if new_row {
+        // Additions only, so merging keeps the cached dedup set warm instead
+        // of making the next feed request rebuild it. Removals still go
+        // through `clear_seen` — see `remove_feed_interaction`.
+        let account = i64::from(interaction.account_id);
+        hydrate_cache::merge_recent_seen(account, &[interaction.post_id]);
+        hydrate_cache::merge_long_term_seen(account, &[interaction.post_id]);
+    }
     Ok(())
 }
 
@@ -161,6 +172,16 @@ pub fn remove_feed_interaction(
              )",
             params![impressions, positives, negatives, Utc::now().to_rfc3339(), interaction.account_id, interaction.post_id],
         ).map_err(|e| format!("Failed to reverse tag feedback: {e}"))?;
+        // Undo means "pretend this never happened", so the exposure row goes
+        // with it. Without this the post would stay filtered for the whole
+        // dedup window (`feed_shown_posts` is what keeps it out of the feed)
+        // and undo would look broken: the event is gone, yet the card never
+        // comes back.
+        tx.execute(
+            "DELETE FROM feed_shown_posts WHERE account_id = ?1 AND post_id = ?2",
+            params![interaction.account_id, interaction.post_id],
+        )
+        .map_err(|e| format!("Failed to drop the exposure row for undo: {e}"))?;
         Ok(true)
     })?;
     if removed {
@@ -370,8 +391,12 @@ pub fn clear_feed_interactions(owner_token: &str, account_id: i32) -> Result<usi
             params![account_id],
         )
         .map_err(|e| format!("Failed to clear tag feedback: {e}"))?;
+        // Scoped by account, not by `session_id IN (…)`: one session id can be
+        // shared by two accounts (the browser keeps it across an account
+        // switch), and the old form took the other account's scroll set with
+        // it. V37 put the account in the key so this is a single predicate.
         tx.execute(
-            "DELETE FROM feed_session_posts WHERE session_id IN (SELECT session_id FROM feed_sessions WHERE account_id = ?1)",
+            "DELETE FROM feed_session_posts WHERE account_id = ?1",
             params![account_id],
         )
         .map_err(|e| format!("Failed to clear feed-session posts: {e}"))?;
@@ -380,6 +405,16 @@ pub fn clear_feed_interactions(owner_token: &str, account_id: i32) -> Result<usi
             params![account_id],
         )
         .map_err(|e| format!("Failed to clear feed sessions: {e}"))?;
+        // The exposure registry is part of the same "forget what I saw"
+        // promise. Leaving it behind would keep every cleared post out of the
+        // feed for up to `SHOWN_RETENTION_DAYS` while the history page showed
+        // nothing — the clearest possible disagreement between two records of
+        // the same fact.
+        tx.execute(
+            "DELETE FROM feed_shown_posts WHERE account_id = ?1",
+            params![account_id],
+        )
+        .map_err(|e| format!("Failed to clear shown posts: {e}"))?;
         Ok(deleted)
     })?;
     hydrate_cache::clear_seen(i64::from(account_id));
@@ -403,16 +438,30 @@ pub struct RecordedInteraction {
     pub event: String,
 }
 
+/// Outcome of [`record_feed_interactions_batch`].
+#[derive(Debug, Clone)]
+pub struct RecordedBatch {
+    /// One entry per interaction row that was actually inserted, for the
+    /// Prometheus counters.
+    pub interactions: Vec<RecordedInteraction>,
+    /// Exposure rows written from those interactions. Interactions are proof
+    /// the card was on screen, so each one also records that the post was seen.
+    pub exposures: usize,
+}
+
 /// Write a batch of interactions, returning one entry per row that was
 /// actually inserted (retries and duplicates yield none).
 pub fn record_feed_interactions_batch(
     owner_token: &str,
     interactions: &[FeedInteractionRequest],
-) -> Result<Vec<RecordedInteraction>, String> {
+) -> Result<RecordedBatch, String> {
     if interactions.is_empty() {
-        return Ok(Vec::new());
+        return Ok(RecordedBatch {
+            interactions: Vec::new(),
+            exposures: 0,
+        });
     }
-    let recorded = super::with_write_tx(|tx| {
+    let (recorded, newly_seen, exposures) = super::with_write_tx(|tx| {
         // Pre-verify ownership for each distinct account_id in the batch.
         let distinct_accounts: HashSet<i32> = interactions.iter().map(|i| i.account_id).collect();
         // Build a single query per account.
@@ -490,6 +539,10 @@ pub fn record_feed_interactions_batch(
         // One entry per row actually written: a retried batch inserts nothing
         // (`INSERT OR IGNORE`) and must therefore move no counter.
         let mut recorded: Vec<RecordedInteraction> = Vec::with_capacity(interactions.len());
+        // Posts this batch proves the user actually saw. Collected per account
+        // and written here, in this transaction, because the interaction row is
+        // the evidence: if one lands, the other must too.
+        let mut newly_seen: HashMap<i32, Vec<i64>> = HashMap::new();
 
         for interaction in interactions {
             let bucket = buckets
@@ -513,6 +566,10 @@ pub fn record_feed_interactions_batch(
                     bucket: bucket.clone(),
                     event: interaction.event_type.to_string(),
                 });
+                newly_seen
+                    .entry(interaction.account_id)
+                    .or_default()
+                    .push(interaction.post_id);
 
                 let (impression_delta, positive_delta, negative_delta) =
                     match interaction.event_type {
@@ -536,33 +593,103 @@ pub fn record_feed_interactions_batch(
             }
         }
 
-        Ok(recorded)
+        // Exposure rows for the posts this batch confirmed as seen. Written
+        // last, per account, so the prepared statement runs once per account
+        // instead of once per interaction.
+        let mut exposures = 0usize;
+        for (account_id, post_ids) in &newly_seen {
+            exposures += upsert_shown_posts(tx, *account_id, post_ids, &now_iso)?;
+        }
+
+        Ok((recorded, newly_seen, exposures))
     })?;
-    {
-        let mut seen_accounts: Vec<i64> = Vec::new();
-        for it in interactions {
-            let a = i64::from(it.account_id);
-            if !seen_accounts.contains(&a) {
-                seen_accounts.push(a);
-            }
-        }
-        for a in seen_accounts {
-            hydrate_cache::clear_seen(a);
-        }
+    // These sets only ever grow on this path, so merging keeps the cached dedup
+    // sets warm: invalidating them on every impression batch would make the
+    // next feed request rebuild both from scratch while the user scrolls.
+    for (account_id, post_ids) in &newly_seen {
+        let account = i64::from(*account_id);
+        hydrate_cache::merge_recent_seen(account, post_ids);
+        hydrate_cache::merge_long_term_seen(account, post_ids);
     }
-    Ok(recorded)
+    Ok(RecordedBatch {
+        interactions: recorded,
+        exposures,
+    })
 }
 
-/// Posts the user has already interacted with in any way (qualified
-/// impression, explicit hide, or open-through to e621) within the last
-/// `days`. Used to drop them from the candidate pool before scoring so
-/// the same post doesn't surface across sessions.
+/// Everything the account has already **seen** inside the window: an explicit
+/// interaction (`feed_interactions`) **or** an exposure the client confirmed by
+/// keeping the card on screen long enough to count (`feed_shown_posts`).
 ///
-/// `hide` is the load-bearing addition: without it, a hidden post would
-/// reappear on the very next page request because the dedup query
-/// previously only matched `qualified_impression`. `open` is included
-/// because the user has already seen the post in full and likely
-/// doesn't need it surfaced again so soon.
+/// The two sources are unioned here, on purpose, instead of being read by the
+/// callers separately: the exposure registry is written from the client's own
+/// confirmation — the only signal that means "a human actually saw this" — and
+/// a caller that forgot to union it would silently restore the pre-V36
+/// behaviour. `UNION` (not `UNION ALL`) collapses posts that were both seen and
+/// interacted with.
+///
+/// The same statement serves the short and the long window; only the cutoff
+/// differs. A confirmed sighting is evidence on its own, so there is no reason
+/// for the two windows to grade it differently — and two nearly identical
+/// statements only invite them to drift apart.
+const SEEN_POST_IDS_SQL: &str = "
+    SELECT post_id FROM feed_interactions
+     WHERE account_id = ?1
+       AND event_type IN ('qualified_impression', 'hide', 'open')
+       AND created_at >= ?2
+    UNION
+    SELECT post_id FROM feed_shown_posts
+     WHERE account_id = ?1
+       AND last_shown_at >= ?2
+";
+
+/// Upsert for the exposure registry. Bumps `last_shown_at` and `shown_count`,
+/// leaves `first_shown_at` alone — the first exposure is the one that dates
+/// the entry.
+const UPSERT_SHOWN_POST_SQL: &str = "
+    INSERT INTO feed_shown_posts (account_id, post_id, first_shown_at, last_shown_at, shown_count)
+    VALUES (?1, ?2, ?3, ?3, 1)
+    ON CONFLICT(account_id, post_id) DO UPDATE SET
+        last_shown_at = excluded.last_shown_at,
+        shown_count = feed_shown_posts.shown_count + 1
+";
+
+/// Age-based cleanup of the exposure registry (it has no TTL of its own).
+const PRUNE_SHOWN_POSTS_SQL: &str = "DELETE FROM feed_shown_posts WHERE last_shown_at < ?1";
+
+/// Dedup window for **local** candidates (old cached posts), in days.
+///
+/// Live posts from e621 only ever needed the short window
+/// (`runtime.dedup_lookback_days`, 14 by default) because a post the user has
+/// not seen is a legitimate repeat a fortnight later. Local candidates are the
+/// opposite: they come from a fixed catalog, so the same old post would keep
+/// resurfacing every few weeks without a wider horizon.
+///
+/// This is a constant rather than a config key on purpose — it is not a knob
+/// operators tune per deployment, it is the definition of "old enough to keep
+/// out of the mix". [`SHOWN_RETENTION_DAYS`] is derived from it.
+pub const LONG_TERM_DEDUP_DAYS: i64 = 60;
+
+/// Retention for [`feed_shown_posts`], in days.
+///
+/// Must stay above the longest dedup window that reads the table, otherwise
+/// pruning would silently shorten a window. `dedup_lookback_days` defaults to
+/// 14 and [`LONG_TERM_DEDUP_DAYS`] is 60, so this leaves room for an operator
+/// who raises the former.
+pub const SHOWN_RETENTION_DAYS: i64 = 90;
+
+/// Posts the user has already **seen** (qualified impression, explicit hide,
+/// open-through to e621, **or an exposure the client confirmed**) within the
+/// last `days`. Used to drop them from the candidate pool before scoring so the
+/// same post doesn't surface across sessions.
+///
+/// `hide` is the load-bearing addition among the interactions: without it, a
+/// hidden post would reappear on the very next page request because the dedup
+/// query previously only matched `qualified_impression`. `open` is included
+/// because the user has already seen the post in full and likely doesn't need
+/// it surfaced again so soon. Confirmed exposure is included because a reload
+/// (and every redeploy is one) used to erase the only other record of it — see
+/// `migrations/V36__feed_shown_posts.sql`.
 pub fn get_recently_seen_post_ids(account_id: i32, days: i64) -> Result<HashSet<i64>, String> {
     let account_id = i64::from(account_id);
     if let Some(cached) = hydrate_cache::recent_seen(account_id) {
@@ -571,14 +698,7 @@ pub fn get_recently_seen_post_ids(account_id: i32, days: i64) -> Result<HashSet<
     let conn = open_db()?;
     let cutoff = (Utc::now() - chrono::Duration::days(days.max(1))).to_rfc3339();
     let mut stmt = conn
-        .prepare(
-            "
-            SELECT DISTINCT post_id FROM feed_interactions
-            WHERE account_id = ?1
-              AND event_type IN ('qualified_impression', 'hide', 'open')
-              AND created_at >= ?2
-            ",
-        )
+        .prepare(SEEN_POST_IDS_SQL)
         .map_err(|e| format!("prep get_recently_seen_post_ids: {e}"))?;
     let rows = stmt
         .query_map(params![account_id, cutoff], |r| r.get::<_, i64>(0))
@@ -593,6 +713,10 @@ pub fn get_recently_seen_post_ids(account_id: i32, days: i64) -> Result<HashSet<
 /// `get_recently_seen_post_ids` for OLD posts (local candidates) so that
 /// even posts shown weeks ago are excluded from the "mix-in" pool.
 /// Fresh live posts from e621 still use the short window.
+///
+/// Same evidence as the short window, only a longer cutoff: exposure recorded
+/// in `feed_shown_posts` means a human actually saw the card, so it counts here
+/// from the first sighting.
 pub fn get_long_term_seen_post_ids(
     account_id: i32,
     long_days: i64,
@@ -604,14 +728,7 @@ pub fn get_long_term_seen_post_ids(
     let conn = open_db()?;
     let cutoff = (Utc::now() - chrono::Duration::days(long_days.max(1))).to_rfc3339();
     let mut stmt = conn
-        .prepare(
-            "
-            SELECT DISTINCT post_id FROM feed_interactions
-            WHERE account_id = ?1
-              AND event_type IN ('qualified_impression', 'hide', 'open')
-              AND created_at >= ?2
-            ",
-        )
+        .prepare(SEEN_POST_IDS_SQL)
         .map_err(|e| format!("prep get_long_term_seen_post_ids: {e}"))?;
     let rows = stmt
         .query_map(params![account_id, cutoff], |r| r.get::<_, i64>(0))
@@ -620,6 +737,60 @@ pub fn get_long_term_seen_post_ids(
         .collect::<Result<HashSet<_>, _>>()
         .map_err(|e| format!("collect get_long_term_seen_post_ids: {e}"))?;
     Ok((*hydrate_cache::store_long_term_seen(account_id, set)).clone())
+}
+
+/// Write exposure rows for `post_ids` on an open write transaction.
+///
+/// Takes `&Connection` (a `Transaction` derefs to one) so the same statement
+/// runs inside [`record_feed_interactions_batch`]'s transaction — where the
+/// exposure row and the interaction that proves it commit together or not at
+/// all — and from unit tests that hold a bare connection.
+///
+/// **Only the client may feed this.** A feed response means "the server
+/// selected this post", not "the user saw it": the browser renders a window of
+/// the list, and the rest never reaches a screen. Recording the selection is
+/// what made good posts disappear from the feed without ever having been shown
+/// — the opposite of the goal. The only caller is the interaction path, whose
+/// `qualified_impression` is emitted after the card itself was visible long
+/// enough to count.
+///
+/// Returns the number of rows SQLite reports as written (an upsert of an
+/// existing `(account_id, post_id)` counts, so this is "exposures recorded").
+fn upsert_shown_posts(
+    conn: &Connection,
+    account_id: i32,
+    post_ids: &[i64],
+    now: &str,
+) -> Result<usize, String> {
+    if post_ids.is_empty() {
+        return Ok(0);
+    }
+    let mut stmt = conn
+        .prepare_cached(UPSERT_SHOWN_POST_SQL)
+        .map_err(|e| format!("Failed to prepare shown-post upsert: {e}"))?;
+    let mut written = 0usize;
+    for &post_id in post_ids {
+        written += stmt
+            .execute(params![account_id, post_id, now])
+            .map_err(|e| format!("Failed to record shown post {post_id}: {e}"))?;
+    }
+    Ok(written)
+}
+
+/// Drop exposure rows older than `retention_days`. Returns `(before, after)`.
+pub fn prune_shown_posts(retention_days: i64) -> Result<(usize, usize), String> {
+    let cutoff = (Utc::now() - chrono::Duration::days(retention_days.max(1))).to_rfc3339();
+    super::with_write_tx(|tx| {
+        let before: i64 = tx
+            .query_row("SELECT COUNT(*) FROM feed_shown_posts", [], |r| r.get(0))
+            .map_err(|e| format!("Failed to count shown posts: {e}"))?;
+        // One COUNT per tick, not two: the prune worker runs on a timer and
+        // this table gains a row per confirmed sighting.
+        let removed = tx
+            .execute(PRUNE_SHOWN_POSTS_SQL, params![cutoff])
+            .map_err(|e| format!("Failed to prune shown posts: {e}"))?;
+        Ok((before as usize, before as usize - removed))
+    })
 }
 
 /// Posts already in the user's favourites — they don't belong in a "discover"
@@ -1661,6 +1832,214 @@ pub(crate) mod tests {
         assert!(
             pool.iter().any(|id| (21..=40).contains(id)),
             "co-occurrence stream contributed nothing"
+        );
+    }
+
+    // ── Exposure registry (V36) ─────────────────────────────────────
+    //
+    // These exercise the SQL constants against a hand-built twin of the real
+    // schema. They are hermetic on purpose: the shared integration DB is
+    // mutated by dozens of other tests, and a dedup assertion that depends on
+    // what those left behind is the failure mode this file keeps producing.
+
+    /// Minimal twin of the two registries — only the columns the dedup queries
+    /// read, so a passing test cannot be an accident of a migration.
+    fn seen_registry_db() -> rusqlite::Connection {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE feed_interactions (
+                account_id INTEGER NOT NULL,
+                post_id INTEGER NOT NULL,
+                event_type TEXT NOT NULL,
+                created_at TEXT NOT NULL
+             );
+             CREATE TABLE feed_shown_posts (
+                account_id INTEGER NOT NULL,
+                post_id INTEGER NOT NULL,
+                first_shown_at TEXT NOT NULL,
+                last_shown_at TEXT NOT NULL,
+                shown_count INTEGER NOT NULL DEFAULT 1,
+                PRIMARY KEY (account_id, post_id)
+             );",
+        )
+        .unwrap();
+        conn
+    }
+
+    fn seen_ids(conn: &rusqlite::Connection, sql: &str, days: i64) -> HashSet<i64> {
+        let cutoff = (Utc::now() - chrono::Duration::days(days)).to_rfc3339();
+        let mut stmt = conn.prepare(sql).unwrap();
+        let rows = stmt
+            .query_map(params![7i64, cutoff], |r| r.get::<_, i64>(0))
+            .unwrap();
+        rows.collect::<Result<HashSet<_>, _>>().unwrap()
+    }
+
+    /// The whole point of V36: a post the client confirmed as seen is excluded
+    /// from the pool exactly like one the user interacted with, and the
+    /// exclusion is scoped to the account and to the window.
+    #[test]
+    fn seen_set_unions_confirmed_exposures_with_interactions() {
+        let conn = seen_registry_db();
+        let now = Utc::now().to_rfc3339();
+        let month_ago = (Utc::now() - chrono::Duration::days(30)).to_rfc3339();
+
+        // 1 — explicit interaction, in window.
+        conn.execute(
+            "INSERT INTO feed_interactions VALUES (7, 1, 'open', ?1)",
+            params![now],
+        )
+        .unwrap();
+        // 2 — confirmed as seen by the client, no interaction of its own. This
+        // row is the one V36 adds.
+        conn.execute(
+            "INSERT INTO feed_shown_posts VALUES (7, 2, ?1, ?1, 1)",
+            params![now],
+        )
+        .unwrap();
+        // 3 — confirmed a month ago: outside the short window.
+        conn.execute(
+            "INSERT INTO feed_shown_posts VALUES (7, 3, ?1, ?1, 1)",
+            params![month_ago],
+        )
+        .unwrap();
+        // 4 — another account's exposure must not leak into account 7.
+        conn.execute(
+            "INSERT INTO feed_shown_posts VALUES (8, 4, ?1, ?1, 1)",
+            params![now],
+        )
+        .unwrap();
+
+        assert_eq!(
+            seen_ids(&conn, SEEN_POST_IDS_SQL, 14),
+            HashSet::from([1, 2]),
+            "short window must cover interactions and fresh sightings only"
+        );
+    }
+
+    /// The short and the long window read the same statement, so one confirmed
+    /// sighting counts in both. Only the cutoff differs — there is no second
+    /// sighting required, because nothing here is an over-recorded serving.
+    #[test]
+    fn long_term_window_keeps_sightings_past_the_short_one() {
+        let conn = seen_registry_db();
+        let month_ago = (Utc::now() - chrono::Duration::days(30)).to_rfc3339();
+
+        conn.execute(
+            "INSERT INTO feed_shown_posts VALUES (7, 10, ?1, ?1, 1)",
+            params![month_ago],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO feed_interactions VALUES (7, 11, 'hide', ?1)",
+            params![month_ago],
+        )
+        .unwrap();
+
+        assert!(
+            seen_ids(&conn, SEEN_POST_IDS_SQL, 14).is_empty(),
+            "a month-old sighting is outside the short window"
+        );
+        assert_eq!(
+            seen_ids(&conn, SEEN_POST_IDS_SQL, 60),
+            HashSet::from([10, 11]),
+            "the long window must keep a sighting without a repeat"
+        );
+    }
+
+    /// The upsert must not reset `first_shown_at` — the entry's age is what
+    /// retention prunes on, and a post seen daily would otherwise never age
+    /// out of its own row. Exercises the same helper the interaction batch
+    /// calls, so a passing test cannot be about a different statement.
+    #[test]
+    fn shown_post_upsert_counts_exposures_and_keeps_first_shown_at() {
+        let conn = seen_registry_db();
+        let first = "2026-10-01T00:00:00+00:00";
+        let later = "2026-10-02T00:00:00+00:00";
+
+        assert_eq!(
+            upsert_shown_posts(&conn, 7, &[100], first).unwrap(),
+            1,
+            "first sighting inserts one row"
+        );
+        assert_eq!(
+            upsert_shown_posts(&conn, 7, &[100], later).unwrap(),
+            1,
+            "a repeat sighting updates the existing row"
+        );
+
+        let (first_at, last_at, count): (String, String, i64) = conn
+            .query_row(
+                "SELECT first_shown_at, last_shown_at, shown_count FROM feed_shown_posts \
+                 WHERE account_id = 7 AND post_id = 100",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(count, 2, "second exposure must bump shown_count");
+        assert_eq!(first_at, first, "first_shown_at must not move");
+        assert_eq!(
+            last_at, later,
+            "last_shown_at must follow the newest exposure"
+        );
+    }
+
+    /// Retention deletes by age and touches nothing younger.
+    #[test]
+    fn prune_shown_posts_drops_only_expired_rows() {
+        let conn = seen_registry_db();
+        let now = Utc::now().to_rfc3339();
+        let ancient = (Utc::now() - chrono::Duration::days(200)).to_rfc3339();
+        conn.execute(
+            "INSERT INTO feed_shown_posts VALUES (7, 1, ?1, ?1, 1)",
+            params![now],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO feed_shown_posts VALUES (7, 2, ?1, ?1, 1)",
+            params![ancient],
+        )
+        .unwrap();
+
+        let cutoff = (Utc::now() - chrono::Duration::days(SHOWN_RETENTION_DAYS)).to_rfc3339();
+        let removed = conn
+            .execute(PRUNE_SHOWN_POSTS_SQL, params![cutoff])
+            .unwrap();
+        assert_eq!(removed, 1);
+
+        let left: Vec<i64> = conn
+            .prepare("SELECT post_id FROM feed_shown_posts ORDER BY post_id")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(left, vec![1], "fresh exposure must survive the prune");
+    }
+
+    /// Losing the primary-key prefix would turn every feed request into a
+    /// full scan of the exposure registry — correct, but slower every day.
+    #[test]
+    fn seen_lookup_uses_the_exposure_primary_key() {
+        let conn = seen_registry_db();
+        let plan = {
+            let mut stmt = conn
+                .prepare(&format!("EXPLAIN QUERY PLAN {SEEN_POST_IDS_SQL}"))
+                .unwrap();
+            let rows = stmt
+                .query_map(params![7i64, "2026-01-01T00:00:00+00:00"], |r| {
+                    r.get::<_, String>(3)
+                })
+                .unwrap();
+            rows.collect::<Result<Vec<_>, _>>().unwrap().join("\n")
+        };
+        let line = plan
+            .lines()
+            .find(|l| l.contains("feed_shown_posts"))
+            .expect("plan mentions feed_shown_posts");
+        assert!(
+            line.contains("SEARCH") && line.contains("INDEX"),
+            "exposure lookup no longer seeks the (account_id, post_id) key:\n{plan}"
         );
     }
 }

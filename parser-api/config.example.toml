@@ -285,7 +285,25 @@ diversity_head_limit = 0
 # --- Runtime and worker tuning ----------------------------------------------
 [runtime]
 local_candidate_limit = 400             # local candidates per recommendations page
-dedup_lookback_days = 14                # live-post deduplication window
+# Deduplication. A post counts as seen once the account either recorded an
+# interaction (qualified impression, open or hide) or the browser confirmed the
+# card was on screen — at least half of it, for 800 ms. A feed response only
+# records the session-scoped cross-page set (30-minute TTL, one scroll); the
+# windows below are fed by the client's confirmation alone, because the server
+# picking a post is not a human seeing it.
+#
+# Two windows read that same evidence. Live posts from e621 use the key below;
+# old local-catalog posts use `LONG_TERM_DEDUP_DAYS` (60, a constant in
+# `db/feed.rs` — there is no key for it) so a months-old post cannot resurface
+# week after week. Sightings are pruned after 90 days
+# (`SHOWN_RETENTION_DAYS`), so keep this value below that, otherwise the pruner
+# drops sightings the window still needs.
+#
+# Both windows, and the session-scoped set, are applied while the candidate pool
+# is assembled — before scoring and before MMR. Filtering them out afterwards
+# let the diversity pass spend its redundancy budget and its artist/character
+# quota on posts that were about to be discarded.
+dedup_lookback_days = 14                # live-post window, in days
 # --- candidate pool composition ---------------------------------------------
 # Streams are capped independently. A shared counter lets the densest stream
 # (artist tags match far more posts than character tags) take every slot, which

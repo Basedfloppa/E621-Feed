@@ -297,15 +297,22 @@ fn setup_test(account_id: i32) {
     // Drop any stale feed_sessions a previous panicking run may have
     // left behind. Without this, the Fresh→Active→Expired tests are
     // order-dependent: a leftover row makes the first call return
-    // Active instead of Fresh. Also clean feed_session_posts since the
-    // cascade FK was removed when session_id became non-unique.
+    // Active instead of Fresh. The shown posts are keyed by account (V37),
+    // so they are cleared by account rather than through the session id.
     if let Ok(conn) = e621_account_parser_api::db::open_db_for_calibration() {
         let _ = conn.execute(
-            "DELETE FROM feed_session_posts WHERE session_id IN (SELECT session_id FROM feed_sessions WHERE account_id = ?1)",
+            "DELETE FROM feed_session_posts WHERE account_id = ?1",
             rusqlite::params![account_id],
         );
         let _ = conn.execute(
             "DELETE FROM feed_sessions WHERE account_id = ?1",
+            rusqlite::params![account_id],
+        );
+        // Durable exposure registry (V36). Account-scoped and written on every
+        // feed response, so it must be wiped here too — otherwise a post served
+        // by an earlier test is silently deduped out of this one.
+        let _ = conn.execute(
+            "DELETE FROM feed_shown_posts WHERE account_id = ?1",
             rusqlite::params![account_id],
         );
     }

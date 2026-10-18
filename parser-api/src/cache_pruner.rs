@@ -113,6 +113,16 @@ pub fn spawn_cache_pruner() {
                 if let Err(e) = db::prune_expired_sessions() {
                     warn!("[cache-pruner] feed-session prune failed: {e}");
                 }
+                // The exposure registry has no TTL of its own: rows are written
+                // whenever the client confirms a card was on screen and only
+                // the dedup windows read them, so anything older than
+                // `SHOWN_RETENTION_DAYS` is dead weight. Without this it would
+                // outlive the sessions it replaces and grow with every scroll
+                // forever.
+                match db::prune_shown_posts(db::SHOWN_RETENTION_DAYS) {
+                    Ok((before, after)) => record_pruned("shown_posts", before - after),
+                    Err(e) => warn!("[cache-pruner] shown-post prune failed: {e}"),
+                }
 
                 let idle_evict_secs = cfg().runtime.cache_idle_eviction_secs;
                 let api_evicted = api::evict_api_cache_if_idle(idle_evict_secs);

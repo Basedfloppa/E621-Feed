@@ -79,7 +79,11 @@ catalog size. The rest comes from:
    `Vec` buffers).
 2. **API response cache** — `e621_cache_max_entries = 5000` JSON blobs,
    each up to several MB → potentially **hundreds of MB**.
-3. **Feed session state** — in-memory dedup windows per active user.
+3. **Feed dedup id-sets** — the record itself lives in SQLite
+   (`feed_interactions`, `feed_shown_posts`), but each account's recent-seen
+   set is also materialised in process memory by `db/hydrate_cache`
+   (20–60 s TTL, up to 1024 accounts) so `db_hydrate` does not re-scan the
+   tables on every scroll.
 4. **Rocket/reqwest connection pools** and general runtime.
 5. **SQLite page cache** — SQLite's own cache can grow to hundreds of MB
    under load unless capped.

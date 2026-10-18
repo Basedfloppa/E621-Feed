@@ -192,10 +192,19 @@ pub(crate) async fn log_feed_interaction_batch(
     ratelimit::check(&format!("interaction:owner:{owner_token}"), 240, 60)?;
     let count = body.interactions.len();
     let primary_account = body.interactions.first().map(|i| i.account_id);
-    let recorded =
+    let batch =
         db_blocking(move || record_feed_interactions_batch(&owner_token, &body.interactions))
             .await
             .map_err(ApiError::from)?;
+    // The interaction is the only evidence that a card reached a screen, so
+    // this is where the durable exposure registry is written — not on the
+    // response path, which only knows what was selected.
+    if batch.exposures > 0 {
+        debug!(
+            "[feed] exposure registry: {} post(s) recorded",
+            batch.exposures
+        );
+    }
     // The WASM client sends every interaction through THIS route —
     // `interaction_queue` batches them and only `undo` uses the single
     // endpoint — so the counters have to be moved here as well as in
@@ -204,7 +213,7 @@ pub(crate) async fn log_feed_interaction_batch(
     // `feed_interactions` filled up. Counting the rows the DB reports as
     // inserted (not `count`) keeps a retried batch from double-counting.
     let metrics = &e621_account_parser_api::metrics::METRICS;
-    for rec in &recorded {
+    for rec in &batch.interactions {
         let bucket = rec.bucket.as_deref().unwrap_or("none");
         metrics
             .feed_interactions_total
@@ -254,59 +263,99 @@ pub(crate) async fn get_recommendations(
 
     let mut pipe = PipelineMetrics::new("recommendations");
 
+    // Cross-page dedup within one scroll: the session-scoped set. Loaded
+    // *before* the pipeline so the posts this scroll already showed never reach
+    // hydration, scoring or MMR — see the `Dedup strategy` note on
+    // `build_recommendations_shared`.
+    //
+    // Ownership is verified first, even though the pipeline checks it again:
+    // touching a session for an account the caller doesn't own would commit a
+    // `feed_sessions` row under it (and leak account existence through the two
+    // distinct failure paths). `/continue` already orders it this way.
+    let mut session_shown: HashSet<i64> = HashSet::new();
+    let mut session_state: Option<(String, db::FeedSessionState)> = None;
+    if let Some(ref sess) = session {
+        db_blocking({
+            let ot = owner_token.clone();
+            move || get_account_by_id(&ot, account_id).map_err(|e| format!("account access: {e}"))
+        })
+        .await?;
+
+        let sess_for_touch = sess.clone();
+        let state =
+            db_blocking(move || db::touch_or_create_feed_session(&sess_for_touch, account_id))
+                .await?;
+
+        // Only an Active session has authoritative history. A Fresh one has no
+        // recorded posts yet; an Expired one is about to be rotated by the
+        // client, so its set describes a scroll that is already over — using it
+        // would hide posts nobody will ever see recorded again.
+        if matches!(state, db::FeedSessionState::Active) {
+            let session_for_dedup = sess.clone();
+            session_shown =
+                db_blocking(move || db::get_session_shown_post_ids(&session_for_dedup, account_id))
+                    .await
+                    // A failed read here used to be swallowed as "nothing shown
+                    // yet", which silently turned dedup into a no-op. Partial
+                    // data is exactly what dedup must not guess about.
+                    .map_err(|e| {
+                        ApiError::from_string(format!("Failed to load session shown posts: {e}"))
+                    })?;
+        }
+
+        session_state = Some((sess.clone(), state));
+    }
+
     // Run the shared pipeline (scoring, threshold, MMR diversification,
     // and exploration bonus). The shared function applies the exploration
     // bonus so both endpoints behave identically — fixing the original bug
     // where build_recommendations_inner skipped it entirely.
-    let mut scored = build_recommendations_shared(
-        account_id,
-        &owner_token,
-        page,
-        affinity_threshold,
-        exploration,
-        "recommendations",
+    let scored = build_recommendations_shared(
+        RecommendationRequest {
+            account_id,
+            owner_token: &owner_token,
+            page,
+            affinity_threshold,
+            exploration,
+            session_shown: &session_shown,
+            ctx_label: "recommendations",
+        },
         Some(&mut pipe),
     )
     .await?;
 
-    // Cross-page dedup: if a session_id is provided, filter out posts
-    // already shown in previous pages and record the new page's IDs.
-    // All I/O is against SQLite — nothing accumulates in process memory.
-    if let Some(ref sess) = session {
-        // Ensure the session row exists (first page of a scroll creates it).
-        let sess_for_touch = sess.clone();
-        db_blocking(move || db::touch_or_create_feed_session(&sess_for_touch, account_id)).await?;
-        let session_for_dedup = sess.clone();
-        let shown_ids: std::collections::HashSet<i64> =
-            db_blocking(move || db::get_session_shown_post_ids(&session_for_dedup, account_id))
-                .await
-                .unwrap_or_default(); // session does not exist yet or has expired
-
-        if !shown_ids.is_empty() {
-            let before = scored.len();
-            scored.retain(|sp| !shown_ids.contains(&sp.post.id));
-            if scored.len() < before {
-                debug!(
-                    "[feed] cross-page dedup: dropped {} posts already shown",
-                    before - scored.len()
-                );
+    // Record this page's shown posts for future dedup. An expired session is
+    // about to be pruned — writing into it would both resurrect the row and be
+    // thrown away later; the durable registry below still covers the rotation.
+    if let Some((sess, state)) = &session_state {
+        if matches!(state, db::FeedSessionState::Expired) {
+            debug!("[feed] session expired: not recording session-scoped shown posts");
+        } else {
+            let posts_to_record: Vec<(i64, i32)> = scored
+                .iter()
+                .enumerate()
+                .map(|(i, sp)| (sp.post.id, (i + 1) as i32))
+                .collect();
+            if !posts_to_record.is_empty() {
+                let session_for_record = sess.clone();
+                db_blocking(move || {
+                    db::record_session_shown_posts(
+                        &session_for_record,
+                        account_id,
+                        &posts_to_record,
+                    )
+                })
+                .await?;
             }
         }
-
-        // Record this page's shown posts for future dedup.
-        let posts_to_record: Vec<(i64, i32)> = scored
-            .iter()
-            .enumerate()
-            .map(|(i, sp)| (sp.post.id, (i + 1) as i32))
-            .collect();
-        if !posts_to_record.is_empty() {
-            let session_for_record = sess.clone();
-            db_blocking(move || {
-                db::record_session_shown_posts(&session_for_record, account_id, &posts_to_record)
-            })
-            .await?;
-        }
     }
+
+    // No exposure is recorded here on purpose. This response means "the server
+    // selected these posts", not "a human saw them": the browser renders a
+    // window of the list and the rest never reaches a screen. The durable
+    // registry (`feed_shown_posts`) is fed from `/interaction/batch`, where a
+    // `qualified_impression` proves the card itself was visible long enough to
+    // count — see `migrations/V36__feed_shown_posts.sql`.
 
     // Bucket logging (main endpoint only — continue caller handles it).
     let (bucket_name, _) = cfg().pick_bucket(account_id, None);
@@ -387,6 +436,22 @@ pub(crate) async fn get_recommendations(
     Ok(Json(scored))
 }
 
+/// What a caller asks the pipeline for.
+///
+/// Grouped rather than passed positionally: four of the seven are `Option` /
+/// slice parameters of the same shape, and an argument list that long turns a
+/// swapped pair into a silent behaviour change.
+struct RecommendationRequest<'a> {
+    account_id: i32,
+    owner_token: &'a str,
+    page: Option<i32>,
+    affinity_threshold: Option<f32>,
+    exploration: Option<f32>,
+    /// Posts this scroll already showed; dropped in the merge step.
+    session_shown: &'a HashSet<i64>,
+    ctx_label: &'a str,
+}
+
 /// Shared recommendation pipeline.
 ///
 /// Fetches e621 posts, hydrates local candidates, scores, thresholds, and
@@ -400,6 +465,16 @@ pub(crate) async fn get_recommendations(
 ///   `get_long_term_seen_post_ids`). This prevents the same old posts from
 ///   reappearing across weeks.
 /// - **Owned posts** (user's favourites) are always excluded.
+/// - **Session-shown posts** (`session_shown`) are dropped here, in the merge
+///   step, rather than by the caller after this function returns. Filtering
+///   after the fact meant MMR spent its redundancy budget and its diversity
+///   quota on posts that were about to be discarded — the quota could then be
+///   violated by the surviving list. Dropping first is also cheaper: these
+///   posts skip hydration and scoring entirely.
+/// - Both durable windows read the same evidence — an interaction, or a
+///   sighting the client confirmed — and differ only in the cutoff. No response
+///   path records anything: a selection is not a sighting
+///   (`migrations/V36__feed_shown_posts.sql`).
 ///
 /// ## Randomisation
 /// `collect_local_candidate_ids` now uses `ORDER BY RANDOM()` (see
@@ -407,23 +482,43 @@ pub(crate) async fn get_recommendations(
 /// call, distributing impressions across the long tail instead of always
 /// promoting the highest-scored posts.
 ///
+/// ## Latency
+/// Every read this function needs is issued in one `tokio::join!` at the top.
+/// `get_long_term_seen_post_ids` used to sit serially between the e621 fetch
+/// and the local hydration — a full round trip in the middle of the request
+/// for a set that depends on nothing but `account_id`.
+///
 /// The caller is responsible for:
+/// - Loading `session_shown` (and recording the returned page afterwards)
 /// - Score breakdown logging (caller-specific diagnostic)
 /// - Pipeline metrics and audit (caller-specific)
 async fn build_recommendations_shared(
-    account_id: i32,
-    owner_token: &str,
-    page: Option<i32>,
-    affinity_threshold: Option<f32>,
-    exploration: Option<f32>,
-    ctx_label: &str,
+    req: RecommendationRequest<'_>,
     mut pipe: Option<&mut PipelineMetrics>,
 ) -> Result<Vec<ScoredPost>, ApiError> {
+    let RecommendationRequest {
+        account_id,
+        owner_token,
+        page,
+        affinity_threshold,
+        exploration,
+        session_shown,
+        ctx_label,
+    } = req;
     let cfg = cfg();
     let runtime = cfg.runtime.clone();
 
     let owner_clone = owner_token.to_string();
-    let (tags_res, profile_res, account_res, seen_res, owned_res, local_res, bucket_res) = rocket::tokio::join!(
+    let (
+        tags_res,
+        profile_res,
+        account_res,
+        seen_res,
+        owned_res,
+        local_res,
+        bucket_res,
+        long_seen_res,
+    ) = rocket::tokio::join!(
         rocket::tokio::task::spawn_blocking(move || {
             get_tag_counts(account_id).map_err(|e| format!("Failed to get tag counts: {e}"))
         }),
@@ -454,6 +549,10 @@ async fn build_recommendations_shared(
             db::get_account_experiment_bucket(account_id)
                 .map_err(|e| format!("Failed to load experiment bucket: {e}"))
         }),
+        rocket::tokio::task::spawn_blocking(move || {
+            get_long_term_seen_post_ids(account_id, db::LONG_TERM_DEDUP_DAYS)
+                .map_err(|e| format!("Failed to load long-term seen post ids: {e}"))
+        }),
     );
 
     let tags = tags_res.map_err(|e| format!("Join error: {e}"))??;
@@ -463,6 +562,7 @@ async fn build_recommendations_shared(
     let owned_ids = owned_res.map_err(|e| format!("Join error: {e}"))??;
     let mut local_candidate_ids = local_res.map_err(|e| format!("Join error: {e}"))??;
     let explicit_bucket = bucket_res.map_err(|e| format!("Join error: {e}"))??;
+    let long_term_seen = long_seen_res.map_err(|e| format!("Join error: {e}"))??;
 
     // Cheap pre-filter for local candidates: drop blacklisted posts *before*
     // hydrating them. Only simple tag names are usable here — the DB check has
@@ -569,19 +669,25 @@ async fn build_recommendations_shared(
         });
     }
 
-    // Hydrate locals (skip owned/seen/already-in-live).
+    // Hydrate locals (skip owned/seen/session-shown/already-in-live).
     let live_ids: HashSet<i64> = live_posts.iter().map(|p| p.id).collect();
-    // Load long-term seen IDs for old-post dedup (local candidates).
-    // While live posts from e621 stay deduped against the short window,
-    // local candidates (which can be months old) get a longer dedup horizon
-    // so the same old post doesn't reappear across weeks.
-    let long_term_seen = get_long_term_seen_post_ids(account_id, 60)
-        .map_err(|e| format!("Failed to load long-term seen post ids: {e}"))?;
+    // Local candidates (which can be months old) get a longer dedup horizon
+    // than live posts, so the same old post doesn't reappear across weeks.
     let local_dedup: HashSet<i64> = seen_ids.union(&long_term_seen).copied().collect();
-    let local_to_hydrate: Vec<i64> = local_candidate_ids
+    let mut local_to_hydrate: Vec<i64> = local_candidate_ids
         .into_iter()
         .filter(|id| !live_ids.contains(id) && !owned_ids.contains(id) && !local_dedup.contains(id))
         .collect();
+    // Session-scoped dedup happens here, before hydration and scoring — not on
+    // the finished list. Counting after the other filters keeps the diagnostic
+    // honest: this number is posts the session actually suppressed, not posts
+    // that were already going to be dropped.
+    let mut session_dropped = 0usize;
+    if !session_shown.is_empty() {
+        let before_session = local_to_hydrate.len();
+        local_to_hydrate.retain(|id| !session_shown.contains(id));
+        session_dropped += before_session - local_to_hydrate.len();
+    }
     let local_posts = if local_to_hydrate.is_empty() {
         Vec::new()
     } else {
@@ -596,6 +702,10 @@ async fn build_recommendations_shared(
         if owned_ids.contains(&post.id) || seen_ids.contains(&post.id) {
             continue;
         }
+        if session_shown.contains(&post.id) {
+            session_dropped += 1;
+            continue;
+        }
         combined.push(post);
     }
     let mut combined_ids: HashSet<i64> = combined.iter().map(|p| p.id).collect();
@@ -603,6 +713,9 @@ async fn build_recommendations_shared(
         if combined_ids.insert(post.id) {
             combined.push(post);
         }
+    }
+    if session_dropped > 0 {
+        debug!("[feed] cross-page dedup: dropped {session_dropped} posts already shown");
     }
 
     // Authoritative blacklist pass over the merged pool. Local candidates were
@@ -778,15 +891,23 @@ pub(crate) async fn get_recommendations_continue(
         HashSet::new()
     };
 
-    // Build, dedup against the session's shown set, then truncate.
-    // `build_recommendations_shared` returns posts already sorted (and
-    // diversified) so `truncate` keeps the top-N, not an arbitrary N.
-    let mut posts =
-        build_recommendations_shared(account_id, &owner_token, None, None, None, "continue", None)
-            .await?;
-    if !shown_ids.is_empty() {
-        posts.retain(|sp| !shown_ids.contains(&sp.post.id));
-    }
+    // Build, then truncate. `build_recommendations_shared` already dropped the
+    // session's shown posts (before scoring and MMR, so they cannot consume a
+    // diversity slot there) and returns posts sorted by adjusted score — so
+    // `truncate` keeps the top-N of what is left, not an arbitrary N.
+    let mut posts = build_recommendations_shared(
+        RecommendationRequest {
+            account_id,
+            owner_token: &owner_token,
+            page: None,
+            affinity_threshold: None,
+            exploration: None,
+            session_shown: &shown_ids,
+            ctx_label: "continue",
+        },
+        None,
+    )
+    .await?;
     posts.truncate(count as usize);
 
     // Skip recording on Expired — the client is about to switch session_id,
@@ -803,6 +924,9 @@ pub(crate) async fn get_recommendations_continue(
         })
         .await?;
     }
+
+    // Exposure for these posts is recorded when the client confirms the cards
+    // rendered, not here — see the note in `get_recommendations`.
 
     let session_state_str = match session_state {
         db::FeedSessionState::Fresh => "fresh",

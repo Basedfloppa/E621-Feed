@@ -9,8 +9,10 @@
 //! §2.2b). They are served from a short-TTL cache here (mirroring
 //! `TAG_COUNTS_CACHE` in `db/tags.rs`), with explicit invalidation on the
 //! write paths that actually mutate the underlying data:
-//! - `seen` (recent + long-term) is cleared on `record_feed_interaction` /
-//!   `remove_feed_interaction`;
+//! - `seen` (recent + long-term) is *merged into* on `record_feed_interaction`
+//!   — a new sighting only adds ids — and *cleared* on
+//!   `remove_feed_interaction` / `clear_feed_interactions`, where a removal
+//!   cannot be expressed as an addition;
 //! - `owned` + `candidates` are cleared on the `/process` rebuild
 //!   (`save_posts` / `drop_account_posts`).
 //!
@@ -76,6 +78,23 @@ fn clear_set(map: &Mutex<HashMap<i64, SetEntry>>, key: i64) {
     }
 }
 
+/// Add ids to a warm set entry, leaving its age alone.
+///
+/// A no-op when the entry is absent or expired: the next read rebuilds it from
+/// the table, which already contains the new rows.
+fn merge_into(map: &Mutex<HashMap<i64, SetEntry>>, key: i64, ids: &[i64], ttl: Duration) {
+    let Ok(mut guard) = map.lock() else {
+        return;
+    };
+    let Some(entry) = guard.get_mut(&key) else {
+        return;
+    };
+    if entry.inserted_at.elapsed() >= ttl {
+        return;
+    }
+    Arc::make_mut(&mut entry.set).extend(ids.iter().copied());
+}
+
 fn evict_oldest_set(guard: &mut HashMap<i64, SetEntry>) {
     if guard.len() <= CACHE_MAX_ENTRIES {
         return;
@@ -137,6 +156,25 @@ pub fn store_recent_seen(account_id: i64, set: HashSet<i64>) -> Arc<HashSet<i64>
     put_set(&RECENT_SEEN_CACHE, account_id, set, RECENT_SEEN_TTL)
 }
 
+/// Fold newly recorded exposures into the cached `recent_seen` set, if the
+/// account has one.
+///
+/// The interaction batch that proves a card was on screen runs while the user
+/// scrolls, so invalidating the set there would empty it every few seconds and
+/// the cache would never help — that is why this adds to the live set instead
+/// of calling `clear_seen`. Removal (undo, cleared history) still goes through
+/// [`clear_seen`], because a deletion cannot be expressed as an addition.
+///
+/// The ids being added are by definition the newest, so they fall inside every
+/// window this cache was built for.
+///
+/// `inserted_at` is deliberately NOT refreshed: adding ids must not extend the
+/// entry's lifetime past another writer's invalidation, and the TTL is short
+/// enough that the next miss picks such a change up.
+pub fn merge_recent_seen(account_id: i64, ids: &[i64]) {
+    merge_into(&RECENT_SEEN_CACHE, account_id, ids, RECENT_SEEN_TTL);
+}
+
 // --- long-term seen --------------------------------------------------------
 
 pub const LONG_TERM_SEEN_TTL: Duration = Duration::from_secs(30);
@@ -148,6 +186,16 @@ pub fn long_term_seen(account_id: i64) -> Option<Arc<HashSet<i64>>> {
 }
 pub fn store_long_term_seen(account_id: i64, set: HashSet<i64>) -> Arc<HashSet<i64>> {
     put_set(&LONG_TERM_SEEN_CACHE, account_id, set, LONG_TERM_SEEN_TTL)
+}
+
+/// Long-window counterpart of [`merge_recent_seen`].
+///
+/// Both windows are fed by the same evidence (a confirmed sighting), so both
+/// need to learn about it in the same write; leaving this one to expire would
+/// let a just-seen post come back from the local candidate pool for up to
+/// `LONG_TERM_SEEN_TTL`.
+pub fn merge_long_term_seen(account_id: i64, ids: &[i64]) {
+    merge_into(&LONG_TERM_SEEN_CACHE, account_id, ids, LONG_TERM_SEEN_TTL);
 }
 
 // --- owned ----------------------------------------------------------------
@@ -191,4 +239,51 @@ pub fn clear_seen(account_id: i64) {
 pub fn clear_owned_and_candidates(account_id: i64) {
     clear_set(&OWNED_CACHE, account_id);
     clear_ids(&CANDIDATE_CACHE, account_id);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The interaction batch merges into the live set instead of clearing it,
+    /// so the dedup read stays cheap while the user scrolls. If the merge
+    /// dropped the previously cached ids (or failed to add the new ones) it
+    /// would silently re-serve posts — the exact bug V36 exists to close.
+    #[test]
+    fn merge_recent_seen_extends_a_warm_entry() {
+        let account = 990_001;
+        store_recent_seen(account, HashSet::from([1i64, 2]));
+        merge_recent_seen(account, &[2, 3]);
+
+        let cached = recent_seen(account).expect("entry must still be warm");
+        assert_eq!(*cached, HashSet::from([1i64, 2, 3]));
+        clear_seen(account);
+    }
+
+    /// The long window reads the same evidence, so a confirmed sighting has to
+    /// land in both caches in the same write. Missing this one would let a
+    /// just-seen post return from the local candidate pool for a whole TTL.
+    #[test]
+    fn merge_long_term_seen_extends_a_warm_entry() {
+        let account = 990_003;
+        store_long_term_seen(account, HashSet::from([1i64]));
+        merge_long_term_seen(account, &[4, 5]);
+
+        let cached = long_term_seen(account).expect("entry must still be warm");
+        assert_eq!(*cached, HashSet::from([1i64, 4, 5]));
+        clear_seen(account);
+    }
+
+    /// A merge must not fabricate an entry: the table is the source of truth,
+    /// and a synthesised set would hide a missing row for a full TTL.
+    #[test]
+    fn merge_recent_seen_is_a_noop_without_an_entry() {
+        let account = 990_002;
+        clear_seen(account);
+        merge_recent_seen(account, &[5]);
+        assert!(
+            recent_seen(account).is_none(),
+            "merge must not create a cache entry"
+        );
+    }
 }

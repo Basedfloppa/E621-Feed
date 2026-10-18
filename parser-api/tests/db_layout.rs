@@ -21,8 +21,7 @@ use std::path::{Path, PathBuf};
 
 fn repo_file(rel: &str) -> String {
     let path: PathBuf = Path::new(env!("CARGO_MANIFEST_DIR")).join(rel);
-    std::fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()))
+    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()))
 }
 
 /// The compose header explains the *old* file mount by quoting it, so a plain
@@ -48,7 +47,11 @@ fn declared_db_path(toml: &str) -> String {
         let Some((_, value)) = rest.split_once('=') else {
             continue;
         };
-        return value.trim().trim_matches('"').trim_matches('\'').to_string();
+        return value
+            .trim()
+            .trim_matches('"')
+            .trim_matches('\'')
+            .to_string();
     }
     panic!("no db_path in the config");
 }

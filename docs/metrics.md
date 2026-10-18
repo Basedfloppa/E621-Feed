@@ -74,7 +74,7 @@ that have never visited have no row in that table and are not counted.
 | Metric | Type | Labels | Read as |
 |---|---|---|---|
 | `e621_catalog_posts_total` | gauge | — | posts in the local catalog |
-| `e621_cache_pruned_total` | counter | `category` (api_ttl, api_idle, jobs, ratelimit, candidates, revoked, idf, relation) | cache entries pruned by category (rising = cache is working) |
+| `e621_cache_pruned_total` | counter | `category` (api_ttl, api_idle, jobs, ratelimit, candidates, revoked, shown_posts, idf, relation) | cache entries pruned by category (rising = cache is working); `shown_posts` counts expired sightings from `feed_shown_posts` |
 
 ## HTTP layer (via fairing)
 
