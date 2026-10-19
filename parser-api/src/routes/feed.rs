@@ -430,7 +430,7 @@ pub(crate) async fn get_recommendations(
     // grouped in the catalog and its media is queued for download.
     if e621_account_parser_api::models::cfg().catalog.save_all {
         let posts: Vec<Post> = scored.iter().map(|sp| sp.post.clone()).collect();
-        crate::routes::browse::spawn_browse_persist(posts, "feed", account_id, true);
+        crate::routes::browse::spawn_browse_persist(posts, "feed", account_id, true, false);
     }
 
     Ok(Json(scored))

@@ -745,7 +745,13 @@ pub(crate) async fn get_daily_digest(
     // local catalog, same as /search, /trending and the feed. Fire-and-forget.
     if cfg().catalog.save_all {
         let digest_posts: Vec<Post> = posts.iter().map(|sp| sp.post.clone()).collect();
-        crate::routes::browse::spawn_browse_persist(digest_posts, "digest", account_id, true);
+        crate::routes::browse::spawn_browse_persist(
+            digest_posts,
+            "digest",
+            account_id,
+            true,
+            false,
+        );
     }
     cache_set(cache_key, posts.clone());
     Ok(Json(posts))

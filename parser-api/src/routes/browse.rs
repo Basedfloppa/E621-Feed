@@ -36,6 +36,12 @@ use e621_account_parser_api::{
 /// * `link_to_account` — when `true`, also inserts `accounts_post` rows so
 ///   the posts are associated with this account. Callers gate collection on
 ///   the catalog toggles (`save_favourites`/`save_all`) before calling.
+/// * `refresh_profile` — derive the account's tag/rating/media profiles from
+///   what was just linked. Only `/browse/favorites` sets this: its posts enter
+///   the user's *library*, while search/trending/feed are an offline cache.
+///   Without it, viewing favourites left `account_tag_counts` stale until the
+///   next `/process` or direct sync, so every scored view ignored the newly
+///   linked posts.
 ///
 /// Errors are non-fatal: the response has already been sent to the client.
 pub(crate) fn spawn_browse_persist(
@@ -43,23 +49,32 @@ pub(crate) fn spawn_browse_persist(
     source: &'static str,
     account_id: i32,
     link_to_account: bool,
+    refresh_profile: bool,
 ) {
     rocket::tokio::spawn(async move {
         let count = posts.len();
         let res = rocket::tokio::task::spawn_blocking(move || -> Result<usize, String> {
             // Posts and their tag postings commit together: a post row with no
             // tags is not a usable post, and the pair used to pay two commits.
-            // Browse posts are not user preferences, hence no cooccurrence and
-            // no blacklist.
+            // Browse posts are not user preferences, hence no blacklist.
+            //
+            // Only the favourites path asks for profile work; it is also the
+            // only one that carries co-occurrence: `refresh_account_profiles_skip_cooc`
+            // relies on the batch having updated it incrementally, which is not
+            // true for a plain cache write.
             if link_to_account {
                 save_posts_with_tags(
                     &posts,
                     account_id,
                     &std::collections::HashSet::new(),
-                    false,
-                    None,
+                    refresh_profile,
+                    refresh_profile.then_some(account_id),
                 )
                 .map_err(|e| format!("Failed to save posts with account link: {e}"))?;
+                if refresh_profile {
+                    e621_account_parser_api::db::refresh_account_profiles_skip_cooc(account_id)
+                        .map_err(|e| format!("Failed to refresh account profiles: {e}"))?;
+                }
             } else {
                 upsert_catalog_posts_with_tags(&posts)
                     .map_err(|e| format!("Failed to upsert catalog posts: {e}"))?;
@@ -131,7 +146,7 @@ pub(crate) async fn search_posts(
         .map_err(ApiError::from_string)?;
     // Encountered scope: only `save_all` collects browse search results.
     if cfg().catalog.save_all {
-        spawn_browse_persist(posts.clone(), "search", account_id, true);
+        spawn_browse_persist(posts.clone(), "search", account_id, true, false);
     }
     e621_account_parser_api::metrics::METRICS
         .browse_views_total
@@ -186,7 +201,7 @@ pub(crate) async fn search_scored_posts(
         .map_err(ApiError::from_string)?;
     // Encountered scope: only `save_all` collects browse search results.
     if cfg().catalog.save_all {
-        spawn_browse_persist(posts.clone(), "search", account_id, true);
+        spawn_browse_persist(posts.clone(), "search", account_id, true, false);
     }
 
     let idf = current_idf();
@@ -276,7 +291,7 @@ pub(crate) async fn get_trending_scored(
 
     // Fire-and-forget persist to catalog (encountered scope: `save_all`).
     if cfg().catalog.save_all {
-        spawn_browse_persist(posts.clone(), "trending", account_id, true);
+        spawn_browse_persist(posts.clone(), "trending", account_id, true, false);
     }
 
     // Score against the account profile.
@@ -368,7 +383,7 @@ pub(crate) async fn get_trending(
     // Сохраняем в каталог (encountered scope: `save_all`). Fire-and-forget,
     // не задерживает ответ.
     if cfg().catalog.save_all {
-        spawn_browse_persist(posts.clone(), "trending", account_id, true);
+        spawn_browse_persist(posts.clone(), "trending", account_id, true, false);
     }
 
     e621_account_parser_api::metrics::METRICS
@@ -402,10 +417,10 @@ pub(crate) async fn get_favorites(
         .await
         .map_err(ApiError::from_string)?;
 
-    // Unconditional, unlike the `save_all` call sites above: `accounts_post`
-    // is the user's library, not the offline cache. Fire-and-forget, so the
-    // response is not delayed.
-    spawn_browse_persist(posts.clone(), "favorites", account_id, true);
+    // Favourites are the user's library, not the offline cache, so this call
+    // is unconditional (unlike the `save_all` sites above) and also refreshes
+    // the profile derived from it.
+    spawn_browse_persist(posts.clone(), "favorites", account_id, true, true);
 
     e621_account_parser_api::metrics::METRICS
         .browse_views_total
