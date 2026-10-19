@@ -170,6 +170,10 @@ static IDF_DIRTY: AtomicBool = AtomicBool::new(true);
 static IDF_REBUILDING: AtomicBool = AtomicBool::new(false);
 static BUMP_LOCK: Mutex<()> = Mutex::new(());
 static BUMP_DRIFT_COUNT: AtomicI64 = AtomicI64::new(0);
+/// Bumped on every in-memory delta. A rebuild compares it before and after
+/// reading the database, so a read that raced a commit cannot overwrite the
+/// newer in-memory value.
+static BUMP_GENERATION: AtomicI64 = AtomicI64::new(0);
 
 /// Two separate access timers so background work (prefetch, `save_posts_tags_batch`)
 /// doesn't prevent idle-eviction of the user-facing cache.
@@ -214,6 +218,9 @@ pub fn bump_idf(df_delta: HashMap<String, i64>, n_posts_delta: i64) {
     let mut next = (*current).clone();
     next.bump(&df_delta, n_posts_delta);
     IDF_CACHE.store(Arc::new(next));
+    // Signals a rebuild that read the database before this delta landed that
+    // its snapshot is stale (see `spawn_rebuild_if_needed`).
+    BUMP_GENERATION.fetch_add(1, Ordering::AcqRel);
 
     let n = BUMP_DRIFT_COUNT.fetch_add(1, Ordering::AcqRel) + 1;
     if n >= cfg().runtime.idf_bump_drift_threshold.max(1) {
@@ -235,10 +242,31 @@ fn spawn_rebuild_if_needed() {
                     if !IDF_DIRTY.swap(false, Ordering::AcqRel) {
                         break 'work;
                     }
+                    let generation = BUMP_GENERATION.load(Ordering::Acquire);
                     match IdfIndex::from_db() {
                         Ok(new) => {
-                            IDF_CACHE.store(Arc::new(new));
-                            BUMP_DRIFT_COUNT.store(0, Ordering::Release);
+                            // The database was read outside `BUMP_LOCK`. If a
+                            // batch (or a post delete) committed and bumped the
+                            // in-memory index while we were reading, `new` is
+                            // older than the live index and storing it would
+                            // silently drop that delta. Keep the bumped index
+                            // and ask for another read instead.
+                            let stored = {
+                                let _guard = BUMP_LOCK
+                                    .lock()
+                                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                                if BUMP_GENERATION.load(Ordering::Acquire) == generation {
+                                    IDF_CACHE.store(Arc::new(new));
+                                    BUMP_DRIFT_COUNT.store(0, Ordering::Release);
+                                    true
+                                } else {
+                                    false
+                                }
+                            };
+                            if !stored {
+                                IDF_DIRTY.store(true, Ordering::Release);
+                                break 'work;
+                            }
                         }
                         Err(e) => {
                             error!("[idf] rebuild failed: {e}");

@@ -1,10 +1,112 @@
 use chrono::Utc;
 use rusqlite::params;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::models::Post;
 
 use super::{hydrate_cache, open_db, parse_db_datetime};
+
+/// Tag-side effects of deleting posts, captured inside the deleting
+/// transaction and applied to the in-memory IDF index only after it commits.
+///
+/// The delete cascades into `tags_posts`, so `tags.df` (recomputed in the same
+/// transaction) and the in-memory index would otherwise disagree until the
+/// next *full* rebuild — which is exactly what the prune workers used to force
+/// on every pass by calling `mark_idf_dirty()`. That rebuild re-reads the whole
+/// `tags` table plus `COUNT(*)` over `posts`, and its cost grows with the
+/// catalog rather than with the deletion. Carrying the exact negative delta
+/// here lets `bump_idf` correct the index in place.
+struct PostDeleteEffects {
+    removed: usize,
+    df_delta: HashMap<String, i64>,
+}
+
+fn apply_post_delete_effects(effects: PostDeleteEffects) {
+    if effects.removed == 0 {
+        return;
+    }
+    crate::utils::bump_idf(effects.df_delta, -(effects.removed as i64));
+}
+
+/// Delete posts by id, in one transaction, and report what the deletion did to
+/// tag document frequencies.
+///
+/// Both the postings that the cascade removes and the new `tags.df` are
+/// computed here, not by a later rebuild: `tags_posts` is keyed
+/// `(tag_id, post_id)`, and `idx_tp_post(post_id)` serves the per-post lookup,
+/// so the per-tag count of a bounded id list stays an index-only `GROUP BY`.
+/// `recompute_df_for_tags` then re-counts just those tags.
+fn delete_posts_by_ids_in_tx(
+    tx: &rusqlite::Transaction,
+    ids: &[i64],
+) -> Result<PostDeleteEffects, String> {
+    if ids.is_empty() {
+        return Ok(PostDeleteEffects {
+            removed: 0,
+            df_delta: HashMap::new(),
+        });
+    }
+
+    let mut postings: HashMap<i64, i64> = HashMap::new();
+    for chunk in ids.chunks(super::IN_CLAUSE_CHUNK) {
+        let placeholders = vec!["?"; chunk.len()].join(",");
+        let mut stmt = tx
+            .prepare(&format!(
+                "SELECT tag_id, COUNT(*) FROM tags_posts \
+                 WHERE post_id IN ({placeholders}) GROUP BY tag_id"
+            ))
+            .map_err(|e| format!("prepare post tag deltas: {e}"))?;
+        let rows = stmt
+            .query_map(rusqlite::params_from_iter(chunk.iter()), |r| {
+                Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))
+            })
+            .map_err(|e| format!("query post tag deltas: {e}"))?;
+        for row in rows {
+            let (tag_id, count) = row.map_err(|e| format!("read post tag delta: {e}"))?;
+            *postings.entry(tag_id).or_insert(0) += count;
+        }
+    }
+
+    let tag_ids: Vec<i64> = postings.keys().copied().collect();
+    let mut names: HashMap<i64, String> = HashMap::with_capacity(tag_ids.len());
+    for chunk in tag_ids.chunks(super::IN_CLAUSE_CHUNK) {
+        let placeholders = vec!["?"; chunk.len()].join(",");
+        let mut stmt = tx
+            .prepare(&format!(
+                "SELECT id, name FROM tags WHERE id IN ({placeholders})"
+            ))
+            .map_err(|e| format!("prepare deleted-tag names: {e}"))?;
+        let rows = stmt
+            .query_map(rusqlite::params_from_iter(chunk.iter()), |r| {
+                Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+            })
+            .map_err(|e| format!("query deleted-tag names: {e}"))?;
+        for row in rows {
+            let (id, name) = row.map_err(|e| format!("read deleted-tag name: {e}"))?;
+            names.insert(id, name);
+        }
+    }
+
+    let mut removed = 0usize;
+    for chunk in ids.chunks(super::IN_CLAUSE_CHUNK) {
+        let placeholders = vec!["?"; chunk.len()].join(",");
+        removed += tx
+            .execute(
+                &format!("DELETE FROM posts WHERE id IN ({placeholders})"),
+                rusqlite::params_from_iter(chunk.iter()),
+            )
+            .map_err(|e| format!("delete posts by id: {e}"))?;
+    }
+
+    let touched: HashSet<i64> = postings.keys().copied().collect();
+    super::tags::recompute_df_for_tags(tx, &touched)?;
+
+    let df_delta = postings
+        .iter()
+        .filter_map(|(id, count)| names.get(id).map(|name| (name.clone(), -count)))
+        .collect();
+    Ok(PostDeleteEffects { removed, df_delta })
+}
 
 /// Delete catalog posts that aren't favourited by anyone and haven't been
 /// re-touched within `retention_secs`. Used by the cache-validator worker
@@ -16,9 +118,11 @@ use super::{hydrate_cache, open_db, parse_db_datetime};
 /// prune. `before` is computed via a separate COUNT so the caller can log
 /// "dropped N entries" without instrumenting the DELETE itself.
 ///
-/// Marks `IDF` and `GLOBAL` caches dirty when anything was deleted, so the
-/// in-memory graphs shrink on the next worker tick. Mirror of the longer-
-/// lived `prune_stale_catalog_posts` — both are now unified in `cache_pruner.rs`.
+/// The in-memory IDF index is corrected incrementally per batch (see
+/// [`delete_posts_by_ids_in_tx`]), so this path no longer forces a full
+/// rebuild. The global relation graph still needs its dirty flag: its table is
+/// not decremented by post deletes. Mirror of the longer-lived
+/// `prune_stale_catalog_posts` — both are now unified in `cache_pruner.rs`.
 pub fn prune_orphan_candidates(retention_secs: u64) -> Result<(usize, usize), String> {
     let conn = open_db().map_err(|e| format!("prune_orphan_candidates open: {e}"))?;
     let cutoff = (Utc::now() - chrono::Duration::seconds(retention_secs as i64)).to_rfc3339();
@@ -48,7 +152,6 @@ pub fn prune_orphan_candidates(retention_secs: u64) -> Result<(usize, usize), St
     let deleted = prune_orphan_posts_batched(&cutoff, ORPHAN_PRUNE_BATCH)?;
 
     if deleted > 0 {
-        crate::utils::mark_idf_dirty();
         crate::utils::mark_global_relation_dirty();
     }
 
@@ -61,27 +164,30 @@ const ORPHAN_PRUNE_BATCH: i64 = 5_000;
 fn prune_orphan_posts_batched(cutoff: &str, batch_size: i64) -> Result<usize, String> {
     let mut total: usize = 0;
     loop {
-        let deleted = super::with_write_tx(|tx| {
-            let n = tx
-                .execute(
-                    "DELETE FROM posts \
-                     WHERE id IN ( \
-                         SELECT p.id FROM posts p \
-                         WHERE p.last_seen_at < ?1 \
-                           AND NOT EXISTS ( \
-                               SELECT 1 FROM accounts_post ap WHERE ap.post_id = p.id \
-                           ) \
-                         LIMIT ?2 \
-                     )",
-                    params![cutoff, batch_size],
+        let effects = super::with_write_tx(|tx| {
+            let mut stmt = tx
+                .prepare(
+                    "SELECT p.id FROM posts p \
+                     WHERE p.last_seen_at < ?1 \
+                       AND NOT EXISTS ( \
+                           SELECT 1 FROM accounts_post ap WHERE ap.post_id = p.id \
+                       ) \
+                     LIMIT ?2",
                 )
-                .map_err(|e| format!("prune_orphan_posts batch: {e}"))?;
-            Ok(n)
+                .map_err(|e| format!("prepare prune batch: {e}"))?;
+            let ids = stmt
+                .query_map(params![cutoff, batch_size], |r| r.get::<_, i64>(0))
+                .map_err(|e| format!("query prune batch: {e}"))?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| format!("collect prune batch: {e}"))?;
+            delete_posts_by_ids_in_tx(tx, &ids)
         })?;
-        if deleted == 0 {
+        let removed = effects.removed;
+        apply_post_delete_effects(effects);
+        if removed == 0 {
             break;
         }
-        total += deleted;
+        total += removed;
     }
     Ok(total)
 }
@@ -92,8 +198,9 @@ fn prune_orphan_posts_batched(cutoff: &str, batch_size: i64) -> Result<usize, St
 /// churns aggressively on browse-time inserts), this is the belt-and-suspenders
 /// bound that ensures the catalog can't grow without limit.
 ///
-/// Returns the number of deleted posts. Marks IDF + global-relation dirty when
-/// anything was pruned so in-memory caches shrink on the next rebuild.
+/// Returns the number of deleted posts. The IDF index is corrected per batch;
+/// only the global relation graph is marked dirty, because its table is not
+/// decremented by post deletes.
 pub fn prune_stale_catalog_posts(retention_days: i64) -> Result<i64, String> {
     let cutoff = (Utc::now() - chrono::Duration::days(retention_days)).to_rfc3339();
 
@@ -106,7 +213,6 @@ pub fn prune_stale_catalog_posts(retention_days: i64) -> Result<i64, String> {
     let deleted = prune_orphan_posts_batched(&cutoff, ORPHAN_PRUNE_BATCH)?;
 
     if deleted > 0 {
-        crate::utils::mark_idf_dirty();
         crate::utils::mark_global_relation_dirty();
     }
 
@@ -114,7 +220,7 @@ pub fn prune_stale_catalog_posts(retention_days: i64) -> Result<i64, String> {
 }
 
 pub fn drop_account_posts(account_id: i32) -> Result<(), String> {
-    super::with_write_tx(|tx| {
+    let effects = super::with_write_tx(|tx| {
         // Order matters: the "exclusively owned" test is a correlated
         // subquery against `accounts_post`, so it has to run *before* this
         // account's ownership rows are cleared. Doing it in the other order
@@ -128,22 +234,30 @@ pub fn drop_account_posts(account_id: i32) -> Result<(), String> {
         // does not remove the post, and stale posts leak into profile/digest
         // queries. The cascade below only reaches this account's own rows,
         // because a post with any other owner is not selected.
-        tx.execute(
-            "DELETE FROM posts \
-             WHERE id IN (SELECT post_id FROM accounts_post WHERE account_id = ?1) \
-               AND NOT EXISTS (SELECT 1 FROM accounts_post AS other \
-                               WHERE other.post_id = posts.id AND other.account_id != ?1)",
-            params![account_id],
-        )
-        .map_err(|e| format!("Failed to drop exclusively owned posts: {e}"))?;
+        let ids: Vec<i64> = {
+            let mut stmt = tx
+                .prepare(
+                    "SELECT ap.post_id FROM accounts_post ap \
+                     WHERE ap.account_id = ?1 \
+                       AND NOT EXISTS (SELECT 1 FROM accounts_post AS other \
+                                       WHERE other.post_id = ap.post_id AND other.account_id != ?1)",
+                )
+                .map_err(|e| format!("prepare exclusively-owned posts: {e}"))?;
+            stmt.query_map(params![account_id], |r| r.get::<_, i64>(0))
+                .map_err(|e| format!("query exclusively-owned posts: {e}"))?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| format!("collect exclusively-owned posts: {e}"))?
+        };
+        let effects = delete_posts_by_ids_in_tx(tx, &ids)?;
 
         tx.execute(
             "DELETE FROM accounts_post WHERE account_id = ?1",
             params![account_id],
         )
         .map_err(|e| format!("Failed to clear accounts_post: {e}"))?;
-        Ok(())
+        Ok(effects)
     })?;
+    apply_post_delete_effects(effects);
     hydrate_cache::clear_owned_and_candidates(i64::from(account_id));
     Ok(())
 }
@@ -426,29 +540,23 @@ pub fn purge_deleted_catalog_posts(limit: usize) -> Result<usize, String> {
     })
 }
 
-/// Remove IDs absent from an upstream hydration response. e621 omits deleted
-/// posts from normal post searches, so retaining them would make every future
-/// media repair pass retry an unrecoverable row forever.
+/// Remove IDs that the upstream source has authoritatively reported as gone:
+/// e621 omits deleted posts from normal searches, and a 404 on a post's
+/// original means the bytes no longer exist. Retaining such a row would make
+/// every future media repair pass retry an unrecoverable post forever.
+///
+/// Unlike [`purge_deleted_catalog_posts`] this is a hard delete, cascade and
+/// all: the caller has a positive "gone" signal, not just a stale flag. The
+/// `is_deleted` flag path (purge) deliberately keeps library rows, because a
+/// hidden post is not the same as a deleted file.
 pub fn delete_catalog_posts_by_ids(ids: &[i64]) -> Result<usize, String> {
     if ids.is_empty() {
         return Ok(0);
     }
-    super::with_write_tx(|tx| {
-        // Chunked so an arbitrarily long id list can never exceed SQLite's
-        // bound-parameter ceiling; the whole loop shares one transaction, so
-        // the delete stays atomic (see `db::IN_CLAUSE_CHUNK`).
-        let mut deleted = 0usize;
-        for chunk in ids.chunks(super::IN_CLAUSE_CHUNK) {
-            let placeholders = vec!["?"; chunk.len()].join(",");
-            deleted += tx
-                .execute(
-                    &format!("DELETE FROM posts WHERE id IN ({placeholders})"),
-                    rusqlite::params_from_iter(chunk.iter()),
-                )
-                .map_err(|e| format!("delete unrecoverable catalog posts: {e}"))?;
-        }
-        Ok(deleted)
-    })
+    let effects = super::with_write_tx(|tx| delete_posts_by_ids_in_tx(tx, ids))?;
+    let removed = effects.removed;
+    apply_post_delete_effects(effects);
+    Ok(removed)
 }
 
 pub fn upsert_catalog_posts(posts: &[Post]) -> Result<(), String> {
