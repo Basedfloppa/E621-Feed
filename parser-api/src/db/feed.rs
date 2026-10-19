@@ -850,6 +850,37 @@ fn run_id_query(
         .map_err(|e| format!("collect: {e}"))
 }
 
+/// Resolve a bounded list of tag ids to names.
+///
+/// Callers pass only the ids that survived a `LIMIT`, so this stays a handful
+/// of primary-key lookups — the alternative (joining `tags` inside an
+/// aggregate over millions of co-occurrence rows) pays one lookup per row.
+fn tag_names_for_ids(
+    conn: &Connection,
+    ids: impl IntoIterator<Item = i64>,
+) -> Result<HashMap<i64, String>, String> {
+    let ids: Vec<i64> = ids.into_iter().collect();
+    let mut names = HashMap::with_capacity(ids.len());
+    for chunk in ids.chunks(800) {
+        let placeholders = vec!["?"; chunk.len()].join(",");
+        let mut stmt = conn
+            .prepare(&format!(
+                "SELECT id, name FROM tags WHERE id IN ({placeholders})"
+            ))
+            .map_err(|e| format!("prep partner names: {e}"))?;
+        let rows = stmt
+            .query_map(rusqlite::params_from_iter(chunk.iter()), |r| {
+                Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+            })
+            .map_err(|e| format!("query partner names: {e}"))?;
+        for row in rows {
+            let (id, name) = row.map_err(|e| format!("read partner name: {e}"))?;
+            names.insert(id, name);
+        }
+    }
+    Ok(names)
+}
+
 /// Per-stream ceilings for the local candidate pool.
 ///
 /// Streams are capped independently because their densities differ by orders of
@@ -1227,57 +1258,63 @@ fn load_candidate_pool_input(
         .map_err(|e| format!("collect pool input/tags: {e}"))?;
     drop(stmt);
 
-    // Aggregate in SQL instead of shipping every pair into Rust: an active
-    // account holds millions of rows and only the top few dozen partners are
-    // ever used. `cooc_count >= ?2` keeps the scan on
-    // `idx_atc_account_cooc(account_id, cooc_count)` rather than a full table
-    // walk. Both members of a pair are folded together because the table
-    // stores each pair once, canonically as `tag1_id < tag2_id`: a tag that
-    // only ever lands in the `tag2_id` column would otherwise lose every one
-    // of its counts. Names come back from `tags`, since the caller matches
-    // them against tag counts keyed by name.
+    // Fold both members of every pair together because the table stores each
+    // pair once, canonically as `tag1_id < tag2_id`: a tag that only ever lands
+    // in the `tag2_id` column would otherwise lose every one of its counts.
     //
-    // The index does not make the *aggregate* cheap: measured on the production
-    // DB, accounts holding 2.6–2.7 M co-occurrence rows take **1.25–1.64 s**
-    // here, because `cooc_count >= 2` admits nearly every row, so both
-    // `UNION ALL` branches feed ~5.5 M rows into a temp B-tree `GROUP BY` (see
-    // `EXPLAIN QUERY PLAN`: `USE TEMP B-TREE FOR GROUP BY` + `FOR ORDER BY`).
-    // That is the shape of the original ~2.7 s `db_hydrate` figure, and it is
-    // query cost, not any writer-lock wait — reads never touch `WRITE_CONN`.
-    // Accounts with no co-occurrence rows (and no `account_tag_counts`, which
-    // is the whole local DB today) measure 0 ms here.
+    // Aggregate by tag **id**, and resolve names only for the handful of
+    // partners that survive the LIMIT. The previous form joined `tags` inside
+    // both `UNION ALL` branches, i.e. one primary-key lookup plus a name copy
+    // for every one of the ~5.5M rows an active account contributes. Measured
+    // on the production database (2026-10-19, account 18044, 2.7M pairs):
+    // 0.77 s for that name-join form versus 0.56 s for the id-only aggregate,
+    // with an identical total. Migration V38 replaces
+    // `idx_atc_account_cooc(account_id, cooc_count)` with a covering
+    // `(account_id, cooc_count, tag1_id, tag2_id)` index, so the two scans
+    // below become index-only.
+    //
+    // The temp B-tree for `GROUP BY` remains — `cooc_count >= 2` admits almost
+    // every row — but it no longer carries strings.
+    //
+    // Over-fetch a little so the final `(total DESC, name ASC)` order is the
+    // same one the name-keyed query produced. Ties that span more than the
+    // over-fetch window are broken by id; either order is deterministic.
+    let fetch = tuning.cooccurrence_limit as i64 * 4 + 16;
     let mut stmt = conn
         .prepare(
-            "SELECT partner, SUM(c) AS total
+            "SELECT partner_id, SUM(c) AS total
              FROM (
-                 SELECT t1.name AS partner, atc.cooc_count AS c
-                 FROM account_tag_cooccurrence atc
-                 INNER JOIN tags t1 ON t1.id = atc.tag1_id
-                 WHERE atc.account_id = ?1 AND atc.cooc_count >= ?2
+                 SELECT tag1_id AS partner_id, cooc_count AS c
+                 FROM account_tag_cooccurrence
+                 WHERE account_id = ?1 AND cooc_count >= ?2
                  UNION ALL
-                 SELECT t2.name AS partner, atc.cooc_count AS c
-                 FROM account_tag_cooccurrence atc
-                 INNER JOIN tags t2 ON t2.id = atc.tag2_id
-                 WHERE atc.account_id = ?1 AND atc.cooc_count >= ?2
+                 SELECT tag2_id AS partner_id, cooc_count AS c
+                 FROM account_tag_cooccurrence
+                 WHERE account_id = ?1 AND cooc_count >= ?2
              )
-             GROUP BY partner
-             ORDER BY total DESC, partner ASC
+             GROUP BY partner_id
+             ORDER BY SUM(c) DESC, partner_id ASC
              LIMIT ?3",
         )
         .map_err(|e| format!("prep pool input/cooc: {e}"))?;
-    let cooccurrence = stmt
+    let partners = stmt
         .query_map(
-            params![
-                account_id,
-                tuning.cooccurrence_min_cooc,
-                tuning.cooccurrence_limit as i64
-            ],
-            |r| r.get::<_, String>(0),
+            params![account_id, tuning.cooccurrence_min_cooc, fetch],
+            |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)),
         )
         .map_err(|e| format!("query pool input/cooc: {e}"))?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| format!("collect pool input/cooc: {e}"))?;
     drop(stmt);
+
+    let partner_names = tag_names_for_ids(conn, partners.iter().map(|(id, _)| *id))?;
+    let mut named: Vec<(i64, String)> = partners
+        .iter()
+        .filter_map(|(id, total)| partner_names.get(id).map(|name| (*total, name.clone())))
+        .collect();
+    named.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    named.truncate(tuning.cooccurrence_limit);
+    let cooccurrence: Vec<String> = named.into_iter().map(|(_, name)| name).collect();
 
     let mut stmt = conn
         .prepare(
