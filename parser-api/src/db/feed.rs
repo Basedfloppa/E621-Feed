@@ -1079,42 +1079,55 @@ fn local_candidates_recent_popular(
     // not "popular for this user". Floored at 1.0 so a fresh account (average
     // 0) still gets a usable stream instead of an empty one.
     let threshold = (fav_baseline.max(0.0) * 0.6).max(1.0);
-    let anchor = random_rowid_anchor(conn)?;
-    // Fast path: a random rowid window, ordered by rowid — avoids the full
-    // `ORDER BY RANDOM()` sort over the entire recent set.
+
+    // Random offset over the qualifying recent set, ordered by `created_at`.
     //
-    // It is still a walk, though: `EXPLAIN QUERY PLAN` shows
-    // `SEARCH p USING INTEGER PRIMARY KEY (rowid>?)` with every other predicate
-    // evaluated per row, so the statement reads until it has collected `limit`
-    // qualifying posts. Measured on the production DB (6.77 M posts, 23 931 of
-    // them inside the 30-day window, `fav_count >= 6` matching 23 318): **86–144
-    // ms** per call, the largest single term of the cold `db_hydrate` phase
-    // (242.7 ms for an account with no taste profile at all). Driving the same
-    // predicate from `idx_posts_created_at` returns 400 ids in **0.3 ms**, but
-    // it would return the *newest* 400 every time, and the window exists to
-    // sample uniformly across the recent set — so replacing it is a change to
-    // design deliberately, not a swap.
-    let window_sql = format!("{RECENT_POPULAR_BODY} AND p.rowid >= ?4 ORDER BY p.rowid LIMIT ?3");
-    let base: &[&dyn rusqlite::ToSql] = &[
-        &cutoff as &dyn rusqlite::ToSql,
-        &threshold as &dyn rusqlite::ToSql,
-        &limit as &dyn rusqlite::ToSql,
-    ];
-    let mut out = {
-        let with_anchor: Vec<&dyn rusqlite::ToSql> = base
-            .iter()
-            .copied()
-            .chain(std::iter::once(&anchor as &dyn rusqlite::ToSql))
-            .collect();
-        run_id_query(conn, &window_sql, &with_anchor)?
-    };
-    if (out.len() as i64) < limit {
-        let random_sql = format!("{RECENT_POPULAR_BODY} ORDER BY RANDOM() LIMIT ?3");
-        let extra = run_id_query(conn, &random_sql, base)?;
-        out.extend(extra);
+    // The previous form drew a random *rowid* and walked forward from it. That
+    // is a table walk with every predicate evaluated per row — measured
+    // 86–144 ms on the production catalog (2026-10-12), the largest single term
+    // of the cold `db_hydrate` phase. It is also not uniform: rowid gaps are
+    // not one per qualifying post, so posts sitting behind a long unmatched
+    // stretch are over-weighted.
+    //
+    // A random OFFSET over `idx_posts_created_at` reads at most the recent
+    // window (17 549 rows here, 23 931 on production) and is exactly uniform:
+    // an offset drawn from `[0, count - limit]` includes every qualifying post
+    // with probability `limit / (count - limit + 1)`. Measured on the same
+    // catalog (2026-10-19): 4.7–5.7 ms for the row fetch plus 4.4 ms for the
+    // count, versus 104 ms for the rowid walk.
+    //
+    // The count is a range scan with per-row predicates, which is why it costs
+    // more than counting index entries; it is still bounded by the recent
+    // window, not by the catalog.
+    let qualifying: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM posts p \
+             WHERE p.created_at >= ?1 \
+               AND p.is_deleted = 0 \
+               AND p.preview_url IS NOT NULL \
+               AND p.fav_count >= ?2",
+            params![cutoff, threshold],
+            |r| r.get(0),
+        )
+        .map_err(|e| format!("recent-popular count: {e}"))?;
+    if qualifying == 0 {
+        return Ok(Vec::new());
     }
-    out.truncate(limit as usize);
-    Ok(out)
+    let span = (qualifying - limit).max(0);
+    let offset: i64 = conn
+        .query_row("SELECT ABS(RANDOM()) % ?1", [span + 1], |r| r.get(0))
+        .map_err(|e| format!("recent-popular offset: {e}"))?;
+    let sql = format!("{RECENT_POPULAR_BODY} ORDER BY p.created_at DESC LIMIT ?3 OFFSET ?4");
+    run_id_query(
+        conn,
+        &sql,
+        &[
+            &cutoff as &dyn rusqlite::ToSql,
+            &threshold as &dyn rusqlite::ToSql,
+            &limit as &dyn rusqlite::ToSql,
+            &offset as &dyn rusqlite::ToSql,
+        ],
+    )
 }
 
 /// Build the local candidate pool from pre-loaded sources.
@@ -1303,8 +1316,10 @@ fn load_candidate_pool_input(
 /// seen/owned in memory.
 ///
 /// ## Randomisation
-/// Each stream samples a pseudo-random rowid window (with an `ORDER BY
-/// RANDOM()` fallback) so the same best posts don't dominate every feed request.
+/// The tag-name streams sample a pseudo-random rowid window; the
+/// recent-popular stream draws a random `OFFSET` over `idx_posts_created_at`
+/// (uniform per qualifying post, and index-bounded). Either way the same best
+/// posts do not dominate every feed request.
 pub fn collect_local_candidate_ids(account_id: i32, limit: i64) -> Result<Vec<i64>, String> {
     let cache_key = i64::from(account_id);
     if let Some(cached) = hydrate_cache::candidates(cache_key) {
