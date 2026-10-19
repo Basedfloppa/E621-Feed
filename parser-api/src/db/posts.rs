@@ -530,14 +530,37 @@ pub fn collect_post_ids_needing_hydration(limit: usize) -> Result<Vec<i64>, Stri
 
 /// Remove catalog posts which e621 has already marked deleted. Cascading FKs
 /// remove their tag, account-link, session, and interaction references.
+///
+/// Posts that are still in somebody's library are **not** purged. The media
+/// worker sees `is_deleted = 1` after e621 hides a post, and deleting the row
+/// would cascade through `accounts_post` — the post would silently vanish from
+/// the owner's catalog and taste profile (the file itself stays on disk). A
+/// deleted-but-favourited post is therefore kept; it is excluded from catalog
+/// views by `is_deleted` and by the hydration scan, which only selects live
+/// rows. The alternative (delete the row *and* its media file) would satisfy
+/// the same invariant, but it needs a file deletion in a path that only knows
+/// about ids; keeping the row is the smaller change and loses nothing.
 pub fn purge_deleted_catalog_posts(limit: usize) -> Result<usize, String> {
-    super::with_write_tx(|tx| {
-        tx.execute(
-            "DELETE FROM posts WHERE id IN (SELECT id FROM posts WHERE is_deleted = 1 LIMIT ?1)",
-            [limit.min(500) as i64],
-        )
-        .map_err(|e| format!("purge deleted catalog posts: {e}"))
-    })
+    let effects = super::with_write_tx(|tx| {
+        let ids: Vec<i64> = {
+            let mut stmt = tx
+                .prepare(
+                    "SELECT p.id FROM posts p \
+                     WHERE p.is_deleted = 1 \
+                       AND NOT EXISTS (SELECT 1 FROM accounts_post ap WHERE ap.post_id = p.id) \
+                     LIMIT ?1",
+                )
+                .map_err(|e| format!("prepare deleted-post purge: {e}"))?;
+            stmt.query_map([limit.min(500) as i64], |r| r.get::<_, i64>(0))
+                .map_err(|e| format!("query deleted-post purge: {e}"))?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| format!("collect deleted-post purge: {e}"))?
+        };
+        delete_posts_by_ids_in_tx(tx, &ids)
+    })?;
+    let removed = effects.removed;
+    apply_post_delete_effects(effects);
+    Ok(removed)
 }
 
 /// Remove IDs that the upstream source has authoritatively reported as gone:

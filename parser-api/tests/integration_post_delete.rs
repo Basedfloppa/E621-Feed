@@ -7,6 +7,8 @@
 
 mod support;
 
+use std::collections::HashSet;
+
 use e621_account_parser_api::db;
 use e621_account_parser_api::models::{
     FileOriginal, Files, Flags, Has, Post, Rating, Relationships, Score, Stats, Tags,
@@ -74,10 +76,42 @@ fn post_exists(id: i64) -> bool {
     count == 1
 }
 
+fn linked_to_account(id: i64) -> bool {
+    let conn = db::open_db_for_calibration().expect("open db");
+    conn.query_row(
+        "SELECT COUNT(*) FROM accounts_post WHERE post_id = ?1 AND account_id = ?2",
+        rusqlite::params![id, ACCOUNT_ID],
+        |r| r.get::<_, i64>(0),
+    )
+    .expect("count link")
+        == 1
+}
+
 fn stored_df(tag: &str) -> i64 {
     let conn = db::open_db_for_calibration().expect("open db");
     conn.query_row("SELECT df FROM tags WHERE name = ?1", [tag], |r| r.get(0))
         .expect("read df")
+}
+
+/// The media worker sees `is_deleted = 1` after e621 hides a post. Purging it
+/// must not cascade into `accounts_post`: the row is the owner's library entry,
+/// and the file is still on disk.
+#[test]
+fn purge_keeps_a_deleted_post_that_is_still_in_a_library() {
+    setup();
+    let favourited = make_post(7_311_001, "purge_favourited", true);
+    let orphan = make_post(7_311_002, "purge_orphan", true);
+
+    db::save_posts_with_tags(&[favourited], ACCOUNT_ID, &HashSet::new(), false, None)
+        .expect("link deleted favourited post");
+    db::upsert_catalog_posts_with_tags(&[orphan]).expect("catalog-only deleted post");
+
+    let removed = db::purge_deleted_catalog_posts(500).expect("purge");
+
+    assert_eq!(removed, 1, "only the unowned post is purgeable");
+    assert!(post_exists(7_311_001), "favourited post must survive");
+    assert!(linked_to_account(7_311_001), "library link must survive");
+    assert!(!post_exists(7_311_002), "unowned deleted post is purged");
 }
 
 /// A hard delete (`delete_catalog_posts_by_ids`, the authoritative "gone"
