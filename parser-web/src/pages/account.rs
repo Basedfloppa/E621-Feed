@@ -786,6 +786,7 @@ pub fn account_creator() -> Html {
                                                         <textarea
                                                             class="textarea textarea-bordered w-full box-border"
                                                             rows="5"
+                                                            aria-label="Blacklist tags"
                                                             value={draft_value}
                                                             onchange={on_draft_change}
                                                             disabled={is_saving}
@@ -833,7 +834,7 @@ pub fn account_creator() -> Html {
 
                             <form onsubmit={onsubmit}>
                                 <fieldset class="fieldset w-full mb-3">
-                                    <legend class="fieldset-legend">{"Account ID"}</legend>
+                                    <legend class="fieldset-legend" id="account-id-label">{"Account ID"}</legend>
                                     <input
                                         type="text"
                                         inputmode="numeric"
@@ -841,6 +842,7 @@ pub fn account_creator() -> Html {
                                         maxlength="9"
                                         class="input w-full box-border"
                                         id="account-id"
+                                        aria-labelledby="account-id-label"
                                         value={(*id).clone()}
                                         onchange={on_id_change}
                                         placeholder="Enter numeric account ID"
@@ -849,11 +851,12 @@ pub fn account_creator() -> Html {
                                 </fieldset>
 
                                 <fieldset class="fieldset w-full mb-3">
-                                    <legend class="fieldset-legend">{"Username"}</legend>
+                                    <legend class="fieldset-legend" id="account-name-label">{"Username"}</legend>
                                     <input
                                         type="text"
                                         class="input w-full box-border"
                                         id="account-name"
+                                        aria-labelledby="account-name-label"
                                         value={(*name).clone()}
                                         onchange={on_name_change}
                                         placeholder="Enter your username"
@@ -862,7 +865,7 @@ pub fn account_creator() -> Html {
                                 </fieldset>
 
                                 <div class="mb-3">
-                                    <label class="font-semibold text-base-content text-sm mb-1 block">{"Blacklist"}</label>
+                                    <label class="font-semibold text-base-content text-sm mb-1 block" for="account-blacklist">{"Blacklist"}</label>
                                     <textarea
                                         class="textarea w-full"
                                         id="account-blacklist"
@@ -884,7 +887,7 @@ pub fn account_creator() -> Html {
                                 </div>
 
                                 <div class="mb-3">
-                                    <label class="font-semibold text-base-content text-sm mb-1 block">{"e621 API key (optional)"}</label>
+                                    <label class="font-semibold text-base-content text-sm mb-1 block" for="account-api-key">{"e621 API key (optional)"}</label>
                                     <input
                                         type="password"
                                         class="input w-full box-border"
