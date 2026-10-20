@@ -200,6 +200,15 @@ networking and binds the app directly to the host port via `ROCKET_PORT=8181`
 > the writer connection sets `busy_timeout` *before* the `journal_mode = WAL`
 > switch — so a concurrently-starting worker holding a shared lock makes the
 > WAL switch wait instead of failing with a "database is locked" panic.
+>
+> **Migrations can dominate startup on a large database.** Nothing serves
+> requests until they finish, so roll out schema changes in a maintenance
+> window: V38 (`idx_atc_account_cooc_cover`) took **17 min 17 s** over 962M
+> rows and grew the file by 19 GB. The writer builds the index with
+> `PRAGMA temp_store = MEMORY`, so the sorter lives in the heap (tens of GB at
+> that size); cap the container (`mem_limit`) and consider
+> `E621_DB_CACHE_MB=1024` for the run. Details and measurements:
+> [`memory-profile.md`](memory-profile.md#migration-peak--temp_store--memory).
 
 ### Local build (no Docker)
 

@@ -14,6 +14,15 @@ approximate production scale) against the real `database.db` (198,794 tags,
 > concurrency under load; `cargo bench --bench scoring` times the scoring
 > hot path (≈3.5 µs/post).
 
+> **2026-10-19, live instance.** At **44.6M pairs** in `tag_cooccurrence`
+> the process sits at **1.7–1.8 GiB RSS**, not the ~73 MB of the 2.7M-pair
+> run below: the frozen vec alone is 44.6M × 12 B ≈ **536 MB**, and every
+> rebuild stages a second copy before swapping the `Arc`, so a load peaks
+> near 1.1 GB. Two full rebuilds were observed minutes apart on the same
+> instance — saving favourites marks the global graph dirty
+> (`mark_global_relation_dirty`), so browsing `/favorites` costs one
+> background rebuild (~10 s CPU, coalesced) and the response is not blocked.
+
 ## Methodology
 
 The example builds each structure at increasing scale and reads RSS via
@@ -93,8 +102,9 @@ catalog size. The rest comes from:
 1. **Keep the frozen Vec path** for the global graph (already done). The
    hot HashMap form should stay limited to small per-account graphs built
    in calibrate.
-2. **Cap the SQLite page cache** — set `PRAGMA cache_size` to a bounded
-   value (e.g. 64 MB) to stop the DB from inflating RSS unboundedly.
+2. **Cap the SQLite page cache** — it is bounded per connection today:
+   readers get 64 MiB each (16-connection pool), the writer gets 8 GiB by
+   default (`E621_DB_CACHE_MB`). Lower the writer value for migration runs.
 3. **Measure API cache realistically** — 5000 entries of full post JSON at
    ~50 KB each = 250 MB. Consider lowering `e621_cache_max_entries` or
    capping per-entry size.
@@ -103,6 +113,30 @@ catalog size. The rest comes from:
    is mainly avoiding *fragmentation* under sustained churn, not peak RSS.
 5. Re-run `memory_profile` after catalog growth (tags → 1M, pairs → 10M)
    to keep the estimates honest.
+
+## Migration peak — `temp_store = MEMORY`
+
+Migrations run on the writer connection, which sets `PRAGMA temp_store = MEMORY`
+(`parser-api/src/db/mod.rs`). A `CREATE INDEX` sorts in that store, so a large
+build keeps the sorter in the heap instead of spilling to disk.
+
+Measured on a synthetic table of the same shape (4 int columns + rowid, peak
+RSS via `VmHWM`):
+
+| rows | `temp_store = MEMORY` | `temp_store = FILE` |
+|---:|---:|---:|
+| 16.7M | 1095 MB (15.4 s) | **135 MB (9.4 s)** |
+| 67.1M | 4167 MB | — |
+
+That is ~60 B/row and linear. V38 (`idx_atc_account_cooc_cover`) built over
+**962M rows** took **17 min 17 s** and grew the file by 19 GB; the extrapolated
+sorter footprint is tens of GB — during that run the host (container without a
+memory limit) pushed its whole desktop into zram.
+
+If a migration ever builds a big index: `PRAGMA temp_store = FILE` for the
+migration connection (measured both leaner and faster), and a smaller
+`E621_DB_CACHE_MB` for the run. The application does not serve requests while
+migrations run, so this needs a maintenance window, not just a restart.
 
 ## Re-running
 
