@@ -6,7 +6,7 @@ use crate::models::{
 use crate::pages::UserInfo;
 use gloo_timers::callback::Timeout;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use web_sys::{HtmlInputElement, HtmlTextAreaElement};
 use yew::prelude::*;
 use yew_router::prelude::use_location;
@@ -48,7 +48,6 @@ pub fn account_creator() -> Html {
     let edit_draft = use_state(String::new);
     let edit_saving = use_state(|| false);
     let remove_error: UseStateHandle<Option<String>> = use_state(|| None);
-    let experiment_buckets: UseStateHandle<HashMap<i64, String>> = use_state(HashMap::new);
     let pending_remove: UseStateHandle<Option<UserInfo>> = use_state(|| None);
     let default_blacklist: UseStateHandle<Vec<String>> = use_state(Vec::new);
     // Accounts with a running /process job (full or incremental).
@@ -155,36 +154,6 @@ pub fn account_creator() -> Html {
                     {
                         saved_accounts.set(accounts);
                     }
-                });
-            }
-            || ()
-        });
-    }
-
-    {
-        let saved_accounts = saved_accounts.clone();
-        let experiment_buckets = experiment_buckets.clone();
-        let ids: Vec<i64> = (*saved_accounts).iter().map(|a| a.id).collect();
-        use_effect_with(ids, move |ids: &Vec<i64>| {
-            let ids = ids.clone();
-            let cfg = read_config_from_head();
-            if !ids.is_empty()
-                && let Some(cfg) = cfg
-            {
-                wasm_bindgen_futures::spawn_local(async move {
-                    let mut found: HashMap<i64, String> = HashMap::new();
-                    for id in ids {
-                        let url =
-                            format!("{}/account/{}/experiment_bucket", cfg.backend_domain, id);
-                        if let Ok(resp) = api_get(&url).send().await
-                            && resp.ok()
-                            && let Ok(v) = resp.json::<serde_json::Value>().await
-                            && let Some(name) = v.get("bucket").and_then(|b| b.as_str())
-                        {
-                            found.insert(id, name.to_string());
-                        }
-                    }
-                    experiment_buckets.set(found);
                 });
             }
             || ()
@@ -696,21 +665,12 @@ pub fn account_creator() -> Html {
                                         let on_draft_change = on_edit_draft_change.clone();
                                         let draft_value = (*edit_draft).clone();
                                         let is_saving = *edit_saving;
-                                        let bucket = experiment_buckets.get(&acc.id).cloned();
                                         html! {
                                             <li class="p-3">
                                                 <div class="flex justify-between items-center gap-2">
                                                     <span class="min-w-0 break-words">
                                                         <strong>{&acc.name}</strong>
                                                         {format!(" (ID: {})", acc.id)}
-                                                        if let Some(bucket_name) = bucket {
-                                                            <span
-                                                                class="badge badge-info ms-2"
-                                                                title="A/B experiment variant currently used for recommendations on this account"
-                                                            >
-                                                                { format!("variant: {bucket_name}") }
-                                                            </span>
-                                                        }
                                                     </span>
                                                     <div class="flex flex-col gap-1 shrink-0 min-w-0">
                                                         <div class="flex gap-2 w-full">
