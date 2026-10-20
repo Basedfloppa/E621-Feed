@@ -787,6 +787,8 @@ pub fn account_creator() -> Html {
                                                             class="textarea textarea-bordered w-full box-border"
                                                             rows="5"
                                                             aria-label="Blacklist tags"
+                                                            id={format!("account-blacklist-row-{acc_id}")}
+                                                            name="account-blacklist-row"
                                                             value={draft_value}
                                                             onchange={on_draft_change}
                                                             disabled={is_saving}
