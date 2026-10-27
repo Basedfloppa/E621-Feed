@@ -196,8 +196,6 @@ pub struct AccountFeedSettings {
     /// Per-account preferred tags for scoring.
     #[serde(default)]
     pub preferred_tags: Vec<PreferredTag>,
-    /// A/B experiment bucket assignment (read-only after creation).
-    pub experiment_bucket: Option<String>,
 }
 
 /// Partial update payload for `PATCH /account/<id>/feed_settings`.
@@ -239,9 +237,6 @@ pub struct AccountDataExport {
     pub blacklist: Option<String>,
     #[serde(default)]
     pub preferred_tags: Vec<PreferredTag>,
-    /// A/B experiment bucket assignment (read-only).
-    #[serde(default)]
-    pub experiment_bucket: Option<String>,
     pub profile: AccountPreferenceProfile,
     /// The account's raw interaction model (open/like/hide/… events).
     #[serde(default)]
@@ -298,8 +293,7 @@ mod tests {
             "preferred_tags": [
                 {"tag": "wolf", "group": "general", "weight": 2.0},
                 {"tag": "canine", "group": "species", "weight": 1.5}
-            ],
-            "experiment_bucket": "B"
+            ]
         }"#;
         let settings: AccountFeedSettings =
             serde_json::from_str(body).expect("GET body must parse with snake_case field names");
@@ -307,7 +301,6 @@ mod tests {
         assert_eq!(settings.preferred_tags.len(), 2);
         assert_eq!(settings.preferred_tags[0].tag, "wolf");
         assert_eq!(settings.preferred_tags[0].weight, 2.0);
-        assert_eq!(settings.experiment_bucket.as_deref(), Some("B"));
 
         // PATCH body arrives with snake_case field names; absent fields -> None.
         let patch: AccountFeedSettingsPatch = serde_json::from_str(

@@ -370,10 +370,9 @@ await check('the operator console counts exactly the accounts in scope', async (
   expect(status === 200, `admin/overview answered ${status}`);
   expect(type.includes('application/json'), `admin/overview answered ${type}`);
   const json = JSON.parse(body);
-  for (const field of ['instance_locked', 'instance_accounts', 'totals', 'buckets', 'media', 'accounts']) {
+  for (const field of ['instance_locked', 'instance_accounts', 'totals', 'media', 'accounts']) {
     expect(field in json, `admin/overview is missing ${field}`);
   }
-  expect(Array.isArray(json.buckets), 'buckets is not an array');
   expect(Array.isArray(json.accounts), 'accounts is not an array');
   // The console is a view over the same account scope `/accounts` returns. If
   // the two ever disagree, the console is showing something the cookie cannot
@@ -383,32 +382,7 @@ await check('the operator console counts exactly the accounts in scope', async (
     json.totals.accounts === listed.length,
     `admin/overview counts ${json.totals.accounts} accounts, /accounts returned ${listed.length}`,
   );
-  return `accounts=${json.totals.accounts} of ${json.instance_accounts} instance-wide, buckets=${json.buckets.length} stored=${json.media.stored}`;
-});
-
-await check('an unassignable bucket is refused, not stored and ignored', async () => {
-  // `Config::pick_bucket` falls back to the hash whenever the pinned name is
-  // not in `[buckets.*]`, so storing an unknown name would look like success
-  // and change nothing. The name is validated before ownership, which makes
-  // this check deterministic regardless of whether this instance has buckets.
-  const headers = ownerHeaders({ 'content-type': 'application/json' });
-  const { status, body } = await request('/api/account/1/experiment_bucket', {
-    method: 'PUT',
-    headers,
-    body: JSON.stringify({ bucket: 'definitely-not-a-configured-bucket' }),
-  });
-  expect(status === 400, `expected 400 for an unknown bucket, got ${status}`);
-  expect(body.includes('bucket'), `the refusal does not mention buckets: ${body}`);
-
-  // Clearing an account this cookie does not own is an authorization miss, and
-  // must read as one (200 when it is ours, 404 when it is not) — never a 500,
-  // which is what `ApiError::from_string` would make of it.
-  const cleared = await request('/api/account/1/experiment_bucket', { method: 'DELETE', headers });
-  expect(
-    cleared.status === 404 || cleared.status === 200,
-    `clearing a bucket on an unowned account answered ${cleared.status}`,
-  );
-  return `${status} unknown, ${cleared.status} clear`;
+  return `accounts=${json.totals.accounts} of ${json.instance_accounts} instance-wide, stored=${json.media.stored}`;
 });
 
 await check('a request carrying the app origin is not answered with index.html', async () => {

@@ -137,7 +137,6 @@ struct PreferredTag {
 struct AccountFeedSettings {
     blacklist: Option<String>,
     preferred_tags: Vec<PreferredTag>,
-    experiment_bucket: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -162,7 +161,6 @@ pub fn settings_page() -> Html {
     let server_is_error = use_state(|| false);
     let blacklist_draft = use_state(String::new);
     let preferred_tags_draft = use_state(String::new);
-    let experiment_bucket = use_state(|| Option::<String>::None);
 
     let display = use_state(load_display_settings);
 
@@ -170,7 +168,6 @@ pub fn settings_page() -> Html {
         let selected_user = selected_user.clone();
         let blacklist_draft = blacklist_draft.clone();
         let preferred_tags_draft = preferred_tags_draft.clone();
-        let experiment_bucket = experiment_bucket.clone();
         let server_loading = server_loading.clone();
         let server_message = server_message.clone();
         let server_is_error = server_is_error.clone();
@@ -184,7 +181,6 @@ pub fn settings_page() -> Html {
                 let url = format!("{}/account/{}/feed_settings", backend_url, user.id);
                 let blacklist_draft = blacklist_draft.clone();
                 let preferred_tags_draft = preferred_tags_draft.clone();
-                let experiment_bucket = experiment_bucket.clone();
                 let server_loading = server_loading.clone();
                 let server_message = server_message.clone();
                 let server_is_error = server_is_error.clone();
@@ -201,7 +197,6 @@ pub fn settings_page() -> Html {
                                     .collect::<Vec<_>>()
                                     .join("\n");
                                 preferred_tags_draft.set(tags_text);
-                                experiment_bucket.set(s.experiment_bucket.clone());
                                 server_loading.set(false);
                             }
                             Err(_e) => {
@@ -234,7 +229,6 @@ pub fn settings_page() -> Html {
         let selected_user = selected_user.clone();
         let blacklist_draft = blacklist_draft.clone();
         let preferred_tags_draft = preferred_tags_draft.clone();
-        let experiment_bucket = experiment_bucket.clone();
         let server_loading = server_loading.clone();
         let server_message = server_message.clone();
         let server_is_error = server_is_error.clone();
@@ -287,7 +281,6 @@ pub fn settings_page() -> Html {
             let url = format!("{}/account/{}/feed_settings", cfg.backend_domain, user.id);
             let blacklist_draft = blacklist_draft.clone();
             let preferred_tags_draft = preferred_tags_draft.clone();
-            let experiment_bucket = experiment_bucket.clone();
             let server_loading = server_loading.clone();
             let server_message = server_message.clone();
             let server_is_error = server_is_error.clone();
@@ -309,7 +302,6 @@ pub fn settings_page() -> Html {
                                 .collect::<Vec<_>>()
                                 .join("\n");
                             preferred_tags_draft.set(tags_text);
-                            experiment_bucket.set(s.experiment_bucket.clone());
                             server_message.set("Settings saved.".to_string());
                             server_is_error.set(false);
                         }
@@ -544,11 +536,6 @@ pub fn settings_page() -> Html {
                             if let Some(user) = &*selected_user {
                                 <p class="text-sm text-base-content/70 mb-3">
                                     { format!("Account: {} (ID {})", user.name, user.id) }
-                                </p>
-                            }
-                            if let Some(bucket) = &*experiment_bucket {
-                                <p class="text-sm text-base-content/70 mb-3">
-                                    { format!("Experiment bucket: {}", bucket) }
                                 </p>
                             }
                             if selected_user.is_some() {

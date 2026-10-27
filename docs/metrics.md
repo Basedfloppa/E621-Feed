@@ -5,8 +5,9 @@ All names have the `e621_` prefix. Metrics are lazily registered on first use.
 There is also a Loki structured log `SCORING_TRACE` (not a Prometheus metric) — see the end.
 
 > Observability invariant: counters keyed by `route`/`class` carry potential
-> cardinality. Interaction counters (`feed_interactions_by_type_total`) grow only
-> by `type`, not by id. Histogram buckets are fixed.
+> cardinality. The interaction counter (`e621_feed_interactions_total`) grows
+> only by `type`, not by id; the A/B `bucket` label was removed with the
+> mechanism on 2026-10-27. Histogram buckets are fixed.
 
 ## Account metrics
 
@@ -17,14 +18,12 @@ There is also a Loki structured log `SCORING_TRACE` (not a Prometheus metric) �
 | `e621_accounts_deleted_total` | counter | — | accounts deleted/unlinked |
 | `e621_active_accounts` | gauge | `window`=1d\|7d\|30d | accounts with a recorded visit inside the window (from `user_visit_tracker`, written by the digest route) |
 
-The account and catalog gauges (`e621_accounts_total`,
-`e621_experiment_bucket_accounts`, `e621_active_accounts`,
+The account and catalog gauges (`e621_accounts_total`, `e621_active_accounts`,
 `e621_catalog_posts_total`) are **re-read from their tables every 60 s** rather
 than maintained incrementally by the write paths — see `src/table_gauges.rs`.
 None of them *can* be incremental: posts are UPSERTed (no path can tell a new
 row from a rewrite), and orphan-account cleanup deletes rows straight from SQL
-without knowing which bucket they were in. Expect up to a minute of lag, and
-expect a bucket that empties to fall to `0` rather than hold its last value.
+without passing through the delete handler. Expect up to a minute of lag.
 
 `window="1d"` reads as *today or yesterday*: `user_visit_tracker.last_visit_date`
 stores a bare date, so a sub-day window cannot be expressed from it. Accounts
@@ -52,22 +51,19 @@ that have never visited have no row in that table and are not counted.
 |---|---|---|
 | `e621_prefetch_breaker_trips_total` | counter | times the prefetch circuit breaker opened |
 
-## Interactions / A/B
+## Interactions
 
 | Metric | Type | Labels | Read as |
 |---|---|---|---|
-| `e621_feed_interactions_total` | counter | `bucket`, `type` | interactions by type and bucket |
-| `e621_feed_interactions_by_type_total` | counter | `type` | interactions by type (for dedup/types) |
-| `e621_experiment_bucket_accounts` | gauge | `bucket` | accounts in each bucket |
-| `e621_experiment_bucket_interactions_total` | counter | `bucket` | interactions in each bucket |
+| `e621_feed_interactions_total` | counter | `type` | interactions by type (`qualified_impression` / `open` / `like` / `strong_like` / `hide`) |
 
-> **Both write paths move these counters.** The WASM client batches every
+> **Both write paths move this counter.** The WASM client batches every
 > interaction (`interaction_queue` → `POST /api/interaction/batch`), which is the
-> route real traffic uses; only Undo calls the single one. They used to be counted
+> route real traffic uses; only Undo calls the single one. It used to be counted
 > on the single route alone, so `e621_feed_interactions_total` stayed unpopulated
-> while `feed_interactions` filled up — the five interaction / A-B dashboard panels
-> read empty on a busy instance. Counts now follow the rows the DB reports as
-> inserted, so a retried batch is not double-counted.
+> while `feed_interactions` filled up — the interaction dashboard panels read empty
+> on a busy instance. Counts now follow the rows the DB reports as inserted, so a
+> retried batch is not double-counted.
 
 ## Catalog / cache
 

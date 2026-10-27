@@ -8,6 +8,11 @@
 # code disagree, the code wins: the authority for a true default is the
 # `default_*` function in `src/models/config.rs`, and `Priors::default`
 # in `src/utils/scorer/priors.rs`. A recalibration rewrites this file.
+#
+# Caveat: that fit predates the candidate-pool rewrite (2026-10-27 — newest-first
+# only, IDF-ranked anchors, five streams drained round-robin), so these weights
+# were tuned on a pool production no longer builds. They are still a working set,
+# not a measured optimum: run `calibrate grid` before trusting small deltas.
 
 # --- Required ---------------------------------------------------------------
 admin_user = "username"
@@ -66,7 +71,7 @@ e621_cache_max_entries = 5000
 # Scoring priors
 # Scoring priors and per-group multipliers.
 [priors]
-now = "2000-1-01T12:00:00Z" # dummy, replaced with current date at load
+now = "2000-1-01T12:00:00Z" # dummy: scoring routes overwrite it with the wall clock
 recency_tau_days = 10.0
 
 quality_a = 0.50
@@ -82,17 +87,17 @@ quality_log_bias = -3.0
 # the offline evidence for them is confounded — `recency` and `popularity` are
 # scored relative to statistics derived from the very favourites the eval treats
 # as labels, the split is `time_causal`, and the hard negatives are mined with
-# the incumbent weights (docs/calibration.md). That decision belongs to the
-# online bucket A/B, not to this pass.
+# the incumbent weights (docs/calibration.md). Those biases belong to the
+# harness, so no further offline run settles the question either.
 #
 # The harness's preference for the zeroed block is measured, not assumed: it is
 # worth +0.069 NDCG@20 (paired, SE 0.002616, one matrix, `eval --fit-mix=<file>`
-# — see "Run 2026-10-10" in docs/calibration.md). That is the size of the bet
-# this pass declines to take, so treat the five values below as *deliberately
+# over docs/calibration-results/). That is the size of the bet this pass
+# declines to take, so treat the five values below as *deliberately
 # uncalibrated* rather than as a null result. The figure is conditioned on the
 # split, though: under `split=random` the same vector is worth only +0.013 and
-# the shipped config scores 0.79 rather than 0.53 (2026-10-11), so +0.069 sizes
-# the bet under `time_causal`, not in general.
+# the shipped config scores 0.79 rather than 0.53, so +0.069 sizes the bet under
+# `time_causal`, not in general.
 #
 # A later full grid run reached the same verdict from the other side and was
 # likewise NOT applied (`grid_20261010_232439.toml`, 2026-10-11): its optimum
@@ -103,8 +108,9 @@ quality_log_bias = -3.0
 # point, not a converged optimum, and it points into the same confounded
 # direction as above. Do not read +0.133 as growth over +0.069: the two come
 # from different datasets, which is exactly the comparison `docs/calibration.md`
-# rules out. Re-deriving the zeroed block is therefore a settled question —
-# it belongs to the online bucket A/B (§2.1 of TODO.md), not to another grid run.
+# rules out. Re-deriving the zeroed block is therefore a settled question: the
+# harness prefers it by a known margin, and the margin is the size of the bet
+# rather than a reason to take it.
 mix_sim = 2.261
 mix_quality = 0.017
 mix_recency = 0.017
@@ -238,7 +244,8 @@ diversity_user_pmi_weight = 1.0  # amplify user-graph PMI over global in MMR (1.
 
 # Production MMR head budget. The diversifier builds a pairwise-redundancy
 # matrix over the candidates, which is O(head²); `/recommendations` scores the
-# whole merged candidate pool (live + local, several hundred posts), so this is
+# whole merged candidate pool (the live page plus local candidates, several
+# hundred posts), so this is
 # the dominant cost of the diversity pass. Posts past the head keep their
 # raw-score order. 0 = the whole list (historical behaviour); a value in the
 # low hundreds bounds the matrix without touching the top of the page, which is
@@ -246,45 +253,16 @@ diversity_user_pmi_weight = 1.0  # amplify user-graph PMI over global in MMR (1.
 # grid derives its own head from top-K.
 diversity_head_limit = 0
 
-# --- Priors buckets (optional) ----------------------------------------------
-# With at least one `[buckets.<name>]` table each account is assigned to exactly
-# one bucket: the bucket stored explicitly on the account when it names a
-# configured table, otherwise `account_id % bucket_count` over the sorted table
-# names (Config::pick_bucket). The bucket's overrides are applied on top of the
-# `[priors]` table above; with no `[buckets.*]` table at all every account runs
-# on those priors. The block below stays commented out so copying this file
-# keeps all accounts on the default priors.
-#
-# A bucket table accepts the eight legacy `mix_*` fields plus `priors`, an
-# arbitrary inline table of `[priors]` keys. Legacy fields are applied first and
-# `priors` is merged on top, so `priors` wins per key. Caveat: the merge skips
-# values equal to a field's default (0 / NaN), so those cannot be forced through
-# `priors`.
-#
-# [buckets.control]
-# mix_sim = 0.603
-# mix_quality = 0.017
-# mix_recency = 0.017
-# mix_rating = 0.034
-# mix_media = 0.042
-# mix_popularity = 0.017
-# mix_interaction = 0.084
-# mix_tag_relation = 0.067
-# priors = { group_w_artist = 2.0, diversity_max_penalty = 0.3 }
-#
-# [buckets.exploration]
-# mix_sim = 0.30
-# mix_quality = 0.05
-# mix_recency = 0.05
-# mix_rating = 0.04
-# mix_media = 0.04
-# mix_popularity = 0.02
-# mix_interaction = 0.10
-# mix_tag_relation = 0.06
-
 # --- Runtime and worker tuning ----------------------------------------------
 [runtime]
-local_candidate_limit = 400             # local candidates per recommendations page
+# The feed's pool is the live e621 page (the newest posts, `order:id`) plus a
+# local supplement merged in to reach posts the live query's tag budget cannot
+# express. The supplement is newest-first per stream by post id, so it extends
+# the live page in time instead of jumping into the middle of the catalog.
+# Cutting it to 80 was measured and not adopted: it halves the local half of the
+# pool and leaves the pool's age distribution unchanged, because freshness is a
+# property of the ordering, not of the size.
+local_candidate_limit = 400             # local candidates merged into a recommendations page
 # Deduplication. A post counts as seen once the account either recorded an
 # interaction (qualified impression, open or hide) or the browser confirmed the
 # card was on screen — at least half of it, for 800 ms. A feed response only
@@ -308,7 +286,7 @@ dedup_lookback_days = 14                # live-post window, in days
 # Streams are capped independently. A shared counter lets the densest stream
 # (artist tags match far more posts than character tags) take every slot, which
 # is what happened before: the pool came out at 134 posts from the artist stream
-# alone and the other two streams contributed nothing.
+# alone and the other streams contributed nothing.
 candidate_anchor_tags = 20              # anchor tags per group, ranked by IDF
 candidate_recent_days = 60              # recent-popular lookback window
 candidate_stream_share = 0.34           # per-stream ceiling as a fraction of local_candidate_limit

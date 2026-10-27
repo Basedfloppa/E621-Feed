@@ -1,5 +1,5 @@
 //! Account-scoped routes: tag counts, lookup by name/id, list, create,
-//! delete, blacklist read/update, experiment-bucket read, tag-relation graph.
+//! delete, blacklist read/update, feed settings, tag-relation graph.
 
 use std::hash::{DefaultHasher, Hasher};
 use std::io::Cursor;
@@ -16,20 +16,18 @@ use e621_account_parser_api::auth::{OwnerToken, secret_matches};
 use e621_account_parser_api::{
     api,
     db::{
-        self, account_in_scope, delete_all_device_links_for_token, find_device_token_by_id,
-        get_account_by_id, get_account_by_name, get_account_feed_settings,
-        get_account_interactions_for_export, get_account_preference_profile,
-        get_account_tag_relation_graph, get_accounts_for_owner, get_tag_counts,
-        list_device_sessions, restore_feed_interactions, set_account,
-        set_account_experiment_bucket as db_set_account_experiment_bucket, set_preferred_tags,
-        update_device_blacklist,
+        self, delete_all_device_links_for_token, find_device_token_by_id, get_account_by_id,
+        get_account_by_name, get_account_feed_settings, get_account_interactions_for_export,
+        get_account_preference_profile, get_account_tag_relation_graph, get_accounts_for_owner,
+        get_tag_counts, list_device_sessions, restore_feed_interactions, set_account,
+        set_preferred_tags, update_device_blacklist,
     },
     errors::ApiError,
     models::{
         AccountDataExport, AccountDataImport, AccountFeedSettings, AccountFeedSettingsPatch,
-        AccountPreferenceProfile, BlacklistPayload, BucketAssignment, BucketState,
-        DeviceScopedAccount, DeviceSession, ExportAccountSummary, PreferredTagPayload,
-        RevokeDeviceRequest, TagCount, TagRelationScoring, TruncatedAccount, UserApiResponse, cfg,
+        AccountPreferenceProfile, BlacklistPayload, DeviceScopedAccount, DeviceSession,
+        ExportAccountSummary, PreferredTagPayload, RevokeDeviceRequest, TagCount,
+        TagRelationScoring, TruncatedAccount, UserApiResponse, cfg,
     },
     ratelimit::{self, ClientIp},
     validation,
@@ -627,15 +625,6 @@ pub(crate) async fn create_account(
     e621_account_parser_api::metrics::METRICS
         .accounts_total
         .inc();
-    // Track A/B bucket distribution of newly created accounts.
-    let bucket = e621_account_parser_api::models::cfg()
-        .pick_bucket(acc_id_for_audit, None)
-        .0
-        .unwrap_or_else(|| "none".to_string());
-    e621_account_parser_api::metrics::METRICS
-        .experiment_bucket_accounts
-        .with_label_values(&[&bucket])
-        .inc();
     Ok(Json(result))
 }
 
@@ -760,148 +749,6 @@ pub(crate) async fn get_account_blacklist(
     }))
 }
 
-#[openapi(tag = "Accounts")]
-#[get("/account/<account_id>/experiment_bucket")]
-pub(crate) async fn get_account_experiment_bucket(
-    account_id: i32,
-    owner: OwnerToken,
-) -> Result<Json<serde_json::Value>, ApiError> {
-    validation::validate_account_id(account_id)?;
-    let owner_token = owner.0;
-    ratelimit::check(&format!("read:owner:{owner_token}"), 240, 60)?;
-    let explicit = db_blocking(move || {
-        get_account_by_id(&owner_token, account_id)
-            .map_err(|e| format!("Failed to validate account access: {e}"))?;
-        db::get_account_experiment_bucket(account_id)
-            .map_err(|e| format!("Failed to read experiment bucket: {e}"))
-    })
-    .await?;
-    let (bucket, _) = cfg().pick_bucket(account_id, explicit.as_deref());
-    Ok(Json(serde_json::json!({ "bucket": bucket })))
-}
-
-/// Why a bucket name was refused, in words that name the situation.
-///
-/// Split out as a pure function because the wording *is* the feature: an
-/// unknown name is stored happily and then ignored by `pick_bucket`, so a
-/// silent success is the failure mode being prevented. "No `[buckets.*]`
-/// configured" is a different situation from "you typo'd one", and saying so
-/// is what stops an operator from hunting a misspelling that isn't there.
-fn unknown_bucket_message(requested: &str, known: &[String]) -> String {
-    if known.is_empty() {
-        format!(
-            "this instance configures no [buckets.*], so '{requested}' cannot be assigned; \
-             clear the account's bucket instead"
-        )
-    } else {
-        format!(
-            "'{requested}' is not a configured bucket; valid names: {}",
-            known.join(", ")
-        )
-    }
-}
-
-/// Validate a requested bucket name and prove ownership before a write.
-///
-/// `Config::pick_bucket` silently ignores an explicit name that is not in
-/// `[buckets.*]` and falls back to the deterministic hash, so storing an
-/// unknown name would look like success and change nothing. Answering 400 with
-/// the valid names is the only honest reply; on an instance with no configured
-/// buckets the honest reply is that there is nothing to pin to.
-async fn resolve_bucket_write(
-    owner: &OwnerToken,
-    account_id: i32,
-    bucket: Option<&str>,
-) -> Result<String, ApiError> {
-    validation::validate_account_id(account_id)?;
-    let owner_token = owner.0.clone();
-    ratelimit::check(&format!("admin-write:owner:{owner_token}"), 60, 60)?;
-
-    if let Some(name) = bucket {
-        let config = cfg();
-        if !config.buckets.contains_key(name) {
-            let mut known: Vec<String> = config.buckets.keys().cloned().collect();
-            known.sort();
-            return Err(ApiError::BadRequest(unknown_bucket_message(name, &known)));
-        }
-    }
-
-    // A valid cookie that owns nothing must not be able to write to an
-    // arbitrary account id. `account_in_scope` is the predicate the DB layer
-    // documents for this; answering 404 here keeps an ordinary authorization
-    // miss out of the 5xx bucket that `ApiError::from_string` would file it in.
-    let in_scope = db_blocking({
-        let owner_token = owner_token.clone();
-        move || account_in_scope(&owner_token, account_id)
-    })
-    .await
-    .map_err(ApiError::from_string)?;
-    if !in_scope {
-        return Err(ApiError::NotFound(
-            "No account found for this device token".into(),
-        ));
-    }
-    Ok(owner_token)
-}
-
-/// Persist the pin (or its removal) and answer with the account's bucket state
-/// *afterwards*, read back through the same path the feed uses.
-async fn apply_bucket(
-    owner_token: &str,
-    account_id: i32,
-    bucket: Option<String>,
-    action: &str,
-) -> Result<Json<BucketState>, ApiError> {
-    let token = owner_token.to_string();
-    let requested = bucket.clone();
-    db_blocking(move || db_set_account_experiment_bucket(&token, account_id, requested.as_deref()))
-        .await
-        .map_err(ApiError::from_string)?;
-
-    e621_account_parser_api::audit::event("account.bucket.set")
-        .field("account_id", account_id)
-        .field("action", action)
-        .field_opt("bucket", bucket)
-        .emit();
-
-    let stored = db_blocking(move || db::get_account_experiment_bucket(account_id))
-        .await
-        .map_err(ApiError::from_string)?;
-    let (effective, _) = cfg().pick_bucket(account_id, stored.as_deref());
-    Ok(Json(BucketState {
-        bucket_explicit: stored,
-        bucket: effective,
-    }))
-}
-
-/// Pin this account to an explicit A/B bucket from `[buckets.*]`.
-///
-/// This is the owner-facing half of the experiment machinery: until now the
-/// buckets existed in config and were assigned by a hash of the account id,
-/// with no way to say "put *this* account in *that* arm".
-#[openapi(tag = "Accounts")]
-#[put("/account/<account_id>/experiment_bucket", data = "<payload>")]
-pub(crate) async fn set_account_experiment_bucket(
-    account_id: i32,
-    payload: Json<BucketAssignment>,
-    owner: OwnerToken,
-) -> Result<Json<BucketState>, ApiError> {
-    let requested = payload.into_inner().bucket;
-    let owner_token = resolve_bucket_write(&owner, account_id, requested.as_deref()).await?;
-    apply_bucket(&owner_token, account_id, requested, "pin").await
-}
-
-/// Drop the explicit pin so the account returns to the hash assignment.
-#[openapi(tag = "Accounts")]
-#[delete("/account/<account_id>/experiment_bucket")]
-pub(crate) async fn clear_account_experiment_bucket(
-    account_id: i32,
-    owner: OwnerToken,
-) -> Result<Json<BucketState>, ApiError> {
-    let owner_token = resolve_bucket_write(&owner, account_id, None).await?;
-    apply_bucket(&owner_token, account_id, None, "clear").await
-}
-
 /// Sever device → account link. Cascade in `delete_device_link` drops the
 /// underlying account row + derived tables when this was the last link.
 #[openapi(tag = "Accounts")]
@@ -928,15 +775,6 @@ pub(crate) async fn delete_account(account_id: i32, owner: OwnerToken) -> Result
         .inc();
     e621_account_parser_api::metrics::METRICS
         .accounts_total
-        .dec();
-    // Track A/B bucket distribution of deleted accounts.
-    let bucket = e621_account_parser_api::models::cfg()
-        .pick_bucket(account_id, None)
-        .0
-        .unwrap_or_else(|| "none".to_string());
-    e621_account_parser_api::metrics::METRICS
-        .experiment_bucket_accounts
-        .with_label_values(&[&bucket])
         .dec();
     Ok(())
 }
@@ -1033,7 +871,7 @@ pub(crate) async fn set_account_preferred_tags(
 }
 
 /// Consolidated read of all per-account feed/recommendation settings.
-/// Returns blacklist, preferred tags, and experiment bucket in one call.
+/// Returns blacklist and preferred tags in one call.
 #[openapi(tag = "Accounts")]
 #[get("/account/<account_id>/feed_settings")]
 pub(crate) async fn get_feed_settings(
@@ -1051,16 +889,6 @@ pub(crate) async fn get_feed_settings(
         })
     })
     .await?;
-
-    // The account may not have a persisted bucket (NULL = not bucketed yet).
-    // Match the recommendations endpoint: hash the account into a configured
-    // bucket on the fly so the UI shows the effective bucket.
-    let effective_bucket = settings.experiment_bucket.clone().or_else(|| {
-        let (name, _) = cfg().pick_bucket(account_id, None);
-        name
-    });
-    let mut settings = settings;
-    settings.experiment_bucket = effective_bucket;
     Ok(Json(settings))
 }
 
@@ -1138,20 +966,12 @@ pub(crate) async fn patch_feed_settings(
     })
     .await?;
 
-    // Same effective-bucket resolution as GET: when the account has no
-    // persisted bucket, hash into a configured bucket on the fly.
-    let effective_bucket = settings.experiment_bucket.clone().or_else(|| {
-        let (name, _) = cfg().pick_bucket(account_id, None);
-        name
-    });
-    let mut settings = settings;
-    settings.experiment_bucket = effective_bucket;
     Ok(Json(settings))
 }
 
 /// Full account data snapshot for backup / migration. Returns the
-/// account identity, effective blacklist, preferred tags, experiment
-/// bucket, and the current preference profile in one JSON document.
+/// account identity, effective blacklist, preferred tags, and the current
+/// preference profile in one JSON document.
 ///
 /// Import restores only the user-settable fields — the profile is
 /// derived state recomputed by `/process`.
@@ -1185,7 +1005,6 @@ pub(crate) async fn export_account(
         },
         blacklist: settings.blacklist,
         preferred_tags: settings.preferred_tags,
-        experiment_bucket: settings.experiment_bucket,
         profile,
         interactions,
     };
@@ -1279,36 +1098,5 @@ pub(crate) async fn import_account(
     })
     .await?;
 
-    let effective_bucket = settings.experiment_bucket.clone().or_else(|| {
-        let (name, _) = cfg().pick_bucket(account_id, None);
-        name
-    });
-    let mut settings = settings;
-    settings.experiment_bucket = effective_bucket;
     Ok(Json(settings))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// The two refusals must stay distinguishable: "nothing is configured" and
-    /// "that name is wrong" send an operator to different places, and the list
-    /// of valid names is the only thing that makes the second actionable.
-    #[test]
-    fn an_unknown_bucket_names_the_valid_ones() {
-        let none: Vec<String> = Vec::new();
-        let message = unknown_bucket_message("variant", &none);
-        assert!(message.contains("no [buckets.*]"), "{message}");
-        assert!(message.contains("variant"), "{message}");
-        // Nothing to suggest, so it must not dangle an empty list.
-        assert!(!message.contains("valid names"), "{message}");
-
-        let known = vec!["control".to_string(), "variant".to_string()];
-        let message = unknown_bucket_message("controll", &known);
-        assert!(
-            message.contains("valid names: control, variant"),
-            "{message}"
-        );
-    }
 }

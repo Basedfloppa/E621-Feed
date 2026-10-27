@@ -3,25 +3,19 @@
 //! None of these can be maintained incrementally, and each has already been
 //! observed wrong in production or is wrong by construction:
 //!
-//! * `e621_accounts_total` / `e621_experiment_bucket_accounts` — the orphan
-//!   cleanup deletes rows from SQL without passing through the delete handler,
-//!   and it cannot know which bucket a deleted row was in, so it can decrement
-//!   neither. Fed only by the handlers, the total reports "net change since
-//!   process start"; on the production database it read **99 while the table
-//!   held 91**.
+//! * `e621_accounts_total` — the orphan cleanup deletes rows from SQL without
+//!   passing through the delete handler, so it can decrement nothing. Fed only
+//!   by the handlers, the total reports "net change since process start"; on
+//!   the production database it read **99 while the table held 91**.
 //! * `e621_active_accounts` — a count over `user_visit_tracker` inside a
 //!   rolling window, which no write path can adjust.
 //! * `e621_catalog_posts_total` — posts are UPSERTed, so no write path can tell
 //!   a new row from a rewrite.
 //!
 //! Re-reading on a timer makes that drift self-correcting instead of permanent
-//! until the next restart, and a bucket that disappears converges to zero
-//! rather than staying at its last value forever.
+//! until the next restart.
 
-use std::collections::HashMap;
 use std::time::Duration;
-
-use prometheus::core::Collector as _;
 
 use crate::db;
 use crate::metrics::METRICS;
@@ -41,24 +35,6 @@ pub const ACTIVE_WINDOWS: [(&str, i64); 3] = [("1d", 1), ("7d", 7), ("30d", 30)]
 /// over a small table, so the tighter interval is cheap.
 const REFRESH_INTERVAL: Duration = Duration::from_secs(60);
 
-/// Buckets that are still exported but hold no account any more.
-///
-/// These have to be set to `0` explicitly. Writing only the fresh counts leaves
-/// a vanished bucket's last value exported forever, so the distribution keeps
-/// summing to more than `e621_accounts_total` — exactly the 99-vs-91 drift the
-/// production instance showed, where orphan cleanup removed rows that no
-/// incremental path could subtract.
-fn buckets_to_zero(exported: &[String], fresh: &HashMap<String, u64>) -> Vec<String> {
-    let mut stale: Vec<String> = exported
-        .iter()
-        .filter(|bucket| !fresh.contains_key(bucket.as_str()))
-        .cloned()
-        .collect();
-    stale.sort();
-    stale.dedup();
-    stale
-}
-
 /// Re-read every table-derived gauge.
 ///
 /// A failed read leaves the previous value in place and logs a warning: the
@@ -67,37 +43,6 @@ pub fn refresh() {
     match db::count_accounts() {
         Ok(n) => METRICS.accounts_total.set(n),
         Err(e) => warn!("[table-gauges] account count failed: {e}"),
-    }
-
-    match db::count_accounts_by_bucket() {
-        Ok(counts) => {
-            // Zero every bucket that no longer holds an account. Writing only
-            // the fresh counts would leave the last value of a vanished bucket
-            // exported forever, which is how the distribution and the total
-            // drifted apart on the production instance.
-            let exported: Vec<String> = METRICS
-                .experiment_bucket_accounts
-                .collect()
-                .iter()
-                .flat_map(|family| family.get_metric())
-                .flat_map(|metric| metric.get_label())
-                .filter(|l| l.name() == "bucket")
-                .map(|l| l.value().to_string())
-                .collect();
-            for bucket in buckets_to_zero(&exported, &counts) {
-                METRICS
-                    .experiment_bucket_accounts
-                    .with_label_values(&[&bucket])
-                    .set(0);
-            }
-            for (bucket, count) in counts {
-                METRICS
-                    .experiment_bucket_accounts
-                    .with_label_values(&[&bucket])
-                    .set(count as i64);
-            }
-        }
-        Err(e) => warn!("[table-gauges] bucket distribution failed: {e}"),
     }
 
     for (window, days) in ACTIVE_WINDOWS {
@@ -180,45 +125,6 @@ mod tests {
             ACTIVE_WINDOWS,
             [("1d", 1), ("7d", 7), ("30d", 30)],
             "panel queries key off these labels"
-        );
-    }
-
-    /// The drift fix, stated as a test: a bucket whose accounts are gone must be
-    /// explicitly zeroed, and a bucket that still holds accounts must not be.
-    ///
-    /// This is the arithmetic behind `e621_accounts_total` reading 99 while the
-    /// table held 91 — orphan cleanup deletes rows without being able to
-    /// decrement the bucket they were counted in.
-    #[test]
-    fn buckets_that_disappeared_are_zeroed_not_left_stale() {
-        let fresh = HashMap::from([("control".to_string(), 4u64), ("none".to_string(), 9)]);
-        let exported = vec![
-            "control".to_string(),
-            "explore".to_string(),
-            "none".to_string(),
-        ];
-
-        assert_eq!(
-            buckets_to_zero(&exported, &fresh),
-            vec!["explore".to_string()],
-            "only the vanished bucket is zeroed"
-        );
-
-        assert!(
-            buckets_to_zero(&["control".to_string(), "none".to_string()], &fresh).is_empty(),
-            "nothing vanished, so nothing is touched"
-        );
-
-        assert_eq!(
-            buckets_to_zero(&exported, &HashMap::new()).len(),
-            3,
-            "with no accounts left every bucket must fall to zero"
-        );
-
-        // A repeated label must not be written twice.
-        assert_eq!(
-            buckets_to_zero(&["explore".to_string(), "explore".to_string()], &fresh),
-            vec!["explore".to_string()]
         );
     }
 }

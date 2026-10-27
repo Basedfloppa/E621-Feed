@@ -72,7 +72,7 @@ prefetch / `/process` / media-hydrator path.
 - Per-knob "lower vs. higher" guide for every scoring variable:
   [scoring.md](scoring.md)
 - Offline calibration (`calibrate eval` / `calibrate grid`, holdout
-  artifacts, A/B experiment buckets): [calibration.md](calibration.md)
+  artifacts): [calibration.md](calibration.md)
 - Background catalog hydration (media/tags/uploader repair):
   [catalog-hydration.md](catalog-hydration.md)
 
@@ -289,15 +289,15 @@ impressions arrive mid-scroll and a rebuild per batch would re-scan the tables.
 
 `parser-web/src/pages/admin.rs` over `GET /api/admin/overview`
 (`parser-api/src/routes/admin.rs`). It is a view over the **instance** — the
-media queue, the job registry, the bucket pins — so the endpoint requires the
+media queue and the job registry — so the endpoint requires the
 administration grant (`require_instance_admin`) and answers 403 otherwise. The
 rows come from the console's own scope (`db::instance::console_accounts_sql`) —
 every account on the instance — which is deliberately **wider** than the account
 picker's: an operator sees the whole instance without gaining the ability to act
 as accounts it holds no link to. Because of that gap each row carries two flags,
 not one: `linked` (unlink would find something to remove) and `addressable` (the
-account is in the scope `account_in_scope` recognises, so sync, export,
-`/process` and the bucket pin would actually be accepted). The console renders
+account is in the scope `account_in_scope` recognises, so sync, export and
+`/process` would actually be accepted). The console renders
 every per-row control from `addressable`, because each of those routes re-checks
 it — a row that is merely *visible* offers nothing to click and says `view only`.
 Rotating `[runtime].admin_api` narrows the scope back to the links. The nav entry
@@ -308,9 +308,9 @@ the operator is told which credential opens the console rather than being sent t
 link an account or to claim the instance, neither of which would help.
 
 The overview carries the totals (accounts in scope, **distinct** saved posts,
-accounts with a stored key, running jobs), the instance-wide media counters, the
-configured `[buckets.*]` names, and one page of accounts with their per-account
-job state. Three details are deliberate:
+accounts with a stored key, running jobs), the instance-wide media counters,
+and one page of accounts with their per-account job state. Three details are
+deliberate:
 
 - `saved_posts` counts **distinct** posts, not `accounts_post` rows: one post
   saved by two accounts is one post.
@@ -320,34 +320,6 @@ job state. Three details are deliberate:
   and `instance_accounts` agree. They stay separate fields because they answer
   different questions — "how many are in scope" and "how many exist here" — and
   they agree by construction rather than by coincidence.
-
-### A/B bucket assignment
-
-`PUT /api/account/<id>/experiment_bucket` with `{"bucket": "variant"}` pins an
-account to one arm; `DELETE` clears the pin so it falls back to the
-deterministic hash of `account_id` (`Config::pick_bucket`). Before this route
-the buckets existed only in config and were assigned by that hash, with no way
-to say "put *this* account in *that* arm" — the field was read-only, exposed
-through `/feed_settings` and the export.
-
-Two behaviours are load-bearing:
-
-- **An unknown name is refused with 400 and the list of valid names.**
-  `pick_bucket` silently ignores an explicit name that is not in
-  `[buckets.*]`, so storing one would look like success and change nothing.
-  On an instance with no buckets configured the refusal says exactly that.
-- **An ownership miss is 404, not 500.** The route checks
-  `db::accounts::account_in_scope` and maps the miss itself, because
-  `ApiError::from_string` files any unrecognised error string under `Internal`
-  — see the note on that pattern in `db/accounts.rs`.
-
-The overview reports both `bucket_explicit` (what the database holds) and
-`bucket` (what scoring actually uses). They differ when a pin names a bucket
-the instance no longer configures; the console renders that as
-`Stale pin: legacy-arm → control` and offers it as a
-`legacy-arm (not configured)` option, because a `<select>` with nothing
-selected displays its first option and would otherwise read "Hash (no pin)"
-while the pin is still there.
 
 ## Profile backup / restore
 

@@ -71,17 +71,8 @@ pub struct AppMetrics {
     /// exceeded `prefetch_breaker_threshold`).
     pub prefetch_breaker_trips_total: IntCounter,
 
-    /// Feed interactions (open / hide / impression), split by A/B bucket.
+    /// Feed interactions (open / hide / impression) by event type.
     pub feed_interactions_total: IntCounterVec,
-
-    /// Feed interactions by event type (legacy, no bucket split).
-    pub feed_interactions_by_type_total: IntCounterVec,
-
-    /// A/B experiment arms: current account distribution (gauge).
-    pub experiment_bucket_accounts: IntGaugeVec,
-
-    /// A/B experiment arms: total feed interactions observed since start.
-    pub experiment_bucket_interactions_total: IntCounterVec,
 
     /// Total posts in the local catalog. Seeded at startup and re-read after
     /// each catalog cleanup: posts are UPSERTed, so no write path can tell a
@@ -192,29 +183,8 @@ impl AppMetrics {
 
             feed_interactions_total: register_int_counter_vec!(
                 "e621_feed_interactions_total",
-                "Feed interactions by bucket and type (qualified_impression / open / like / strong_like / hide)",
-                &["bucket", "type"]
-            )
-            .unwrap(),
-
-            feed_interactions_by_type_total: register_int_counter_vec!(
-                "e621_feed_interactions_by_type_total",
-                "Feed interactions by type (legacy metric, no bucket split)",
+                "Feed interactions by type (qualified_impression / open / like / strong_like / hide)",
                 &["type"]
-            )
-            .unwrap(),
-
-            experiment_bucket_accounts: register_int_gauge_vec!(
-                "e621_experiment_bucket_accounts",
-                "Current number of accounts per A/B experiment bucket",
-                &["bucket"]
-            )
-            .unwrap(),
-
-            experiment_bucket_interactions_total: register_int_counter_vec!(
-                "e621_experiment_bucket_interactions_total",
-                "Total feed interactions observed since server start, by A/B bucket",
-                &["bucket"]
             )
             .unwrap(),
 

@@ -313,6 +313,58 @@ fn run_eval_with_dataset(
     )
     .average();
     let score_secs = t_score.elapsed().as_secs_f32();
+    // The pool is the evaluation universe, so its size is part of the result:
+    // a run that changed the candidate pool is not comparable to one that did
+    // not unless this line is read alongside the metric.
+    let positives: usize = dataset.accounts.iter().map(|a| a.test_features.len()).sum();
+    let negatives: usize = dataset.accounts.iter().map(|a| a.neg_features.len()).sum();
+    println!(
+        "[pool] candidates={} positives={positives} negatives={negatives} \
+         ({:.1} negatives/account)",
+        positives + negatives,
+        negatives as f64 / dataset.accounts.len().max(1) as f64
+    );
+    // Age of the pool the ranker is judged against. This is the number the
+    // feed complaint is actually about: the harness metric moves when the
+    // negatives get younger and harder, so the pool's age has to be reported
+    // next to it or the two effects are indistinguishable.
+    let now_epoch = now.timestamp();
+    let ages_of = |neg: bool| -> Vec<i64> {
+        let mut v: Vec<i64> = dataset
+            .accounts
+            .iter()
+            .flat_map(|a| {
+                let feats = if neg {
+                    &a.neg_features
+                } else {
+                    &a.test_features
+                };
+                feats
+                    .iter()
+                    .map(|f| (now_epoch - f.created_at.timestamp()) / 86_400)
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        v.sort_unstable();
+        v
+    };
+    for (label, neg) in [("negatives", true), ("positives", false)] {
+        let v = ages_of(neg);
+        if v.is_empty() {
+            continue;
+        }
+        let share = |d: i64| 100.0 * v.partition_point(|&x| x <= d) as f64 / v.len() as f64;
+        println!(
+            "[pool] {label} ages: median={}d mean={}d <=30d={:.1}% <=90d={:.1}% \
+             <=365d={:.1}% <=730d={:.1}%",
+            v[v.len() / 2],
+            v.iter().sum::<i64>() / v.len() as i64,
+            share(30),
+            share(90),
+            share(365),
+            share(730),
+        );
+    }
     print_metrics("baseline", &m, top_k_ndcg, top_k_recall);
     eprintln!("[eval] timings: score={score_secs:.1}s");
     Ok(())

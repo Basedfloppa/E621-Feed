@@ -2,8 +2,7 @@
 //!
 //! The console is a view over the *instance*: the endpoint requires the instance
 //! claim, and every row comes from the same account scope `/accounts` uses —
-//! which for the instance owner is every account on the instance. The one write
-//! is the A/B bucket pin.
+//! which for the instance owner is every account on the instance.
 
 use serde::Deserialize;
 
@@ -25,12 +24,6 @@ pub struct AdminJob {
 pub struct AdminAccount {
     pub id: i32,
     pub name: String,
-    /// Bucket pinned in the database, if any.
-    pub bucket_explicit: Option<String>,
-    /// Bucket scoring actually uses. Differs from `bucket_explicit` when the
-    /// pin names a bucket that is no longer configured — the case
-    /// [`bucket_cell`] exists to make visible.
-    pub bucket: Option<String>,
     pub has_key: bool,
     pub saved_posts: i64,
     /// Whether this browser holds a *direct* link to the account. The instance
@@ -40,7 +33,7 @@ pub struct AdminAccount {
     #[serde(default)]
     pub linked: bool,
     /// Whether this browser may *act* on the account: sync it, export it, start
-    /// a `/process` run, pin its bucket. Wider than [`Self::linked`] for the
+    /// a `/process` run. Wider than [`Self::linked`] for the
     /// instance owner, which addresses accounts it holds no link to — and
     /// narrower than "the row is visible", because an operator's console covers
     /// the instance without handing over the libraries on it.
@@ -78,43 +71,8 @@ pub struct AdminOverview {
     /// Accounts on this instance — what holding the claim covers.
     pub instance_accounts: i64,
     pub totals: AdminTotals,
-    /// Bucket names from `[buckets.*]`. Empty = A/B is off on this instance.
-    pub buckets: Vec<String>,
     pub media: AdminMedia,
     pub accounts: Vec<AdminAccount>,
-}
-
-/// The bucket cell for one row.
-///
-/// Three states, and the middle one is the reason this is not a one-liner: a
-/// pin that no longer names a configured bucket is *silently ignored* by
-/// `pick_bucket`, so the account scores under the hash while the database
-/// still says it is pinned. Showing only the pin would be a lie and showing
-/// only the effective bucket would hide the stale row forever.
-pub fn bucket_cell(account: &AdminAccount) -> String {
-    match (
-        account.bucket_explicit.as_deref(),
-        account.bucket.as_deref(),
-    ) {
-        (Some(pinned), Some(effective)) if pinned == effective => format!("Pinned: {pinned}"),
-        (Some(pinned), effective) => format!(
-            "Stale pin: {pinned} → {}",
-            effective.unwrap_or("no buckets configured")
-        ),
-        (None, Some(effective)) => format!("Hash: {effective}"),
-        (None, None) => "No [buckets.*] configured".to_string(),
-    }
-}
-
-/// Whether the pin shown in the cell is one the server is actually honouring.
-pub fn bucket_pin_is_stale(account: &AdminAccount) -> bool {
-    match (
-        account.bucket_explicit.as_deref(),
-        account.bucket.as_deref(),
-    ) {
-        (Some(pinned), effective) => effective != Some(pinned),
-        (None, _) => false,
-    }
 }
 
 /// Human label for a job phase, with its progress when it has any.
@@ -146,50 +104,6 @@ pub const PROCESS_MODES: [(&str, &str); 3] = [
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn account(pinned: Option<&str>, effective: Option<&str>) -> AdminAccount {
-        AdminAccount {
-            id: 1,
-            name: "a".into(),
-            bucket_explicit: pinned.map(str::to_string),
-            bucket: effective.map(str::to_string),
-            has_key: false,
-            saved_posts: 0,
-            linked: true,
-            addressable: true,
-            job: None,
-        }
-    }
-
-    /// The three states must read differently, because they mean different
-    /// things and only one of them needs the operator to act.
-    #[test]
-    fn the_bucket_cell_distinguishes_a_pin_from_a_stale_pin_from_a_hash() {
-        assert_eq!(
-            bucket_cell(&account(Some("control"), Some("control"))),
-            "Pinned: control"
-        );
-
-        // Pinned to a bucket that is no longer configured: `pick_bucket` falls
-        // back to the hash, so the account is NOT in the arm the DB names.
-        let stale = account(Some("control"), Some("variant"));
-        assert_eq!(bucket_cell(&stale), "Stale pin: control → variant");
-        assert!(bucket_pin_is_stale(&stale));
-
-        assert_eq!(
-            bucket_cell(&account(None, Some("variant"))),
-            "Hash: variant"
-        );
-        assert!(!bucket_pin_is_stale(&account(None, Some("variant"))));
-        assert_eq!(
-            bucket_cell(&account(None, None)),
-            "No [buckets.*] configured"
-        );
-        assert!(!bucket_pin_is_stale(&account(
-            Some("control"),
-            Some("control")
-        )));
-    }
 
     #[test]
     fn the_job_cell_reports_progress_and_failure_reasons() {

@@ -39,8 +39,6 @@ pub fn integration_test_routes() -> Vec<rocket::Route> {
         account::test_account_key,
         account::delete_account_key,
         account::get_account_key_state,
-        account::set_account_experiment_bucket,
-        account::clear_account_experiment_bucket,
         account::create_account,
         account::sync_account_route,
         account::get_sync_status,

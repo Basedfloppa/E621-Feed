@@ -1,7 +1,7 @@
 //! Scoring priors loaded from `[priors]` in `config.toml`. The struct carries
-//! `#[serde(default)]`, so the section may be partial: any field left out —
-//! whether in `[priors]` or in a `[buckets.*] priors = { … }` override — takes
-//! [`Priors::default`], whose values reproduce the legacy production behaviour.
+//! `#[serde(default)]`, so the section may be partial: any field left out takes
+//! [`Priors::default`], whose values reproduce the legacy production
+//! behaviour.
 //!
 //! Knob classes added in v5.2 / v5.3 are grouped at the end with inline
 //! markers (`Class A` … `Class E`) so calibrate's grid is easy to mirror.
@@ -297,11 +297,9 @@ pub struct Priors {
 
 /// Every field's default, in one place. The per-field `#[serde(default = …)]`
 /// attributes take precedence where they exist; this impl fills the fields that
-/// have none, and is what makes a partial override deserialisable at all —
-/// `BucketOverride::priors` hands a bare `{ knob = value }` object to
-/// `serde_json::from_value::<Priors>`, and before this the 25 fields without an
-/// attribute (starting with `now`) made every such override fail to parse and
-/// get dropped.
+/// have none, and is what makes a partial `[priors]` section deserialisable at
+/// all — before it, the 25 fields without an attribute (starting with `now`)
+/// made every partial section fail to parse.
 ///
 /// `now` is the evaluation clock rather than a knob: it defaults to
 /// deserialisation time so a config that omits it still works.
@@ -628,8 +626,8 @@ mod tests {
     /// are two encodings of the same defaults. An empty override is
     /// deserialised through the attributes (and through `Default` for the
     /// fields that have none), so comparing the two serialised forms proves
-    /// they agree on every field at once. Drift here is how a bucket override
-    /// silently stops matching `merge_priors`' expectations.
+    /// they agree on every field at once. Drift here is how a partial
+    /// `[priors]` section silently stops parsing.
     #[test]
     fn serde_defaults_match_priors_default() {
         let from_serde: Priors =

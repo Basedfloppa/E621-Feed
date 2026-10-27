@@ -1091,7 +1091,11 @@ impl TagQueryBudget {
 /// - blank runs and case-insensitive duplicates are dropped (18× → one);
 /// - the user's *positive* search terms keep priority, then the boost group,
 ///   then requirements, then exclusions fill the remaining budget;
-/// - each group is kept sorted so equal inputs in any order share a cache key.
+/// - the boost group keeps the caller's order, because the caller ranks it by
+///   strength (`routes::feed` puts preferred tags first, then IDF anchors) and
+///   the budget truncates the tail. Sorting it alphabetically — which this did
+///   — silently kept the alphabetically first anchors instead of the strongest
+///   ones. The other three groups are sorted so their cache keys stay stable.
 ///
 /// Requirements and exclusions beyond the budget are dropped here. That is not a
 /// safety hole: the feed re-checks live posts against the full blacklist
@@ -1147,7 +1151,6 @@ fn build_e621_tags_query_with_budget(
     }
 
     positives.sort_unstable();
-    boosts.sort_unstable();
     required.sort_unstable();
     negatives.sort_unstable();
     let total = positives.len() + boosts.len() + required.len() + negatives.len();
@@ -1199,6 +1202,17 @@ fn build_e621_tags_query_with_budget(
 /// and have no boost group (the background prefetcher).
 fn build_e621_tags_query(user_query: &str, blacklist: &str) -> String {
     build_e621_tags_query_with_budget(user_query, blacklist, &[], TagQueryBudget::default())
+}
+
+/// Tag query for `/recommendations`: the newest matching posts first.
+///
+/// `order:id` (descending) is explicit rather than left to e621's default
+/// ordering. The feed's pool is meant to be a *time-based* page of the newest
+/// posts matching the account's anchors, with only a small local supplement;
+/// inheriting the default sort would make that guarantee depend on upstream
+/// behaviour, and it costs one slot of the tag budget.
+fn build_recommendation_tags(blacklist: &str, boost: &[String]) -> String {
+    build_e621_tags_query_with_budget("order:id", blacklist, boost, TagQueryBudget::from_config())
 }
 
 /// `get_posts` with a caller-supplied `tags` query — used by the
@@ -1330,12 +1344,7 @@ pub async fn get_posts(
     page: Option<i32>,
     boost: &[String],
 ) -> Result<Vec<Post>, String> {
-    let tags = build_e621_tags_query_with_budget(
-        "",
-        &account.blacklist,
-        boost,
-        TagQueryBudget::from_config(),
-    );
+    let tags = build_recommendation_tags(&account.blacklist, boost);
     let cfg = cfg();
     let ttl_secs = posts_cache_ttl(page);
     let url = build_url(
@@ -1469,10 +1478,37 @@ mod tests {
     }
 
     #[test]
-    fn boost_budget_caps_the_group_and_keeps_it_sorted() {
-        let boost: Vec<String> = (0..10).map(|i| format!("b{i:02}")).collect();
-        let out = build_e621_tags_query_with_budget("", "", &boost, budget(40, 3, 0));
-        assert_eq!(out, "( ~b00 ~b01 ~b02 )");
+    fn boost_budget_caps_the_group_in_the_callers_priority_order() {
+        // The caller ranks boosts by strength, so the budget must truncate the
+        // *tail* of that order, not keep whatever sorts first alphabetically.
+        // Regression: `boosts.sort_unstable()` made the 12-slot group the
+        // alphabetically first anchors instead of the strongest ones.
+        let boost: Vec<String> = ["gamma", "alpha", "beta", "delta"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let out = build_e621_tags_query_with_budget("", "", &boost, budget(40, 2, 0));
+        assert_eq!(out, "( ~gamma ~alpha )");
+    }
+
+    #[test]
+    fn recommendation_query_pins_the_newest_first_order() {
+        // The feed pool is time-based: the newest posts come from this
+        // request, so the sort order cannot be left to e621's default.
+        let out = super::build_recommendation_tags("", &["dragon".to_string()]);
+        assert_eq!(out, "order:id ( ~dragon )");
+
+        // And the order term comes out of the same 40-term budget as every
+        // other term, so a full blacklist cannot push it past the limit.
+        let blob = (0..80)
+            .map(|i| format!("t{i:02}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let out = super::build_recommendation_tags(&blob, &["dragon".to_string()]);
+        assert!(out.starts_with("order:id "), "{out}");
+        // 40 slots = order:id + the one-term boost group + 38 exclusions. The
+        // group's parens are separators, not terms, so count the exclusions.
+        assert_eq!(out.matches(" -t").count(), E621_TAG_LIMIT - 2, "{out}");
     }
 
     #[test]

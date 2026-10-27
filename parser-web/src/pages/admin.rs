@@ -6,9 +6,8 @@
 //! `admin_entry_visible` hides the entry unless this browser linked
 //! `[runtime].admin_user` with a key matching `[runtime].admin_api`, and
 //! `GET /api/admin/overview` answers 403 otherwise. What the console is for is
-//! *acting* on the instance — run `/process`, see its progress, unlink, and (the
-//! first real consumer of the `BucketOverride` machinery) pin an account to an
-//! A/B arm instead of living with the hash assignment.
+//! *acting* on the instance — run `/process`, see its progress, sync, export,
+//! unlink.
 //!
 //! Gating happens twice, deliberately: the nav entry is hidden for a browser that
 //! does not operate the instance (`admin_entry_visible`), and the page itself
@@ -47,9 +46,9 @@ fn empty_admin_notice(admin_available: bool) -> (&'static str, &'static str) {
     if admin_available {
         (
             "This browser does not operate the instance",
-            "The console shows instance state — the media queue, the job registry, the bucket \
-             pins — so it takes the [runtime].admin_api key from config.toml, proved in the \
-             owner claim on the settings page. The instance claim does not open it.",
+            "The console shows instance state — the media queue and the job registry — so \
+             it takes the [runtime].admin_api key from config.toml, proved in the owner claim \
+             on the settings page. The instance claim does not open it.",
         )
     } else {
         (
@@ -327,46 +326,6 @@ pub fn admin_page() -> Html {
         })
     };
 
-    let on_bucket = {
-        let backend_url = backend_url.clone();
-        let busy = busy.clone();
-        let message = message.clone();
-        let is_error = is_error.clone();
-        let tick = tick.clone();
-        Callback::from(move |(account_id, value): (i32, String)| {
-            // The route answers with the account's bucket state, but the console
-            // re-reads the whole overview instead of patching the single row:
-            // the *effective* bucket also depends on which names are configured,
-            // and a stale pin is exactly the case where the two disagree.
-            let (request, success) = if value.is_empty() {
-                (
-                    api_delete(&format!(
-                        "{backend_url}/account/{account_id}/experiment_bucket"
-                    )),
-                    format!("Bucket pin cleared for account {account_id}."),
-                )
-            } else {
-                (
-                    api_put(&format!(
-                        "{backend_url}/account/{account_id}/experiment_bucket"
-                    ))
-                    .header("Content-Type", "application/json")
-                    .body(serde_json::json!({ "bucket": value }).to_string()),
-                    format!("Account {account_id} pinned to '{value}'."),
-                )
-            };
-            spawn_action(
-                request,
-                account_id,
-                success,
-                busy.clone(),
-                message.clone(),
-                is_error.clone(),
-                tick.clone(),
-            );
-        })
-    };
-
     let on_mode_change = {
         let mode = mode.clone();
         Callback::from(move |e: Event| {
@@ -393,7 +352,7 @@ pub fn admin_page() -> Html {
         <div id="admin-page" class="m-4">
             <h1 class="text-2xl font-semibold text-base-content mb-1">{ "Owner console" }</h1>
             <p class="text-sm text-base-content/70 mb-3">
-                { "Everything here is instance state: the media queue, the job registry and the bucket pins. There is no separate admin login — the [runtime].admin_api key proved in Settings is the gate, and the cookie is the identity." }
+                { "Everything here is instance state: the media queue and the job registry. There is no separate admin login — the [runtime].admin_api key proved in Settings is the gate, and the cookie is the identity." }
             </p>
 
             if !message.is_empty() {
@@ -464,26 +423,6 @@ pub fn admin_page() -> Html {
                         </div>
                     </div>
 
-                    <div class="card bg-base-100 shadow mb-4">
-                        <div class="card-body text-base-content">
-                            <h2 class="card-title text-xl">{ "Experiment buckets" }</h2>
-                            if o.buckets.is_empty() {
-                                <p class="text-sm text-base-content/70">
-                                    { "No [buckets.*] sections in config.toml, so scoring runs on [priors] alone and there is nothing to assign. Add a bucket section to A/B a channel." }
-                                </p>
-                            } else {
-                                <p class="text-sm text-base-content/70">
-                                    { "An account with no pin is assigned by a hash of its id, which keeps the split stable across restarts. A pin overrides that for one account." }
-                                </p>
-                                <div class="flex flex-wrap gap-2">
-                                    { for o.buckets.iter().map(|b| html! {
-                                        <span class="badge badge-outline">{ b }</span>
-                                    }) }
-                                </div>
-                            }
-                        </div>
-                    </div>
-
                     <div class="card bg-base-100 shadow">
                         <div class="card-body text-base-content">
                             <div class="flex flex-wrap items-center justify-between gap-2">
@@ -513,7 +452,6 @@ pub fn admin_page() -> Html {
                                                 <th>{ "Account" }</th>
                                                 <th>{ "Saved" }</th>
                                                 <th>{ "e621 key" }</th>
-                                                <th>{ "A/B bucket" }</th>
                                                 <th>{ "Job" }</th>
                                                 <th>{ "Actions" }</th>
                                             </tr>
@@ -523,16 +461,6 @@ pub fn admin_page() -> Html {
                                                 let running = a.job.as_ref().is_some_and(|j| j.phase == "running");
                                                 let row_busy = *busy == Some(a.id);
                                                 let account_id = a.id;
-                                                let stale = bucket_pin_is_stale(a);
-                                                let on_bucket_select = {
-                                                    let on_bucket = on_bucket.clone();
-                                                    Callback::from(move |e: Event| {
-                                                        let value = e
-                                                            .target_unchecked_into::<HtmlSelectElement>()
-                                                            .value();
-                                                        on_bucket.emit((account_id, value));
-                                                    })
-                                                };
                                                 let on_process_row = {
                                                     let on_process = on_process.clone();
                                                     Callback::from(move |_: MouseEvent| on_process.emit(account_id))
@@ -558,47 +486,6 @@ pub fn admin_page() -> Html {
                                                             } else {
                                                                 <span class="text-xs text-base-content/50">{ "—" }</span>
                                                             }
-                                                        </td>
-                                                        <td>
-                                                            <div class="flex flex-col gap-1">
-                                                                <span class={classes!("text-xs", if stale { "text-warning" } else { "text-base-content/60" })}>
-                                                                    { bucket_cell(a) }
-                                                                </span>
-                                                                if !o.buckets.is_empty() && a.addressable {
-                                                                    // `id` + `aria-label`: a bare control with neither is
-                                                                    // both unnamed for a screen reader and flagged by the
-                                                                    // browser's own form-field audit, and there is one of
-                                                                    // these per row.
-                                                                    <select class="select select-xs" disabled={row_busy}
-                                                                        id={format!("admin-bucket-{}", a.id)}
-                                                                        aria-label={format!("A/B bucket for account {}", a.id)}
-                                                                        onchange={on_bucket_select}>
-                                                                        <option value="" selected={a.bucket_explicit.is_none()}>
-                                                                            { "Hash (no pin)" }
-                                                                        </option>
-                                                                        if let Some(pinned) = a.bucket_explicit.as_deref()
-                                                                            .filter(|p| !o.buckets.iter().any(|b| b == p))
-                                                                        {
-                                                                            // A pin naming a bucket this instance no longer
-                                                                            // configures has no option in the list, and a
-                                                                            // `<select>` with nothing selected displays its
-                                                                            // *first* option — so without this the control
-                                                                            // would read "Hash (no pin)" while the database
-                                                                            // still holds the stale pin. The cell above says
-                                                                            // so in words; this makes the control agree.
-                                                                            <option value={pinned.to_string()} selected={true}>
-                                                                                { format!("{pinned} (not configured)") }
-                                                                            </option>
-                                                                        }
-                                                                        { for o.buckets.iter().map(|b| html! {
-                                                                            <option value={b.clone()}
-                                                                                selected={a.bucket_explicit.as_deref() == Some(b.as_str())}>
-                                                                                { b }
-                                                                            </option>
-                                                                        }) }
-                                                                    </select>
-                                                                }
-                                                            </div>
                                                         </td>
                                                         <td class="text-xs">{ job_cell(&a.job) }</td>
                                                         <td>

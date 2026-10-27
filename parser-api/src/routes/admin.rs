@@ -1,7 +1,7 @@
 //! Operator console — `GET /api/admin/overview` (TODO §3.2).
 //!
-//! This is the view of *the machine*: the media cache, the job registry, the
-//! bucket pins. It is gated on the administration tier
+//! This is the view of *the machine*: the media cache and the job registry.
+//! It is gated on the administration tier
 //! (`auth::require_instance_admin`) — the browser must have linked
 //! `[runtime].admin_user` with the matching `[runtime].admin_api` — and not on
 //! the instance claim. Owning the instance widens what a browser may *read*;
@@ -10,12 +10,7 @@
 //! *recover* access after clearing cookies. The account rows come from the
 //! console's own scope — every account on the instance — which is deliberately
 //! wider than the account picker's: an operator sees the whole instance without
-//! gaining the ability to act as accounts it holds no link to. The one genuinely
-//! new capability — the A/B bucket assignment —
-//! lives next to the read-only bucket route in `routes::account`, and this
-//! endpoint is what makes `[buckets.*]` visible at all: `pick_bucket` silently
-//! ignores an explicit name that is not configured, so the console has to be
-//! told which names exist.
+//! gaining the ability to act as accounts it holds no link to.
 
 use rocket::serde::json::Json;
 use rocket_okapi::openapi;
@@ -35,7 +30,7 @@ use e621_account_parser_api::{
 /// paginates because rendering 900 rows is a DOM problem, not a data one.
 const ADMIN_PAGE_LIMIT: i64 = 100;
 
-/// Operator-scoped console snapshot: accounts, totals, buckets, media, jobs.
+/// Operator-scoped console snapshot: accounts, totals, media, jobs.
 #[openapi(tag = "Admin")]
 #[get("/admin/overview?<limit>&<offset>")]
 pub(crate) async fn admin_overview(
@@ -83,9 +78,6 @@ pub(crate) async fn admin_overview(
     .unwrap_or(i64::MAX);
 
     let config = cfg();
-    let mut buckets: Vec<String> = config.buckets.keys().cloned().collect();
-    buckets.sort();
-
     let accounts: Vec<AdminAccount> = rows
         .into_iter()
         .map(|row| {
@@ -101,15 +93,9 @@ pub(crate) async fn admin_overview(
                 elapsed_secs: s.elapsed_secs,
                 error: s.error,
             });
-            // The effective bucket needs `Config`, which is why it is resolved
-            // here and not in SQL. Resolved with the account's own explicit pin
-            // so a stale pin shows up as itself rather than as "unassigned".
-            let (bucket, _) = config.pick_bucket(row.id, row.bucket_explicit.as_deref());
             AdminAccount {
                 id: row.id,
                 name: row.name,
-                bucket_explicit: row.bucket_explicit,
-                bucket,
                 has_key: row.has_key,
                 saved_posts: row.saved_posts,
                 linked: row.linked,
@@ -127,7 +113,6 @@ pub(crate) async fn admin_overview(
         instance_locked: config.instance.ownership_requires_secret(),
         instance_accounts,
         totals,
-        buckets,
         media: AdminMedia {
             enabled: config.catalog.media_cache_enabled(),
             paused: worker_paused(),

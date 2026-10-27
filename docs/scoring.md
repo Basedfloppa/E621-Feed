@@ -60,10 +60,11 @@ their ratios matter and the values in `config.example.toml` are shares rather
 than a bounded range. A weight may be **negative**, in which case the channel is
 subtracted — for that row, "Lower →" means *penalised* rather than merely
 *disabled*. Whether the small channels should be negative is an open question:
-the offline harness prefers five of them at 0 by a wide margin (+0.069 NDCG@20,
-26 SE), but its evidence for exactly those channels is confounded — see
-[Caveats](calibration.md#caveats--dont-blindly-copy-best-priors-into-prod) and
-[Run 2026-10-10](calibration.md#run-2026-10-10--what-the-zeroed-block-is-worth).
+the offline harness prefers five of them at 0 by a wide margin, but its
+evidence for exactly those channels is confounded — see
+[Caveats](calibration.md#caveats--dont-blindly-copy-best-priors-into-prod). The
+margin itself is recorded in the run artifacts under
+[`calibration-results/`](calibration-results/).
 
 ## Quality channel internals
 
@@ -185,8 +186,15 @@ co-favourites `skeb`+`canine` gets less MMR penalty for those tags together);
 
 The diversifier builds a **pairwise-redundancy matrix** over the posts it
 re-ranks, so its cost is O(head²) in time and memory. `/recommendations` feeds it
-the whole merged candidate pool — the live page plus local candidates, several
-hundred posts — which makes this matrix the dominant cost of the diversity pass.
+the whole merged candidate pool — the live page plus local candidates — which
+makes this matrix the dominant cost of the diversity pass.
+
+The supplement is drawn newest-first: the four tag streams walk
+`tags_posts(post_id)` descending, recent-popular is ordered by `created_at
+DESC`, so the supplement extends the live page in time instead of jumping into
+the middle of the catalog. Sampling at random instead gave a pool whose median
+age was ~1000 days; newest-first puts it at 16–18 days at either pool size,
+because order rather than the cap is what moves freshness.
 
 `diversity_head_limit` caps how many top-by-score posts take part: everything
 past the head is appended untouched, in raw-score order. `0` (the default) is

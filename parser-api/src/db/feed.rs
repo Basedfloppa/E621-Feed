@@ -32,26 +32,13 @@ pub fn record_feed_interaction(
             return Err("Account is not in scope for this device token".to_string());
         }
 
-        // Resolve the bucket the same way `get_recommendations` does so the
-        // logged arm matches the one the user actually saw.
-        let explicit: Option<String> = tx
-            .query_row(
-                "SELECT experiment_bucket FROM accounts WHERE id = ?1",
-                params![interaction.account_id],
-                |r| r.get::<_, Option<String>>(0),
-            )
-            .unwrap_or(None);
-        let bucket: Option<String> = crate::models::cfg()
-            .pick_bucket(interaction.account_id, explicit.as_deref())
-            .0;
-
         let inserted = tx
             .execute(
                 "
                 INSERT OR IGNORE INTO feed_interactions (
-                    account_id, post_id, event_type, position, session_id, created_at, experiment_bucket
+                    account_id, post_id, event_type, position, session_id, created_at
                 )
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6)
                 ",
                 params![
                     interaction.account_id,
@@ -60,7 +47,6 @@ pub fn record_feed_interaction(
                     interaction.position,
                     interaction.session_id,
                     Utc::now().to_rfc3339(),
-                    bucket,
                 ],
             )
             .map_err(|e| format!("Failed to record feed interaction: {e}"))?;
@@ -288,14 +274,13 @@ pub fn restore_feed_interactions(
     if items.is_empty() {
         return Ok((0, 0));
     }
-    let bucket: Option<String> = crate::models::cfg().pick_bucket(account_id, None).0;
     let mut inserted = 0usize;
     super::with_write_tx(|tx| {
         let mut stmt = tx
             .prepare_cached(
                 "INSERT OR IGNORE INTO feed_interactions ( \
-                    account_id, post_id, event_type, position, session_id, created_at, experiment_bucket \
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                    account_id, post_id, event_type, position, session_id, created_at \
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             )
             .map_err(|e| format!("Failed to prepare interaction restore: {e}"))?;
         for item in items {
@@ -312,7 +297,6 @@ pub fn restore_feed_interactions(
                     item.position,
                     INTERACTION_RESTORE_SESSION,
                     created,
-                    bucket,
                 ])
                 .map_err(|e| format!("Failed to restore interaction: {e}"))?;
             if n > 0 {
@@ -421,8 +405,7 @@ pub fn clear_feed_interactions(owner_token: &str, account_id: i32) -> Result<usi
     Ok(deleted)
 }
 
-/// One row that [`record_feed_interactions_batch`] actually wrote, carrying
-/// the A/B arm it was filed under.
+/// One row that [`record_feed_interactions_batch`] actually wrote.
 ///
 /// The caller needs this because `INSERT OR IGNORE` collapses duplicates: the
 /// frontend submits interactions through the batched route and **retries** a
@@ -430,9 +413,6 @@ pub fn clear_feed_interactions(owner_token: &str, account_id: i32) -> Result<usi
 /// inflate the metrics on every retry while the table stayed the same size.
 #[derive(Debug, Clone)]
 pub struct RecordedInteraction {
-    /// `feed_interactions.experiment_bucket` as stored; `None` when no
-    /// experiment buckets are configured.
-    pub bucket: Option<String>,
     /// `event_type` exactly as written to the row, i.e. already the label the
     /// Prometheus series uses.
     pub event: String,
@@ -480,31 +460,14 @@ pub fn record_feed_interactions_batch(
             }
         }
 
-        // Pre-resolve experiment buckets for each account.
-        let mut buckets: HashMap<i32, Option<String>> =
-            HashMap::with_capacity(distinct_accounts.len());
-        for aid in &distinct_accounts {
-            let explicit: Option<String> = tx
-                .query_row(
-                    "SELECT experiment_bucket FROM accounts WHERE id = ?1",
-                    params![aid],
-                    |r| r.get::<_, Option<String>>(0),
-                )
-                .unwrap_or(None);
-            let bucket = crate::models::cfg()
-                .pick_bucket(*aid, explicit.as_deref())
-                .0;
-            buckets.insert(*aid, bucket);
-        }
-
         let now_iso = Utc::now().to_rfc3339();
 
         // Prepare static statements.
         let mut insert_interaction = tx
             .prepare_cached(
                 "INSERT OR IGNORE INTO feed_interactions (
-                    account_id, post_id, event_type, position, session_id, created_at, experiment_bucket
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                    account_id, post_id, event_type, position, session_id, created_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             )
             .map_err(|e| format!("Failed to prepare batch interaction insert: {e}"))?;
 
@@ -545,10 +508,6 @@ pub fn record_feed_interactions_batch(
         let mut newly_seen: HashMap<i32, Vec<i64>> = HashMap::new();
 
         for interaction in interactions {
-            let bucket = buckets
-                .get(&interaction.account_id)
-                .and_then(std::clone::Clone::clone);
-
             let inserted = insert_interaction
                 .execute(params![
                     interaction.account_id,
@@ -557,13 +516,11 @@ pub fn record_feed_interactions_batch(
                     interaction.position,
                     interaction.session_id,
                     now_iso,
-                    bucket,
                 ])
                 .map_err(|e| format!("Failed to record batch feed interaction: {e}"))?;
 
             if inserted > 0 {
                 recorded.push(RecordedInteraction {
-                    bucket: bucket.clone(),
                     event: interaction.event_type.to_string(),
                 });
                 newly_seen
@@ -813,27 +770,6 @@ pub fn get_owned_post_ids(account_id: i32) -> Result<HashSet<i64>, String> {
     Ok((*hydrate_cache::store_owned(account_id, set)).clone())
 }
 
-/// Posts authored by the user's top-N favourite tags within `group_type`,
-/// randomized instead of ranked — pulls from a wider pool and shuffles
-/// so the same best posts don't dominate every feed request.
-/// Random LOW `rowid` anchor into `posts` so a following
-/// `AND p.rowid >= ? ORDER BY p.rowid LIMIT n` samples a pseudo-random window
-/// without the full `ORDER BY RANDOM()` sort (the dominant `db_hydrate` cost
-/// on large catalogs). Returns `0` when `posts` is empty (callers treat that as
-/// "no window constraint").
-fn random_rowid_anchor(conn: &Connection) -> Result<i64, String> {
-    let anchor: i64 = conn
-        .query_row(
-            "SELECT CASE WHEN (SELECT COALESCE(MAX(rowid),0) FROM posts) > 0
-                         THEN ABS(RANDOM()) % (SELECT COALESCE(MAX(rowid),0) FROM posts) + 1
-                         ELSE 0 END",
-            [],
-            |r| r.get(0),
-        )
-        .map_err(|e| format!("random_rowid_anchor: {e}"))?;
-    Ok(anchor)
-}
-
 /// Run a query that returns a single `id` column, collecting into a `Vec`.
 fn run_id_query(
     conn: &Connection,
@@ -940,8 +876,7 @@ pub struct CandidatePoolInput {
     pub fav_baseline: f64,
 }
 
-/// Candidate posts carrying any of `tags`, sampled through a random rowid
-/// window with an `ORDER BY RANDOM()` top-up.
+/// Candidate posts carrying any of `tags`, newest first per tag.
 ///
 /// Matched on tag name alone: `tags` is `UNIQUE(name, group_type)` and e621
 /// keeps a name in exactly one category, so threading the group through would
@@ -951,98 +886,42 @@ pub struct CandidatePoolInput {
 /// One `?` per tag, so the list must stay short — every caller caps it well
 /// below SQLite's 999-variable floor.
 ///
-/// The window runs as an `EXISTS` probe over a rowid scan rather than as a
-/// join plus `DISTINCT`. The join form fans out one row per matching tag, so
-/// it needs `DISTINCT` — and `DISTINCT` forces SQLite to materialise *every*
-/// match into a temp B-tree before `LIMIT` can stop anything, which makes the
-/// cost proportional to the match count instead of to `limit`. On a generic
-/// tag that is the whole catalog (`male` alone carries ~63% of it, and the
-/// co-occurrence stream samples exactly such tags), which is where the multi
-/// second `db_hydrate` came from. Measured on the production DB over the same
-/// 80 generic tags: 6.81 s -> 0.06 s for the same 136 ids.
-/// The top-up is not restricted to the part of the catalog the window skipped,
-/// so it can repeat ids the window already returned. Callers are expected to
-/// absorb that: `collect_candidate_ids` dedups through `seen` and charges only
-/// genuinely new ids against a stream's budget.
+/// One reverse index scan per tag rather than a single `ORDER BY p.id DESC`
+/// over the `EXISTS` form. The anchors are IDF-ranked, so they are *rare* by
+/// construction (that is the point of ranking them); walking `posts` backwards
+/// until each rare tag matches would cover the catalog, and with several rare
+/// tags in one `IN` list it would cover it several times. Scanning
+/// `tags_posts(tag_id, post_id)` — the primary key, so the scan is covering and
+/// already ordered — stops after `limit` rowids per tag. Measured on the local
+/// catalog (2026-10-26): 0.5–3 ms per tag, including a tag carrying 6.7M
+/// postings.
 fn local_candidates_for_tag_names(
     conn: &Connection,
     tags: &[String],
     limit: i64,
 ) -> Result<Vec<i64>, String> {
-    if tags.is_empty() || limit <= 0 {
-        return Ok(Vec::new());
-    }
-    let anchor = random_rowid_anchor(conn)?;
-    local_candidates_for_tag_names_from(conn, tags, limit, anchor)
-}
-
-/// The body of [`local_candidates_for_tag_names`] with the anchor passed in.
-///
-/// Split out so tests can pin the anchor: the window is the contract this
-/// function has to keep, and a randomly drawn anchor can only ever be checked
-/// probabilistically. Callers must pass a non-empty `tags` and a positive
-/// `limit`; the public wrapper enforces both.
-fn local_candidates_for_tag_names_from(
-    conn: &Connection,
-    tags: &[String],
-    limit: i64,
-    anchor: i64,
-) -> Result<Vec<i64>, String> {
-    let n = tags.len();
-    // Tag placeholders are numbered explicitly: a bare `?` takes the index
-    // *after the largest one seen so far*, so an anonymous placeholder sitting
-    // behind `?n+2` would become `?n+3` and ask for a parameter that does not
-    // exist. Numbering every placeholder makes binding independent of the
-    // order the clauses happen to appear in.
-    let placeholders = (1..=n)
-        .map(|i| format!("?{i}"))
-        .collect::<Vec<_>>()
-        .join(",");
-    // `?1..?n` are tag names, `?n+1` the limit, `?n+2` the rowid anchor.
-    let mut params: Vec<&dyn rusqlite::ToSql> =
-        tags.iter().map(|t| t as &dyn rusqlite::ToSql).collect();
-    params.push(&limit as &dyn rusqlite::ToSql);
-    params.push(&anchor as &dyn rusqlite::ToSql);
-
-    let window_sql = format!(
-        "SELECT p.id
-         FROM posts p
-         WHERE p.is_deleted = 0
-           AND p.preview_url IS NOT NULL
-           AND p.rowid >= ?{}
-           AND EXISTS (
-               SELECT 1
-               FROM tags_posts tp
-               INNER JOIN tags t ON t.id = tp.tag_id
-               WHERE tp.post_id = p.id AND t.name IN ({placeholders})
-           )
-         ORDER BY p.rowid
-         LIMIT ?{}",
-        n + 2,
-        n + 1
-    );
-    let mut out = run_id_query(conn, &window_sql, &params)?;
-    if (out.len() as i64) < limit {
-        // The top-up keeps the join + `ORDER BY RANDOM()` shape on purpose: it
-        // only fires when the rowid window under-filled, which means the tag
-        // matched fewer posts than `limit` inside the tail — that is, the match
-        // set is small, which is exactly when sorting all of it is cheap. In
-        // `EXISTS` form this query would instead probe every row of `posts`.
-        let random_sql = format!(
-            "SELECT DISTINCT p.id
-             FROM posts p
-             INNER JOIN tags_posts tp ON tp.post_id = p.id
-             INNER JOIN tags t ON t.id = tp.tag_id
-             WHERE t.name IN ({placeholders})
+    let mut merged: Vec<i64> = Vec::with_capacity(tags.len() * limit as usize);
+    for tag in tags {
+        // `?1` is the tag name, `?2` the limit. Resolving the name to `tag_id`
+        // in a subquery keeps the caller's `&[String]` shape; `tags.name` is
+        // unique, so the plan is a single covering-index probe.
+        merged.extend(run_id_query(
+            conn,
+            "SELECT tp.post_id
+             FROM tags_posts tp
+             INNER JOIN posts p ON p.id = tp.post_id
+             WHERE tp.tag_id = (SELECT id FROM tags WHERE name = ?1)
                AND p.is_deleted = 0
                AND p.preview_url IS NOT NULL
-             ORDER BY RANDOM() LIMIT ?{}",
-            n + 1
-        );
-        out.extend(run_id_query(conn, &random_sql, &params[..n + 1])?);
+             ORDER BY tp.post_id DESC
+             LIMIT ?2",
+            &[tag as &dyn rusqlite::ToSql, &limit as &dyn rusqlite::ToSql],
+        )?);
     }
-    out.truncate(limit as usize);
-    Ok(out)
+    merged.sort_unstable_by(|a, b| b.cmp(a));
+    merged.dedup();
+    merged.truncate(limit as usize);
+    Ok(merged)
 }
 
 /// Rank `(tag_name, count)` rows by IDF-weighted frequency, keep the best
@@ -1075,27 +954,11 @@ pub fn rank_tags_by_idf(rows: Vec<(String, i64)>, idf: &IdfIndex, want: usize) -
     scored.into_iter().map(|(_, name)| name).collect()
 }
 
-/// Recent posts above the account's own popularity baseline.
+/// Recent posts above the account's own popularity baseline, newest first.
 ///
 /// `?1=created_at cutoff ?2=fav_count threshold ?3=limit`. The baseline is
 /// passed in rather than read from `account_quality_profile` so `bin/calibrate`
 /// can build the same stream from its training split.
-///
-/// Randomized instead of ranked — picks from a wider pool to reduce repetition
-/// of the same popular posts across requests.
-const RECENT_POPULAR_BODY: &str = "
-            SELECT p.id
-            FROM posts p
-            WHERE p.created_at >= ?1
-              AND p.is_deleted = 0
-              AND p.preview_url IS NOT NULL
-              AND p.fav_count >= ?2
-";
-
-/// Recent posts above the account's own popularity baseline.
-///
-/// Randomized instead of ranked — picks from a wider pool to reduce repetition
-/// of the same popular posts across requests.
 fn local_candidates_recent_popular(
     conn: &Connection,
     fav_baseline: f64,
@@ -1110,64 +973,34 @@ fn local_candidates_recent_popular(
     // not "popular for this user". Floored at 1.0 so a fresh account (average
     // 0) still gets a usable stream instead of an empty one.
     let threshold = (fav_baseline.max(0.0) * 0.6).max(1.0);
-
-    // Random offset over the qualifying recent set, ordered by `created_at`.
-    //
-    // The previous form drew a random *rowid* and walked forward from it. That
-    // is a table walk with every predicate evaluated per row — measured
-    // 86–144 ms on the production catalog (2026-10-12), the largest single term
-    // of the cold `db_hydrate` phase. It is also not uniform: rowid gaps are
-    // not one per qualifying post, so posts sitting behind a long unmatched
-    // stretch are over-weighted.
-    //
-    // A random OFFSET over `idx_posts_created_at` reads at most the recent
-    // window (17 549 rows here, 23 931 on production) and is exactly uniform:
-    // an offset drawn from `[0, count - limit]` includes every qualifying post
-    // with probability `limit / (count - limit + 1)`. Measured on the same
-    // catalog (2026-10-19): 4.7–5.7 ms for the row fetch plus 4.4 ms for the
-    // count, versus 104 ms for the rowid walk.
-    //
-    // The count is a range scan with per-row predicates, which is why it costs
-    // more than counting index entries; it is still bounded by the recent
-    // window, not by the catalog.
-    let qualifying: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM posts p \
-             WHERE p.created_at >= ?1 \
-               AND p.is_deleted = 0 \
-               AND p.preview_url IS NOT NULL \
-               AND p.fav_count >= ?2",
-            params![cutoff, threshold],
-            |r| r.get(0),
-        )
-        .map_err(|e| format!("recent-popular count: {e}"))?;
-    if qualifying == 0 {
-        return Ok(Vec::new());
-    }
-    let span = (qualifying - limit).max(0);
-    let offset: i64 = conn
-        .query_row("SELECT ABS(RANDOM()) % ?1", [span + 1], |r| r.get(0))
-        .map_err(|e| format!("recent-popular offset: {e}"))?;
-    let sql = format!("{RECENT_POPULAR_BODY} ORDER BY p.created_at DESC LIMIT ?3 OFFSET ?4");
     run_id_query(
         conn,
-        &sql,
+        "SELECT p.id
+         FROM posts p
+         WHERE p.created_at >= ?1
+           AND p.is_deleted = 0
+           AND p.preview_url IS NOT NULL
+           AND p.fav_count >= ?2
+         ORDER BY p.created_at DESC
+         LIMIT ?3",
         &[
             &cutoff as &dyn rusqlite::ToSql,
             &threshold as &dyn rusqlite::ToSql,
             &limit as &dyn rusqlite::ToSql,
-            &offset as &dyn rusqlite::ToSql,
         ],
     )
 }
 
 /// Build the local candidate pool from pre-loaded sources.
 ///
-/// Streams, in order: IDF-ranked artist anchors, IDF-ranked character anchors,
-/// recent-popular, explicit preferred tags, co-occurrence neighbours. Every
-/// stream draws up to its own cap and the union is deduped in insertion order,
-/// so a stream that under-fills leaves room for the next one instead of the
-/// first dense stream consuming the whole pool.
+/// Streams: IDF-ranked artist anchors, IDF-ranked character anchors,
+/// recent-popular, explicit preferred tags, co-occurrence neighbours. Each
+/// stream is capped independently and the streams are drained **round-robin**,
+/// so the pool is a union of all five rather than the first few that happen to
+/// be dense. Round-robin (not one stream after another) is what keeps the last
+/// streams alive: a sequential union let artist + character + recent-popular
+/// fill every slot, and the explicit preferred-tags stream — the only signal
+/// the user states rather than one we infer — contributed nothing.
 pub fn collect_candidate_ids(
     conn: &Connection,
     input: &CandidatePoolInput,
@@ -1205,32 +1038,47 @@ pub fn collect_candidate_ids(
         .cloned()
         .collect();
 
-    let streams = [
+    let mut streams: Vec<std::vec::IntoIter<i64>> = [
         local_candidates_for_tag_names(conn, &artist_anchors, cap)?,
         local_candidates_for_tag_names(conn, &character_anchors, cap)?,
         local_candidates_recent_popular(conn, input.fav_baseline, tuning.recent_days, cap)?,
         local_candidates_for_tag_names(conn, &preferred, cap)?,
         local_candidates_for_tag_names(conn, &neighbours, cap)?,
-    ];
+    ]
+    .into_iter()
+    .map(Vec::into_iter)
+    .collect();
 
     let mut out: Vec<i64> = Vec::with_capacity(limit as usize);
     let mut seen: HashSet<i64> = HashSet::with_capacity(limit as usize);
-    for ids in streams {
-        // Count each stream's own contribution, not the pool's running size:
-        // a shared counter let the first (densest) stream fill the pool and
-        // every later stream break out before adding anything, so the pool was
-        // one stream's output dressed up as five.
-        let mut added = 0usize;
-        for id in ids {
-            if added >= cap as usize || out.len() as i64 >= limit {
-                break;
+    let mut taken = vec![0usize; streams.len()];
+    'fill: loop {
+        let mut progressed = false;
+        for (i, stream) in streams.iter_mut().enumerate() {
+            if out.len() as i64 >= limit {
+                break 'fill;
             }
-            // `insert` returning false means the id was already in the pool, so
-            // it must not be charged against this stream's budget.
-            if seen.insert(id) {
-                out.push(id);
-                added += 1;
+            // Charge each stream against its own cap, never against the
+            // pool's running size: a shared counter is what let the first
+            // (densest) stream consume every slot while the rest broke out on
+            // their first element.
+            if taken[i] >= cap as usize {
+                continue;
             }
+            // Skip ids another stream already contributed before charging
+            // this one. `insert` returning false means it was a duplicate, so
+            // it must not count against this stream's budget.
+            for id in stream.by_ref() {
+                if seen.insert(id) {
+                    out.push(id);
+                    taken[i] += 1;
+                    progressed = true;
+                    break;
+                }
+            }
+        }
+        if !progressed {
+            break;
         }
     }
     Ok(out)
@@ -1352,11 +1200,13 @@ fn load_candidate_pool_input(
 /// Five SQL streams unioned and capped at `limit`. Caller dedups against
 /// seen/owned in memory.
 ///
-/// ## Randomisation
-/// The tag-name streams sample a pseudo-random rowid window; the
-/// recent-popular stream draws a random `OFFSET` over `idx_posts_created_at`
-/// (uniform per qualifying post, and index-bounded). Either way the same best
-/// posts do not dominate every feed request.
+/// ## Ordering
+/// Every stream returns its **newest** candidates: the four tag streams walk
+/// `tags_posts(post_id)` backwards, recent-popular is ordered by
+/// `created_at DESC`. Newest-first is what holds the pool's median age at
+/// ~16 days instead of ~1000 (measured 2026-10-27 at both 80 and 400 slots):
+/// freshness is a property of the ordering, not of the pool size, so there is
+/// deliberately no random window here.
 pub fn collect_local_candidate_ids(account_id: i32, limit: i64) -> Result<Vec<i64>, String> {
     let cache_key = i64::from(account_id);
     if let Some(cached) = hydrate_cache::candidates(cache_key) {
@@ -1440,26 +1290,6 @@ pub(crate) mod tests {
 
         let ids = load_blacklisted_post_ids(&[], &["gore".to_string()]).unwrap();
         assert!(ids.is_empty());
-    }
-
-    #[test]
-    fn random_rowid_anchor_within_range_or_zero() {
-        let conn = rusqlite::Connection::open_in_memory().unwrap();
-        conn.execute_batch(
-            "CREATE TABLE posts (id INTEGER PRIMARY KEY, created_at TEXT NOT NULL);",
-        )
-        .unwrap();
-        // Empty table -> anchor 0 (no constraint).
-        assert_eq!(random_rowid_anchor(&conn).unwrap(), 0);
-        for i in 1..=10i64 {
-            conn.execute(
-                "INSERT INTO posts (id, created_at) VALUES (?1, '2026-08-14T00:00:00Z')",
-                [i],
-            )
-            .unwrap();
-        }
-        let a = random_rowid_anchor(&conn).unwrap();
-        assert!((1..=10).contains(&a), "anchor {a} out of [1,10]");
     }
 
     #[test]
@@ -1590,15 +1420,12 @@ pub(crate) mod tests {
         );
     }
 
+    /// `recent` must mean "newest by post id", not "some newest posts in an
+    /// arbitrary order" — the pool is later merged into a newest-first page and
+    /// the stream order is what decides which posts make the cut when it is
+    /// truncated.
     #[test]
-    fn the_tag_window_is_the_first_matches_after_the_anchor_in_rowid_order() {
-        // The stream promises "the first `limit` matches at or after the anchor,
-        // in rowid order". The `EXISTS` rewrite replaced a join + `DISTINCT`
-        // (which materialised every match) with a rowid scan, and a scan that
-        // dropped `ORDER BY` — or an `EXISTS` that restarted the window per tag
-        // — would still return *matching* ids while breaking that promise. So
-        // pin the promise itself, with the anchor fixed rather than drawn at
-        // random: a random anchor can only ever test this probabilistically.
+    fn recent_tag_sampling_takes_the_newest_posts_newest_first() {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         conn.execute_batch(
             "CREATE TABLE posts (
@@ -1607,71 +1434,52 @@ pub(crate) mod tests {
                 is_deleted INTEGER NOT NULL DEFAULT 0, preview_url TEXT
              );
              CREATE TABLE tags (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, group_type TEXT NOT NULL);
-             CREATE TABLE tags_posts (tag_id INTEGER NOT NULL, post_id INTEGER NOT NULL);
-             INSERT INTO tags (name, group_type) VALUES ('wtag','artist');",
+             CREATE TABLE tags_posts (tag_id INTEGER NOT NULL, post_id INTEGER NOT NULL);",
         )
         .unwrap();
-        // 42 posts all carrying the tag, so the window is the only thing that
-        // decides membership. Two of them must never surface: 41 is deleted and
-        // 42 has no preview. The preview must also be rendered by a separate
-        // statement because `REFERENTIAL`-less in-memory SQLite needs the rows
-        // first.
         conn.execute_batch(
-            "INSERT INTO posts (id, created_at, score_total, fav_count, rating, last_seen_at, is_deleted, preview_url)
-             SELECT v, '2026-08-13T00:00:00Z', 50, 5, 'q', '2026-08-13T00:00:00Z',
-                    CASE WHEN v = 41 THEN 1 ELSE 0 END,
-                    CASE WHEN v = 42 THEN NULL ELSE 'p/'||v||'.jpg' END
-             FROM (WITH RECURSIVE seq(v) AS (SELECT 1 UNION ALL SELECT v+1 FROM seq WHERE v < 42) SELECT v FROM seq);
-             INSERT INTO tags_posts (tag_id, post_id)
-             SELECT 1, v FROM (WITH RECURSIVE seq(v) AS (SELECT 1 UNION ALL SELECT v+1 FROM seq WHERE v < 42) SELECT v FROM seq);",
+            "INSERT INTO tags (name, group_type) VALUES ('artist_tag_1','artist'),('artist_tag_2','artist');
+             INSERT INTO posts (id, created_at, score_total, fav_count, rating, last_seen_at, preview_url)
+                SELECT column1 AS id, '2026-08-13T00:00:00Z', 50, 5, 'q', '2026-08-13T00:00:00Z', 'p/'||column1||'.jpg'
+                FROM (VALUES (1),(2),(3),(4),(5),(6),(7),(8),(9),(10),(11),(12),(13),(14),(15),(16),(17),(18),(19),(20));",
         )
         .unwrap();
-
-        let tags = vec!["wtag".to_string()];
-
-        // A window wide enough to hold every eligible post: the window prefix
-        // must be exactly the non-deleted, preview-bearing rows in rowid order.
-        // Only the prefix is pinned: because 40 < limit the top-up also fires
-        // and may repeat ids the window already returned. That is harmless —
-        // `collect_candidate_ids` dedups through `seen` and charges only new
-        // insertions against a stream's budget — but it does mean the tail of
-        // this vector is not ordered.
-        let all = local_candidates_for_tag_names_from(&conn, &tags, 100, 1).unwrap();
+        for i in 1..=20i64 {
+            // Tag 1 carries every post, tag 2 only the even ones, so the union
+            // exercises both the merge and the dedup.
+            let tag_id = if i % 2 == 0 { 2 } else { 1 };
+            conn.execute(
+                "INSERT INTO tags_posts (tag_id, post_id) VALUES (?1,?2)",
+                [tag_id, i],
+            )
+            .unwrap();
+            if i % 2 == 0 {
+                conn.execute(
+                    "INSERT INTO tags_posts (tag_id, post_id) VALUES (1,?1)",
+                    [i],
+                )
+                .unwrap();
+            }
+        }
+        let newest =
+            local_candidates_for_tag_names(&conn, &["artist_tag_1".to_string()], 5).unwrap();
         assert_eq!(
-            &all[..40],
-            &(1..=40).collect::<Vec<i64>>()[..],
-            "the window must return every eligible match in rowid order"
-        );
-        assert!(
-            all.iter().all(|id| (1..=40).contains(id)),
-            "neither deleted post 41 nor preview-less post 42 may appear"
+            newest,
+            vec![20, 19, 18, 17, 16],
+            "newest five, newest first"
         );
 
-        // A window that fills exactly.
-        let full = local_candidates_for_tag_names_from(&conn, &tags, 10, 11).unwrap();
-        assert_eq!(full, (11..=20).collect::<Vec<i64>>());
-
-        // A window that cannot fill: the top-up may add anything, but the
-        // window's own prefix must survive, in order, ahead of it.
-        let short = local_candidates_for_tag_names_from(&conn, &tags, 10, 35).unwrap();
-        assert_eq!(short.len(), 10, "the top-up must still fill to the limit");
+        let both = local_candidates_for_tag_names(
+            &conn,
+            &["artist_tag_1".to_string(), "artist_tag_2".to_string()],
+            6,
+        )
+        .unwrap();
+        assert_eq!(both, vec![20, 19, 18, 17, 16, 15], "merged newest-first");
         assert_eq!(
-            &short[..6],
-            &[35, 36, 37, 38, 39, 40],
-            "the window prefix must stay ordered and come first"
-        );
-
-        // An anchor past every post yields no window at all, so the result is
-        // purely the top-up — which must respect the same filters.
-        let beyond = local_candidates_for_tag_names_from(&conn, &tags, 100, 100_000).unwrap();
-        assert_eq!(
-            beyond.len(),
-            40,
-            "only the 40 eligible posts may be topped up"
-        );
-        assert!(
-            !beyond.contains(&41) && !beyond.contains(&42),
-            "the top-up must not resurrect a deleted or preview-less post"
+            both.iter().filter(|id| **id == 20).count(),
+            1,
+            "a post carrying both tags must appear once"
         );
     }
 
@@ -1885,6 +1693,88 @@ pub(crate) mod tests {
             pool.iter().any(|id| (21..=40).contains(id)),
             "co-occurrence stream contributed nothing"
         );
+    }
+
+    /// With the pool reduced to a supplement (tens of ids, not hundreds), a
+    /// sequential union let the first three streams fill every slot and the
+    /// last two contribute nothing — the explicit preferred-tags stream among
+    /// them. Round-robin has to give every non-empty stream a share even when
+    /// the pool is much smaller than five times the per-stream cap.
+    #[test]
+    fn every_stream_survives_a_small_pool() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE posts (
+                id INTEGER PRIMARY KEY, created_at TEXT NOT NULL, score_total INTEGER NOT NULL,
+                fav_count INTEGER NOT NULL, rating TEXT NOT NULL, last_seen_at TEXT NOT NULL,
+                is_deleted INTEGER NOT NULL DEFAULT 0, preview_url TEXT
+             );
+             CREATE TABLE tags (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, group_type TEXT NOT NULL);
+             CREATE TABLE tags_posts (tag_id INTEGER NOT NULL, post_id INTEGER NOT NULL);",
+        )
+        .unwrap();
+        let now = Utc::now().to_rfc3339();
+        for i in 1..=50i64 {
+            // Only the last ten qualify for recent-popular (fav >= 0.6 * 50).
+            let fav = if i > 40 { 50 } else { 0 };
+            conn.execute(
+                "INSERT INTO posts (id, created_at, score_total, fav_count, rating, last_seen_at, is_deleted, preview_url)
+                 VALUES (?1,?2,100,?3,'q',?2,0,'p/'||?1||'.jpg')",
+                rusqlite::params![i, now, fav],
+            )
+            .unwrap();
+        }
+        conn.execute_batch(
+            "INSERT INTO tags (name, group_type) VALUES
+                ('a_art','artist'),('c_chr','character'),('p_pref','general'),('n_cooc','general');",
+        )
+        .unwrap();
+        // 1-10 artist, 11-20 character, 21-30 preferred, 31-40 neighbour.
+        for (tag_id, start) in [(1i64, 1i64), (2, 11), (3, 21), (4, 31)] {
+            for i in start..start + 10 {
+                conn.execute(
+                    "INSERT INTO tags_posts (tag_id, post_id) VALUES (?1,?2)",
+                    rusqlite::params![tag_id, i],
+                )
+                .unwrap();
+            }
+        }
+
+        let idf = IdfIndex::from_df(&HashMap::new(), 1000);
+        let input = CandidatePoolInput {
+            tag_counts: vec![
+                ("a_art".to_string(), "artist".to_string(), 50),
+                ("c_chr".to_string(), "character".to_string(), 50),
+            ],
+            cooccurrence: vec!["n_cooc".to_string()],
+            preferred: vec!["p_pref".to_string()],
+            fav_baseline: 50.0,
+        };
+        let tuning = CandidatePoolTuning {
+            anchor_tags: 20,
+            recent_days: 60,
+            stream_share: 0.34,
+            preferred_limit: 50,
+            cooccurrence_limit: 50,
+            cooccurrence_min_cooc: 2,
+        };
+
+        // cap = ceil(20 * 0.34) = 7, so a sequential union stops after three
+        // streams (7 + 7 + 6) and never reaches preferred/co-occurrence.
+        let pool = collect_candidate_ids(&conn, &input, &idf, &tuning, 20).unwrap();
+        assert_eq!(pool.len(), 20);
+        for (name, range) in [
+            ("artist", 1..=10),
+            ("character", 11..=20),
+            ("preferred", 21..=30),
+            ("neighbour", 31..=40),
+            ("recent-popular", 41..=50),
+        ] {
+            assert!(
+                pool.iter().any(|id| range.contains(id)),
+                "{name} stream contributed nothing: {pool:?}"
+            );
+        }
     }
 
     // ── Exposure registry (V36) ─────────────────────────────────────

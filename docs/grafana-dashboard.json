@@ -2,11 +2,10 @@
   "__inputs": [],
   "__requires": [],
   "title": "E621 Feed — Usage Analytics",
-  "description": "Usage metrics for E621 Feed: active users, feature popularity, process health, catalog growth, A/B experiment comparison (control vs exploration), and request/e621 latency. Source: e621-feed /api/metrics",
+  "description": "Usage metrics for E621 Feed: active users, feature popularity, process health, catalog growth, and request/e621 latency. Source: e621-feed /api/metrics",
   "tags": [
     "e621-feed",
-    "prometheus",
-    "ab-testing"
+    "prometheus"
   ],
   "timezone": "browser",
   "editable": true,
@@ -51,7 +50,8 @@
           },
           "unit": "none"
         }
-      }
+      },
+      "id": 1
     },
     {
       "title": "Total Accounts",
@@ -83,7 +83,8 @@
           },
           "unit": "none"
         }
-      }
+      },
+      "id": 2
     },
     {
       "title": "Accounts Created (24h)",
@@ -115,7 +116,8 @@
           },
           "unit": "none"
         }
-      }
+      },
+      "id": 3
     },
     {
       "title": "Total Posts in Catalog",
@@ -147,7 +149,8 @@
           },
           "unit": "none"
         }
-      }
+      },
+      "id": 4
     },
     {
       "title": "Active accounts (7d)",
@@ -188,7 +191,8 @@
           "unit": "none"
         }
       },
-      "description": "Accounts with a recorded digest visit inside 7 days. \"7 days\" reads as the last 7 days plus today because user_visit_tracker.last_visit_date stores a date, not a timestamp. Source: e621_active_accounts{window=\"7d\"}, refreshed every 60s from user_visit_tracker, which the digest route writes. Accounts that never visited have no row and are not counted."
+      "description": "Accounts with a recorded digest visit inside 7 days. \"7 days\" reads as the last 7 days plus today because user_visit_tracker.last_visit_date stores a date, not a timestamp. Source: e621_active_accounts{window=\"7d\"}, refreshed every 60s from user_visit_tracker, which the digest route writes. Accounts that never visited have no row and are not counted.",
+      "id": 5
     },
     {
       "title": "Active accounts (30d)",
@@ -229,7 +233,8 @@
           "unit": "none"
         }
       },
-      "description": "Accounts with a recorded digest visit inside 30 days. \"30 days\" reads as the last 30 days plus today because user_visit_tracker.last_visit_date stores a date, not a timestamp. Source: e621_active_accounts{window=\"30d\"}, refreshed every 60s from user_visit_tracker, which the digest route writes. Accounts that never visited have no row and are not counted."
+      "description": "Accounts with a recorded digest visit inside 30 days. \"30 days\" reads as the last 30 days plus today because user_visit_tracker.last_visit_date stores a date, not a timestamp. Source: e621_active_accounts{window=\"30d\"}, refreshed every 60s from user_visit_tracker, which the digest route writes. Accounts that never visited have no row and are not counted.",
+      "id": 6
     },
     {
       "title": "Feature Usage — Last 7 Days",
@@ -267,7 +272,8 @@
           },
           "unit": "req/s"
         }
-      }
+      },
+      "id": 7
     },
     {
       "title": "Browse Breakdown (trending vs favorites)",
@@ -297,7 +303,8 @@
           },
           "unit": "req/s"
         }
-      }
+      },
+      "id": 8
     },
     {
       "title": "/process Pipeline — Success Rate (7d)",
@@ -341,7 +348,8 @@
             ]
           }
         }
-      }
+      },
+      "id": 9
     },
     {
       "title": "/process Pipeline Runs (24h)",
@@ -375,7 +383,8 @@
           },
           "unit": "req/s"
         }
-      }
+      },
+      "id": 10
     },
     {
       "title": "Catalog Growth",
@@ -402,7 +411,8 @@
           },
           "unit": "none"
         }
-      }
+      },
+      "id": 11
     },
     {
       "title": "Feed Interactions (24h)",
@@ -432,143 +442,8 @@
           "unit": "req/s"
         }
       },
-      "description": "Feed interaction rate by event type (all buckets combined)"
-    },
-    {
-      "title": "A/B — Accounts per Bucket",
-      "description": "Current account count in each experiment arm (gauge from accounts table)",
-      "type": "stat",
-      "gridPos": {
-        "h": 5,
-        "w": 4,
-        "x": 0,
-        "y": 33
-      },
-      "targets": [
-        {
-          "expr": "e621_experiment_bucket_accounts",
-          "legendFormat": "{{ bucket }}"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "unit": "none"
-        }
-      }
-    },
-    {
-      "title": "A/B — Interactions per Bucket (24h)",
-      "description": "Feed interactions per arm (24h window)",
-      "type": "stat",
-      "gridPos": {
-        "h": 5,
-        "w": 4,
-        "x": 4,
-        "y": 33
-      },
-      "targets": [
-        {
-          "expr": "increase(e621_experiment_bucket_interactions_total[24h])",
-          "legendFormat": "{{ bucket }}"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "unit": "none"
-        }
-      }
-    },
-    {
-      "title": "A/B — Engagement Rate",
-      "description": "Positive actions (open/like/strong_like) per impression per arm. Higher = better recommendations.",
-      "type": "timeseries",
-      "gridPos": {
-        "h": 5,
-        "w": 16,
-        "x": 8,
-        "y": 33
-      },
-      "targets": [
-        {
-          "expr": "sum(rate(e621_feed_interactions_total{type=~\"open|like|strong_like\"}[5m])) by (bucket) / clamp_min(sum(rate(e621_feed_interactions_total{type=\"qualified_impression\"}[5m])) by (bucket), 0.001)",
-          "legendFormat": "{{ bucket }}"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "drawStyle": "line",
-            "lineWidth": 2,
-            "fillOpacity": 15
-          },
-          "unit": "short",
-          "min": 0
-        }
-      }
-    },
-    {
-      "title": "A/B — Hide Rate",
-      "description": "Hides per impression per arm. Lower = fewer misses.",
-      "type": "timeseries",
-      "gridPos": {
-        "h": 10,
-        "w": 12,
-        "x": 0,
-        "y": 38
-      },
-      "targets": [
-        {
-          "expr": "sum(rate(e621_feed_interactions_total{type=\"hide\"}[5m])) by (bucket) / clamp_min(sum(rate(e621_feed_interactions_total{type=\"qualified_impression\"}[5m])) by (bucket), 0.001)",
-          "legendFormat": "{{ bucket }}"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "drawStyle": "line",
-            "lineWidth": 2,
-            "fillOpacity": 15
-          },
-          "unit": "short",
-          "min": 0
-        }
-      }
-    },
-    {
-      "title": "A/B — Interactions by Type & Bucket",
-      "description": "Raw interaction rates split by arm and event type",
-      "type": "timeseries",
-      "gridPos": {
-        "h": 10,
-        "w": 12,
-        "x": 12,
-        "y": 38
-      },
-      "targets": [
-        {
-          "expr": "sum(rate(e621_feed_interactions_total[5m])) by (bucket, type)",
-          "legendFormat": "{{ bucket }} / {{ type }}"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "drawStyle": "line",
-            "lineWidth": 1,
-            "fillOpacity": 8,
-            "stacking": {
-              "mode": "normal"
-            }
-          },
-          "unit": "req/s"
-        }
-      }
+      "description": "Feed interaction rate by event type",
+      "id": 12
     },
     {
       "title": "Cache Pruner — Entries Dropped",
@@ -595,7 +470,8 @@
           },
           "unit": "none"
         }
-      }
+      },
+      "id": 13
     },
     {
       "title": "Process Job Wall Time (running)",
@@ -675,7 +551,8 @@
         "name": "Process running > 30 min",
         "noDataState": "no_data",
         "notifications": []
-      }
+      },
+      "id": 14
     },
     {
       "title": "Last /process Duration (s)",
@@ -716,7 +593,8 @@
           },
           "unit": "s"
         }
-      }
+      },
+      "id": 15
     },
     {
       "title": "Prefetch Breaker Trips (24h)",
@@ -790,7 +668,8 @@
         "name": "Prefetch circuit breaker tripped",
         "noDataState": "no_data",
         "notifications": []
-      }
+      },
+      "id": 16
     },
     {
       "title": "e621 Upstream Errors by Class (5m rate)",
@@ -854,7 +733,8 @@
         "name": "High % of e621 429/5xx errors",
         "noDataState": "no_data",
         "notifications": []
-      }
+      },
+      "id": 17
     },
     {
       "title": "HTTP Response Time (p50/p95/p99)",
@@ -906,7 +786,8 @@
             ]
           }
         }
-      }
+      },
+      "id": 18
     },
     {
       "title": "e621 Upstream Latency (p50/p95/p99)",
@@ -958,7 +839,8 @@
             ]
           }
         }
-      }
+      },
+      "id": 19
     },
     {
       "title": "HTTP p95 by Route",
@@ -986,7 +868,8 @@
           "unit": "s",
           "min": 0
         }
-      }
+      },
+      "id": 20
     },
     {
       "title": "e621 Upstream p95 by Class",
@@ -1014,7 +897,8 @@
           "unit": "s",
           "min": 0
         }
-      }
+      },
+      "id": 21
     },
     {
       "title": "HTTP Request Rate by Route",
@@ -1044,7 +928,8 @@
           },
           "unit": "req/s"
         }
-      }
+      },
+      "id": 22
     },
     {
       "title": "Scoring — total request time by endpoint",
@@ -1081,7 +966,8 @@
           "unit": "ms",
           "min": 0
         }
-      }
+      },
+      "id": 23
     },
     {
       "title": "Scoring — bottleneck channel (top_channel_ms)",
@@ -1118,7 +1004,8 @@
           "unit": "ms",
           "min": 0
         }
-      }
+      },
+      "id": 24
     },
     {
       "title": "Scoring trace (SCORING_TRACE)",
@@ -1153,7 +1040,8 @@
         "showTime": true,
         "sortOrder": "Descending",
         "enableLogDetails": true
-      }
+      },
+      "id": 25
     },
     {
       "title": "Scoring — phase db_hydrate (ms)",
@@ -1190,7 +1078,8 @@
           "unit": "ms",
           "min": 0
         }
-      }
+      },
+      "id": 26
     },
     {
       "title": "Scoring — phase diversify_post (ms)",
@@ -1227,7 +1116,8 @@
           "unit": "ms",
           "min": 0
         }
-      }
+      },
+      "id": 27
     },
     {
       "title": "Scoring — phase e621_fetch (ms)",
@@ -1264,7 +1154,8 @@
           "unit": "ms",
           "min": 0
         }
-      }
+      },
+      "id": 28
     },
     {
       "title": "Scoring — phase cache_build (ms)",
@@ -1301,7 +1192,8 @@
           "unit": "ms",
           "min": 0
         }
-      }
+      },
+      "id": 29
     },
     {
       "title": "Scoring — phase scoring (ms)",
@@ -1338,7 +1230,8 @@
           "unit": "ms",
           "min": 0
         }
-      }
+      },
+      "id": 30
     },
     {
       "title": "Active accounts by window (digest visits)",
@@ -1365,7 +1258,8 @@
           },
           "unit": "none"
         }
-      }
+      },
+      "id": 31
     }
   ],
   "schemaVersion": 39,

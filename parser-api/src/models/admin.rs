@@ -4,11 +4,7 @@
 //! rows come from the same account scope `/accounts` uses, which for the
 //! instance owner is every account on the instance. The endpoint itself requires
 //! the instance claim (`auth::require_instance_owner`), because everything on it
-//! — the media cache, the job registry, the bucket pins — is instance state. The
-//! genuinely new capability is the bucket assignment —
-//! `PUT /account/<id>/experiment_bucket` — which is what turns the previously
-//! read-only `[buckets.*]` machinery into something an owner can actually run an
-//! experiment with.
+//! — the media cache, the job registry — is instance state.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -18,14 +14,6 @@ use serde::{Deserialize, Serialize};
 pub struct AdminAccount {
     pub id: i32,
     pub name: String,
-    /// Bucket pinned to this account in the DB, if any. Kept even when it no
-    /// longer names a configured bucket, so the row can show the stale pin
-    /// instead of silently pretending the account is unassigned.
-    pub bucket_explicit: Option<String>,
-    /// Bucket scoring actually uses: the pinned one when it names a configured
-    /// bucket, otherwise the deterministic hash of `account_id` (see
-    /// `Config::pick_bucket`). `None` when `[buckets.*]` is empty.
-    pub bucket: Option<String>,
     /// Whether an e621 API key is stored for this account (enables key-backed
     /// direct sync). The key itself is never read here — only its presence.
     pub has_key: bool,
@@ -39,8 +27,8 @@ pub struct AdminAccount {
     pub linked: bool,
     /// Whether this browser may *act* on the account at all.
     ///
-    /// Every per-row action (sync, export, `/process`, the bucket pin) lands on a
-    /// route that re-checks `db::account_in_scope`, so the console offers them
+    /// Every per-row action (sync, export, `/process`) lands on a route that
+    /// re-checks `db::account_in_scope`, so the console offers them
     /// from this flag. It is wider than [`Self::linked`] for the instance owner
     /// and narrower than "the row is visible" for a mere operator.
     pub addressable: bool,
@@ -102,29 +90,8 @@ pub struct AdminOverview {
     /// Accounts on this instance. The denominator of what owning it covers.
     pub instance_accounts: i64,
     pub totals: AdminTotals,
-    /// Bucket names configured in `[buckets.*]`, sorted. Empty = A/B is off,
-    /// and no bucket can be pinned.
-    pub buckets: Vec<String>,
     pub media: AdminMedia,
     /// One page of accounts in scope, newest-seen first (same order as
     /// `GET /accounts`).
     pub accounts: Vec<AdminAccount>,
-}
-
-/// Body of `PUT /account/<id>/experiment_bucket`.
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub struct BucketAssignment {
-    /// Configured bucket name to pin. Validation happens in the route, because
-    /// an unknown name is stored happily and then ignored by `pick_bucket` —
-    /// a silent no-op is worse than a 400.
-    pub bucket: Option<String>,
-}
-
-/// Result of pinning or clearing a bucket: the account's bucket state after
-/// the write, so the console can update the row without refetching the page.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct BucketState {
-    pub bucket_explicit: Option<String>,
-    /// Effective bucket after the write (`pick_bucket`).
-    pub bucket: Option<String>,
 }

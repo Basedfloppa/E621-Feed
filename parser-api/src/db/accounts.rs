@@ -725,19 +725,6 @@ pub fn cleanup_orphan_accounts() -> Result<i64, String> {
     Ok(deleted as i64)
 }
 
-pub fn get_account_experiment_bucket(account_id: i32) -> Result<Option<String>, String> {
-    let conn = open_db()?;
-    conn.query_row(
-        "SELECT experiment_bucket FROM accounts WHERE id = ?1",
-        params![account_id],
-        |r| r.get::<_, Option<String>>(0),
-    )
-    .or_else(|e| match e {
-        rusqlite::Error::QueryReturnedNoRows => Ok(None),
-        other => Err(format!("get_account_experiment_bucket: {other}")),
-    })
-}
-
 /// Every account id the console covers for `owner_token`.
 ///
 /// Used to count running `/process` jobs across everything the console shows
@@ -766,17 +753,12 @@ pub fn console_account_ids(owner_token: &str) -> Result<Vec<i32>, String> {
 
 /// One row of the operator console's account table (TODO §3.2).
 ///
-/// Deliberately flat and SQL-only: the route adds the two pieces that are not
-/// database state — the *effective* bucket (needs `Config`) and the
-/// in-process `/process` job.
+/// Deliberately flat and SQL-only: the route adds the one piece that is not
+/// database state — the in-process `/process` job.
 #[derive(Debug, Clone)]
 pub struct OwnedAccountRow {
     pub id: i32,
     pub name: String,
-    /// Bucket pinned in the DB. Kept verbatim even when it no longer names a
-    /// configured bucket, so the console can show a stale pin rather than
-    /// making the account look unassigned.
-    pub bucket_explicit: Option<String>,
     pub has_key: bool,
     pub saved_posts: i64,
     /// Does this browser hold a *direct* link to the account?
@@ -786,7 +768,7 @@ pub struct OwnedAccountRow {
     /// offered from this flag rather than from "the row is visible".
     pub linked: bool,
     /// May this browser *address* the account — sync it, export it, start a
-    /// `/process` run, pin its bucket?
+    /// `/process` run?
     ///
     /// Wider than [`Self::linked`] in one direction (the instance owner
     /// addresses accounts it holds no link to) and identical otherwise. A row
@@ -879,7 +861,7 @@ fn console_accounts_overview_tx(
     let mut stmt = tx
         .prepare(&format!(
             r"
-        SELECT a.id, a.name, a.experiment_bucket,
+        SELECT a.id, a.name,
                (a.e621_api_key_encrypted IS NOT NULL),
                (SELECT COUNT(*) FROM accounts_post ap WHERE ap.account_id = a.id),
                (adl.owner_token IS NOT NULL),
@@ -899,11 +881,10 @@ fn console_accounts_overview_tx(
             Ok(OwnedAccountRow {
                 id: row.get(0)?,
                 name: row.get(1)?,
-                bucket_explicit: row.get(2)?,
-                has_key: row.get(3)?,
-                saved_posts: row.get(4)?,
-                linked: row.get(5)?,
-                addressable: row.get(6)?,
+                has_key: row.get(2)?,
+                saved_posts: row.get(3)?,
+                linked: row.get(4)?,
+                addressable: row.get(5)?,
             })
         })
         .map_err(|e| format!("Failed to enumerate console accounts: {e}"))?
@@ -924,51 +905,9 @@ fn console_accounts_overview_tx(
     ))
 }
 
-/// Pin or clear an account's explicit A/B bucket.
-///
-/// Ownership-checked inside the transaction: the `account_device_links` row
-/// must name `owner_token`, so a stolen account id alone writes nothing. The
-/// caller validates the name against `[buckets.*]`; this function stores what
-/// it is given so "pin" and "clear" share one path.
-pub fn set_account_experiment_bucket(
-    owner_token: &str,
-    account_id: i32,
-    bucket: Option<&str>,
-) -> Result<(), String> {
-    super::with_write_tx(|tx| set_account_experiment_bucket_tx(tx, owner_token, account_id, bucket))
-}
-
-/// Body of [`set_account_experiment_bucket`], separated from the write
-/// transaction so the ownership rule can be pinned on an in-memory schema.
-fn set_account_experiment_bucket_tx(
-    tx: &rusqlite::Transaction<'_>,
-    owner_token: &str,
-    account_id: i32,
-    bucket: Option<&str>,
-) -> Result<(), String> {
-    let in_scope: bool = tx
-        .query_row(
-            &format!("SELECT {MAY_ADDRESS_SQL}"),
-            params![owner_token, account_id],
-            |r| r.get(0),
-        )
-        .map_err(|e| format!("verify account access: {e}"))?;
-    if !in_scope {
-        // Wording matches `get_account_by_id`, so callers that already
-        // special-case "No account found" keep working.
-        return Err("No account found for this device token".to_string());
-    }
-    tx.execute(
-        "UPDATE accounts SET experiment_bucket = ?1 WHERE id = ?2",
-        params![bucket, account_id],
-    )
-    .map_err(|e| format!("set experiment bucket: {e}"))?;
-    Ok(())
-}
-
 /// Read consolidated feed settings for an account. Verifies device
-/// ownership, then reads blacklist (device-specific with global fallback),
-/// preferred tags, and experiment bucket in a single read transaction.
+/// ownership, then reads blacklist (device-specific with global fallback) and
+/// preferred tags in a single read transaction.
 pub fn get_account_feed_settings(
     owner_token: &str,
     account_id: i32,
@@ -1036,20 +975,9 @@ pub fn get_account_feed_settings(
         .map_err(|e| format!("Failed to collect preferred_tags: {e}"))?;
     drop(stmt);
 
-    // 3) Experiment bucket.
-    let experiment_bucket: Option<String> = tx
-        .query_row(
-            "SELECT experiment_bucket FROM accounts WHERE id = ?1",
-            params![account_id],
-            |r| r.get(0),
-        )
-        .ok()
-        .flatten();
-
     let settings = AccountFeedSettings {
         blacklist,
         preferred_tags,
-        experiment_bucket,
     };
 
     tx.commit()
@@ -1101,9 +1029,6 @@ pub fn set_preferred_tags(
     })
 }
 
-/// Count accounts per A/B bucket. Buckets come from `cfg().buckets`; an
-/// account falls into `pick_bucket(id, None)`. Used to seed the
-/// `e621_experiment_bucket_accounts` gauge at startup.
 /// Get all preferred tags for an account for backfill purposes.
 /// Returns (`tag_name`, `group_type`, weight).
 pub fn get_all_preferred_tags(account_id: i32) -> Result<Vec<(String, String, f64)>, String> {
@@ -1175,31 +1100,7 @@ pub fn mark_account_backfilled(account_id: i32) -> Result<(), String> {
     })
 }
 
-pub fn count_accounts_by_bucket() -> Result<std::collections::HashMap<String, u64>, String> {
-    use std::collections::HashMap;
-    let conn = open_db()?;
-    let mut stmt = conn
-        .prepare("SELECT id FROM accounts")
-        .map_err(|e| format!("Failed to prepare account count query: {e}"))?;
-    let ids = stmt
-        .query_map([], |row| row.get::<_, i64>(0))
-        .map_err(|e| format!("Failed to query account ids: {e}"))?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| format!("Failed to collect account ids: {e}"))?;
-    let mut counts: HashMap<String, u64> = HashMap::new();
-    for id in ids {
-        let (bucket, _) = crate::models::cfg().pick_bucket(id as i32, None);
-        let key = bucket.unwrap_or_else(|| "none".to_string());
-        *counts.entry(key).or_insert(0) += 1;
-    }
-    Ok(counts)
-}
-
 /// Total rows in `accounts` — the value `e621_accounts_total` reports.
-///
-/// Deliberately not built on [`count_accounts_by_bucket`]: that one reads every
-/// id and evaluates the bucket rules per account, which is both more expensive
-/// and a different question.
 pub fn count_accounts() -> Result<i64, String> {
     let conn = open_db()?;
     conn.query_row("SELECT COUNT(*) FROM accounts", [], |row| {
@@ -1561,7 +1462,6 @@ mod tests {
                  id INTEGER PRIMARY KEY,
                  name TEXT,
                  blacklisted_tags TEXT,
-                 experiment_bucket TEXT,
                  e621_api_key_encrypted BLOB
              );
              CREATE TABLE account_device_links (
@@ -1773,7 +1673,6 @@ mod tests {
             "CREATE TABLE accounts (
                  id INTEGER PRIMARY KEY,
                  name TEXT NOT NULL,
-                 experiment_bucket TEXT,
                  e621_api_key_encrypted TEXT
              );
              CREATE TABLE account_device_links (
@@ -1792,9 +1691,9 @@ mod tests {
                  claim_method TEXT NOT NULL CHECK (claim_method IN ('bootstrap','secret'))
              );
              CREATE TABLE accounts_post (post_id INTEGER NOT NULL, account_id INTEGER NOT NULL);
-             INSERT INTO accounts (id, name, experiment_bucket, e621_api_key_encrypted) VALUES
-                 (1,'a',NULL,NULL), (2,'b','control',NULL), (3,'c',NULL,'sealed'),
-                 (9,'other',NULL,NULL);
+             INSERT INTO accounts (id, name, e621_api_key_encrypted) VALUES
+                 (1,'a',NULL), (2,'b',NULL), (3,'c','sealed'),
+                 (9,'other',NULL);
              INSERT INTO account_device_links
                  (owner_token, account_id, linked_at, last_seen_at) VALUES
                  ('me',1,'t','2026-01-03'), ('me',2,'t','2026-01-02'),
@@ -1811,7 +1710,6 @@ mod tests {
         assert_eq!(page.len(), 1);
         assert_eq!(page[0].id, 2, "second row in last_seen order");
         assert_eq!(page[0].saved_posts, 2, "account 2 saved 100 and 101");
-        assert_eq!(page[0].bucket_explicit.as_deref(), Some("control"));
 
         // ...but totals over the whole library.
         assert_eq!(totals.accounts, 3);
@@ -1828,107 +1726,10 @@ mod tests {
             "another token's account must never appear"
         );
         assert!(all[2].has_key, "account 3 carries the only stored key");
-        assert!(all[0].bucket_explicit.is_none());
         assert!(all[0].name == "a");
         assert!(
             all.iter().all(|r| r.linked),
             "every row here really is linked, so unlink is offered on all of them"
         );
-    }
-
-    /// The bucket write is ownership-checked inside the transaction, so a valid
-    /// cookie that owns nothing cannot pin an arbitrary account id — and a
-    /// refused write leaves no row changed.
-    #[test]
-    fn pinning_a_bucket_requires_ownership() {
-        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
-        conn.execute_batch(
-            "CREATE TABLE accounts (
-                 id INTEGER PRIMARY KEY,
-                 name TEXT NOT NULL,
-                 experiment_bucket TEXT,
-                 e621_api_key_encrypted TEXT
-             );
-             CREATE TABLE account_device_links (
-                 owner_token TEXT NOT NULL,
-                 account_id INTEGER NOT NULL,
-                 linked_at TEXT NOT NULL,
-                 last_seen_at TEXT NOT NULL,
-                 PRIMARY KEY(owner_token, account_id)
-             );
-             CREATE TABLE instance_ownership (
-                 id INTEGER PRIMARY KEY CHECK (id = 1),
-                 owner_token TEXT NOT NULL,
-                 claimed_at TEXT NOT NULL,
-                 claim_method TEXT NOT NULL CHECK (claim_method IN ('bootstrap','secret'))
-             );
-             INSERT INTO accounts (id, name, experiment_bucket, e621_api_key_encrypted) VALUES
-                 (1,'mine',NULL,NULL), (2,'theirs',NULL,NULL);
-             INSERT INTO account_device_links VALUES
-                 ('me',1,'t','t'), ('other',2,'t','t');",
-        )
-        .unwrap();
-
-        {
-            let tx = conn.transaction().unwrap();
-            set_account_experiment_bucket_tx(&tx, "me", 1, Some("variant")).unwrap();
-            assert!(
-                set_account_experiment_bucket_tx(&tx, "me", 2, Some("variant")).is_err(),
-                "another owner's account must not be pinnable"
-            );
-            assert!(
-                set_account_experiment_bucket_tx(&tx, "nobody", 1, Some("variant")).is_err(),
-                "a token with no link must not be able to pin anything"
-            );
-            tx.commit().unwrap();
-        }
-
-        // The instance owner holds no link to account 2 and still may pin it:
-        // the write path takes the claim, not the links.
-        conn.execute(
-            "INSERT INTO instance_ownership (id, owner_token, claimed_at, claim_method)
-             VALUES (1, 'owner', 't', 'secret')",
-            [],
-        )
-        .unwrap();
-        {
-            let tx = conn.transaction().unwrap();
-            set_account_experiment_bucket_tx(&tx, "owner", 2, Some("control")).unwrap();
-            tx.commit().unwrap();
-        }
-        let mine: Option<String> = conn
-            .query_row(
-                "SELECT experiment_bucket FROM accounts WHERE id = 1",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(mine.as_deref(), Some("variant"));
-        // Account 2 carries the owner's pin, so `me`'s rejected write clearly did
-        // not land — and the rejection happened while the column was still NULL.
-        let theirs: Option<String> = conn
-            .query_row(
-                "SELECT experiment_bucket FROM accounts WHERE id = 2",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(theirs.as_deref(), Some("control"));
-
-        // `None` is how the console clears a pin: the account goes back to the
-        // hash assignment rather than to a bucket named "".
-        {
-            let tx = conn.transaction().unwrap();
-            set_account_experiment_bucket_tx(&tx, "me", 1, None).unwrap();
-            tx.commit().unwrap();
-        }
-        let cleared: Option<String> = conn
-            .query_row(
-                "SELECT experiment_bucket FROM accounts WHERE id = 1",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert!(cleared.is_none());
     }
 }

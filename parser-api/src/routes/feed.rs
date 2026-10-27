@@ -58,22 +58,8 @@ pub(crate) async fn log_feed_interaction(
         .field("post_id", post_id)
         .field("event", &event_str)
         .emit();
-    // Resolve the A/B bucket the same way the DB layer does, so the metric
-    // arm matches the one the user actually saw.
-    let bucket = e621_account_parser_api::models::cfg()
-        .pick_bucket(account_id, None)
-        .0
-        .unwrap_or_else(|| "none".to_string());
     e621_account_parser_api::metrics::METRICS
         .feed_interactions_total
-        .with_label_values(&[&bucket, &event_str])
-        .inc();
-    e621_account_parser_api::metrics::METRICS
-        .experiment_bucket_interactions_total
-        .with_label_values(&[&bucket])
-        .inc();
-    e621_account_parser_api::metrics::METRICS
-        .feed_interactions_by_type_total
         .with_label_values(&[&event_str])
         .inc();
     Ok(())
@@ -207,24 +193,15 @@ pub(crate) async fn log_feed_interaction_batch(
     }
     // The WASM client sends every interaction through THIS route —
     // `interaction_queue` batches them and only `undo` uses the single
-    // endpoint — so the counters have to be moved here as well as in
-    // `log_feed_interaction`. Without this the feed-interaction and A/B panels
-    // stayed empty however much traffic the backend served, while
+    // endpoint — so the counter has to be moved here as well as in
+    // `log_feed_interaction`. Without this the feed-interaction panel stayed
+    // empty however much traffic the backend served, while
     // `feed_interactions` filled up. Counting the rows the DB reports as
     // inserted (not `count`) keeps a retried batch from double-counting.
     let metrics = &e621_account_parser_api::metrics::METRICS;
     for rec in &batch.interactions {
-        let bucket = rec.bucket.as_deref().unwrap_or("none");
         metrics
             .feed_interactions_total
-            .with_label_values(&[bucket, &rec.event])
-            .inc();
-        metrics
-            .experiment_bucket_interactions_total
-            .with_label_values(&[bucket])
-            .inc();
-        metrics
-            .feed_interactions_by_type_total
             .with_label_values(&[&rec.event])
             .inc();
     }
@@ -356,12 +333,6 @@ pub(crate) async fn get_recommendations(
     // registry (`feed_shown_posts`) is fed from `/interaction/batch`, where a
     // `qualified_impression` proves the card itself was visible long enough to
     // count — see `migrations/V36__feed_shown_posts.sql`.
-
-    // Bucket logging (main endpoint only — continue caller handles it).
-    let (bucket_name, _) = cfg().pick_bucket(account_id, None);
-    if let Some(bucket) = &bucket_name {
-        debug!("recommendations account={account_id} bucket={bucket}");
-    }
 
     // Log score breakdown for top-10 and bottom-10 posts (sorted copy).
     let mut sorted_for_log: Vec<&ScoredPost> = scored.iter().collect();
@@ -509,16 +480,7 @@ async fn build_recommendations_shared(
     let runtime = cfg.runtime.clone();
 
     let owner_clone = owner_token.to_string();
-    let (
-        tags_res,
-        profile_res,
-        account_res,
-        seen_res,
-        owned_res,
-        local_res,
-        bucket_res,
-        long_seen_res,
-    ) = rocket::tokio::join!(
+    let (tags_res, profile_res, account_res, seen_res, owned_res, local_res, long_seen_res) = rocket::tokio::join!(
         rocket::tokio::task::spawn_blocking(move || {
             get_tag_counts(account_id).map_err(|e| format!("Failed to get tag counts: {e}"))
         }),
@@ -546,10 +508,6 @@ async fn build_recommendations_shared(
                 .map_err(|e| format!("Failed to collect local candidate ids: {e}"))
         }),
         rocket::tokio::task::spawn_blocking(move || {
-            db::get_account_experiment_bucket(account_id)
-                .map_err(|e| format!("Failed to load experiment bucket: {e}"))
-        }),
-        rocket::tokio::task::spawn_blocking(move || {
             get_long_term_seen_post_ids(account_id, db::LONG_TERM_DEDUP_DAYS)
                 .map_err(|e| format!("Failed to load long-term seen post ids: {e}"))
         }),
@@ -561,7 +519,6 @@ async fn build_recommendations_shared(
     let seen_ids = seen_res.map_err(|e| format!("Join error: {e}"))??;
     let owned_ids = owned_res.map_err(|e| format!("Join error: {e}"))??;
     let mut local_candidate_ids = local_res.map_err(|e| format!("Join error: {e}"))??;
-    let explicit_bucket = bucket_res.map_err(|e| format!("Join error: {e}"))??;
     let long_term_seen = long_seen_res.map_err(|e| format!("Join error: {e}"))??;
 
     // Cheap pre-filter for local candidates: drop blacklisted posts *before*
@@ -588,7 +545,7 @@ async fn build_recommendations_shared(
     .await
     .map_err(|e| format!("Join error: {e}"))??;
 
-    let (bucket_name, mut priors) = cfg.pick_bucket(account_id, explicit_bucket.as_deref());
+    let mut priors = cfg.priors.clone();
     priors.now = Utc::now();
 
     if let Some(explore) = exploration {
@@ -824,9 +781,6 @@ async fn build_recommendations_shared(
         &user_tags,
         priors.exploration_epsilon > 1e-4,
     );
-
-    // Drop bucket_name — the caller handles bucket logging.
-    let _ = bucket_name;
 
     // Emit one structured JSON line per request so Loki/Grafana can show which
     // scoring channel and which pipeline phase dominated (see `emit_json`).
