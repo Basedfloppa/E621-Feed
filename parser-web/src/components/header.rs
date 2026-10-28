@@ -380,6 +380,22 @@ pub fn header() -> Html {
                         <a class="btn btn-ghost text-xl" href="/">
                             {"E621 Feed"}
                         </a>
+                        // The build the interface came from. Recommendations are
+                        // produced by weights that ship with the release, so a
+                        // user who notices the feed behaving differently needs
+                        // somewhere to point at — otherwise every ranking change
+                        // looks like it arrived out of nowhere. `env!` is
+                        // compile-time, so this cannot drift from the WASM binary.
+                        <span
+                            class="badge badge-ghost badge-sm font-mono opacity-70"
+                            title={format!(
+                                "Interface build {} — ranking weights and the channel set ship with the release, so a changed feed usually means a new build, not a glitch.",
+                                env!("CARGO_PKG_VERSION")
+                            )}
+                            data-testid="app-version"
+                        >
+                            {format!("v{}", env!("CARGO_PKG_VERSION"))}
+                        </span>
                     </div>
                     <div class="navbar-center hidden lg:flex">
                         <div role="tablist" class="tabs tabs-box">
