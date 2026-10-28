@@ -376,17 +376,23 @@ pub(super) fn save_posts_in_tx(
         .map_err(|e| format!("Failed to prepare transaction: {e}"))?;
     let mut insert_account = tx
         .prepare_cached(
-            "INSERT OR IGNORE INTO accounts_post (account_id, post_id) VALUES (?1, ?2);",
+            // `added_at` records when this row first entered our library — the
+            // only favourite clock e621 does not give us (see
+            // `V40__accounts_post_added_at.sql`). `OR IGNORE` keeps the first
+            // sighting, so re-syncing an old favourite does not move it.
+            "INSERT OR IGNORE INTO accounts_post (account_id, post_id, added_at) \
+             VALUES (?1, ?2, ?3);",
         )
         .map_err(|e| format!("Failed to prepare transaction: {e}"))?;
 
+    let added_at = Utc::now().to_rfc3339();
     for post in posts {
         insert_post
             .execute(rusqlite::params_from_iter(post_upsert_params(post)))
             .map_err(|e| format!("Failed to execute transaction: {e}"))?;
 
         insert_account
-            .execute(params![account_id, post.id])
+            .execute(params![account_id, post.id, added_at])
             .map_err(|e| format!("Failed to execute transaction: {e}"))?;
     }
     Ok(())

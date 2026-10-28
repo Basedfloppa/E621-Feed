@@ -1820,6 +1820,47 @@ async fn account_export_import_round_trip() {
     assert_eq!(response.status(), Status::BadRequest);
 }
 
+/// e621 never tells us when a favourite was made — `/favorites.json` returns
+/// the post's own `created_at` — so `accounts_post.added_at` records the first
+/// time *we* saw the row. A re-sync must not move it: otherwise a future
+/// temporal holdout would slide forward on every run and the "added after T"
+/// split would be meaningless.
+#[test]
+fn favourites_record_when_they_first_entered_the_library() {
+    use e621_account_parser_api::models::Tags;
+
+    ensure_migrations();
+    let account = TestAccount::new(9_160_001);
+    let post = make_post(12_800_001, Tags::default(), 1);
+
+    let read_added_at = || -> Option<String> {
+        let conn = db::open_db_for_calibration().unwrap();
+        conn.query_row(
+            "SELECT added_at FROM accounts_post WHERE account_id = ?1 AND post_id = ?2",
+            rusqlite::params![account.id, post.id],
+            |r| r.get(0),
+        )
+        .unwrap()
+    };
+
+    db::save_posts(std::slice::from_ref(&post), account.id).unwrap();
+    let first = read_added_at().expect("added_at must be written with the favourite");
+    assert!(
+        chrono::DateTime::parse_from_rfc3339(&first).is_ok(),
+        "added_at must be an RFC3339 timestamp, got {first:?}"
+    );
+
+    // A second sync of the same favourite (the normal path: the whole page is
+    // re-saved on every run) must keep the original sighting.
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    db::save_posts(std::slice::from_ref(&post), account.id).unwrap();
+    assert_eq!(
+        read_added_at().as_deref(),
+        Some(first.as_str()),
+        "re-saving a favourite must not move its added_at"
+    );
+}
+
 /// The interaction model is exported with the backup and restored on import:
 /// replayed into `feed_interactions` for the target account, idempotent on
 /// re-import, and refused for an account the token isn't linked to.

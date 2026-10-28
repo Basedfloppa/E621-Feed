@@ -344,7 +344,7 @@ pub(crate) fn prepare_eval_dataset(
             );
             c
         }
-        NegMode::Uniform => {
+        NegMode::Uniform | NegMode::Catalog => {
             eprintln!("[prep] loading catalog ids (uniform-neg mode)...");
             let ids = catalog_post_ids()?;
             eprintln!(
@@ -445,7 +445,14 @@ pub(crate) fn prepare_eval_dataset(
             // candidate distribution production never produces; falling back to
             // the whole catalog keeps the run alive when the pool comes back
             // empty (cold DB, unbuilt IDF).
-            let restricted = {
+            //
+            // `NegMode::Catalog` deliberately skips the restriction: that mode
+            // exists to measure the channels against the whole catalog, and
+            // sampling it through the pool would reintroduce exactly the age
+            // and popularity bias it is meant to remove.
+            let restricted = if opts.neg_mode == NegMode::Catalog {
+                None
+            } else {
                 let pool_ids = production_pool_ids(account_id, &train_posts, &tags, &idf);
                 if pool_ids.is_empty() {
                     None
@@ -460,7 +467,7 @@ pub(crate) fn prepare_eval_dataset(
                 let mut scratch = cell.borrow_mut();
                 scratch.clear();
                 match opts.neg_mode {
-                    NegMode::Uniform => {
+                    NegMode::Uniform | NegMode::Catalog => {
                         sample_negatives_uniform(&catalog.ids, &excluded_ids, target_negs, &mut scratch)
                     }
                     NegMode::Mixed => sample_negatives_mixed(

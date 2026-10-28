@@ -24,8 +24,20 @@ impl SplitStrategy {
 
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub(crate) enum NegMode {
-    /// Uniform xorshift over `posts.id` (legacy).
+    /// Uniform xorshift over the production candidate pool (legacy). The pool
+    /// is what the live feed actually scores — the newest ids of each stream
+    /// plus recent-popular — so "uniform" here means uniform *within that
+    /// pool*, not uniform over the catalog.
     Uniform,
+    /// Uniform over the whole catalog, with no production-pool restriction.
+    ///
+    /// This is the research mode: the pool is the newest posts of a few tag
+    /// streams, so negatives drawn from it inherit that age and popularity
+    /// profile and the recency/popularity channels are measured against a
+    /// distribution production no longer produces. Catalog-wide negatives are
+    /// the honest question "would this user have favourited the post at all?",
+    /// at the cost of being an easier retrieval task than the live feed.
+    Catalog,
     /// 40% uniform + 30% popularity-decile + 30% age-window matched.
     Mixed,
     /// 70% mixed + 30% tag-similarity-based hard negatives (Option C).
@@ -38,6 +50,7 @@ impl NegMode {
     pub(crate) fn label(self) -> &'static str {
         match self {
             NegMode::Uniform => "uniform",
+            NegMode::Catalog => "catalog",
             NegMode::Mixed => "mixed-hard",
             NegMode::Hybrid { .. } => "hybrid-hard",
         }

@@ -558,6 +558,7 @@ fn parse_grid_flags(
             "split=post_id" => opts.split = SplitStrategy::PostId,
             "split=time_causal" | "split=time" => opts.split = SplitStrategy::TimeCausal,
             "neg=uniform" => opts.neg_mode = NegMode::Uniform,
+            "neg=catalog" => opts.neg_mode = NegMode::Catalog,
             "neg=mixed" => opts.neg_mode = NegMode::Mixed,
             "neg=hybrid" => opts.neg_mode = NegMode::Hybrid { hard_ratio: 0.3 },
             "verbose" => opts.verbose = true,
@@ -602,6 +603,21 @@ mod cli_tests {
         assert_eq!(opts.neg_mode, NegMode::Uniform);
         let (opts, _) = parse(&["--split=random"]).expect("known flag");
         assert_eq!(opts.split, SplitStrategy::Random);
+    }
+
+    /// `neg=catalog` is the research mode: uniform over the whole catalog
+    /// instead of the production candidate pool.
+    #[test]
+    fn the_catalog_negative_mode_is_selectable() {
+        let (opts, _) = parse(&["neg=catalog"]).expect("known flag");
+        assert_eq!(opts.neg_mode, NegMode::Catalog);
+        assert_eq!(opts.neg_mode.label(), "catalog");
+    }
+
+    #[test]
+    fn an_unknown_negative_mode_is_an_error_rather_than_a_silent_default() {
+        let err = parse(&["neg=bogus"]).unwrap_err();
+        assert!(err.contains("unknown flag: neg=bogus"), "{err}");
     }
 
     #[test]

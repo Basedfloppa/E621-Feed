@@ -19,10 +19,27 @@
    Negatives are sampled from the catalog (default: hybrid hard-negatives
    — 70% mixed, popularity- and time-matched, plus 30% tag-similarity-based
    hard negatives; `neg=mixed` drops the hard-mined third and
-   `neg=uniform` switches to pure random). Each test fixture also carries a
-   **per-account tag-relation graph** built from `train_posts`
+   `neg=uniform` switches to pure random). ⚠️ **`neg=uniform` is uniform inside
+   the production candidate pool, not over the catalog** — the pool is the
+   newest ids of a few tag streams plus recent-popular, so negatives drawn from
+   it inherit that age and popularity profile. `neg=catalog` is the
+   research mode that skips the pool restriction entirely and samples uniformly
+   over every non-deleted post. It answers "would the user have favourited this
+   at all", which is the question the channel weights are for, at the cost of
+   being an easier retrieval task than the live feed. Each test fixture also
+   carries a **per-account tag-relation graph** built from `train_posts`
    cooccurrences, so the personal `tag_relation` channel and its
    `*_user_*` knobs see real signal under the synthetic split.
+
+   There is **no favourite timestamp in the e621 API** — `/favorites.json`
+   returns the *post's* `created_at`, and neither the `v1` (`{"posts": […]}`) nor
+   the `v2` (`[…]`) shape carries a favourite date. `accounts_post.added_at`
+   (V40) therefore records the first time *this* process stored the row: a lower
+   bound for accounts first synced after the migration, `NULL` for older rows.
+   Until enough favourites have been added after a cutoff, the temporal split
+   can only approximate "what the user knew at T" through the post's creation
+   date; a re-sync keeps the first `added_at`, so the column is a usable
+   holdout the moment a future sync adds a favourite.
 
    Reports **NDCG@20**, **Recall@50**, **MRR** with **bootstrap 95% CI**
    on NDCG. Probe acceptance during grid uses a **paired** 1-sided 95 %
@@ -136,6 +153,39 @@ The first line of a chained run prints
 `[run] preparing dataset (shared across N mode(s))...`. Each mode's
 output (`[eval]…`, `[grid]…`) follows in order against that single
 hydrated dataset.
+
+## What offline NDCG cannot decide
+
+The negative sampler, not the model, decides which weights win. Measured on one
+dataset (N=150, `CALIBRATE_NOW=1792972800`), fitting the eleven `mix_*` weights
+with `--fit-mix` under each distribution and then evaluating both fitted sets
+under both distributions:
+
+| weights | hybrid-hard negatives | catalog negatives |
+|---|---:|---:|
+| shipped (`sim` = 0.878) | 0.6070 | 0.8107 |
+| fit on hybrid (`quality` 0.61, `novelty` −0.34, `media` 0.05) | **0.6413** | 0.2463 |
+| fit on catalog (`rating` 0.34, `recency` −0.56, `media` 0.09) | 0.6838 | 0.1823 |
+
+Every fitted set wins on the distribution it was fitted on and collapses on the
+other (0.68 → 0.18, 0.64 → 0.25). The shipped weights are second best under both
+— which is the only property an offline harness can actually certify. Two
+corollaries:
+
+- A "better" NDCG inside one sampler is a statement about that sampler. The
+  earlier +0.008 between the twelve-channel blend and `sim`-only is the same
+  effect at a smaller scale: the ranks are nearly flat once the negatives come
+  from the same similarity space the model scores.
+- `--fit-mix` is not an oracle. The catalog fit puts a *negative* weight on
+  recency (`−0.56`) — preferring older posts — which is what a Plackett–Luce
+  fit does when most of its negatives are old and most positives are recent:
+  it minimises the loss by inverting a channel rather than by ranking taste.
+
+What the harness *can* decide: whether a knob is dead (constant channel, zero
+gradient), whether a change is inside the noise, and how the head's composition
+moves (age, favourites, artists, tag jaccard). Ranking two models for the live
+feed needs either an `added_at` holdout — favourites the user added after the
+cutoff, which no sampler can fake — or online interleaving.
 
 ## Quickstart
 
