@@ -63,6 +63,16 @@ pub(crate) const NEG_SAMPLE_SEED: u64 = 0xE621_CA118;
 /// Deterministic seed for `split_strategy = random`.
 pub(crate) const SPLIT_SEED: u64 = 0xE621_5917;
 
+/// The one place the accepted arguments are spelled out. Every failure path
+/// prints this, so an unknown flag is answered with what *is* accepted instead
+/// of with a list that has drifted from the parser.
+const USAGE: &str = "usage: calibrate <mode> [flags]
+  modes:  eval | grid [mix-only] | probe | graph   (chainable: 'eval grid')
+  flags:  pairs-only, no-pairs, with-diversify, no-cache,
+          fit-mix[=<priors.toml>], fit-mix-objective=pl|ndcg, fit-mix-holdout,
+          split=random|post_id|time_causal, neg=uniform|mixed|hybrid, verbose
+  unknown or malformed arguments abort with exit code 2";
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 enum Mode {
     Eval,
@@ -83,8 +93,13 @@ fn main() -> anyhow::Result<()> {
     // Modes can chain (e.g. `eval grid`); `mix-only` is a positional
     // grid-modifier that must follow `grid`.
     let raw_args: Vec<String> = env::args().skip(1).collect();
+    // No implicit default run. Before this, a bare `calibrate` silently ran the
+    // full `eval` — a ~60s pass over every account that looks exactly like a
+    // deliberate measurement. A missing argument is a mistake like any other,
+    // so it stops with the usage text instead of spending the time.
     if raw_args.is_empty() {
-        return run_modes(&[Mode::Eval], false, GridOptions::default(), None);
+        eprintln!("[run] no arguments given.\n{}", USAGE);
+        std::process::exit(2);
     }
 
     let mut modes: Vec<Mode> = Vec::new();
@@ -124,17 +139,14 @@ fn main() -> anyhow::Result<()> {
         }
     }
     if modes.is_empty() {
-        eprintln!(
-            "no mode given. Use 'eval', 'grid [mix-only]', 'probe', 'graph', or chain them \
-             (e.g. 'eval grid'). Flags: pairs-only, no-pairs, with-diversify, no-cache, \
-             fit-mix[=<priors.toml>], fit-mix-objective=pl|ndcg, fit-mix-holdout, \
-             split=random|post_id|time_causal, \
-             neg=uniform|mixed|hybrid, verbose"
-        );
+        eprintln!("[run] no mode given.\n{USAGE}");
         std::process::exit(2);
     }
 
-    let (opts, reference_path) = parse_grid_flags(tail.into_iter());
+    let (opts, reference_path) = parse_grid_flags(tail.into_iter()).unwrap_or_else(|e| {
+        eprintln!("{e}");
+        std::process::exit(2);
+    });
 
     // Loaded here rather than inside the eval: a bad path must fail before the
     // ~60s scoring pass, not after it. `run_modes` then carries the parsed
@@ -483,21 +495,31 @@ fn run_clock() -> DateTime<Utc> {
 /// Returns the grid options plus the optional reference-vector path given via
 /// `--fit-mix=<path>`. The path is only collected here, not loaded: the caller
 /// owns the IO so that a bad path fails before the scoring pass.
-fn parse_grid_flags(args: impl Iterator<Item = String>) -> (GridOptions, Option<String>) {
+fn parse_grid_flags(
+    args: impl Iterator<Item = String>,
+) -> Result<(GridOptions, Option<String>), String> {
     let mut opts = GridOptions::default();
     let mut reference: Option<String> = None;
 
     for arg in args {
+        // Normalise the `--` prefix once. Before this, every literal arm was
+        // reachable only in the bare form (`neg=uniform`), so the conventional
+        // `--neg=uniform` fell into the unknown-flag arm and the run silently
+        // used the default negatives — measured: an entire A/B pair came out
+        // identical because both runs ignored the flag.
+        let arg = arg.strip_prefix("--").map(str::to_string).unwrap_or(arg);
         // The value-carrying forms are matched before the literal table below,
         // since `--fit-mix=<path>` is not a fixed string.
         let path = arg
-            .strip_prefix("--fit-mix=")
-            .or_else(|| arg.strip_prefix("fit-mix="))
-            .or_else(|| arg.strip_prefix("--fit-mix-ref="))
+            .strip_prefix("fit-mix=")
             .or_else(|| arg.strip_prefix("fit-mix-ref="));
         if let Some(path) = path {
             if path.is_empty() {
-                eprintln!("[run] --fit-mix=<path> needs a path (ignored)");
+                // An empty path used to fall through as `(ignored)`, so
+                // `--fit-mix=` ran a plain eval while looking like a fitted
+                // one. Same reasoning as the unknown-flag arm: a run that
+                // silently does something else is worse than no run.
+                return Err(format!("[run] --fit-mix= needs a path.\n{USAGE}"));
             } else {
                 // A reference implies the fit: the reference is re-scored on
                 // the matrix the eval pass builds, and that matrix is only kept
@@ -511,16 +533,19 @@ fn parse_grid_flags(args: impl Iterator<Item = String>) -> (GridOptions, Option<
         // Value-carrying form too, and checked before the literal table below.
         // It is *not* matched by the `fit-mix=` prefix above: that one requires
         // the `=` right after `fit-mix`.
-        let objective = arg
-            .strip_prefix("--fit-mix-objective=")
-            .or_else(|| arg.strip_prefix("fit-mix-objective="));
+        let objective = arg.strip_prefix("fit-mix-objective=");
         if let Some(value) = objective {
             match value {
                 "pl" | "plackett-luce" => opts.fit_objective = FitObjective::PlackettLuce,
                 "ndcg" => opts.fit_objective = FitObjective::ApproxNdcg,
-                other => eprintln!(
-                    "[run] unknown --fit-mix-objective={other} (expected pl|ndcg; ignored)"
-                ),
+                other => {
+                    // Was `(ignored)`: an unknown objective silently kept the
+                    // default (Plackett-Luce), so two runs that were meant to
+                    // differ measured the same thing.
+                    return Err(format!(
+                        "[run] unknown --fit-mix-objective={other} (expected pl|ndcg).\n{USAGE}"
+                    ));
+                }
             }
             continue;
         }
@@ -535,17 +560,66 @@ fn parse_grid_flags(args: impl Iterator<Item = String>) -> (GridOptions, Option<
             "neg=uniform" => opts.neg_mode = NegMode::Uniform,
             "neg=mixed" => opts.neg_mode = NegMode::Mixed,
             "neg=hybrid" => opts.neg_mode = NegMode::Hybrid { hard_ratio: 0.3 },
-            "verbose" | "--verbose" => opts.verbose = true,
+            "verbose" => opts.verbose = true,
             "no-cache" => opts.channel_cache = false,
-            "fit-mix" | "--fit-mix" => opts.fit_mix = true,
+            "fit-mix" => opts.fit_mix = true,
             // Implies the fit: there is nothing to hold out without a vector
             // to hold it out of.
-            "fit-mix-holdout" | "--fit-mix-holdout" => {
+            "fit-mix-holdout" => {
                 opts.fit_mix = true;
                 opts.fit_holdout = true;
             }
-            other => eprintln!("[run] unknown flag: {other} (ignored)"),
+            // Fail loudly. A silently ignored flag does not just lose a
+            // setting — it makes the run look like it tested something it
+            // did not, which is worse than a crash.
+            other => return Err(format!("[run] unknown flag: {other}\n{USAGE}")),
         }
     }
-    (opts, reference)
+    Ok((opts, reference))
+}
+
+#[cfg(test)]
+mod cli_tests {
+    use super::*;
+
+    fn parse(args: &[&str]) -> Result<(GridOptions, Option<String>), String> {
+        parse_grid_flags(args.iter().map(|s| (*s).to_string()))
+    }
+
+    #[test]
+    fn an_unknown_flag_is_an_error_rather_than_a_default() {
+        // The failure this guards against: `--neg=uniform` was accepted with a
+        // warning and the run continued on the default negatives, so a whole
+        // A/B pair came out byte-identical while looking like a real comparison.
+        let err = parse(&["--nope"]).unwrap_err();
+        assert!(err.contains("unknown flag: nope"), "{err}");
+        assert!(err.contains("usage: calibrate"), "{err}");
+    }
+
+    #[test]
+    fn the_double_dash_form_of_a_known_flag_still_sets_it() {
+        let (opts, _) = parse(&["--neg=uniform"]).expect("known flag");
+        assert_eq!(opts.neg_mode, NegMode::Uniform);
+        let (opts, _) = parse(&["--split=random"]).expect("known flag");
+        assert_eq!(opts.split, SplitStrategy::Random);
+    }
+
+    #[test]
+    fn an_empty_fit_mix_path_is_an_error() {
+        let err = parse(&["--fit-mix="]).unwrap_err();
+        assert!(err.contains("needs a path"), "{err}");
+    }
+
+    #[test]
+    fn an_unknown_fit_objective_is_an_error_instead_of_a_silent_default() {
+        let err = parse(&["--fit-mix-objective=auc"]).unwrap_err();
+        assert!(err.contains("expected pl|ndcg"), "{err}");
+    }
+
+    #[test]
+    fn a_reference_path_implies_the_fit() {
+        let (opts, reference) = parse(&["--fit-mix=calibration_results/x.toml"]).expect("ok");
+        assert!(opts.fit_mix);
+        assert_eq!(reference.as_deref(), Some("calibration_results/x.toml"));
+    }
 }
