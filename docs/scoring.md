@@ -123,29 +123,33 @@ diversity-quota pass guarantees minimum variety in the top 20:
 ### The redundancy penalty
 
 Each step of the pass picks the remaining post with the highest adjusted score
-`score − penalty`:
+`relevance − penalty`:
 
 ```
-penalty = clamp(redundancy × gap, 0, diversity_max_penalty)
-gap     = reference_score − score
+relevance  = score / scale          # scale = the largest |score| in the head
+redundancy = max group similarity / Σ|diversity_w_*|   # clamped to [0, 1]
+penalty    = redundancy ^ mmr_redundancy_exp × diversity_max_penalty
 ```
 
-`reference_score` is the best score in the head and stays **fixed for the whole
-pass**; `redundancy` is the highest weighted group similarity to the posts
-already picked inside `diversity_window`. Because the penalty only scales a
-post's distance below that reference, the best post is never demoted, while a
-redundant one is pushed down until a dissimilar post overtakes it.
+`scale` puts relevance and penalty into the same units, so
+`diversity_max_penalty` is a fraction of the available relevance rather than an
+absolute number of points. `redundancy` is the highest weighted group similarity
+to the posts already picked inside `diversity_window`, normalised by the L1 norm
+of the five `diversity_w_*` weights: 1.0 means "identical tags", 0.0 "nothing in
+common". The penalty is therefore scale-free — multiplying every weight by the
+same factor changes nothing, which is what "relative importance" has to mean.
 
-This is what makes `diversity_*` a live knob. If the reference is re-based to the
-best *remaining* candidate after every pick instead, `gap` collapses to zero for
-the candidate that is about to win, every penalty vanishes and the pass
-degenerates into a plain sort by score — the knobs change nothing about the
-order.
+The penalty is deliberately **independent of the score gap**. Two variants of one
+post that score 1.000 and 0.999 both pay the full fraction for their overlap, so
+the duplicate lands below a dissimilar post instead of sitting next to its
+original. A gap-scaled penalty shrank with the very difference it had to
+overcome: at a 0.001 gap a duplicate paid 0.0004 and kept its place — exactly the
+case MMR exists for. Relevance still decides the rest, because the penalty is at
+most 45 % of the head's relevance scale and a shared artist alone costs ~2.6 % of
+it (`0.22 / 3.76 × 0.45`).
 
-Because the penalty grows with `gap`, it can only demote a redundant post past a
-dissimilar one that lands within `redundancy × gap` of it. Identical scores carry `gap == 0` and are ordered by post id; near-identical
-variants of one poster that also sit within a hair of each other in score keep
-their order as well — that case is what the quota pass above separates, not MMR.
+Equal scores fall back to the post id as the tie-break, and the quota pass above
+remains the guarantee for the top-20 artist/character minimums.
 
 ### Semantic similarity (v5.11)
 

@@ -389,22 +389,46 @@ pub fn diversify_indices(
         pos_of[actual] = pos;
     }
 
-    let mut available: Vec<usize> = head_ids;
+    let mut available: Vec<usize> = head_ids.clone();
     let mut selected: Vec<usize> = Vec::with_capacity(head_n);
-    // Reference score for the `gap` term: the best score of the whole head,
-    // fixed for the entire pass. Rebasing it to the best *remaining* candidate
-    // after every pick drives `gap` to zero for the candidate that is about to
-    // win, so every penalty vanishes and the pass degenerates into a stable
-    // sort by score — which is how all `diversity_*` knobs lost any effect on
-    // the order. See `mmr_penalty_pushes_a_redundant_post_below_a_dissimilar_one`.
-    let reference_score = available
-        .iter()
-        .map(|&i| entries[i].0)
-        .fold(f32::MIN, f32::max);
 
     let window = priors.diversity_window.max(1);
     let exp = priors.mmr_redundancy_exp;
     let max_penalty = priors.diversity_max_penalty.clamp(0.0, 1.0);
+
+    // Relevance scale: the largest absolute score in the head. Dividing by it
+    // turns "relevance" and "penalty" into comparable, dimensionless units, so
+    // `diversity_max_penalty` is a fraction of the available relevance rather
+    // than an absolute number of points.
+    //
+    // This is what makes the penalty independent of `gap` (the score distance
+    // to the head maximum). A gap-scaled penalty shrank together with the very
+    // difference it had to overcome: two near-identical variants scoring 1.00
+    // and 0.99 paid at most 0.01 of penalty and stayed adjacent. See
+    // `mmr_separates_near_identical_duplicates`.
+    let scale = head_ids
+        .iter()
+        .map(|&i| entries[i].0.abs())
+        .fold(0.0f32, f32::max);
+    let scale = if scale.is_finite() && scale > f32::EPSILON {
+        scale
+    } else {
+        1.0
+    };
+
+    // Redundancy is a weighted *average* of the five group similarities, not a
+    // weighted sum: the weights are relative importances (`diversity_w_general`
+    // is 0.08 next to 1.8 for copyright), so a sum would let one group push
+    // `redundancy` past 1.0 and saturate the clamp. Dividing by the L1 norm of
+    // the weights keeps `redundancy` in [0, 1] and makes scaling every
+    // `diversity_w_*` by the same factor a no-op, which is what "relative
+    // importance" has to mean.
+    let weight_norm = (priors.diversity_w_artist.abs()
+        + priors.diversity_w_character.abs()
+        + priors.diversity_w_copyright.abs()
+        + priors.diversity_w_species.abs()
+        + priors.diversity_w_general.abs())
+    .max(f32::EPSILON);
 
     while !available.is_empty() {
         let mut best_pos = 0usize;
@@ -421,15 +445,15 @@ pub fn diversify_indices(
                     max_sim = v;
                 }
             }
+            let r = (max_sim / weight_norm).clamp(0.0, 1.0);
             let redundancy = if (exp - 1.0).abs() < 1e-3 {
-                max_sim
+                r
             } else {
-                max_sim.max(0.0).powf(exp.clamp(0.1, 5.0)).clamp(0.0, 1.0)
+                r.powf(exp.clamp(0.1, 5.0))
             };
             let (score, tid) = entries[i];
-            let gap = (reference_score - score).max(0.0);
-            let penalty = (redundancy * gap).clamp(0.0, max_penalty);
-            let adj = score - penalty;
+            let relevance = score / scale;
+            let adj = relevance - redundancy * max_penalty;
             if adj > best_value || (adj == best_value && tid < best_tiebreak) {
                 best_value = adj;
                 best_pos = pos;
@@ -1119,10 +1143,22 @@ mod tests {
         });
         let mut available: Vec<usize> = idx_by_score;
         let mut selected: Vec<usize> = Vec::with_capacity(n);
-        let reference_score = available
+        let scale = available
             .iter()
-            .map(|&i| entries[i].0)
-            .fold(f32::MIN, f32::max);
+            .map(|&i| entries[i].0.abs())
+            .fold(0.0f32, f32::max);
+        let scale = if scale.is_finite() && scale > f32::EPSILON {
+            scale
+        } else {
+            1.0
+        };
+        let weight_norm = (priors.diversity_w_artist.abs()
+            + priors.diversity_w_character.abs()
+            + priors.diversity_w_copyright.abs()
+            + priors.diversity_w_species.abs()
+            + priors.diversity_w_general.abs())
+        .max(f32::EPSILON);
+        let exp = priors.mmr_redundancy_exp;
         let max_penalty = priors.diversity_max_penalty.clamp(0.0, 1.0);
         while !available.is_empty() {
             let mut best_pos = 0usize;
@@ -1130,7 +1166,7 @@ mod tests {
             let mut best_tiebreak = i64::MAX;
             for (pos, &i) in available.iter().enumerate() {
                 let (score, tid) = entries[i];
-                let redundancy = mmr_redundancy_recompute(
+                let raw = mmr_redundancy_recompute(
                     &features[i],
                     &selected,
                     features,
@@ -1138,9 +1174,13 @@ mod tests {
                     user_graph,
                     priors,
                 );
-                let gap = (reference_score - score).max(0.0);
-                let penalty = (redundancy * gap).clamp(0.0, max_penalty);
-                let adj = score - penalty;
+                let r = (raw / weight_norm).clamp(0.0, 1.0);
+                let redundancy = if (exp - 1.0).abs() < 1e-3 {
+                    r
+                } else {
+                    r.powf(exp.clamp(0.1, 5.0))
+                };
+                let adj = score / scale - redundancy * max_penalty;
                 if adj > best_value || (adj == best_value && tid < best_tiebreak) {
                     best_value = adj;
                     best_pos = pos;
@@ -1344,15 +1384,12 @@ mod tests {
 
     /// MMR must be able to move a redundant post below a dissimilar one.
     ///
-    /// `gap` (the score distance to the reference score) scales the penalty, so
-    /// the case that exposes a degenerate reference is a *close* redundant pair
-    /// and a dissimilar post just behind it: A(1.0) and B(0.9) share the only
-    /// group that carries weight, C(0.85) shares nothing. With `gap` measured
-    /// from the fixed head maximum, B pays `1.0 × 0.1 × (1 − 0.35 × 0.5) =
-    /// 0.0825` and drops to 0.8175 — below C — giving `[A, C, B]`. If the
-    /// reference is rebased to the best *remaining* candidate after every pick,
-    /// B's `gap` becomes zero, its penalty vanishes and the pass reproduces raw
-    /// score order `[A, B, C]`.
+    /// A(1.0) and B(0.9) share the only group that carries weight, C(0.85)
+    /// shares nothing. With the penalty at `redundancy × diversity_max_penalty`
+    /// (here `1.0 × 0.45` in units of the head's relevance scale), B drops to
+    /// 0.45 and C at 0.85 wins — `[A, C, B]`. A gap-scaled penalty gives the
+    /// same answer for this pair; the difference shows up in
+    /// [`mmr_separates_near_identical_duplicates`].
     #[test]
     fn mmr_penalty_pushes_a_redundant_post_below_a_dissimilar_one() {
         let graph = TagRelationGraph::empty();
@@ -1389,20 +1426,16 @@ mod tests {
         );
     }
 
-    /// Characterises the limit of a gap-scaled penalty: two posts that are both
-    /// near-identical *and* near-equal in score keep their score order, because
-    /// the penalty `redundancy × gap` shrinks together with the gap it has to
-    /// overcome. Variants of one poster scoring 1.00 and 0.99 therefore stay
-    /// adjacent unless a dissimilar post lands inside the (here 0.008) band
-    /// between them — the `enforce_diversity_quota` pass, not MMR, is what
-    /// separates that particular case.
+    /// Two variants of the same post that also score almost identically must
+    /// not stay adjacent.
     ///
-    /// If the penalty is ever made independent of `gap` (or `gap` is measured
-    /// from the bottom of the head instead of the top), this test must fail:
-    /// then the "redundancy penalty" section of `docs/scoring.md` needs
-    /// rewriting along with it.
+    /// This is the case a gap-scaled penalty could not fix: the penalty
+    /// `redundancy × gap` shrank together with the gap it had to overcome, so
+    /// 1.00 / 0.99 paid at most 0.008 and kept their score order. The penalty
+    /// is now independent of the gap, so the duplicate pays the full
+    /// `diversity_max_penalty` (0.45) and falls below a 0.9 post.
     #[test]
-    fn mmr_leaves_near_identical_near_ties_in_score_order() {
+    fn mmr_separates_near_identical_duplicates() {
         let graph = TagRelationGraph::empty();
         let mut priors = test_priors();
         priors.diversity_w_artist = 1.0;
@@ -1428,8 +1461,61 @@ mod tests {
 
         assert_eq!(
             ids(&diversify_scored_posts(posts, &graph, None, &priors)),
+            vec![1, 3, 2],
+            "a 0.99 duplicate must not sit next to its 1.00 original"
+        );
+    }
+
+    /// The normalised redundancy is a weighted average, so a partial overlap
+    /// stays a *small* penalty: sharing only the artist costs
+    /// `0.22 / 3.76 × 0.45 ≈ 0.026` of the relevance scale with the production
+    /// weights. That is enough to separate a near-tie (0.999 vs 1.000) but not
+    /// enough to lift a post 0.05 behind.
+    #[test]
+    fn partial_overlap_separates_only_near_ties() {
+        let graph = TagRelationGraph::empty();
+        let mut priors = test_priors();
+        // Production diversity weights: artist 0.22 of the 3.76 total, so
+        // "shares the artist" alone is ~6 % of the weighted overlap.
+        priors.diversity_w_artist = 0.22;
+        priors.diversity_w_character = 0.16;
+        priors.diversity_w_copyright = 1.8;
+        priors.diversity_w_species = 1.5;
+        priors.diversity_w_general = 0.08;
+
+        // Both posts share the artist; the third has another artist.
+        let posts = vec![
+            ScoredPost {
+                score: 1.0,
+                ..scored(1, &["shared"], &[])
+            },
+            ScoredPost {
+                score: 0.999,
+                ..scored(2, &["shared"], &[])
+            },
+            ScoredPost {
+                score: 0.995,
+                ..scored(3, &["other"], &[])
+            },
+        ];
+        assert_eq!(
+            ids(&diversify_scored_posts(
+                posts.clone(),
+                &graph,
+                None,
+                &priors
+            )),
+            vec![1, 3, 2],
+            "artist-only overlap still outranks a 0.004 gap"
+        );
+
+        // Same pair, but the third post is far enough behind to keep its place.
+        let mut behind = posts;
+        behind[2].score = 0.95;
+        assert_eq!(
+            ids(&diversify_scored_posts(behind, &graph, None, &priors)),
             vec![1, 2, 3],
-            "a 0.008 penalty band cannot lift a 0.9 post over a 0.99 duplicate"
+            "0.05 of raw score is more than the 0.026 overlap penalty"
         );
     }
 
@@ -1437,10 +1523,11 @@ mod tests {
     /// positive value bounds it, and posts past the bound are appended
     /// untouched in raw-score order.
     ///
-    /// Equal scores are deliberate: with `gap == 0` every penalty is zero, so
-    /// MMR reduces to its `tid` tie-break and the only thing the output can
-    /// show is which posts took part in the pass at all — inside the head the
-    /// tie-break is `tid`, past the head the raw order survives.
+    /// Equal scores are deliberate: every post has distinct artist and
+    /// character tags, so `redundancy == 0` and the penalty is zero for
+    /// everyone. MMR then reduces to its `tid` tie-break, and the only thing
+    /// the output can show is which posts took part in the pass at all — inside
+    /// the head the tie-break is `tid`, past the head the raw order survives.
     #[test]
     fn diversity_head_limit_bounds_the_mmr_pass() {
         let graph = TagRelationGraph::empty();
