@@ -717,13 +717,23 @@ pub(crate) async fn get_daily_digest(
         build_generic_digest(account_id, hide_saved, &account.blacklist).await?
     };
 
-    // Human-readable "why this post" reasons for digest cards (both modes).
-    let user_tags: std::collections::HashSet<String> =
+    // Human-readable "why this post" reasons for digest cards (both modes),
+    // ordered by each channel's weighted contribution.
+    let user_tags: HashMap<String, f32> =
         stratum_or_default("user_tag_counts", account_id, get_tag_counts(account_id))
             .iter()
-            .map(|t| t.name.to_lowercase())
+            .map(|t| (t.name.to_lowercase(), t.count as f32))
             .collect();
-    e621_account_parser_api::utils::explain_scored_posts(&mut posts, &user_tags, false);
+    let mut explain_priors = cfg().priors.clone();
+    explain_priors.now = Utc::now();
+    let explain_idf = current_idf();
+    e621_account_parser_api::utils::explain_scored_posts(
+        &mut posts,
+        &user_tags,
+        &explain_priors,
+        &explain_idf,
+        false,
+    );
 
     e621_account_parser_api::audit::event("feed.digest")
         .field("account_id", account_id)

@@ -235,10 +235,19 @@ pub(crate) async fn search_scored_posts(
         })
         .collect();
 
-    // Human-readable "why this post" reasons for trending cards.
-    let user_tags: std::collections::HashSet<String> =
-        tags.iter().map(|t| t.name.to_lowercase()).collect();
-    e621_account_parser_api::utils::explain_scored_posts(&mut scored, &user_tags, false);
+    // Human-readable "why this post" reasons for trending cards, ordered by
+    // each channel's weighted contribution.
+    let user_tags: std::collections::HashMap<String, f32> = tags
+        .iter()
+        .map(|t| (t.name.to_lowercase(), t.count as f32))
+        .collect();
+    e621_account_parser_api::utils::explain_scored_posts(
+        &mut scored,
+        &user_tags,
+        &priors,
+        &idf,
+        false,
+    );
 
     scored.sort_by(|a, b| {
         b.score
@@ -327,10 +336,19 @@ pub(crate) async fn get_trending_scored(
         })
         .collect();
 
-    // Human-readable "why this post" reasons for trending cards.
-    let user_tags: std::collections::HashSet<String> =
-        tags.iter().map(|t| t.name.to_lowercase()).collect();
-    e621_account_parser_api::utils::explain_scored_posts(&mut scored, &user_tags, false);
+    // Human-readable "why this post" reasons for trending cards, ordered by
+    // each channel's weighted contribution.
+    let user_tags: std::collections::HashMap<String, f32> = tags
+        .iter()
+        .map(|t| (t.name.to_lowercase(), t.count as f32))
+        .collect();
+    e621_account_parser_api::utils::explain_scored_posts(
+        &mut scored,
+        &user_tags,
+        &priors,
+        &idf,
+        false,
+    );
 
     // Apply affinity threshold if provided.
     if let Some(threshold) = affinity_threshold {

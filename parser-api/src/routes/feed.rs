@@ -772,13 +772,19 @@ async fn build_recommendations_shared(
         p.mark("diversify_post");
     }
 
-    // Human-readable "why this post" reasons for the frontend. Uses the
-    // account's tag counts only to name a shared tag — never re-scores.
-    let user_tags: std::collections::HashSet<String> =
-        tags.iter().map(|t| t.name.to_lowercase()).collect();
+    // Human-readable "why this post" reasons for the frontend. The account's
+    // tag counts are used only to name the specific tag that carries the most
+    // weight in the taste profile — never to re-score — and the reasons are
+    // ordered by each channel's weighted contribution (see `utils::explain`).
+    let user_tags: std::collections::HashMap<String, f32> = tags
+        .iter()
+        .map(|t| (t.name.to_lowercase(), t.count as f32))
+        .collect();
     e621_account_parser_api::utils::explain_scored_posts(
         &mut scored,
         &user_tags,
+        &priors,
+        &idf,
         priors.exploration_epsilon > 1e-4,
     );
 
