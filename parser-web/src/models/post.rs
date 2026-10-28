@@ -177,9 +177,6 @@ pub enum Rating {
 pub enum FeedInteractionType {
     QualifiedImpression,
     Open,
-    Like,
-    StrongLike,
-    Hide,
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq)]

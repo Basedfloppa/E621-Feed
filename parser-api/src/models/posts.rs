@@ -292,12 +292,16 @@ pub enum Rating {
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema, Clone, PartialEq, Eq)]
 #[serde(crate = "rocket::serde", rename_all = "snake_case")]
+/// Events the client may report. There are only two kinds of evidence the
+/// feed consumes: a card was on screen (`qualified_impression`) and the user
+/// opened it (`open`). Explicit liking/hiding was removed with the interaction
+/// channel — the client no longer sends it and nothing scores it, so carrying
+/// the variants implied a feedback path that does not exist. Any other string
+/// deserialises to [`FeedInteractionType::Unknown`] and the route rejects it
+/// with 400 instead of writing a row nothing reads.
 pub enum FeedInteractionType {
     QualifiedImpression,
     Open,
-    Like,
-    StrongLike,
-    Hide,
 
     #[serde(other)]
     Unknown,
@@ -308,9 +312,6 @@ impl Display for FeedInteractionType {
         match self {
             FeedInteractionType::QualifiedImpression => write!(f, "qualified_impression"),
             FeedInteractionType::Open => write!(f, "open"),
-            FeedInteractionType::Like => write!(f, "like"),
-            FeedInteractionType::StrongLike => write!(f, "strong_like"),
-            FeedInteractionType::Hide => write!(f, "hide"),
             FeedInteractionType::Unknown => write!(f, "unknown"),
         }
     }
@@ -558,7 +559,6 @@ mod tests {
             "qualified_impression"
         );
         assert_eq!(FeedInteractionType::Open.to_string(), "open");
-        assert_eq!(FeedInteractionType::Hide.to_string(), "hide");
         assert_eq!(FeedInteractionType::Unknown.to_string(), "unknown");
     }
 
@@ -566,12 +566,25 @@ mod tests {
     fn feed_interaction_type_deserialization() {
         let parse = |s: &str| serde_json::from_str::<FeedInteractionType>(s).unwrap();
         assert_eq!(parse(r#""open""#), FeedInteractionType::Open);
-        assert_eq!(parse(r#""hide""#), FeedInteractionType::Hide);
         assert_eq!(
             parse(r#""qualified_impression""#),
             FeedInteractionType::QualifiedImpression
         );
         // Unrecognised event types fall through to Unknown (#[serde(other)]).
         assert_eq!(parse(r#""brand_new_event""#), FeedInteractionType::Unknown);
+    }
+
+    /// The removed feedback events must not come back through the wire: a
+    /// client still sending them gets `Unknown`, which the routes reject.
+    #[test]
+    fn removed_feedback_events_are_unknown() {
+        let parse = |s: &str| serde_json::from_str::<FeedInteractionType>(s).unwrap();
+        for gone in ["like", "strong_like", "hide"] {
+            assert_eq!(
+                parse(&format!("\"{gone}\"")),
+                FeedInteractionType::Unknown,
+                "{gone} must no longer have a variant"
+            );
+        }
     }
 }

@@ -54,9 +54,7 @@ pub fn record_feed_interaction(
         if inserted > 0 {
             let (impression_delta, positive_delta, negative_delta) = match interaction.event_type {
                 FeedInteractionType::QualifiedImpression => (1, 0, 0),
-                FeedInteractionType::Open | FeedInteractionType::Like => (0, 1, 0),
-                FeedInteractionType::StrongLike => (0, 3, 0),
-                FeedInteractionType::Hide => (0, 0, 1),
+                FeedInteractionType::Open => (0, 1, 0),
                 FeedInteractionType::Unknown => (0, 0, 0),
             };
 
@@ -142,9 +140,7 @@ pub fn remove_feed_interaction(
         }
         let (impressions, positives, negatives) = match interaction.event_type {
             FeedInteractionType::QualifiedImpression => (1, 0, 0),
-            FeedInteractionType::Open | FeedInteractionType::Like => (0, 1, 0),
-            FeedInteractionType::StrongLike => (0, 3, 0),
-            FeedInteractionType::Hide => (0, 0, 1),
+            FeedInteractionType::Open => (0, 1, 0),
             FeedInteractionType::Unknown => (0, 0, 0),
         };
         tx.execute(
@@ -218,9 +214,8 @@ fn history_row_mapper(
     let event_type = match event_str.as_str() {
         "qualified_impression" => crate::models::FeedInteractionType::QualifiedImpression,
         "open" => crate::models::FeedInteractionType::Open,
-        "like" => crate::models::FeedInteractionType::Like,
-        "strong_like" => crate::models::FeedInteractionType::StrongLike,
-        "hide" => crate::models::FeedInteractionType::Hide,
+        // Rows written before the feedback events were cut (and any future
+        // unknown string) read back as Unknown rather than failing the page.
         _ => crate::models::FeedInteractionType::Unknown,
     };
     Ok(crate::models::InteractionHistoryItem {
@@ -329,11 +324,8 @@ fn rebuild_account_tag_feedback(account_id: i32) -> Result<(), String> {
             SELECT
                 fi.account_id, t.name AS tag_name, t.group_type,
                 SUM(CASE WHEN fi.event_type = 'qualified_impression' THEN 1 ELSE 0 END),
-                SUM(CASE
-                    WHEN fi.event_type IN ('open','like') THEN 1
-                    WHEN fi.event_type = 'strong_like' THEN 3
-                    ELSE 0 END),
-                SUM(CASE WHEN fi.event_type = 'hide' THEN 1 ELSE 0 END),
+                SUM(CASE WHEN fi.event_type = 'open' THEN 1 ELSE 0 END),
+                0,
                 MAX(fi.created_at),
                 MAX(fi.created_at)
             FROM feed_interactions fi
@@ -531,9 +523,7 @@ pub fn record_feed_interactions_batch(
                 let (impression_delta, positive_delta, negative_delta) =
                     match interaction.event_type {
                         FeedInteractionType::QualifiedImpression => (1, 0, 0),
-                        FeedInteractionType::Open | FeedInteractionType::Like => (0, 1, 0),
-                        FeedInteractionType::StrongLike => (0, 3, 0),
-                        FeedInteractionType::Hide => (0, 0, 1),
+                        FeedInteractionType::Open => (0, 1, 0),
                         FeedInteractionType::Unknown => (0, 0, 0),
                     };
 

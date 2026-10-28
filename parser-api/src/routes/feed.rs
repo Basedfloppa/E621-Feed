@@ -97,8 +97,10 @@ pub(crate) async fn clear_account_interactions(
 }
 
 /// Interaction history for the history page. Optional `event` filter
-/// (`open` / `hide` / `like` / `strong_like` / `qualified_impression`)
-/// and `limit` (default 100, max 500). Newest first.
+/// (`open` / `qualified_impression`) and `limit` (default 100, max 500).
+/// Newest first. The feedback events (`like`, `strong_like`, `hide`) were
+/// removed with the interaction channel; asking for one is a 400, not an
+/// empty page.
 #[openapi(tag = "Recommendations")]
 #[get("/account/<account_id>/interactions?<event>&<limit>")]
 pub(crate) async fn get_account_interactions(
@@ -113,13 +115,10 @@ pub(crate) async fn get_account_interactions(
     let filter = match event.as_deref() {
         None => None,
         Some("open") => Some(models::FeedInteractionType::Open),
-        Some("hide") => Some(models::FeedInteractionType::Hide),
-        Some("like") => Some(models::FeedInteractionType::Like),
-        Some("strong_like") => Some(models::FeedInteractionType::StrongLike),
         Some("qualified_impression") => Some(models::FeedInteractionType::QualifiedImpression),
         Some(other) => {
             return Err(ApiError::BadRequest(format!(
-                "unknown event filter: {other}"
+                "unknown event filter: {other} (expected open or qualified_impression)"
             )));
         }
     };

@@ -11,8 +11,8 @@
 //! - Impressions (`qualified_impression`) are delay-tolerant: the buffer
 //!   drains on a debounce timer and once a size threshold is hit, so a
 //!   scroll-back burst coalesces into a handful of requests.
-//! - Explicit actions (open / like / strong_like / hide) flush the queue
-//!   immediately so user feedback reaches the server without a visible delay.
+//! - Opening a post (`open`) flushes the queue immediately so the evidence
+//!   that the card was clicked reaches the server without a visible delay.
 
 use std::cell::RefCell;
 

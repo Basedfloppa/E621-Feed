@@ -183,7 +183,7 @@ impl AppMetrics {
 
             feed_interactions_total: register_int_counter_vec!(
                 "e621_feed_interactions_total",
-                "Feed interactions by type (qualified_impression / open / like / strong_like / hide)",
+                "Feed interactions by type (qualified_impression / open)",
                 &["type"]
             )
             .unwrap(),

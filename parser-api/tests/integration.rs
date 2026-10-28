@@ -1842,7 +1842,7 @@ async fn account_export_import_interactions_round_trip() {
         &FeedInteractionRequest {
             account_id: src.id,
             post_id: 12_700_001,
-            event_type: FeedInteractionType::Like,
+            event_type: FeedInteractionType::Open,
             position: 1,
             session_id: "sess_a".into(),
         },
@@ -1853,7 +1853,7 @@ async fn account_export_import_interactions_round_trip() {
         &FeedInteractionRequest {
             account_id: src.id,
             post_id: 12_700_002,
-            event_type: FeedInteractionType::Hide,
+            event_type: FeedInteractionType::QualifiedImpression,
             position: 2,
             session_id: "sess_a".into(),
         },
@@ -1958,22 +1958,28 @@ async fn interaction_history_lists_and_filters() {
     )
     .unwrap();
 
-    // Record interactions directly via the DB layer.
-    for (post_id, event) in [
-        (7_100_001_i64, "open"),
-        (7_100_001_i64, "hide"),
-        (7_100_002_i64, "like"),
+    // Record interactions directly via the DB layer. Only the two events the
+    // feed still consumes exist: an open and a qualified impression.
+    for (post_id, event_type) in [
+        (
+            7_100_001_i64,
+            e621_account_parser_api::models::FeedInteractionType::Open,
+        ),
+        (
+            7_100_001_i64,
+            e621_account_parser_api::models::FeedInteractionType::QualifiedImpression,
+        ),
+        (
+            7_100_002_i64,
+            e621_account_parser_api::models::FeedInteractionType::QualifiedImpression,
+        ),
     ] {
         e621_account_parser_api::db::record_feed_interaction(
             owner,
             &e621_account_parser_api::models::FeedInteractionRequest {
                 account_id: aid,
                 post_id,
-                event_type: match event {
-                    "open" => e621_account_parser_api::models::FeedInteractionType::Open,
-                    "hide" => e621_account_parser_api::models::FeedInteractionType::Hide,
-                    _ => e621_account_parser_api::models::FeedInteractionType::Like,
-                },
+                event_type,
                 position: 1,
                 session_id: "hist-test".into(),
             },
@@ -2000,8 +2006,10 @@ async fn interaction_history_lists_and_filters() {
     let arr = items.as_array().unwrap();
     assert_eq!(arr.len(), 3, "all three interactions listed");
     assert!(arr.iter().any(|i| i["event_type"] == "open"));
-    assert!(arr.iter().any(|i| i["event_type"] == "hide"));
-    assert!(arr.iter().any(|i| i["event_type"] == "like"));
+    assert!(
+        arr.iter()
+            .any(|i| i["event_type"] == "qualified_impression")
+    );
 
     // Filtered by event.
     let response = client
@@ -2022,6 +2030,21 @@ async fn interaction_history_lists_and_filters() {
         .dispatch()
         .await;
     assert_eq!(response.status(), Status::BadRequest);
+
+    // The removed feedback events are rejected too, rather than silently
+    // returning an empty page for a filter the server no longer knows.
+    for gone in ["like", "strong_like", "hide"] {
+        let response = client
+            .get(format!("/api/account/{aid}/interactions?event={gone}"))
+            .cookie(cookie.clone())
+            .dispatch()
+            .await;
+        assert_eq!(
+            response.status(),
+            Status::BadRequest,
+            "event={gone} must be rejected"
+        );
+    }
 }
 
 #[test]

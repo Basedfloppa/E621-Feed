@@ -103,26 +103,13 @@ pub fn history_page() -> Html {
                         class={classes!("tab", if filter.is_none() { "tab-active" } else { "" })}
                         onclick={on_select_filter(None)}
                     >{ "All" }</button>
-                    { for ["open", "like", "strong_like", "hide"].iter().map(|ev| {
-                        let label = match *ev {
-                            "strong_like" => "Strong like".to_string(),
-                            _ => {
-                                let mut s = ev.to_string();
-                                s = s[..1].to_uppercase() + &s[1..];
-                                s
-                            }
-                        };
-                        let active = filter.as_deref() == Some(*ev);
-                        html! {
-                            <button
-                                type="button"
-                                role="tab"
-                                aria-selected={active.to_string()}
-                                class={classes!("tab", if active { "tab-active" } else { "" })}
-                                onclick={on_select_filter(Some((*ev).to_string()))}
-                            >{ label }</button>
-                        }
-                    }) }
+                    <button
+                        type="button"
+                        role="tab"
+                        aria-selected={(filter.as_deref() == Some("open")).to_string()}
+                        class={classes!("tab", if filter.as_deref() == Some("open") { "tab-active" } else { "" })}
+                        onclick={on_select_filter(Some("open".to_string()))}
+                    >{ "Open" }</button>
                 </div>
             </div>
 
@@ -199,18 +186,12 @@ fn event_label(et: &FeedInteractionType) -> &'static str {
     match et {
         FeedInteractionType::QualifiedImpression => "Impression",
         FeedInteractionType::Open => "Open",
-        FeedInteractionType::Like => "Like",
-        FeedInteractionType::StrongLike => "Strong like",
-        FeedInteractionType::Hide => "Hide",
     }
 }
 
 fn event_badge_class(et: &FeedInteractionType) -> &'static str {
     match et {
         FeedInteractionType::Open => "badge-info",
-        FeedInteractionType::Like => "badge-success",
-        FeedInteractionType::StrongLike => "badge-success badge-outline",
-        FeedInteractionType::Hide => "badge-error",
         FeedInteractionType::QualifiedImpression => "badge-ghost",
     }
 }
