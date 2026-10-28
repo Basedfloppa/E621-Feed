@@ -304,11 +304,29 @@ survive contact with production traffic:
    after every pick, which forced the penalty to zero: the MMR pass was a plain
    sort by score, so *no* `diversity_*` value could move any metric and the
    ~0.002 spread was noise. The reference is now fixed
-   (see [scoring.md](scoring.md#the-redundancy-penalty)), so the grid can probe
-   these knobs for the first time. Treat the `diversity_*` values in
-   `config.example.toml` (`diversity_max_penalty`, `diversity_interaction_damp`,
-   `diversity_w_*`, `mmr_redundancy_exp`, `diversity_semantic_*`) as uncalibrated
-   until they have been re-probed.
+   (see [scoring.md](scoring.md#the-redundancy-penalty)).
+5. **`diversity_max_penalty` is now calibrated** — and the honest result is that
+   NDCG cannot pick it. Five runs on one dataset (`CALIBRATE_NOW=1792972800`,
+   N=150, fingerprint `0x2a6d692efbd1f0f5`, `with-diversify`), only the penalty
+   changed:
+
+   | `diversity_max_penalty` | NDCG@20 | SE | distinct artists in head | tag-jaccard |
+   |---:|---:|---:|---:|---:|
+   | 0.00 | 0.6070 | 0.0185 | 10.5 | 0.15 |
+   | 0.20 | 0.6154 | 0.0162 | 13.7 | 0.12 |
+   | 0.45 | 0.6090 | 0.0155 | 15.6 | 0.11 |
+   | **0.65** | **0.6106** | 0.0155 | **16.1** | **0.10** |
+   | 0.90 | 0.6073 | 0.0154 | 16.4 | 0.10 |
+
+   Every NDCG difference is inside one SE, while the diversity columns move
+   monotonically: MMR removes near-duplicates from the head without costing
+   ranked relevance, because a duplicate never earns a second positive. The head
+   stops improving past ~0.65 (0.9 buys +0.3 artists and no jaccard), so
+   `diversity_max_penalty = 0.65` is the knee. The live feed agrees: on account
+   298553 the most-repeated artist in the top 20 fell from 6 posts to 3, adjacent
+   same-artist pairs from 1 to 0, and the median head age from 37 to 27 days.
+   Re-probe the remaining `diversity_*` knobs (weights, `mmr_redundancy_exp`,
+   `diversity_semantic_*`) the same way: they are still uncalibrated.
 5. **Personal `tag_relation` channel** has signal: each fixture builds its
    own user-graph from train_posts. `tag_relation_
    w_personal`, `tag_relation_pmi_scale_user`, `tag_relation_user_min_

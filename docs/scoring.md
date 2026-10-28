@@ -145,8 +145,8 @@ the duplicate lands below a dissimilar post instead of sitting next to its
 original. A gap-scaled penalty shrank with the very difference it had to
 overcome: at a 0.001 gap a duplicate paid 0.0004 and kept its place — exactly the
 case MMR exists for. Relevance still decides the rest, because the penalty is at
-most 45 % of the head's relevance scale and a shared artist alone costs ~2.6 % of
-it (`0.22 / 3.76 × 0.45`).
+most 65 % of the head's relevance scale and a shared artist alone costs ~3.8 % of
+it (`0.22 / 3.76 × 0.65`, the calibrated value).
 
 Equal scores fall back to the post id as the tie-break, and the quota pass above
 remains the guarantee for the top-20 artist/character minimums.
