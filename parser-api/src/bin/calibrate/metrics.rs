@@ -1,6 +1,7 @@
 //! Metrics + scoring loop. NDCG@k / Recall@k / MRR over per-account ranked
 //! lists. Parallelism via a bounded rayon pool sized from `calibrate_threads`.
 
+use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -9,7 +10,9 @@ use rayon::ThreadPool;
 use rayon::prelude::*;
 
 use e621_account_parser_api::models::cfg;
-use e621_account_parser_api::utils::{Priors, ScoringContext, diversify_indices};
+use e621_account_parser_api::utils::{
+    CachedPostFeatures, Group, Priors, ScoringContext, diversify_indices,
+};
 
 use crate::dataset::EvalDataset;
 
@@ -26,6 +29,15 @@ pub(crate) struct Metrics {
     pub(crate) ndcg_per_account: Vec<f64>,
     pub(crate) recall_per_account: Vec<f64>,
     pub(crate) mrr_per_account: Vec<f64>,
+    /// What the head of the list *is*, not just how well it ranks the labels.
+    /// Summed over accounts, divided in `average()`. Motivation: two
+    /// configurations whose NDCG differs by less than one standard error can
+    /// still hand the reader completely different feeds, and relevance alone
+    /// cannot say which is which — which is why `eval` also describes the head.
+    pub(crate) dist_age_days: f64,
+    pub(crate) dist_fav_count: f64,
+    pub(crate) dist_artists: f64,
+    pub(crate) dist_tag_jaccard: f64,
 }
 
 impl Metrics {
@@ -44,6 +56,10 @@ impl Metrics {
             ndcg_per_account: self.ndcg_per_account.clone(),
             recall_per_account: self.recall_per_account.clone(),
             mrr_per_account: self.mrr_per_account.clone(),
+            dist_age_days: self.dist_age_days / n,
+            dist_fav_count: self.dist_fav_count / n,
+            dist_artists: self.dist_artists / n,
+            dist_tag_jaccard: self.dist_tag_jaccard / n,
         }
     }
 
@@ -283,7 +299,7 @@ fn score_with_opts(
     let report_every = (total / 10).max(20);
     let t0 = std::time::Instant::now();
 
-    let per_account: Vec<(f64, f64, f64)> = score_pool().install(|| {
+    let per_account: Vec<(f64, f64, f64, Distribution)> = score_pool().install(|| {
         dataset
             .accounts
             .par_iter()
@@ -300,16 +316,23 @@ fn score_with_opts(
                 let n_test = fx.test_features.len();
                 let total_posts = n_test + fx.neg_features.len();
                 let mut scored: Vec<(i64, f32, bool)> = Vec::with_capacity(total_posts);
+                // Id → features, so the head of the ranking can be described
+                // after it has been sorted (the tuple only carries the id).
+                let mut by_id: HashMap<i64, &CachedPostFeatures> =
+                    HashMap::with_capacity(total_posts);
+                for f in fx.test_features.iter().chain(fx.neg_features.iter()) {
+                    by_id.insert(f.id, f);
+                }
 
                 if diversify {
-                    let mut entries: Vec<(f32, f32, i64)> = Vec::with_capacity(total_posts);
+                    let mut entries: Vec<(f32, i64)> = Vec::with_capacity(total_posts);
                     for f in &fx.test_features {
-                        let (s, breakdown) = ctx.score_cached(f);
-                        entries.push((s, breakdown.interaction_fit, f.id));
+                        let (s, _) = ctx.score_cached(f);
+                        entries.push((s, f.id));
                     }
                     for f in &fx.neg_features {
-                        let (s, breakdown) = ctx.score_cached(f);
-                        entries.push((s, breakdown.interaction_fit, f.id));
+                        let (s, _) = ctx.score_cached(f);
+                        entries.push((s, f.id));
                     }
                     let head_limit = top_k_ndcg.max(top_k_recall).saturating_mul(2).max(50);
                     let order = diversify_indices(
@@ -322,7 +345,7 @@ fn score_with_opts(
                     );
                     for i in order {
                         let is_pos = i < n_test;
-                        scored.push((entries[i].2, entries[i].0, is_pos));
+                        scored.push((entries[i].1, entries[i].0, is_pos));
                     }
                 } else {
                     for f in &fx.test_features {
@@ -341,6 +364,7 @@ fn score_with_opts(
                     ndcg_at_k(&scored, top_k_ndcg),
                     recall_at_k(&scored, top_k_recall, fx.test_count),
                     mrr(&scored),
+                    head_distribution(&scored, &by_id, top_k_ndcg, now),
                 );
                 if progress {
                     let done = counter.fetch_add(1, Ordering::Relaxed) + 1;
@@ -360,7 +384,7 @@ fn score_with_opts(
     totals.ndcg_per_account.reserve(per_account.len());
     totals.recall_per_account.reserve(per_account.len());
     totals.mrr_per_account.reserve(per_account.len());
-    for (n, r, m) in per_account {
+    for (n, r, m, d) in per_account {
         totals.ndcg_at_k += n;
         totals.recall_at_k += r;
         totals.mrr += m;
@@ -368,6 +392,10 @@ fn score_with_opts(
         totals.ndcg_per_account.push(n);
         totals.recall_per_account.push(r);
         totals.mrr_per_account.push(m);
+        totals.dist_age_days += d.age_days;
+        totals.dist_fav_count += d.fav_count;
+        totals.dist_artists += d.artists;
+        totals.dist_tag_jaccard += d.tag_jaccard;
     }
     if progress {
         eprintln!(
@@ -377,6 +405,103 @@ fn score_with_opts(
         );
     }
     totals
+}
+
+/// Shape of the head of one account's ranking.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct Distribution {
+    /// Median age of the top-K posts, in days.
+    pub(crate) age_days: f64,
+    /// Median favourite count of the top-K posts.
+    pub(crate) fav_count: f64,
+    /// Distinct artists among the top-K posts.
+    pub(crate) artists: f64,
+    /// Mean pairwise tag Jaccard of the top-K posts: how much of the head is
+    /// the same picture with different ids.
+    pub(crate) tag_jaccard: f64,
+}
+
+/// Describe the first `k` entries of `ranked`.
+///
+/// Relevance metrics answer "is the label above the noise"; this answers
+/// "what does the reader actually get". The two disagree: measured on the
+/// live feed, two configurations 0.0084 NDCG apart (one standard error) put
+/// 10-year-old posts at the top of one and last month's at the top of the
+/// other. A metric that cannot see that cannot steer the weights.
+pub(crate) fn head_distribution(
+    ranked: &[(i64, f32, bool)],
+    by_id: &HashMap<i64, &CachedPostFeatures>,
+    k: usize,
+    now: DateTime<Utc>,
+) -> Distribution {
+    let top: Vec<&CachedPostFeatures> = ranked
+        .iter()
+        .take(k)
+        .filter_map(|(id, _, _)| by_id.get(id).copied())
+        .collect();
+    if top.is_empty() {
+        return Distribution::default();
+    }
+
+    let artist_group = Group::Artist as u8;
+    let mut ages: Vec<f64> = top
+        .iter()
+        .map(|f| (now - f.created_at).num_days().max(0) as f64)
+        .collect();
+    let mut favs: Vec<f64> = top.iter().map(|f| f.fav_count as f64).collect();
+    let artists: HashSet<&str> = top
+        .iter()
+        .flat_map(|f| f.tags.iter().filter(|t| t.group == artist_group))
+        .map(|t| t.lc.as_str())
+        .collect();
+    let sets: Vec<HashSet<&str>> = top
+        .iter()
+        .map(|f| f.tags.iter().map(|t| t.lc.as_str()).collect())
+        .collect();
+
+    Distribution {
+        age_days: median(&mut ages),
+        fav_count: median(&mut favs),
+        artists: artists.len() as f64,
+        tag_jaccard: mean_pairwise_jaccard(&sets),
+    }
+}
+
+/// Median of a slice, consuming it. Even length → mean of the two middle
+/// values. Empty → 0.0.
+pub(crate) fn median(xs: &mut [f64]) -> f64 {
+    if xs.is_empty() {
+        return 0.0;
+    }
+    xs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let mid = xs.len() / 2;
+    if xs.len().is_multiple_of(2) {
+        (xs[mid - 1] + xs[mid]) / 2.0
+    } else {
+        xs[mid]
+    }
+}
+
+/// Mean Jaccard similarity over all unordered pairs. Empty or single-element
+/// input → 0.0 (nothing to be redundant with).
+pub(crate) fn mean_pairwise_jaccard(sets: &[HashSet<&str>]) -> f64 {
+    let n = sets.len();
+    if n < 2 {
+        return 0.0;
+    }
+    let mut sum = 0.0;
+    let mut pairs = 0usize;
+    for i in 0..n {
+        for j in (i + 1)..n {
+            let inter = sets[i].intersection(&sets[j]).count() as f64;
+            let union = sets[i].union(&sets[j]).count() as f64;
+            if union > 0.0 {
+                sum += inter / union;
+            }
+            pairs += 1;
+        }
+    }
+    if pairs == 0 { 0.0 } else { sum / pairs as f64 }
 }
 
 pub(crate) fn print_metrics(label: &str, m: &Metrics, top_k_ndcg: usize, top_k_recall: usize) {
@@ -392,6 +517,13 @@ pub(crate) fn print_metrics(label: &str, m: &Metrics, top_k_ndcg: usize, top_k_r
         m.recall_at_k,
         m.mrr
     );
+    if m.n_accounts > 0 {
+        println!(
+            "[{label}] head@{top_k_ndcg}: age={:.0}d  fav={:.0}  artists={:.1}  \
+             tag-jaccard={:.2}",
+            m.dist_age_days, m.dist_fav_count, m.dist_artists, m.dist_tag_jaccard
+        );
+    }
 }
 
 pub(crate) fn ndcg_at_k_pub(ranked: &[(i64, f32, bool)], k: usize) -> f64 {
@@ -445,6 +577,29 @@ fn mrr(ranked: &[(i64, f32, bool)]) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn median_handles_odd_even_and_empty() {
+        assert_eq!(median(&mut []), 0.0);
+        assert_eq!(median(&mut [5.0]), 5.0);
+        assert_eq!(median(&mut [3.0, 1.0, 2.0]), 2.0);
+        // Even length averages the middle pair, which is what makes the
+        // reported age of a 20-item head stable across neighbouring posts.
+        assert_eq!(median(&mut [4.0, 1.0, 3.0, 2.0]), 2.5);
+    }
+
+    #[test]
+    fn pairwise_jaccard_is_a_mean_over_pairs_not_over_items() {
+        let a: HashSet<&str> = ["x", "y"].into_iter().collect();
+        let b: HashSet<&str> = ["x", "z"].into_iter().collect();
+        let c: HashSet<&str> = ["q"].into_iter().collect();
+        // Pairs: a-b = 1/3, a-c = 0, b-c = 0 → mean 1/9.
+        let got = mean_pairwise_jaccard(&[a.clone(), b, c]);
+        assert!((got - 1.0 / 9.0).abs() < 1e-9, "got {got}");
+        // One item has nothing to be redundant with.
+        assert_eq!(mean_pairwise_jaccard(&[a]), 0.0);
+        assert_eq!(mean_pairwise_jaccard(&[]), 0.0);
+    }
 
     #[test]
     fn paired_mean_se_cancels_account_difficulty() {

@@ -1,6 +1,6 @@
 use crate::components::icons::{
-    IconClock, IconDiscover, IconExclusive, IconInteract, IconMedia, IconNovel, IconPopular,
-    IconQuestion, IconRating, IconRelation, IconStar, IconTag, IconUploader,
+    IconClock, IconDiscover, IconExclusive, IconMedia, IconNovel, IconPopular, IconQuestion,
+    IconRating, IconRelation, IconStar, IconTag, IconUploader,
 };
 use crate::models::*;
 use yew::prelude::*;
@@ -42,7 +42,7 @@ struct ChannelInfo {
     why: &'static str,
 }
 
-fn all_channels(bd: &ScoreBreakdown) -> [ChannelInfo; 12] {
+fn all_channels(bd: &ScoreBreakdown) -> [ChannelInfo; 11] {
     [
         ChannelInfo {
             label: "Tag",
@@ -79,12 +79,6 @@ fn all_channels(bd: &ScoreBreakdown) -> [ChannelInfo; 12] {
             icon: html! { <IconPopular /> },
             value: bd.popularity_fit,
             why: "popular with others",
-        },
-        ChannelInfo {
-            label: "Interact",
-            icon: html! { <IconInteract /> },
-            value: bd.interaction_fit,
-            why: "similar to posts you interacted with",
         },
         ChannelInfo {
             label: "Relation",
@@ -132,7 +126,7 @@ fn bar_colour(value: f32) -> &'static str {
 }
 
 /// Pick the top-K channels by absolute contribution (value).
-fn top_k(chs: &[ChannelInfo; 12], k: usize) -> Vec<&ChannelInfo> {
+fn top_k(chs: &[ChannelInfo; 11], k: usize) -> Vec<&ChannelInfo> {
     let mut ranked: Vec<&ChannelInfo> = chs.iter().collect();
     ranked.sort_by(|a, b| {
         b.value

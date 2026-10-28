@@ -8,7 +8,7 @@ which directions are trustworthy see [calibration.md](calibration.md);
 for the math see
 [`parser-api/src/utils/scorer/`](../parser-api/src/utils/scorer/).
 
-The final score is a weighted blend of **12 scoring channels**:
+The final score is a weighted blend of **11 scoring channels**:
 
 | Channel | Mix weight | What it measures |
 |---|---|---|
@@ -18,7 +18,6 @@ The final score is a weighted blend of **12 scoring channels**:
 | `rating` | `mix_rating` | Rating compatibility (S/Q/E) vs user's preference profile |
 | `media` | `mix_media` | Media-type preference (image/video/flash) |
 | `popularity` | `mix_popularity` | Fav count and duration vs user's norm |
-| `interaction` | `mix_interaction` | Per-tag feedback (opens, hides) with Bayesian CTR and staleness decay |
 | `tag_relation` | `mix_tag_relation` | PMI-based pairwise tag co-occurrence (global + personal) |
 | `uploader` | `mix_uploader` | Uploader quality (avg score, avg fav count vs user's profile) |
 | `exclusivity` | `mix_exclusivity` | Tag exclusivity — rare tag combinations get a boost |
@@ -49,13 +48,12 @@ The final score is a weighted blend of **12 scoring channels**:
 |`mix_rating`|rating compatibility matters less|rating compatibility matters more|
 |`mix_media`|media-type preference matters less|media-type preference matters more|
 |`mix_popularity`|popularity fit matters less|feed tracks account's usual popularity range more|
-|`mix_interaction`|feed history matters less|recent browsing behavior matters more|
 |`mix_tag_relation`|tag co-occurrence graph ignored|tag pairs that cluster together (globally or in favourites) lift scores more|
 |`mix_exclusivity`|exclusivity channel disabled|rare tag combinations boost the final score|
 |`mix_novelty`|novelty channel disabled|unseen-before tags boost the final score|
 |`mix_artist_discovery`|artist discovery channel disabled|posts from new artists matching the user's profile boost the final score|
 
-The twelve weights are **L1-normalised** by `MixWeights::from_priors`, so only
+The eleven weights are **L1-normalised** by `MixWeights::from_priors`, so only
 their ratios matter and the values in `config.example.toml` are shares rather
 than a bounded range. A weight may be **negative**, in which case the channel is
 subtracted — for that row, "Lower →" means *penalised* rather than merely
@@ -128,8 +126,7 @@ Each step of the pass picks the remaining post with the highest adjusted score
 `score − penalty`:
 
 ```
-penalty = clamp(redundancy × gap × (1 − diversity_interaction_damp × interaction_fit),
-                0, diversity_max_penalty)
+penalty = clamp(redundancy × gap, 0, diversity_max_penalty)
 gap     = reference_score − score
 ```
 
@@ -146,8 +143,7 @@ degenerates into a plain sort by score — the knobs change nothing about the
 order.
 
 Because the penalty grows with `gap`, it can only demote a redundant post past a
-dissimilar one that lands within `redundancy × gap × (1 − damp × interaction)` of
-it. Identical scores carry `gap == 0` and are ordered by post id; near-identical
+dissimilar one that lands within `redundancy × gap` of it. Identical scores carry `gap == 0` and are ordered by post id; near-identical
 variants of one poster that also sit within a hair of each other in score keep
 their order as well — that case is what the quota pass above separates, not MMR.
 
@@ -214,7 +210,6 @@ across grid widths.
 |`diversity_w_species`|species overlap ignored|penalises posts sharing species tags|
 |`diversity_w_general`|general-tag overlap ignored|penalises posts with too-similar tag sets|
 |`diversity_max_penalty`|MMR penalty capped lower|redundancy penalty can push duplicate posts further down|
-|`diversity_interaction_damp`|interaction signal doesn't reduce redundancy penalty|liked similar posts → less penalty for similarity|
 |`diversity_semantic_blend`|pure Jaccard (legacy)|PMI-soft-match blended into MMR similarity (0 = disabled, default)|
 |`diversity_pmi_threshold`|more pairs count as semantic matches|only strongly-associated pairs (PMI above this) count|
 |`diversity_semantic_max_tags`|fewer tags in O(T²) loop (faster)|more tags per group considered (slower, more signal)|
@@ -237,42 +232,32 @@ by affinity before the client applies one of these per-page cutoffs:
 Cutoffs only affect Search presentation; they do not add a blacklist or alter
 the account's preference profile.
 
-## Discrete-preference smoothing + strong-negative veto
+## Discrete-preference smoothing
 
 |Variable|Lower →|Higher →|
 |---|---|---|
 |`discrete_smoothing_alpha`|rating/media prefs react sharply to small samples|cold-start profiles stay near neutral longer|
-|`strong_negative_count`|one or two dislikes can veto a post|requires a pattern of dislikes before vetoing|
-|`strong_negative_wilson_threshold`|veto fires more easily (loose statistical bar)|veto only when the negative rate is confidently above this fraction (95% lower bound). 0.5 ≈ "more likely negative than not"; 0.6 ≈ "confidently negative"|
-|`strong_negative_penalty`|vetoed posts barely affected|vetoed posts pushed far down the feed (1.0 = zeroed)|
 
-## Feedback decay + meta interaction
+## Blocking rules
 
-The post card's … recommendation menu supports three explicit signals:
-**Like**, **Strong like**, and **Not interested**. Like records one positive
-feedback count for every tag on the post; Strong like records three. Not
-interested hides the post and records one negative count per tag, reducing
-future `interaction_fit` scores for similar candidates rather than creating a
-permanent blacklist rule. The same menu can add a confirmed permanent account
-blacklist rule for a tag, artist, uploader, rating, or media category. The
-media rules use the e621 meta tags `video` and `animated`, plus `require:animated`
-for static media. A blacklist entry is an exclusion, so a leading `-` is stripped
+The post card's … menu holds **blocking rules only**: a confirmed permanent
+account blacklist entry for a tag, artist, uploader, rating, or media category.
+It carries no like/dislike signal — the `interaction` scoring channel was
+removed, so nothing on the card feeds a per-tag CTR any more. The media rules
+use the e621 meta tags `video` and `animated`, plus `require:animated` for
+static media. A blacklist entry is an exclusion, so a leading `-` is stripped
 as decoration rather than read as negation; "hide everything that is not
 animated" is instead spelled as a requirement, which the live query forwards to
-e621 as a positive tag. Undo removes the current session's hide interaction
-and reverses that negative tag feedback. The menu closes when the pointer
-leaves it or the user clicks outside it.
+e621 as a positive tag. The menu closes when the pointer leaves it or the user
+clicks outside it.
 
-Feedback counts are decayed eagerly at `/process` time. Between refreshes, a
-supplementary decay factor is applied per-tag in `interaction_fit` based on
-each tag's `last_interaction_at` and `feedback_decay_half_life_days` — the
-longer since that tag's last interaction, the less the interaction signal is
-trusted.
+`account_tag_feedback` still ages at `/process` time: `feedback_decay_half_life_days`
+decays the per-tag impression counts that `novelty` reads ("shown, not saved ⇒
+less novel").
 
 |Variable|Lower →|Higher →|
 |---|---|---|
-|`feedback_decay_half_life_days`|tag feedback fades fast — recent shifts in taste dominate quickly|tag feedback persists longer — old preferences linger|
-|`meta_interaction_weight`|meta tags ignored even for interaction signal|meta-tag feedback (monochrome, absurd_res, english_text…) feeds the interaction channel; meta is still excluded from tag_similarity / tag_relation|
+|`feedback_decay_half_life_days`|impressions fade fast — a tag looks novel again sooner|impressions persist longer — a tag stays "already seen" longer|
 
 ## Rating fit
 
@@ -347,8 +332,8 @@ the user's established tag groups.
 
 A post scores higher when it carries tags the user hasn't seen before (or has
 seen only a few times). The channel checks each tag against the user's
-favourites (`self.user` maps) and optionally against `feed_interactions`
-impression counts.
+favourites (`self.user` maps) and, when `novelty_use_feedback` is on, against
+the per-tag impression counts in `account_tag_feedback`.
 
 For each tag, novelty is computed as `1.0 − confidence(impressions, n0, 1.0)`,
 where confidence is the `n^p / (n^p + n0^p)` curve. Tags with zero
@@ -363,7 +348,7 @@ for users who want broader discovery beyond their established tag profile.
 |---|---|---|
 |`mix_novelty`|novelty channel disabled|unseen-before tags boost the final score (default 0)|
 |`novelty_n0`|fewer impressions needed to consider a tag "known"|more impressions required before a tag is familiar (default 3)|
-|`novelty_use_feedback`|`false`: only check favourites for novelty|`true` (default): also check feed_interaction impression counts|
+|`novelty_use_feedback`|`false`: only check favourites for novelty|`true` (default): also count feed impressions from `account_tag_feedback`|
 
 ## Artist discovery channel (v5.12)
 

@@ -334,7 +334,6 @@ pub struct ScoreBreakdown {
     pub rating_fit: f32,
     pub media_fit: f32,
     pub popularity_fit: f32,
-    pub interaction_fit: f32,
     #[serde(default)]
     pub tag_relation_fit: f32,
     /// Uploader quality channel (0 when disabled). Added in v5.10.

@@ -986,7 +986,6 @@ mix_recency      = 0.02
 mix_rating       = 0.04
 mix_media        = 0.05
 mix_popularity   = 0.02
-mix_interaction  = 0.10
 idf_lambda       = 1.0
 idf_alpha        = 1.05
 freq_alpha       = 0.95

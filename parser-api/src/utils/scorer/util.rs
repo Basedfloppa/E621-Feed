@@ -5,8 +5,6 @@ use std::borrow::Cow;
 
 use super::priors::Priors;
 
-/// Mathematical 95% one-sided Wilson lower-bound z-score.
-pub(super) const WILSON_Z: f32 = 1.96;
 pub(super) const FEEDBACK_NEUTRAL: f32 = 0.5;
 
 #[inline]
@@ -22,7 +20,7 @@ pub(super) fn sigmoid(x: f32) -> f32 {
 /// [`crate::utils::ChannelScores::values`] — a new channel must be added in
 /// the same position on all three sides or the fit silently optimises a
 /// permutation of the blend the scorer actually runs.
-pub const BLEND_CHANNEL_COUNT: usize = 12;
+pub const BLEND_CHANNEL_COUNT: usize = 11;
 
 /// Channel order for [`blend_score`], matching the `ChannelScores` layout in
 /// `bin/calibrate/cache.rs` and `MixWeights` field order.
@@ -33,7 +31,6 @@ pub const BLEND_CHANNEL_NAMES: [&str; BLEND_CHANNEL_COUNT] = [
     "rating",
     "media",
     "popularity",
-    "interaction",
     "tag_relation",
     "uploader",
     "exclusivity",
@@ -42,8 +39,7 @@ pub const BLEND_CHANNEL_NAMES: [&str; BLEND_CHANNEL_COUNT] = [
 ];
 
 /// The final blend for an explicit weight vector:
-/// `Σ w_c·s_c` → clamp → optional sigmoid sharpening → optional veto
-/// penalty → clamp.
+/// `Σ w_c·s_c` → clamp → optional sigmoid sharpening → clamp.
 ///
 /// Single implementation shared by the production scorer
 /// ([`crate::utils::ScoringContext::final_blend`], which derives the weights
@@ -64,8 +60,6 @@ pub fn blend_score(
     w: [f32; BLEND_CHANNEL_COUNT],
     channels: [f32; BLEND_CHANNEL_COUNT],
     score_temperature: f32,
-    strong_negative_penalty: f32,
-    veto: bool,
 ) -> f32 {
     let mut raw = 0.0f32;
     for (wc, sc) in w.iter().zip(channels.iter()) {
@@ -75,9 +69,6 @@ pub fn blend_score(
     // Class C v5.3: optional sigmoid sharpening on the final blend.
     if score_temperature > 1e-3 {
         score = sigmoid((score - 0.5) * score_temperature).clamp(0.0, 1.0);
-    }
-    if veto {
-        score *= 1.0 - strong_negative_penalty.clamp(0.0, 1.0);
     }
     score.clamp(0.0, 1.0)
 }
@@ -155,41 +146,14 @@ pub(super) fn confidence(n: f32, n0: f32, p: f32) -> f32 {
     np / (np + n0p)
 }
 
-#[inline]
-pub(super) fn wilson_lower_bound(positives: f32, total: f32, z: f32) -> f32 {
-    if total <= 0.0 {
-        return 0.0;
-    }
-    let p_hat = positives / total;
-    let z2 = z * z;
-    let denom = 1.0 + z2 / total;
-    let centre = p_hat + z2 / (2.0 * total);
-    let margin = z * ((p_hat * (1.0 - p_hat) + z2 / (4.0 * total)) / total).sqrt();
-    ((centre - margin) / denom).max(0.0)
-}
-
-/// CTR with Bayesian prior pulling low-volume tags toward `p0`.
-#[inline]
-pub(super) fn ctr_score(pos: f32, neg: f32, imp: f32, p0: f32, alpha: f32) -> f32 {
-    let strong = pos + neg;
-    let exposure = (imp - pos).max(0.0);
-    let denom = strong + exposure + alpha;
-    if denom <= 0.0 {
-        return p0.clamp(0.0, 1.0);
-    }
-    ((pos + alpha * p0) / denom).clamp(0.0, 1.0)
-}
-
 #[derive(Default, Clone, Copy)]
+/// Per-tag exposure counts, resolved from `account_tag_feedback`.
+///
+/// Only impressions survive here: they are the input to `novelty_fit`
+/// ("shown, not saved ⇒ less novel"). The positive/negative counts fed the
+/// removed `interaction` channel.
 pub(super) struct CompactFeedback {
-    pub positive: i64,
-    pub negative: i64,
     pub impressions: i64,
-    /// When this tag was last interacted with. Used for per-tag staleness
-    /// decay in the interaction channel — replaces the old global
-    /// `last_refreshed_at` approach so each tag's feedback age is tracked
-    /// independently.
-    pub last_interaction_secs: Option<f64>,
 }
 
 /// Class E v5.3: how to combine global+user PMI inside a single tag pair.
@@ -218,7 +182,6 @@ pub(super) struct MixWeights {
     pub rating: f32,
     pub media: f32,
     pub popularity: f32,
-    pub interaction: f32,
     pub tag_relation: f32,
     pub uploader: f32,
     pub exclusivity: f32,
@@ -240,7 +203,6 @@ impl MixWeights {
             p.mix_rating,
             p.mix_media,
             p.mix_popularity,
-            p.mix_interaction,
             p.mix_tag_relation,
             p.mix_uploader,
             p.mix_exclusivity,
@@ -262,12 +224,11 @@ impl MixWeights {
             rating: raw[3] / sum,
             media: raw[4] / sum,
             popularity: raw[5] / sum,
-            interaction: raw[6] / sum,
-            tag_relation: raw[7] / sum,
-            uploader: raw[8] / sum,
-            exclusivity: raw[9] / sum,
-            novelty: raw[10] / sum,
-            artist_discovery: raw[11] / sum,
+            tag_relation: raw[6] / sum,
+            uploader: raw[7] / sum,
+            exclusivity: raw[8] / sum,
+            novelty: raw[9] / sum,
+            artist_discovery: raw[10] / sum,
         }
     }
 
@@ -281,7 +242,6 @@ impl MixWeights {
             self.rating,
             self.media,
             self.popularity,
-            self.interaction,
             self.tag_relation,
             self.uploader,
             self.exclusivity,
@@ -338,7 +298,6 @@ mod tests {
             mix_rating: 0.0,
             mix_media: 0.0,
             mix_popularity: 0.0,
-            mix_interaction: 0.0,
             mix_tag_relation: 0.0,
             mix_uploader: 0.0,
             mix_exclusivity: 0.0,
@@ -348,12 +307,14 @@ mod tests {
         };
 
         let w = normalised_mix_weights(&p);
-        assert!(w[10] < 0.0, "negative weight must survive, got {}", w[10]);
+        // `novelty` sits at slot 9 in the blend order (the removed `interaction`
+        // channel used to occupy 6).
+        assert!(w[9] < 0.0, "negative weight must survive, got {}", w[9]);
         assert!(close(w[0], 0.75), "sim share should be 0.75, got {}", w[0]);
         assert!(
-            close(w[10], -0.25),
+            close(w[9], -0.25),
             "novelty share should be -0.25, got {}",
-            w[10]
+            w[9]
         );
         let l1: f32 = w.iter().map(|x| x.abs()).sum();
         assert!(close(l1, 1.0), "L1 norm should be 1, got {l1}");
@@ -412,23 +373,6 @@ mod tests {
         // p != 1 path stays in [0, 1] and is monotone in n.
         assert!(close(confidence(10.0, 10.0, 2.0), 0.5));
         assert!(confidence(100.0, 10.0, 2.0) > confidence(1.0, 10.0, 2.0));
-    }
-
-    #[test]
-    fn wilson_lower_bound_bounds_and_grows_with_evidence() {
-        assert_eq!(wilson_lower_bound(0.0, 0.0, WILSON_Z), 0.0);
-        let small = wilson_lower_bound(10.0, 10.0, WILSON_Z);
-        let large = wilson_lower_bound(1000.0, 1000.0, WILSON_Z);
-        // Same 100% observed rate, but more evidence → tighter (higher) bound.
-        assert!(small > 0.0 && small < 1.0);
-        assert!(large > small);
-    }
-
-    #[test]
-    fn ctr_score_falls_back_to_prior_without_data() {
-        assert!(close(ctr_score(0.0, 0.0, 0.0, 0.42, 0.0), 0.42));
-        // 8 up / 2 down, 10 impressions → 8 / (10 + 2) = 0.667.
-        assert!(close(ctr_score(8.0, 2.0, 10.0, 0.5, 0.0), 8.0 / 12.0));
     }
 
     #[test]

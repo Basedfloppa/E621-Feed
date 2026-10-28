@@ -48,8 +48,8 @@
      what made the 2026-10-09 run read as "the semantic channels are dead"
      instead of "the search switched them off".
 
-   The grid currently covers 85 numeric knobs + 2 categorical:
-   - 12 `mix_*` weights (`mix_uploader`, `mix_exclusivity`, `mix_novelty`,
+   The grid currently covers 84 numeric knobs + 2 categorical:
+   - 11 `mix_*` weights (`mix_uploader`, `mix_exclusivity`, `mix_novelty`,
      `mix_artist_discovery`)
    - IDF / frequency shaping (8): `df_floor`, `idf_max`, `idf_lambda`,
      `idf_alpha`, `freq_alpha`, `bm25_k`, `one_sided_ratio_exp`,
@@ -92,18 +92,17 @@
    - Categorical (2 registered, 1 swept): `tag_relation_pair_aggregator` ∈
      {mean, max, geomean}; `novelty_use_feedback` ∈ {true, false} is in the
      registry but `grid.rs` skips it (`_ => continue`) — synthetic runs carry no
-     `feed_interactions` rows, so the switch has no gradient offline, the same
-     reason `meta_interaction_weight` is not in the grid at all
+     `account_tag_feedback` rows, so the switch has no gradient offline
 
    Subsets / flags:
-   - `grid mix-only` — only the 12 mix weights (fastest)
+   - `grid mix-only` — only the 11 mix weights (fastest)
    - `grid pairs-only` — skip the single-knob sweep, only the paired moves
    - `grid no-pairs` — skip the paired sweep
    - `grid with-diversify` — run `diversify_indices` before NDCG so
      `diversity_*` knobs become measurable
    - `verbose` — log every probe (including rejected ones) plus
      per-knob early-exit notices
-   - `fit-mix` — after the eval pass, solve the twelve `mix_*` weights
+   - `fit-mix` — after the eval pass, solve the eleven `mix_*` weights
      analytically from the channel matrix that pass already built, and
      report the same paired gate a grid probe must pass (TODO §2.7).
      Costs one scoring pass; the solve itself is seconds. Diagnostic:
@@ -294,11 +293,10 @@ survive contact with production traffic:
    up in many users' favourites). The model correctly says "popular = good"
    but the holdout positive is the user's specific niche favourite, so the
    weights cancel.
-3. **`mix_interaction` doesn't move.** Synthetic split has no
-   `feed_interactions` rows. Same applies to anything else that depends on
-   feedback — `meta_interaction_weight`, `feedback_decay_*`,
-   `strong_negative_*` — none are in the grid because they have zero
-   gradient here. Tune online.
+3. **`mix_novelty` doesn't move.** Synthetic split has no
+   `account_tag_feedback` rows, so the impressions input is empty. Anything
+   else that depends on feedback (`feedback_decay_*`) is out of the grid for
+   the same reason: zero gradient here. Tune online.
 4. **Diversity knobs (`diversity_*`)** are in the grid only under
    `with-diversify` (gated via `diversify_only`). ⚠️ **The ΔNDCG@20 of
    0.001–0.003 this item used to quote is void.** It was measured while the
@@ -354,7 +352,7 @@ NDCG@20" is a sentence the report can support.
 
 Two limits, both enforced rather than merely warned about:
 
-- **The file must carry all twelve `mix_*` keys.** `Priors` is
+- **The file must carry all eleven `mix_*` keys.** `Priors` is
   `#[serde(default)]`, so a partial block parses happily and silently
   substitutes the built-in default for every omitted weight. The report would
   then describe a vector that is not in the file, and nothing downstream could
@@ -402,8 +400,8 @@ with a short index of what each one was run for.
   - `log.rs`, `options.rs`, `probe.rs` — printing, CLI options, DB probe.
 - [`parser-api/src/utils/scorer/`](../parser-api/src/utils/scorer/) —
   the scoring math being calibrated; same code paths in production. The
-  cached entry points (`tag_similarity_cached`, `tag_relation_fit_cached`,
-  `interaction_fit_cached`) live in `channels_cached.rs` and are a math-
+  cached entry points (`tag_similarity_cached`, `tag_relation_fit_cached`)
+  live in `channels_cached.rs` and are a math-
   identical mirror of their `&Post` counterparts in `channels.rs`.
 - [`parser-api/src/utils/scorer/cached.rs`](../parser-api/src/utils/scorer/cached.rs) —
   `CachedPostFeatures` / `CachedTag`: pre-resolved (group, lc, df_raw,
@@ -436,17 +434,17 @@ calibrate_threads = 0   # 0 = auto (nproc/2). Set explicitly to e.g. 4 to be mor
 
 2. **Per-channel score cache** ([`bin/calibrate/cache.rs`](../parser-api/src/bin/calibrate/cache.rs)).
    Every `KnobSpec` declares an `invalidates: u16` bitmask naming which of
-   the 12 scoring channels its delta affects. The baseline run computes all
+   the 11 scoring channels its delta affects. The baseline run computes all
    channels and stores them per (account, post). Each subsequent probe
    recomputes only the invalidated channels and reuses the rest from the
-   cache; the final mix-blend / temperature / strong-negative-penalty
-   shape is always reapplied by the shared `final_blend` — the same
+   cache; the final mix-blend / temperature shape is always reapplied by
+   the shared `final_blend` — the same
    function the production `score` / `score_cached` paths call, so cached
    and uncached scores cannot drift. Effects on common probe categories:
 
    | Knob class (typical examples) | Channels recomputed | Probe cost vs uncached |
    |---|---|---|
-   | `mix_*` (12) / `score_temperature` / `mmr_redundancy_exp` (no diversify) / `strong_negative_penalty` | none — final blend only | ~3% |
+   | `mix_*` (11) / `score_temperature` / `mmr_redundancy_exp` (no diversify) | none — final blend only | ~3% |
    | `quality_*`, `popularity_*`, `recency_*`, `interaction_ctr_*`, single-channel TR knobs | one channel | ~5–40% |
    | `idf_*`, `df_floor`, `idf_max`, `bm25_k`, `freq_alpha`, `idf_rsj_smoothing`, `tag_sim_jaccard_blend` | sim only | ~30% |
    | `tag_relation_*` (PMI / cooc_ref) | tag_relation only | ~40% |

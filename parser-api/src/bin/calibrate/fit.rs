@@ -64,9 +64,9 @@
 //! would still be the arbiter.
 //!
 //! Such channels are listed separately — "the data cannot rank this" is a
-//! different statement from "this is unimportant". `mix_interaction` is the
-//! expected instance offline: the synthetic split has no `feed_interactions`
-//! rows, so the channel (and its veto) are constant zero.
+//! different statement from "this is unimportant". `mix_novelty` is the
+//! expected instance offline: the synthetic split has no `account_tag_feedback`
+//! rows, so the channel is constant.
 //!
 //! ## Acceptance
 //!
@@ -166,8 +166,8 @@ pub(crate) struct FitOutcome {
 /// this module pins that), so a fitted vector means the same thing offline as
 /// it does in production.
 #[inline]
-fn candidate_score(w: &Weights, ch: &ChannelScores, temp: f32, penalty: f32) -> f32 {
-    blend_score(*w, ch.values(), temp, penalty, ch.veto)
+fn candidate_score(w: &Weights, ch: &ChannelScores, temp: f32) -> f32 {
+    blend_score(*w, ch.values(), temp)
 }
 
 /// `∂u_i/∂w_c` for one candidate, in f64.
@@ -183,9 +183,8 @@ fn candidate_score(w: &Weights, ch: &ChannelScores, temp: f32, penalty: f32) -> 
 ///   themselves bounded to `[0,1]`.
 /// * `sigmoid((x−0.5)·T)` — derivative `T·σ·(1−σ)`, skipped when the
 ///   temperature is the no-op default (`≤ 1e-3`).
-/// * the veto factor `1 − penalty` — a positive constant multiplier.
 #[inline]
-fn candidate_grad(w: &Weights, ch: &ChannelScores, temp: f32, penalty: f32) -> Grad {
+fn candidate_grad(w: &Weights, ch: &ChannelScores, temp: f32) -> Grad {
     let s = ch.values();
     let mut raw = 0.0f64;
     for (wc, sc) in w.iter().zip(s.iter()) {
@@ -197,9 +196,6 @@ fn candidate_grad(w: &Weights, ch: &ChannelScores, temp: f32, penalty: f32) -> G
         let z = (raw - 0.5) * t;
         let sig = 1.0 / (1.0 + (-z).exp());
         d *= t * sig * (1.0 - sig);
-    }
-    if ch.veto {
-        d *= 1.0 - f64::from(penalty.clamp(0.0, 1.0));
     }
     let mut g = [0.0f64; BLEND_CHANNEL_COUNT];
     for (gc, sc) in g.iter_mut().zip(s.iter()) {
@@ -219,13 +215,12 @@ fn fill_account_scores(
     acc: &crate::cache::AccountChannelCache,
     w: &Weights,
     temp: f32,
-    penalty: f32,
     u: &mut Vec<f32>,
 ) -> (f64, f64, f64) {
     let mut pos_sum = 0.0f64;
     let mut max = f64::NEG_INFINITY;
     for (i, ch) in acc.channels.iter().enumerate() {
-        let v = candidate_score(w, ch, temp, penalty);
+        let v = candidate_score(w, ch, temp);
         let v = if v.is_finite() { v } else { 0.0 };
         u.push(v);
         if i < acc.n_test {
@@ -243,7 +238,7 @@ fn fill_account_scores(
 }
 
 /// `L(w)` — see the module docs.
-pub(crate) fn objective(cache: &ScoreCache, w: &Weights, temp: f32, penalty: f32) -> f64 {
+pub(crate) fn objective(cache: &ScoreCache, w: &Weights, temp: f32) -> f64 {
     let mut obj = 0.0f64;
     let mut u: Vec<f32> = Vec::new();
     for acc in &cache.accounts {
@@ -251,7 +246,7 @@ pub(crate) fn objective(cache: &ScoreCache, w: &Weights, temp: f32, penalty: f32
             continue;
         }
         u.clear();
-        let (pos_sum, max, sum_exp) = fill_account_scores(acc, w, temp, penalty, &mut u);
+        let (pos_sum, max, sum_exp) = fill_account_scores(acc, w, temp, &mut u);
         obj += pos_sum - acc.n_test as f64 * (max + sum_exp.ln());
     }
     obj
@@ -269,7 +264,6 @@ fn objective_and_grad(
     cache: &ScoreCache,
     w: &Weights,
     temp: f32,
-    penalty: f32,
     unidentifiable: &[usize],
 ) -> (f64, Grad) {
     let mut obj = 0.0f64;
@@ -280,14 +274,14 @@ fn objective_and_grad(
             continue;
         }
         u.clear();
-        let (pos_sum, max, sum_exp) = fill_account_scores(acc, w, temp, penalty, &mut u);
+        let (pos_sum, max, sum_exp) = fill_account_scores(acc, w, temp, &mut u);
         obj += pos_sum - acc.n_test as f64 * (max + sum_exp.ln());
 
         let mut pos_grad = [0.0f64; BLEND_CHANNEL_COUNT];
         let mut mix_grad = [0.0f64; BLEND_CHANNEL_COUNT];
         for (i, ch) in acc.channels.iter().enumerate() {
             let weight = (f64::from(u[i]) - max).exp() / sum_exp;
-            let g = candidate_grad(w, ch, temp, penalty);
+            let g = candidate_grad(w, ch, temp);
             for c in 0..BLEND_CHANNEL_COUNT {
                 mix_grad[c] += weight * g[c];
                 if i < acc.n_test {
@@ -355,13 +349,7 @@ fn ideal_dcg(n_pos: usize, k: usize) -> f64 {
 /// (`spread / shortlist_len`), so the sigmoid transitions over roughly one rank
 /// position: sharp enough that the soft ranks track the true ones, smooth enough
 /// that the gradient is not lost to rounding.
-fn ndcg_temperatures(
-    cache: &ScoreCache,
-    init: &Weights,
-    temp: f32,
-    penalty: f32,
-    k: usize,
-) -> Vec<f32> {
+fn ndcg_temperatures(cache: &ScoreCache, init: &Weights, temp: f32, k: usize) -> Vec<f32> {
     let limit = k.saturating_mul(NDCG_SHORTLIST_MULT).max(1);
     let mut taus = Vec::with_capacity(cache.accounts.len());
     let mut u: Vec<f32> = Vec::new();
@@ -372,7 +360,7 @@ fn ndcg_temperatures(
         }
         u.clear();
         for ch in &acc.channels {
-            let v = candidate_score(init, ch, temp, penalty);
+            let v = candidate_score(init, ch, temp);
             u.push(if v.is_finite() { v } else { 0.0 });
         }
         let sel = top_indices(&u, limit);
@@ -492,12 +480,11 @@ fn fill_ndcg_scores(
     acc: &crate::cache::AccountChannelCache,
     w: &Weights,
     temp: f32,
-    penalty: f32,
     u: &mut Vec<f32>,
 ) {
     u.clear();
     for ch in &acc.channels {
-        let v = candidate_score(w, ch, temp, penalty);
+        let v = candidate_score(w, ch, temp);
         u.push(if v.is_finite() { v } else { 0.0 });
     }
 }
@@ -507,7 +494,6 @@ pub(crate) fn objective_ndcg(
     cache: &ScoreCache,
     w: &Weights,
     temp: f32,
-    penalty: f32,
     k: usize,
     taus: &[f32],
 ) -> f64 {
@@ -520,7 +506,7 @@ pub(crate) fn objective_ndcg(
         if acc.n_test == 0 || acc.channels.is_empty() {
             continue;
         }
-        fill_ndcg_scores(acc, w, temp, penalty, &mut u);
+        fill_ndcg_scores(acc, w, temp, &mut u);
         du.clear();
         du.resize(acc.channels.len(), 0.0);
         obj += account_soft_ndcg(acc, &u, taus[ai], k, &mut du, &mut sig, &mut ranks);
@@ -538,7 +524,6 @@ fn objective_ndcg_and_grad(
     cache: &ScoreCache,
     w: &Weights,
     temp: f32,
-    penalty: f32,
     k: usize,
     taus: &[f32],
     unidentifiable: &[usize],
@@ -553,7 +538,7 @@ fn objective_ndcg_and_grad(
         if acc.n_test == 0 || acc.channels.is_empty() {
             continue;
         }
-        fill_ndcg_scores(acc, w, temp, penalty, &mut u);
+        fill_ndcg_scores(acc, w, temp, &mut u);
         du.clear();
         du.resize(acc.channels.len(), 0.0);
         obj += account_soft_ndcg(acc, &u, taus[ai], k, &mut du, &mut sig, &mut ranks);
@@ -562,7 +547,7 @@ fn objective_ndcg_and_grad(
             if d == 0.0 {
                 continue;
             }
-            let g = candidate_grad(w, &acc.channels[l], temp, penalty);
+            let g = candidate_grad(w, &acc.channels[l], temp);
             for c in 0..BLEND_CHANNEL_COUNT {
                 grad[c] += d * g[c];
             }
@@ -716,7 +701,6 @@ struct Surrogate<'a> {
     kind: FitObjective,
     cache: &'a ScoreCache,
     temp: f32,
-    penalty: f32,
     top_k: usize,
     taus: &'a [f32],
 }
@@ -725,15 +709,10 @@ impl Surrogate<'_> {
     /// Value only.
     fn value(&self, w: &Weights) -> f64 {
         match self.kind {
-            FitObjective::PlackettLuce => objective(self.cache, w, self.temp, self.penalty),
-            FitObjective::ApproxNdcg => objective_ndcg(
-                self.cache,
-                w,
-                self.temp,
-                self.penalty,
-                self.top_k,
-                self.taus,
-            ),
+            FitObjective::PlackettLuce => objective(self.cache, w, self.temp),
+            FitObjective::ApproxNdcg => {
+                objective_ndcg(self.cache, w, self.temp, self.top_k, self.taus)
+            }
         }
     }
 
@@ -742,13 +721,12 @@ impl Surrogate<'_> {
     fn value_and_grad(&self, w: &Weights, unidentifiable: &[usize]) -> (f64, Grad) {
         match self.kind {
             FitObjective::PlackettLuce => {
-                objective_and_grad(self.cache, w, self.temp, self.penalty, unidentifiable)
+                objective_and_grad(self.cache, w, self.temp, unidentifiable)
             }
             FitObjective::ApproxNdcg => objective_ndcg_and_grad(
                 self.cache,
                 w,
                 self.temp,
-                self.penalty,
                 self.top_k,
                 self.taus,
                 unidentifiable,
@@ -772,7 +750,6 @@ pub(crate) fn solve(
     cache: &ScoreCache,
     init: &Weights,
     temp: f32,
-    penalty: f32,
     kind: FitObjective,
     top_k: usize,
 ) -> FitOutcome {
@@ -780,7 +757,7 @@ pub(crate) fn solve(
     // Frozen once, from the starting weights — see `ndcg_temperatures` for why
     // it must not follow the iterate.
     let taus = match kind {
-        FitObjective::ApproxNdcg => ndcg_temperatures(cache, init, temp, penalty, top_k),
+        FitObjective::ApproxNdcg => ndcg_temperatures(cache, init, temp, top_k),
         FitObjective::PlackettLuce => Vec::new(),
     };
     let mut parts = split(init);
@@ -789,7 +766,6 @@ pub(crate) fn solve(
         kind,
         cache,
         temp,
-        penalty,
         top_k,
         taus: &taus,
     };
@@ -879,7 +855,6 @@ pub(crate) fn rescore(
     top_k_recall: usize,
 ) -> Metrics {
     let temp = priors.score_temperature;
-    let penalty = priors.strong_negative_penalty;
     let mut totals = Metrics::default();
     let n = cache.accounts.len();
     totals.ndcg_per_account.reserve(n);
@@ -891,13 +866,7 @@ pub(crate) fn rescore(
             .channels
             .iter()
             .enumerate()
-            .map(|(i, ch)| {
-                (
-                    i as i64,
-                    candidate_score(w, ch, temp, penalty),
-                    i < acc.n_test,
-                )
-            })
+            .map(|(i, ch)| (i as i64, candidate_score(w, ch, temp), i < acc.n_test))
             .collect();
         scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
@@ -1101,7 +1070,6 @@ fn run_holdout(
 ) -> Holdout {
     let n = cache.accounts.len();
     let temp = priors.score_temperature;
-    let penalty = priors.strong_negative_penalty;
     let init = initial_weights(priors);
 
     // Stride, not contiguous halves. The dataset is ordered by favourite count
@@ -1127,7 +1095,7 @@ fn run_holdout(
         let test_idx = &fold_idx[(f + 1) % HOLDOUT_FOLDS];
         let train = subset_cache(cache, train_idx);
         let test = subset_cache(cache, test_idx);
-        let outcome = solve(&train, &init, temp, penalty, kind, top_k_ndcg);
+        let outcome = solve(&train, &init, temp, kind, top_k_ndcg);
 
         let fit_train = rescore(&train, priors, &outcome.weights, top_k_ndcg, top_k_recall);
         let fit_test = rescore(&test, priors, &outcome.weights, top_k_ndcg, top_k_recall);
@@ -1426,7 +1394,6 @@ pub(crate) fn run_fit_and_report(
     let top_k_recall = cfg_arc.backtest.top_k_recall;
     let priors = cfg_arc.priors.clone();
     let temp = priors.score_temperature;
-    let penalty = priors.strong_negative_penalty;
 
     let n_accounts = cache.accounts.len();
     let n_cand: usize = cache.accounts.iter().map(|a| a.channels.len()).sum();
@@ -1437,7 +1404,7 @@ pub(crate) fn run_fit_and_report(
     }
     eprintln!(
         "[fit] solving 12 mix weights from {n_accounts} accounts / {n_cand} candidates / \
-         {n_pos} positives (temp={temp}, penalty={penalty}, objective={})",
+         {n_pos} positives (temp={temp}, objective={})",
         kind.label()
     );
     if kind == FitObjective::ApproxNdcg {
@@ -1469,7 +1436,7 @@ pub(crate) fn run_fit_and_report(
     let init = initial_weights(&priors);
 
     let t_solve = Instant::now();
-    let outcome = solve(cache, &init, temp, penalty, kind, top_k_ndcg);
+    let outcome = solve(cache, &init, temp, kind, top_k_ndcg);
     let solve_secs = t_solve.elapsed().as_secs_f32();
 
     let unidentifiable = &outcome.unidentifiable;
@@ -1662,7 +1629,6 @@ fn report_reference(
     let top_k_ndcg = cfg_arc.backtest.top_k_ndcg;
     let top_k_recall = cfg_arc.backtest.top_k_recall;
     let temp = live.score_temperature;
-    let penalty = live.strong_negative_penalty;
 
     let w = normalised_mix_weights(&reference.priors);
     eprintln!("[fit] reference vector: {}", reference.label);
@@ -1706,14 +1672,13 @@ fn report_reference(
     // temperature and `solve` freezes it from its start vector — which, for the
     // comparison this function exists to make, is the incumbent.
     let taus = match kind {
-        FitObjective::ApproxNdcg => ndcg_temperatures(cache, incumbent, temp, penalty, top_k_ndcg),
+        FitObjective::ApproxNdcg => ndcg_temperatures(cache, incumbent, temp, top_k_ndcg),
         FitObjective::PlackettLuce => Vec::new(),
     };
     let surrogate = Surrogate {
         kind,
         cache,
         temp,
-        penalty,
         top_k: top_k_ndcg,
         taus: &taus,
     };
@@ -1777,13 +1742,11 @@ mod tests {
         rating: f32,
         media: f32,
         popularity: f32,
-        interaction: f32,
         tag_relation: f32,
         uploader: f32,
         exclusivity: f32,
         novelty: f32,
         artist_discovery: f32,
-        veto: bool,
     }
 
     impl Row {
@@ -1795,13 +1758,11 @@ mod tests {
                 rating: 0.0,
                 media: 0.0,
                 popularity: 0.0,
-                interaction: 0.0,
                 tag_relation: 0.0,
                 uploader: 0.0,
                 exclusivity: 0.0,
                 novelty: 0.0,
                 artist_discovery: 0.0,
-                veto: false,
             }
         }
 
@@ -1813,13 +1774,11 @@ mod tests {
                 rating: self.rating,
                 media: self.media,
                 popularity: self.popularity,
-                interaction: self.interaction,
                 tag_relation: self.tag_relation,
                 uploader: self.uploader,
                 exclusivity: self.exclusivity,
                 novelty: self.novelty,
                 artist_discovery: self.artist_discovery,
-                veto: self.veto,
             }
         }
     }
@@ -1838,11 +1797,11 @@ mod tests {
     }
 
     /// Two accounts x 4 candidates: `sim` separates positives perfectly, every
-    /// other channel is constant (hence unidentifiable). `interaction` is the
-    /// channel §2.7 names as the real offline instance.
+    /// other channel is constant (hence unidentifiable). `tag_relation` is one
+    /// of them, and it keeps slot 6 in the blend order.
     fn separating_cache() -> ScoreCache {
         let mut accounts = Vec::new();
-        for acc in 0..2 {
+        for _acc in 0..2 {
             let mut rows = Vec::new();
             for i in 0..4usize {
                 let mut r = Row::zeros();
@@ -1855,7 +1814,6 @@ mod tests {
                 // Constant within the account but different *between*
                 // accounts: still zero gradient, because the objective is
                 // separable per account.
-                r.interaction = 0.4 + acc as f32 * 0.1;
                 r.tag_relation = 0.6;
                 r.uploader = 0.15;
                 r.exclusivity = 0.05;
@@ -1868,9 +1826,8 @@ mod tests {
         synthetic_cache(&accounts)
     }
 
-    fn temp_penalty() -> (f32, f32) {
-        let p = Priors::default();
-        (p.score_temperature, p.strong_negative_penalty)
+    fn fit_temp() -> f32 {
+        Priors::default().score_temperature
     }
 
     // ---- the blend is the production blend ---------------------------------
@@ -1896,14 +1853,12 @@ mod tests {
             mix_rating: 0.14,
             mix_media: 0.15,
             mix_popularity: 0.16,
-            mix_interaction: 0.17,
             mix_tag_relation: 0.18,
             mix_uploader: 0.19,
             mix_exclusivity: 0.20,
             mix_novelty: 0.21,
             mix_artist_discovery: 0.22,
             score_temperature: 2.5,
-            strong_negative_penalty: 0.35,
             now: Utc::now(),
             ..Priors::default()
         };
@@ -1915,29 +1870,23 @@ mod tests {
         let ctx = ScoringContext::new(&[], &p, &idf, &profile, &global, &user);
 
         let w = normalised_mix_weights(&p);
-        let ch = [
-            1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0,
-        ];
-        for veto in [false, true] {
-            let ours = blend_score(w, ch, p.score_temperature, p.strong_negative_penalty, veto);
-            let theirs = ctx.final_blend(
-                ch[0], ch[1], ch[2], ch[3], ch[4], ch[5], ch[6], ch[7], ch[8], ch[9], ch[10],
-                ch[11], veto,
-            );
-            assert_eq!(
-                ours.to_bits(),
-                theirs.to_bits(),
-                "veto={veto}: fit path {ours} != final_blend {theirs}"
-            );
-        }
+        let ch = [1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0];
+        let ours = blend_score(w, ch, p.score_temperature);
+        let theirs = ctx.final_blend(
+            ch[0], ch[1], ch[2], ch[3], ch[4], ch[5], ch[6], ch[7], ch[8], ch[9], ch[10],
+        );
+        assert_eq!(
+            ours.to_bits(),
+            theirs.to_bits(),
+            "fit path {ours} != final_blend {theirs}"
+        );
 
         // The no-temperature branch is a separate code path in the blend.
         p.score_temperature = 0.0;
         let ctx = ScoringContext::new(&[], &p, &idf, &profile, &global, &user);
-        let ours = blend_score(w, ch, 0.0, p.strong_negative_penalty, false);
+        let ours = blend_score(w, ch, 0.0);
         let theirs = ctx.final_blend(
-            ch[0], ch[1], ch[2], ch[3], ch[4], ch[5], ch[6], ch[7], ch[8], ch[9], ch[10], ch[11],
-            false,
+            ch[0], ch[1], ch[2], ch[3], ch[4], ch[5], ch[6], ch[7], ch[8], ch[9], ch[10],
         );
         assert_eq!(ours.to_bits(), theirs.to_bits());
     }
@@ -1953,19 +1902,15 @@ mod tests {
             rating: 4.0,
             media: 5.0,
             popularity: 6.0,
-            interaction: 7.0,
-            tag_relation: 8.0,
-            uploader: 9.0,
-            exclusivity: 10.0,
-            novelty: 11.0,
-            artist_discovery: 12.0,
-            veto: false,
+            tag_relation: 7.0,
+            uploader: 8.0,
+            exclusivity: 9.0,
+            novelty: 10.0,
+            artist_discovery: 11.0,
         };
         assert_eq!(
             ch.values(),
-            [
-                1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0
-            ]
+            [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0]
         );
         assert_eq!(BLEND_CHANNEL_NAMES.len(), BLEND_CHANNEL_COUNT);
 
@@ -1981,7 +1926,6 @@ mod tests {
             mix_rating: 0.0,
             mix_media: 0.0,
             mix_popularity: 0.0,
-            mix_interaction: 0.0,
             mix_tag_relation: 0.0,
             mix_uploader: 0.0,
             mix_exclusivity: 0.0,
@@ -1994,13 +1938,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            blend_score(
-                normalised_mix_weights(&p),
-                sim_only.values(),
-                0.0,
-                0.0,
-                false
-            ),
+            blend_score(normalised_mix_weights(&p), sim_only.values(), 0.0),
             1.0
         );
     }
@@ -2024,7 +1962,6 @@ mod tests {
                 r.rating = (1.0 - x) * 0.25;
                 r.media = x * 0.3 + 0.1;
                 r.popularity = (1.0 - x) * 0.2;
-                r.interaction = x;
                 r.tag_relation = 0.5 - x * 0.25;
                 r.uploader = x * 0.7;
                 r.exclusivity = 0.2 + x * 0.1;
@@ -2035,12 +1972,11 @@ mod tests {
             accounts.push((12usize, rows));
         }
         let cache = synthetic_cache(&accounts);
-        let (temp, penalty) = temp_penalty();
+        let temp = fit_temp();
         let outcome = solve(
             &cache,
             &initial_weights(&Priors::default()),
             temp,
-            penalty,
             FitObjective::PlackettLuce,
             20,
         );
@@ -2065,10 +2001,10 @@ mod tests {
     #[test]
     fn the_solver_improves_the_objective_monotonically() {
         let cache = separating_cache();
-        let (temp, penalty) = temp_penalty();
+        let temp = fit_temp();
         let p = Priors::default();
         let init = initial_weights(&p);
-        let outcome = solve(&cache, &init, temp, penalty, FitObjective::PlackettLuce, 20);
+        let outcome = solve(&cache, &init, temp, FitObjective::PlackettLuce, 20);
 
         assert!(
             outcome.history.len() > 1,
@@ -2091,7 +2027,7 @@ mod tests {
         );
         // The start is the incumbent (up to the floor), so the objective at the
         // incumbent must be no better than at the fitted weights.
-        let inc_obj = objective(&cache, &normalised_mix_weights(&p), temp, penalty);
+        let inc_obj = objective(&cache, &normalised_mix_weights(&p), temp);
         assert!(outcome.objective >= inc_obj - 1e-6);
     }
 
@@ -2101,13 +2037,12 @@ mod tests {
     #[test]
     fn the_fit_recovers_the_channel_that_ranks_the_favourites() {
         let cache = separating_cache();
-        let (temp, penalty) = temp_penalty();
+        let temp = fit_temp();
         let p = Priors::default();
         let outcome = solve(
             &cache,
             &initial_weights(&p),
             temp,
-            penalty,
             FitObjective::PlackettLuce,
             20,
         );
@@ -2151,22 +2086,22 @@ mod tests {
         let unident = unidentifiable_channels(&cache);
         assert!(
             unident.contains(&6),
-            "interaction must be unidentifiable: {unident:?}"
+            "tag_relation must be unidentifiable: {unident:?}"
         );
         assert!(
             !unident.contains(&0),
             "sim varies within every account and is identifiable"
         );
 
-        let (temp, penalty) = temp_penalty();
+        let temp = fit_temp();
         let p = Priors::default();
         let init = initial_weights(&p);
-        let outcome = solve(&cache, &init, temp, penalty, FitObjective::PlackettLuce, 20);
+        let outcome = solve(&cache, &init, temp, FitObjective::PlackettLuce, 20);
         assert_eq!(outcome.unidentifiable, unident);
 
         // Its gradient contribution is projected out, so the solver cannot move
         // it away from the start.
-        let (_, g) = objective_and_grad(&cache, &outcome.weights, temp, penalty, &unident);
+        let (_, g) = objective_and_grad(&cache, &outcome.weights, temp, &unident);
         assert_eq!(g[6], 0.0, "unidentifiable channel got a non-zero gradient");
         // Renormalisation still squeezes it (the identifiable channel grows and
         // takes the simplex share), so the invariant is "never promoted", not
@@ -2195,12 +2130,12 @@ mod tests {
             vec![
                 Row {
                     sim: 1.0,
-                    interaction: 0.5,
+                    tag_relation: 0.5,
                     ..Row::zeros()
                 },
                 Row {
                     sim: 0.0,
-                    interaction: 0.5,
+                    tag_relation: 0.5,
                     ..Row::zeros()
                 },
             ],
@@ -2213,12 +2148,12 @@ mod tests {
 
         let unident = unidentifiable_channels(&cache);
         assert!(unident.contains(&6), "{unident:?}");
-        let (_, raw) = objective_and_grad(&cache, &w, 0.0, 0.0, &[]);
+        let (_, raw) = objective_and_grad(&cache, &w, 0.0, &[]);
         assert_ne!(
             raw[6], 0.0,
             "with the clamp active the constant channel's raw gradient should survive"
         );
-        let (_, projected) = objective_and_grad(&cache, &w, 0.0, 0.0, &unident);
+        let (_, projected) = objective_and_grad(&cache, &w, 0.0, &unident);
         assert_eq!(projected[6], 0.0);
     }
 
@@ -2253,16 +2188,17 @@ mod tests {
             ],
         )]);
         let init = initial_weights(&Priors::default());
+        // `novelty` sits at slot 9 (the removed `interaction` channel held 6).
         assert_eq!(
-            init[10], 0.0,
+            init[9], 0.0,
             "novelty ships at zero, which is the hard case"
         );
 
-        let outcome = solve(&cache, &init, 0.0, 0.0, FitObjective::PlackettLuce, 20);
+        let outcome = solve(&cache, &init, 0.0, FitObjective::PlackettLuce, 20);
         assert!(
-            outcome.weights[10] < 0.0,
+            outcome.weights[9] < 0.0,
             "novelty should be subtracted, got {}",
-            outcome.weights[10]
+            outcome.weights[9]
         );
         assert!(
             outcome.objective > outcome.initial_objective,
@@ -2284,9 +2220,9 @@ mod tests {
 
         let init = initial_weights(&p);
         assert!(
-            init[10] < 0.0,
+            init[9] < 0.0,
             "warm start must keep the incumbent's sign, got {}",
-            init[10]
+            init[9]
         );
         let l1: f32 = init.iter().map(|x| x.abs()).sum();
         assert!(
@@ -2387,7 +2323,7 @@ mod tests {
     #[test]
     fn objective_is_built_from_the_exact_blend_scores() {
         let cache = separating_cache();
-        let (temp, penalty) = temp_penalty();
+        let temp = fit_temp();
         let p = Priors::default();
         let w = normalised_mix_weights(&p);
 
@@ -2396,7 +2332,7 @@ mod tests {
             let us: Vec<f64> = acc
                 .channels
                 .iter()
-                .map(|ch| f64::from(candidate_score(&w, ch, temp, penalty)))
+                .map(|ch| f64::from(candidate_score(&w, ch, temp)))
                 .collect();
             let max = us.iter().copied().fold(f64::NEG_INFINITY, f64::max);
             let sum_exp: f64 = us.iter().map(|u| (u - max).exp()).sum();
@@ -2405,7 +2341,7 @@ mod tests {
                 expected += u - lse;
             }
         }
-        let got = objective(&cache, &w, temp, penalty);
+        let got = objective(&cache, &w, temp);
         assert!(
             (got - expected).abs() < 1e-9,
             "objective {got} != hand-computed {expected}"
@@ -2579,7 +2515,6 @@ mod tests {
             r.rating = 0.5;
             r.media = 0.5;
             r.popularity = 0.5;
-            r.interaction = 0.5;
             r.tag_relation = 0.5;
             r.uploader = 0.5;
             r.exclusivity = 0.5;
@@ -2596,7 +2531,6 @@ mod tests {
             r.rating = 0.5;
             r.media = 0.5;
             r.popularity = 0.5;
-            r.interaction = 0.5;
             r.tag_relation = 0.5;
             r.uploader = 0.5;
             r.exclusivity = 0.5;
@@ -2620,7 +2554,6 @@ mod tests {
     fn the_soft_ndcg_reproduces_the_exact_metric_when_the_temperature_is_sharp() {
         let priors = Priors::default();
         let temp = priors.score_temperature;
-        let penalty = priors.strong_negative_penalty;
 
         let mut accounts = Vec::new();
         // Positives strictly above every negative: exact NDCG@20 = 1.0.
@@ -2635,8 +2568,7 @@ mod tests {
         let exact = rescore(&cache, &priors, &w, 20, 50).average().ndcg_at_k;
 
         let taus = vec![1e-6f32; cache.accounts.len()];
-        let soft =
-            objective_ndcg(&cache, &w, temp, penalty, 20, &taus) / cache.accounts.len() as f64;
+        let soft = objective_ndcg(&cache, &w, temp, 20, &taus) / cache.accounts.len() as f64;
 
         // The tolerance is `5e-3`, not `1e-9`: the gate is a sigmoid, not a step,
         // so the third account contributes ~5e-4 where the metric has exactly 0.
@@ -2657,11 +2589,10 @@ mod tests {
     fn the_ndcg_gradient_matches_central_differences() {
         let priors = Priors::default();
         let temp = priors.score_temperature;
-        let penalty = priors.strong_negative_penalty;
         let cache = smooth_cache();
         let w = normalised_mix_weights(&priors);
-        let taus = ndcg_temperatures(&cache, &w, temp, penalty, 20);
-        let (_, g) = objective_ndcg_and_grad(&cache, &w, temp, penalty, 20, &taus, &[]);
+        let taus = ndcg_temperatures(&cache, &w, temp, 20);
+        let (_, g) = objective_ndcg_and_grad(&cache, &w, temp, 20, &taus, &[]);
 
         // The objective is evaluated through the production **f32** blend, so the
         // difference quotient cannot be made arbitrarily accurate: quantisation
@@ -2676,8 +2607,8 @@ mod tests {
             up[c] += h;
             let mut down = w;
             down[c] -= h;
-            let fd = (objective_ndcg(&cache, &up, temp, penalty, 20, &taus)
-                - objective_ndcg(&cache, &down, temp, penalty, 20, &taus))
+            let fd = (objective_ndcg(&cache, &up, temp, 20, &taus)
+                - objective_ndcg(&cache, &down, temp, 20, &taus))
                 / (2.0 * f64::from(h));
             let rel = (fd - g[c]).abs() / (1.0 + g[c].abs());
             worst = worst.max(rel);
@@ -2721,12 +2652,10 @@ mod tests {
         let cache = synthetic_cache(&[(4usize, rows)]);
         let priors = Priors::default();
         let temp = priors.score_temperature;
-        let penalty = priors.strong_negative_penalty;
         let outcome = solve(
             &cache,
             &initial_weights(&priors),
             temp,
-            penalty,
             FitObjective::ApproxNdcg,
             20,
         );
@@ -2790,14 +2719,13 @@ mod tests {
         let k = 20usize;
         let priors = Priors::default();
         let temp = priors.score_temperature;
-        let penalty = priors.strong_negative_penalty;
 
         // One positive, parked below `shortlist` stronger negatives.
         let cache = ramp_cache(1, k * NDCG_SHORTLIST_MULT + 5, 0.10, 0.60);
         let acc = &cache.accounts[0];
         let w = normalised_mix_weights(&priors);
         let mut u = Vec::new();
-        fill_ndcg_scores(acc, &w, temp, penalty, &mut u);
+        fill_ndcg_scores(acc, &w, temp, &mut u);
         let mut du = vec![0.0f64; acc.channels.len()];
         let mut sig = Vec::new();
         let mut ranks = Vec::new();

@@ -82,7 +82,6 @@ pub(crate) fn print_diff(baseline: &Priors, best: &Priors) -> DiffReport {
     diff!("mix_rating", mix_rating, "{:.3}");
     diff!("mix_media", mix_media, "{:.3}");
     diff!("mix_popularity", mix_popularity, "{:.3}");
-    diff!("mix_interaction", mix_interaction, "{:.3}");
     diff!("mix_tag_relation", mix_tag_relation, "{:.3}");
     diff!("mix_uploader", mix_uploader, "{:.3}");
     diff!("mix_exclusivity", mix_exclusivity, "{:.3}");
@@ -149,11 +148,6 @@ pub(crate) fn print_diff(baseline: &Priors, best: &Priors) -> DiffReport {
     diff!(
         "coldstart_smoothing_boost",
         coldstart_smoothing_boost,
-        "{:.3}"
-    );
-    diff!(
-        "interaction_ctr_prior_alpha",
-        interaction_ctr_prior_alpha,
         "{:.3}"
     );
     // v5.3 Class B
@@ -266,14 +260,13 @@ pub(crate) fn print_diff(baseline: &Priors, best: &Priors) -> DiffReport {
         0.0_f32,
         1.0_f32
     );
-    // All twelve blend weights, so a channel driven to zero is always named.
+    // All eleven blend weights, so a channel driven to zero is always named.
     check_mix_floor!("mix_sim", mix_sim);
     check_mix_floor!("mix_quality", mix_quality);
     check_mix_floor!("mix_recency", mix_recency);
     check_mix_floor!("mix_rating", mix_rating);
     check_mix_floor!("mix_media", mix_media);
     check_mix_floor!("mix_popularity", mix_popularity);
-    check_mix_floor!("mix_interaction", mix_interaction);
     check_mix_floor!("mix_tag_relation", mix_tag_relation);
     check_mix_floor!("mix_uploader", mix_uploader);
     check_mix_floor!("mix_exclusivity", mix_exclusivity);
@@ -314,7 +307,6 @@ fn mix_raw_sum(p: &Priors) -> f32 {
         + p.mix_rating
         + p.mix_media
         + p.mix_popularity
-        + p.mix_interaction
         + p.mix_tag_relation
         + p.mix_uploader
         + p.mix_exclusivity
@@ -337,7 +329,6 @@ fn mix_shares(p: &Priors) -> Vec<(&'static str, f32)> {
         ("mix_rating", p.mix_rating / sum),
         ("mix_media", p.mix_media / sum),
         ("mix_popularity", p.mix_popularity / sum),
-        ("mix_interaction", p.mix_interaction / sum),
         ("mix_tag_relation", p.mix_tag_relation / sum),
         ("mix_uploader", p.mix_uploader / sum),
         ("mix_exclusivity", p.mix_exclusivity / sum),
@@ -413,12 +404,12 @@ fn priors_toml(best: &Priors) -> String {
         "recency_tau_days = {:.2}\nquality_a = {:.3}\nquality_b = {:.3}\nquality_log_bias = {:.3}\n",
         best.recency_tau_days, best.quality_a, best.quality_b, best.quality_log_bias
     ));
-    // All twelve blend weights — the scorer normalises the whole block, so a
+    // All eleven blend weights — the scorer normalises the whole block, so a
     // file that omits any of them does not reproduce the run it describes.
     s.push_str(&format!(
-        "mix_sim = {:.3}\nmix_quality = {:.3}\nmix_recency = {:.3}\nmix_rating = {:.3}\nmix_media = {:.3}\nmix_popularity = {:.3}\nmix_interaction = {:.3}\nmix_tag_relation = {:.3}\nmix_uploader = {:.3}\nmix_exclusivity = {:.3}\nmix_novelty = {:.3}\nmix_artist_discovery = {:.3}\n",
+        "mix_sim = {:.3}\nmix_quality = {:.3}\nmix_recency = {:.3}\nmix_rating = {:.3}\nmix_media = {:.3}\nmix_popularity = {:.3}\nmix_tag_relation = {:.3}\nmix_uploader = {:.3}\nmix_exclusivity = {:.3}\nmix_novelty = {:.3}\nmix_artist_discovery = {:.3}\n",
         best.mix_sim, best.mix_quality, best.mix_recency, best.mix_rating, best.mix_media,
-        best.mix_popularity, best.mix_interaction, best.mix_tag_relation, best.mix_uploader,
+        best.mix_popularity, best.mix_tag_relation, best.mix_uploader,
         best.mix_exclusivity, best.mix_novelty, best.mix_artist_discovery
     ));
     s.push_str(&format!(
@@ -432,10 +423,9 @@ fn priors_toml(best: &Priors) -> String {
         best.group_w_species, best.group_w_general, best.group_w_lore
     ));
     s.push_str(&format!(
-        "coldstart_smoothing_boost = {:.3}\ninteraction_ctr_prior_alpha = {:.3}\nscore_temperature = {:.3}\nconfidence_steepness = {:.3}\nmmr_redundancy_exp = {:.3}\ntag_sim_jaccard_blend = {:.3}\n",
-        best.coldstart_smoothing_boost, best.interaction_ctr_prior_alpha,
-        best.score_temperature, best.confidence_steepness, best.mmr_redundancy_exp,
-        best.tag_sim_jaccard_blend
+        "coldstart_smoothing_boost = {:.3}\nscore_temperature = {:.3}\nconfidence_steepness = {:.3}\nmmr_redundancy_exp = {:.3}\ntag_sim_jaccard_blend = {:.3}\n",
+        best.coldstart_smoothing_boost, best.score_temperature, best.confidence_steepness,
+        best.mmr_redundancy_exp, best.tag_sim_jaccard_blend
     ));
     if !best.idf_lambda_meta.is_nan() {
         s.push_str(&format!("idf_lambda_meta = {:.3}\n", best.idf_lambda_meta));
@@ -469,9 +459,8 @@ fn priors_toml(best: &Priors) -> String {
         best.recency_w_global, best.recency_w_personal, best.recency_personal_floor_frac, best.recency_log_personal
     ));
     s.push_str(&format!(
-        "discrete_smoothing_alpha = {:.3}\ndiscrete_pref_floor = {:.3}\nstrong_negative_count = {}\nstrong_negative_penalty = {:.3}\nstrong_negative_wilson_threshold = {:.3}\n",
-        best.discrete_smoothing_alpha, best.discrete_pref_floor, best.strong_negative_count,
-        best.strong_negative_penalty, best.strong_negative_wilson_threshold
+        "discrete_smoothing_alpha = {:.3}\ndiscrete_pref_floor = {:.3}\n",
+        best.discrete_smoothing_alpha, best.discrete_pref_floor
     ));
     s.push_str(&format!(
         "tag_relation_w_global = {:.3}\ntag_relation_w_personal = {:.3}\ntag_relation_pmi_scale = {:.3}\ntag_relation_min_cooc = {}\ntag_relation_user_min_cooc = {}\ntag_relation_cooc_ref = {:.2}\ntag_relation_user_cooc_ref = {:.2}\n",
@@ -480,13 +469,13 @@ fn priors_toml(best: &Priors) -> String {
         best.tag_relation_user_cooc_ref
     ));
     s.push_str(&format!(
-        "feedback_decay_half_life_days = {:.2}\nmeta_interaction_weight = {:.3}\ncoldstart_n0 = {:.1}\n",
-        best.feedback_decay_half_life_days, best.meta_interaction_weight, best.coldstart_n0
+        "feedback_decay_half_life_days = {:.2}\ncoldstart_n0 = {:.1}\n",
+        best.feedback_decay_half_life_days, best.coldstart_n0
     ));
     s.push_str(&format!(
-        "diversity_window = {}\ndiversity_w_artist = {:.3}\ndiversity_w_character = {:.3}\ndiversity_w_general = {:.3}\ndiversity_max_penalty = {:.3}\ndiversity_interaction_damp = {:.3}\n",
+        "diversity_window = {}\ndiversity_w_artist = {:.3}\ndiversity_w_character = {:.3}\ndiversity_w_general = {:.3}\ndiversity_max_penalty = {:.3}\n",
         best.diversity_window, best.diversity_w_artist, best.diversity_w_character,
-        best.diversity_w_general, best.diversity_max_penalty, best.diversity_interaction_damp
+        best.diversity_w_general, best.diversity_max_penalty
     ));
     // v5.11: exclusivity + novelty channel knobs
     s.push_str(&format!(
@@ -521,7 +510,6 @@ mod tests {
             mix_rating: 0.034,
             mix_media: 0.042,
             mix_popularity: 0.017,
-            mix_interaction: 0.084,
             mix_tag_relation: 0.067,
             mix_uploader: 0.05,
             mix_exclusivity: 0.02,
@@ -531,14 +519,13 @@ mod tests {
         }
     }
 
-    const MIX_KEYS: [&str; 12] = [
+    const MIX_KEYS: [&str; 11] = [
         "mix_sim",
         "mix_quality",
         "mix_recency",
         "mix_rating",
         "mix_media",
         "mix_popularity",
-        "mix_interaction",
         "mix_tag_relation",
         "mix_uploader",
         "mix_exclusivity",
@@ -558,7 +545,6 @@ mod tests {
         best.mix_rating = 0.0;
         best.mix_media = 0.0;
         best.mix_popularity = 0.0;
-        best.mix_interaction = 0.0;
         best.mix_tag_relation = 0.0;
         best.mix_uploader = 0.0;
         best.mix_exclusivity = 0.0;
@@ -709,7 +695,6 @@ mod tests {
             "mix_rating" => p.mix_rating,
             "mix_media" => p.mix_media,
             "mix_popularity" => p.mix_popularity,
-            "mix_interaction" => p.mix_interaction,
             "mix_tag_relation" => p.mix_tag_relation,
             "mix_uploader" => p.mix_uploader,
             "mix_exclusivity" => p.mix_exclusivity,

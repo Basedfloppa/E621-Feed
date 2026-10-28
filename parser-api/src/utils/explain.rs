@@ -69,12 +69,7 @@ fn explain_one(
         }
     }
 
-    // 3. Interaction similarity.
-    if b.interaction_fit > 0.3 {
-        reasons.push("Similar to posts you've interacted with".to_string());
-    }
-
-    // 4. Name the uploader when uploader affinity drives the pick.
+    // 3. Name the uploader when uploader affinity drives the pick.
     if reasons.len() < 2
         && b.uploader_fit > 0.2
         && let Some(name) = post.uploader_name.as_deref().filter(|n| !n.is_empty())
@@ -82,7 +77,7 @@ fn explain_one(
         reasons.push(format!("From {name} — an uploader you tend to favourite"));
     }
 
-    // 5. Exploration / novelty pick.
+    // 4. Exploration / novelty pick.
     if exploration_active && reasons.len() < 3 && b.novelty_fit > 0.2 {
         reasons.push("Exploration pick — stepping outside your usual picks".to_string());
     }
@@ -160,7 +155,6 @@ mod tests {
             rating_fit: 0.0,
             media_fit: 0.0,
             popularity_fit: 0.0,
-            interaction_fit: 0.0,
             tag_relation_fit: 0.0,
             uploader_fit: 0.0,
             exclusivity_fit: 0.0,
@@ -222,7 +216,6 @@ mod tests {
         let mut bd = breakdown();
         bd.artist_discovery_fit = 0.8;
         bd.tag_similarity = 0.9;
-        bd.interaction_fit = 0.9;
         bd.novelty_fit = 0.9;
         let mut user = HashSet::new();
         user.insert("dragon".to_string());

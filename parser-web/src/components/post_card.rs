@@ -70,7 +70,6 @@ pub fn post_card(props: &PostCardProps) -> Html {
     let video_ref = use_node_ref();
     let negative_menu_ref = use_node_ref();
     let impression_logged = use_state(|| false);
-    let hidden = use_state(|| false);
     let video_failed = use_state(|| false);
     let pending_blacklist_rule: UseStateHandle<Option<PendingBlacklistRule>> = use_state(|| None);
     let tag_picker_open = use_state(|| false);
@@ -402,98 +401,6 @@ pub fn post_card(props: &PostCardProps) -> Html {
         post.stats.score.up, post.stats.score.down
     ));
 
-    let on_hide = {
-        let backend_url = props.backend_url.to_string();
-        let session_id = props.session_id.to_string();
-        let account_id = props.account_id;
-        let position = props.position;
-        let post_id = post.id;
-        let hidden = hidden.clone();
-        Callback::from(move |e: MouseEvent| {
-            e.stop_propagation();
-            e.prevent_default();
-            hidden.set(true);
-            send_interaction(
-                backend_url.clone(),
-                FeedInteractionRequest {
-                    account_id,
-                    post_id,
-                    event_type: FeedInteractionType::Hide,
-                    position,
-                    session_id: session_id.clone(),
-                },
-            );
-        })
-    };
-
-    let on_like = {
-        let backend_url = props.backend_url.to_string();
-        let session_id = props.session_id.to_string();
-        let account_id = props.account_id;
-        let position = props.position;
-        let post_id = post.id;
-        Callback::from(move |e: MouseEvent| {
-            e.stop_propagation();
-            e.prevent_default();
-            send_interaction(
-                backend_url.clone(),
-                FeedInteractionRequest {
-                    account_id,
-                    post_id,
-                    event_type: FeedInteractionType::Like,
-                    position,
-                    session_id: session_id.clone(),
-                },
-            );
-        })
-    };
-
-    let on_strong_like = {
-        let backend_url = props.backend_url.to_string();
-        let session_id = props.session_id.to_string();
-        let account_id = props.account_id;
-        let position = props.position;
-        let post_id = post.id;
-        Callback::from(move |e: MouseEvent| {
-            e.stop_propagation();
-            e.prevent_default();
-            send_interaction(
-                backend_url.clone(),
-                FeedInteractionRequest {
-                    account_id,
-                    post_id,
-                    event_type: FeedInteractionType::StrongLike,
-                    position,
-                    session_id: session_id.clone(),
-                },
-            );
-        })
-    };
-
-    let on_unhide = {
-        let hidden = hidden.clone();
-        let backend_url = props.backend_url.to_string();
-        let session_id = props.session_id.to_string();
-        let account_id = props.account_id;
-        let position = props.position;
-        let post_id = post.id;
-        Callback::from(move |e: MouseEvent| {
-            e.stop_propagation();
-            e.prevent_default();
-            hidden.set(false);
-            undo_interaction(
-                backend_url.clone(),
-                FeedInteractionRequest {
-                    account_id,
-                    post_id,
-                    event_type: FeedInteractionType::Hide,
-                    position,
-                    session_id: session_id.clone(),
-                },
-            );
-        })
-    };
-
     let mut blockable_tags: Vec<(String, String)> = Vec::new();
     for (group, tags) in [
         ("General", &post.tags.general),
@@ -645,7 +552,7 @@ pub fn post_card(props: &PostCardProps) -> Html {
         })
     };
 
-    let mut root_classes = classes!(
+    let root_classes = classes!(
         "card",
         "post-card",
         "card-compact",
@@ -658,9 +565,6 @@ pub fn post_card(props: &PostCardProps) -> Html {
         "break-inside-avoid",
         "mb-3"
     );
-    if *hidden {
-        root_classes.push("post-card-hidden");
-    }
 
     // Post number badge with optional file metadata
     let badge_text = {
@@ -859,8 +763,8 @@ pub fn post_card(props: &PostCardProps) -> Html {
                     <summary
                         class="post-card-hide-btn btn btn-sm btn-neutral btn-circle list-none"
                         onmousedown={Callback::from(|e: MouseEvent| e.stop_propagation())}
-                        title="Recommendation controls"
-                        aria-label={format!("Recommendation controls for post {}", post.id)}
+                        title="Blocking options"
+                        aria-label={format!("Blocking options for post {}", post.id)}
                     >
                         { "…" }
                     </summary>
@@ -875,21 +779,6 @@ pub fn post_card(props: &PostCardProps) -> Html {
                             })
                         }}
                     >
-                        <li>
-                            <button type="button" onclick={on_like}>
-                                <span>{ "Like" }</span>
-                            </button>
-                        </li>
-                        <li>
-                            <button type="button" onclick={on_strong_like}>
-                                <span>{ "Strong like" }</span>
-                            </button>
-                        </li>
-                        <li>
-                            <button type="button" onclick={on_hide}>
-                                <span>{ "Not interested" }</span>
-                            </button>
-                        </li>
                         <li class="menu-title text-xs normal-case whitespace-normal">
                             <span>{ "Permanent blacklist" }</span>
                         </li>
@@ -911,7 +800,7 @@ pub fn post_card(props: &PostCardProps) -> Html {
                 if props.show_affinity {
                     <span
                         class={classes!("badge", "badge-ghost", "absolute", "top-0", "right-0", "m-2")}
-                        title={"Overall recommendation score — blends tag similarity, quality, recency, rating, media, popularity, interaction, and tag-relation signals into a single affinity measure. Higher values indicate a stronger match with your personal preferences, but absolute scores shift with model tuning."}
+                        title={"Overall recommendation score — blends tag similarity, quality, recency, rating, media, popularity, tag-relation and discovery signals into a single affinity measure. Higher values indicate a stronger match with your personal preferences, but absolute scores shift with model tuning."}
                         aria-label={format!("Affinity {:.2}", props.affinity)}>
                         { format!("{:.2}",&props.affinity) }
                     </span>
@@ -942,26 +831,6 @@ pub fn post_card(props: &PostCardProps) -> Html {
             }
         </>
     };
-
-    if *hidden {
-        return html! {
-            <div
-                class={classes!("card", "min-h-25", "h-full", "post-card-hidden", "w-full", "p-3", "flex", "flex-col", "items-center", "justify-center", "text-center", "break-inside-avoid", "mb-3")}
-                ref={root_ref}
-                aria-label={format!("Post {} hidden", post.id)}
-            >
-                <span class="text-base-content/70 text-sm mb-2">{ format!("Hidden #{}", post.id) }</span>
-                <button
-                    type="button"
-                    class="btn btn-sm btn-outline"
-                    onclick={on_unhide}
-                    aria-label="Undo hide"
-                >
-                    { "Undo" }
-                </button>
-            </div>
-        };
-    }
 
     let pending_rule = (*pending_blacklist_rule).clone();
     let on_confirm_tag_picker = {
@@ -1161,25 +1030,6 @@ fn send_interaction(backend_url: String, payload: FeedInteractionRequest) {
     // churn; explicit events still flush immediately. Undo stays a direct
     // DELETE because it is keyed per-event.
     crate::interaction_queue::push(backend_url, payload);
-}
-
-fn undo_interaction(backend_url: String, payload: FeedInteractionRequest) {
-    if backend_url.trim().is_empty() {
-        return;
-    }
-    spawn_local(async move {
-        let Ok(body) = serde_json::to_string(&payload) else {
-            return;
-        };
-        if let Err(err) = api_delete(&format!("{backend_url}/interaction"))
-            .header("Content-Type", "application/json")
-            .body(body)
-            .send()
-            .await
-        {
-            web_sys::console::warn_1(&format!("failed to undo interaction: {err}").into());
-        }
-    });
 }
 
 fn is_supported_image(url: &str) -> bool {

@@ -19,7 +19,6 @@ pub struct ChannelTiming {
     pub popularity_fit: u64,
     pub rating_fit: u64,
     pub media_fit: u64,
-    pub interaction_fit: u64,
     pub recency_fit: u64,
     pub tag_relation_fit: u64,
     pub uploader_fit: u64,
@@ -46,7 +45,6 @@ impl ScoringMetrics {
         self.channel.popularity_fit += t.popularity_fit;
         self.channel.rating_fit += t.rating_fit;
         self.channel.media_fit += t.media_fit;
-        self.channel.interaction_fit += t.interaction_fit;
         self.channel.recency_fit += t.recency_fit;
         self.channel.tag_relation_fit += t.tag_relation_fit;
         self.channel.uploader_fit += t.uploader_fit;
@@ -74,7 +72,6 @@ impl ScoringMetrics {
             ("popularity_fit", c.popularity_fit),
             ("rating_fit", c.rating_fit),
             ("media_fit", c.media_fit),
-            ("interaction_fit", c.interaction_fit),
             ("recency_fit", c.recency_fit),
             ("tag_relation_fit", c.tag_relation_fit),
             ("uploader_fit", c.uploader_fit),
@@ -141,7 +138,6 @@ impl ScoringMetrics {
             "popularity_fit": ph_ms(c.popularity_fit),
             "rating_fit": ph_ms(c.rating_fit),
             "media_fit": ph_ms(c.media_fit),
-            "interaction_fit": ph_ms(c.interaction_fit),
             "recency_fit": ph_ms(c.recency_fit),
             "tag_relation_fit": ph_ms(c.tag_relation_fit),
             "uploader_fit": ph_ms(c.uploader_fit),
@@ -152,13 +148,12 @@ impl ScoringMetrics {
         });
         // Which channel consumed the most time — surfaced as flat fields so a
         // Grafana (Loki) panel can `unwrap` them directly.
-        let channels: [(&str, u64); 13] = [
+        let channels: [(&str, u64); 12] = [
             ("tag_similarity", c.tag_similarity),
             ("quality_fit", c.quality_fit),
             ("popularity_fit", c.popularity_fit),
             ("rating_fit", c.rating_fit),
             ("media_fit", c.media_fit),
-            ("interaction_fit", c.interaction_fit),
             ("recency_fit", c.recency_fit),
             ("tag_relation_fit", c.tag_relation_fit),
             ("uploader_fit", c.uploader_fit),
@@ -365,7 +360,6 @@ impl super::context::ScoringContext<'_> {
         let (popularity, p_ns) = timed_channel!(self, popularity_fit_cached, features);
         let (rating, r_ns) = timed_channel!(self, rating_fit_cached, features);
         let (media, m_ns) = timed_channel!(self, media_fit_cached, features);
-        let ((interaction, veto), i_ns) = timed_channel!(self, interaction_fit_cached, features);
 
         let age_days = (self.priors.now - features.created_at).num_seconds() as f32 / 86_400.0;
         let (recency, rec_ns) = {
@@ -387,13 +381,11 @@ impl super::context::ScoringContext<'_> {
             rating,
             media,
             popularity,
-            interaction,
             tag_relation,
             uploader,
             exclusivity,
             novelty,
             artist_discovery,
-            veto,
         );
         let blend_ns = blend_start.elapsed().as_nanos() as u64;
 
@@ -404,7 +396,6 @@ impl super::context::ScoringContext<'_> {
             rating_fit: rating,
             media_fit: media,
             popularity_fit: popularity,
-            interaction_fit: interaction,
             tag_relation_fit: tag_relation,
             uploader_fit: uploader,
             exclusivity_fit: exclusivity,
@@ -418,7 +409,6 @@ impl super::context::ScoringContext<'_> {
             popularity_fit: p_ns,
             rating_fit: r_ns,
             media_fit: m_ns,
-            interaction_fit: i_ns,
             recency_fit: rec_ns,
             tag_relation_fit: tr_ns,
             uploader_fit: u_ns,
@@ -455,7 +445,6 @@ mod tests {
         assert_eq!(t.popularity_fit, 0);
         assert_eq!(t.rating_fit, 0);
         assert_eq!(t.media_fit, 0);
-        assert_eq!(t.interaction_fit, 0);
         assert_eq!(t.recency_fit, 0);
         assert_eq!(t.tag_relation_fit, 0);
         assert_eq!(t.uploader_fit, 0);

@@ -12,10 +12,9 @@
 //!   2. Each probe gets a `ChannelMask` from the knob registry naming
 //!      which channels its delta invalidates. Only those channels are
 //!      recomputed; the rest are read out of the prior cache.
-//!   3. The final mix-blend / temperature shaping / strong-negative
-//!      penalty are always reapplied (they depend on `mix_*`,
-//!      `score_temperature`, `strong_negative_penalty` regardless of
-//!      what was invalidated).
+//!   3. The final mix-blend / temperature shaping is always reapplied
+//!      (it depends on `mix_*` and `score_temperature` regardless of what
+//!      was invalidated).
 //!   4. If a probe wins, its (partially-rebuilt) cache is promoted to
 //!      the new baseline. If it loses, the cache is dropped.
 //!
@@ -49,12 +48,11 @@ pub(crate) const M_RECENCY: u16 = 1 << 2;
 pub(crate) const M_RATING: u16 = 1 << 3;
 pub(crate) const M_MEDIA: u16 = 1 << 4;
 pub(crate) const M_POPULARITY: u16 = 1 << 5;
-pub(crate) const M_INTERACTION: u16 = 1 << 6;
-pub(crate) const M_TAG_RELATION: u16 = 1 << 7;
-pub(crate) const M_UPLOADER: u16 = 1 << 8;
-pub(crate) const M_EXCLUSIVITY: u16 = 1 << 9;
-pub(crate) const M_NOVELTY: u16 = 1 << 10;
-pub(crate) const M_ARTIST_DISCOVERY: u16 = 1 << 11;
+pub(crate) const M_TAG_RELATION: u16 = 1 << 6;
+pub(crate) const M_UPLOADER: u16 = 1 << 7;
+pub(crate) const M_EXCLUSIVITY: u16 = 1 << 8;
+pub(crate) const M_NOVELTY: u16 = 1 << 9;
+pub(crate) const M_ARTIST_DISCOVERY: u16 = 1 << 10;
 
 /// Empty mask: probe touched only mix weights / temperature / penalty.
 /// All channels reused from prior cache; only the final blend is rerun.
@@ -66,7 +64,6 @@ pub(crate) const M_ALL: u16 = M_SIM
     | M_RATING
     | M_MEDIA
     | M_POPULARITY
-    | M_INTERACTION
     | M_TAG_RELATION
     | M_UPLOADER
     | M_EXCLUSIVITY
@@ -90,8 +87,8 @@ pub(crate) const M_DISCRETE: u16 = M_RATING | M_MEDIA;
 pub(crate) const M_BOOST: u16 = M_SIM | M_DISCRETE;
 /// `one_sided_ratio_exp` changes both quality and popularity ratios.
 pub(crate) const M_RATIO_EXP: u16 = M_QUALITY | M_POPULARITY;
-/// `group_w_*` change the per-group weight vector → `sim+interaction+tag_relation`.
-pub(crate) const M_GROUP_W: u16 = M_SIM | M_INTERACTION | M_TAG_RELATION;
+/// `group_w_*` change the per-group weight vector → `sim+tag_relation`.
+pub(crate) const M_GROUP_W: u16 = M_SIM | M_TAG_RELATION;
 
 // ---- ChannelScores + ScoreCache --------------------------------------------
 
@@ -103,13 +100,11 @@ pub(crate) struct ChannelScores {
     pub(crate) rating: f32,
     pub(crate) media: f32,
     pub(crate) popularity: f32,
-    pub(crate) interaction: f32,
     pub(crate) tag_relation: f32,
     pub(crate) uploader: f32,
     pub(crate) exclusivity: f32,
     pub(crate) novelty: f32,
     pub(crate) artist_discovery: f32,
-    pub(crate) veto: bool,
 }
 
 impl ChannelScores {
@@ -126,7 +121,6 @@ impl ChannelScores {
             self.rating,
             self.media,
             self.popularity,
-            self.interaction,
             self.tag_relation,
             self.uploader,
             self.exclusivity,
@@ -186,11 +180,6 @@ fn recompute_one_post(
     }
     if mask & M_MEDIA != 0 {
         next.media = ctx.media_fit_cached(features);
-    }
-    if mask & M_INTERACTION != 0 {
-        let (val, veto) = ctx.interaction_fit_cached(features);
-        next.interaction = val;
-        next.veto = veto;
     }
     if mask & M_TAG_RELATION != 0 {
         next.tag_relation = ctx.tag_relation_fit_cached(features);
@@ -306,12 +295,12 @@ pub(crate) fn score_with_cache(
                 // a final blend per post. Common to both code paths
                 // below; the only difference is how the resulting list
                 // is ordered.
-                let mut entries: Vec<(f32, f32, i64)> = Vec::with_capacity(total_posts);
+                let mut entries: Vec<(f32, i64)> = Vec::with_capacity(total_posts);
                 for (i, features) in fx.test_features.iter().enumerate() {
                     let prior = prev_acc.map(|a| a.channels[i]).unwrap_or_default();
                     let ch = recompute_one_post(&ctx, features, priors.now, prior, effective_mask);
                     let score = blend_channel(&ctx, ch);
-                    entries.push((score, ch.interaction, features.id));
+                    entries.push((score, features.id));
                     next_channels.push(ch);
                 }
                 for (j, features) in fx.neg_features.iter().enumerate() {
@@ -319,7 +308,7 @@ pub(crate) fn score_with_cache(
                     let prior = prev_acc.map(|a| a.channels[cache_idx]).unwrap_or_default();
                     let ch = recompute_one_post(&ctx, features, priors.now, prior, effective_mask);
                     let score = blend_channel(&ctx, ch);
-                    entries.push((score, ch.interaction, features.id));
+                    entries.push((score, features.id));
                     next_channels.push(ch);
                 }
 
@@ -343,14 +332,14 @@ pub(crate) fn score_with_cache(
                         .into_iter()
                         .map(|i| {
                             let is_pos = i < n_test;
-                            (entries[i].2, entries[i].0, is_pos)
+                            (entries[i].1, entries[i].0, is_pos)
                         })
                         .collect()
                 } else {
                     let mut s: Vec<(i64, f32, bool)> = (0..total_posts)
                         .map(|i| {
                             let is_pos = i < n_test;
-                            (entries[i].2, entries[i].0, is_pos)
+                            (entries[i].1, entries[i].0, is_pos)
                         })
                         .collect();
                     s.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
@@ -429,12 +418,10 @@ fn blend_channel(ctx: &ScoringContext<'_>, ch: ChannelScores) -> f32 {
         ch.rating,
         ch.media,
         ch.popularity,
-        ch.interaction,
         ch.tag_relation,
         ch.uploader,
         ch.exclusivity,
         ch.novelty,
         ch.artist_discovery,
-        ch.veto,
     )
 }

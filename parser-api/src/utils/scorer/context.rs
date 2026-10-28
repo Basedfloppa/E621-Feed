@@ -14,7 +14,6 @@ use super::util::{
     CompactFeedback, MixWeights, PairAggregator, blend_score, confidence, normalize_tag,
 };
 use super::{GROUP_COUNT, Group};
-use crate::db::parse_db_datetime;
 
 pub struct ScoringContext<'a> {
     pub(super) priors: &'a Priors,
@@ -31,7 +30,6 @@ pub struct ScoringContext<'a> {
     pub(super) rating_total: i64,
     pub(super) media_total: i64,
     pub(super) personal_confidence: f32,
-    pub(super) user_base_positive_rate: f32,
     pub(super) mix: MixWeights,
     /// Per-uploader quality stats (`uploader_id` -> stats), built from profile.
     pub(super) uploader_map: HashMap<i64, AccountUploaderStat>,
@@ -65,7 +63,6 @@ pub struct ContextBase {
     pub(super) rating_total: i64,
     pub(super) media_total: i64,
     pub(super) personal_confidence: f32,
-    pub(super) user_base_positive_rate: f32,
     pub(super) fingerprint: u64,
     pub(super) uploader_map: HashMap<i64, AccountUploaderStat>,
 }
@@ -175,24 +172,15 @@ impl ContextBase {
         }
 
         // Feedback maps (from profile — never changes between probes).
-        let mut total_pos = 0.0f32;
-        let mut total_neg = 0.0f32;
         let mut feedback: [HashMap<String, CompactFeedback>; GROUP_COUNT] = Default::default();
         for fb in &profile.feedback {
             let Some(group) = Group::from_str(fb.group_type.as_str()) else {
                 continue;
             };
-            total_pos += fb.positive_count.max(0) as f32;
-            total_neg += fb.negative_count.max(0) as f32;
             feedback[group as usize].insert(
                 normalize_tag(&fb.tag_name).into_owned(),
                 CompactFeedback {
-                    positive: fb.positive_count,
-                    negative: fb.negative_count,
                     impressions: fb.impression_count,
-                    last_interaction_secs: parse_db_datetime(&fb.last_interaction_at)
-                        .ok()
-                        .map(|dt| dt.timestamp() as f64),
                 },
             );
         }
@@ -206,13 +194,6 @@ impl ContextBase {
             priors.coldstart_n0.max(1.0),
             priors.confidence_steepness,
         );
-
-        let strong_total = total_pos + total_neg;
-        let user_base_positive_rate = if strong_total > 0.0 {
-            (total_pos / strong_total).clamp(0.05, 0.95)
-        } else {
-            0.5
-        };
 
         let fingerprint = context_fingerprint(priors);
 
@@ -260,7 +241,6 @@ impl ContextBase {
             rating_total,
             media_total,
             personal_confidence,
-            user_base_positive_rate,
             fingerprint,
             uploader_map,
         }
@@ -357,13 +337,12 @@ impl<'a> ScoringContext<'a> {
             rating_total: base.rating_total,
             media_total: base.media_total,
             personal_confidence: base.personal_confidence,
-            user_base_positive_rate: base.user_base_positive_rate,
             uploader_map: base.uploader_map,
             blacklisted_tags: HashSet::new(),
         }
     }
 
-    /// Apply the final mix+temperature+veto blend to a set of per-channel
+    /// Apply the final mix+temperature blend to a set of per-channel
     /// scores. Single source of truth for the blend: every scoring path
     /// (`score`, `score_cached`, the calibrate cache) must route through it.
     /// The calibrate cache path reuses per-channel values across probes and
@@ -384,13 +363,11 @@ impl<'a> ScoringContext<'a> {
         rating: f32,
         media: f32,
         popularity: f32,
-        interaction: f32,
         tag_relation: f32,
         uploader: f32,
         exclusivity: f32,
         novelty: f32,
         artist_discovery: f32,
-        veto: bool,
     ) -> f32 {
         blend_score(
             self.mix.as_array(),
@@ -401,7 +378,6 @@ impl<'a> ScoringContext<'a> {
                 rating,
                 media,
                 popularity,
-                interaction,
                 tag_relation,
                 uploader,
                 exclusivity,
@@ -409,8 +385,6 @@ impl<'a> ScoringContext<'a> {
                 artist_discovery,
             ],
             self.priors.score_temperature,
-            self.priors.strong_negative_penalty,
-            veto,
         )
     }
 
@@ -422,7 +396,6 @@ impl<'a> ScoringContext<'a> {
         let popularity = self.popularity_fit(post);
         let rating = self.rating_fit(post);
         let media = self.media_fit(post);
-        let (interaction, veto) = self.interaction_fit(post);
         let recency = self.recency_fit(age_days);
         let tag_relation = self.tag_relation_fit(post);
         let uploader = self.uploader_fit(post);
@@ -437,13 +410,11 @@ impl<'a> ScoringContext<'a> {
             rating,
             media,
             popularity,
-            interaction,
             tag_relation,
             uploader,
             exclusivity,
             novelty,
             artist_discovery,
-            veto,
         );
 
         let breakdown = ScoreBreakdown {
@@ -453,7 +424,6 @@ impl<'a> ScoringContext<'a> {
             rating_fit: rating,
             media_fit: media,
             popularity_fit: popularity,
-            interaction_fit: interaction,
             tag_relation_fit: tag_relation,
             uploader_fit: uploader,
             exclusivity_fit: exclusivity,
@@ -479,7 +449,6 @@ impl<'a> ScoringContext<'a> {
         let popularity = self.popularity_fit_cached(features);
         let rating = self.rating_fit_cached(features);
         let media = self.media_fit_cached(features);
-        let (interaction, veto) = self.interaction_fit_cached(features);
         let recency = self.recency_fit(age_days);
         let tag_relation = self.tag_relation_fit_cached(features);
         let uploader = self.uploader_fit_cached(features);
@@ -495,13 +464,11 @@ impl<'a> ScoringContext<'a> {
             rating,
             media,
             popularity,
-            interaction,
             tag_relation,
             uploader,
             exclusivity,
             novelty,
             artist_discovery,
-            veto,
         );
 
         let breakdown = ScoreBreakdown {
@@ -511,7 +478,6 @@ impl<'a> ScoringContext<'a> {
             rating_fit: rating,
             media_fit: media,
             popularity_fit: popularity,
-            interaction_fit: interaction,
             tag_relation_fit: tag_relation,
             uploader_fit: uploader,
             exclusivity_fit: exclusivity,
@@ -552,7 +518,6 @@ mod tests {
             mix_rating: 0.0,
             mix_media: 0.0,
             mix_popularity: 0.0,
-            mix_interaction: 0.0,
             mix_tag_relation: 0.0,
             idf_lambda: 1.0,
             idf_alpha: 1.0,
@@ -570,8 +535,6 @@ mod tests {
             diversity_w_general: 1.0,
             quality_log_bias: -3.0,
             discrete_smoothing_alpha: 1.0,
-            strong_negative_count: 3,
-            strong_negative_penalty: 0.40,
             recency_personal_floor_frac: 1.0,
             tag_relation_w_global: 0.0,
             tag_relation_w_personal: 0.0,
@@ -580,20 +543,16 @@ mod tests {
             tag_relation_user_min_cooc: 1,
             tag_relation_cooc_ref: 16.0,
             tag_relation_user_cooc_ref: 5.0,
-            strong_negative_wilson_threshold: 0.55,
             recency_log_personal: true,
             feedback_decay_half_life_days: 90.0,
-            meta_interaction_weight: 0.3,
             coldstart_n0: 25.0,
             discrete_pref_floor: 0.05,
             diversity_max_penalty: 0.45,
-            diversity_interaction_damp: 0.35,
             df_floor: 0.4,
             idf_max: 100.0,
             bm25_k: 2.25,
             one_sided_ratio_exp: 0.5,
             coldstart_smoothing_boost: 2.0,
-            interaction_ctr_prior_alpha: 4.0,
             idf_rsj_smoothing: 0.35,
             group_w_artist: 2.40,
             group_w_character: 2.00,
@@ -803,7 +762,6 @@ mod tests {
         assert_eq!(base.rating_total, 0);
         assert_eq!(base.media_total, 0);
         assert!(close(base.personal_confidence, 0.0));
-        assert!(close(base.user_base_positive_rate, 0.5));
     }
 
     #[test]
@@ -940,7 +898,6 @@ mod tests {
         assert_eq!(base.rating_total, 150);
         assert_eq!(base.media_total, 150);
         assert!(close(base.personal_confidence, 150.0 / 175.0));
-        assert!(close(base.user_base_positive_rate, 8.0 / 9.0));
         let fb = &base.feedback[0];
         assert!(fb.contains_key("skeb"), "feedback should contain skeb");
     }
@@ -974,9 +931,7 @@ mod tests {
 
         // Each channel contributes proportionally to its mix weight.
         // mix_sim=0, mix_quality=1, others=0 → score = quality
-        let score = ctx.final_blend(
-            0.5, 0.7, 0.3, 0.6, 0.4, 0.2, 0.8, 0.5, 0.0, 0.0, 0.0, 0.0, false,
-        );
+        let score = ctx.final_blend(0.5, 0.7, 0.3, 0.6, 0.4, 0.2, 0.5, 0.0, 0.0, 0.0, 0.0);
         assert!(
             close(score, 0.7),
             "with mix_quality=1 and no temp, score should equal quality=0.7 got {score}"
@@ -1000,49 +955,20 @@ mod tests {
         let ctx_yes = ScoringContext::new(&counts, &p_yes, &idf, &profile, &graph, &graph);
 
         // Input score > 0.5 → temperature pushes it higher.
-        let s_no = ctx_no.final_blend(
-            0.6, 0.6, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, false,
-        );
-        let s_yes = ctx_yes.final_blend(
-            0.6, 0.6, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, false,
-        );
+        let s_no = ctx_no.final_blend(0.6, 0.6, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+        let s_yes = ctx_yes.final_blend(0.6, 0.6, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
         assert!(
             s_yes >= s_no,
             "temperature should push >0.5 scores higher: {s_no} -> {s_yes}"
         );
 
         // Input score < 0.5 → temperature pushes it lower.
-        let s_no2 = ctx_no.final_blend(
-            0.3, 0.3, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, false,
-        );
-        let s_yes2 = ctx_yes.final_blend(
-            0.3, 0.3, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, false,
-        );
+        let s_no2 = ctx_no.final_blend(0.3, 0.3, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+        let s_yes2 = ctx_yes.final_blend(0.3, 0.3, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
         assert!(
             s_yes2 <= s_no2,
             "temperature should push <0.5 scores lower: {s_no2} -> {s_yes2}"
         );
-    }
-
-    #[test]
-    fn final_blend_veto_applies_penalty() {
-        let mut p = default_priors();
-        p.strong_negative_penalty = 0.25;
-        let idf = build_idf();
-        let graph = build_graph();
-        let profile = minimal_profile();
-        let counts = empty_counts();
-        let ctx = ScoringContext::new(&counts, &p, &idf, &profile, &graph, &graph);
-
-        let _without = ctx.final_blend(
-            0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, false,
-        );
-        let with_veto = ctx.final_blend(
-            0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, true,
-        );
-        // The total mix weight sums to 1.0, no temperature, so raw=1.0, score=1.0
-        // With veto: 1.0 * (1 - 0.25) = 0.75
-        assert!(close(with_veto, 0.75), "expected 0.75 got {with_veto}");
     }
 
     #[test]
@@ -1054,7 +980,6 @@ mod tests {
         p.mix_rating = 0.0;
         p.mix_media = 0.0;
         p.mix_popularity = 0.0;
-        p.mix_interaction = 0.0;
         p.mix_tag_relation = 0.0;
         let idf = build_idf();
         let graph = build_graph();
@@ -1064,9 +989,7 @@ mod tests {
 
         // sim=0.2, quality=0.8, mix_sim=0.5, mix_quality=0.5, normalized to 1.0
         // score = 0.5*0.2 + 0.5*0.8 = 0.5
-        let s = ctx.final_blend(
-            0.2, 0.8, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, false,
-        );
+        let s = ctx.final_blend(0.2, 0.8, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
         assert!(close(s, 0.5), "expected 0.5 got {s}");
     }
 
@@ -1085,7 +1008,6 @@ mod tests {
         p.mix_rating = 0.60;
         p.mix_media = 0.50;
         p.mix_popularity = 0.40;
-        p.mix_interaction = 0.30;
         p.mix_tag_relation = 0.20;
         p.mix_uploader = 0.15;
         p.mix_exclusivity = 0.10;
@@ -1112,15 +1034,11 @@ mod tests {
             bd.rating_fit,
             bd.media_fit,
             bd.popularity_fit,
-            bd.interaction_fit,
             bd.tag_relation_fit,
             bd.uploader_fit,
             bd.exclusivity_fit,
             bd.novelty_fit,
             bd.artist_discovery_fit,
-            // `minimal_profile` carries no feedback, so `interaction_fit`
-            // cannot reach the strong-negative veto threshold here.
-            false,
         );
         assert_eq!(
             score.to_bits(),
@@ -1149,12 +1067,8 @@ mod tests {
         let ctx_from_base = ScoringContext::from_base(base, &p, &idf, &profile, &graph, &graph);
         let ctx_new = ScoringContext::new(&counts, &p, &idf, &profile, &graph, &graph);
 
-        let s1 = ctx_from_base.final_blend(
-            0.3, 0.6, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, false,
-        );
-        let s2 = ctx_new.final_blend(
-            0.3, 0.6, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, false,
-        );
+        let s1 = ctx_from_base.final_blend(0.3, 0.6, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+        let s2 = ctx_new.final_blend(0.3, 0.6, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
         assert!(
             close(s1, s2),
             "from_base and new should produce identical blends: {s1} vs {s2}"

@@ -14,8 +14,8 @@ use super::Group;
 use super::cached::{CachedPostFeatures, CachedTag};
 use super::context::ScoringContext;
 use super::util::{
-    FEEDBACK_NEUTRAL, PairAggregator, WILSON_Z, blend2, blend3, confidence, ctr_score,
-    discrete_preference_smooth, one_sided_ratio, sigmoid, wilson_lower_bound,
+    FEEDBACK_NEUTRAL, PairAggregator, blend2, blend3, confidence, discrete_preference_smooth,
+    one_sided_ratio, sigmoid,
 };
 use crate::utils::tag_relation::TagId;
 
@@ -85,85 +85,6 @@ impl ScoringContext<'_> {
             (overlap as f32) / (union as f32)
         };
         ((1.0 - blend) * cosine + blend * jaccard).clamp(0.0, 1.0)
-    }
-
-    /// Cached counterpart of `interaction_fit`. The feedback `HashMap`
-    /// itself isn't pre-resolved (one `HashMap` per account, rebuilt only
-    /// on profile change — not per-probe), but we skip the per-tag
-    /// `normalize_tag` since cached tags are already lowercased.
-    #[must_use]
-    pub fn interaction_fit_cached(&self, post: &CachedPostFeatures) -> (f32, bool) {
-        let mut total_weight = 0.0f32;
-        let mut weighted = 0.0f32;
-        let mut strong_neg = false;
-
-        let strong_min = self.priors.strong_negative_count.max(1) as f32;
-        let wilson_threshold = self
-            .priors
-            .strong_negative_wilson_threshold
-            .clamp(0.05, 0.99);
-        let p0 = self.user_base_positive_rate;
-        let meta_w = self.priors.meta_interaction_weight.max(0.0);
-        let half_life = f64::from(self.priors.feedback_decay_half_life_days.max(1.0));
-
-        for ct in &post.tags {
-            let g_idx = ct.group as usize;
-            let group_weight = if ct.group == Group::Meta as u8 {
-                meta_w
-            } else {
-                self.group_wts[g_idx]
-            };
-            if group_weight <= 0.0 {
-                continue;
-            }
-            let group_feedback = &self.feedback[g_idx];
-            if let Some(fb) = group_feedback.get(ct.lc.as_str()) {
-                let pos = fb.positive.max(0) as f32;
-                let neg = fb.negative.max(0) as f32;
-                let imp = fb.impressions.max(0) as f32;
-
-                // Per-tag staleness decay — mirrors channels.rs.
-                // IMPORTANT: raw counts (pos/neg/imp) are already decayed
-                // by the /process worker's decay_account_tag_feedback().
-                // We only apply the half-life factor to the confidence
-                // scaling (ln_1p term) — applying it to raw counts again
-                // would be a double-decay bug.
-                let tag_staleness = match fb.last_interaction_secs {
-                    Some(secs) => {
-                        let elapsed_days =
-                            ((self.priors.now.timestamp() as f64 - secs) / 86_400.0).max(0.0);
-                        if elapsed_days > 0.0 {
-                            (-std::f32::consts::LN_2 * elapsed_days as f32 / half_life as f32).exp()
-                        } else {
-                            1.0
-                        }
-                    }
-                    None => 1.0,
-                };
-                let conf = (pos + neg + imp).ln_1p() * tag_staleness;
-                if conf <= 0.0 {
-                    continue;
-                }
-                let w = group_weight * conf;
-                total_weight += w;
-                weighted +=
-                    w * ctr_score(pos, neg, imp, p0, self.priors.interaction_ctr_prior_alpha);
-
-                if neg >= strong_min {
-                    let neg_lcb = wilson_lower_bound(neg, pos + neg, WILSON_Z);
-                    if neg_lcb >= wilson_threshold {
-                        strong_neg = true;
-                    }
-                }
-            }
-        }
-
-        let score = if total_weight <= 0.0 {
-            FEEDBACK_NEUTRAL
-        } else {
-            (weighted / total_weight).clamp(0.0, 1.0)
-        };
-        (score, strong_neg)
     }
 
     /// Cached counterpart of `tag_relation_fit`. Math mirrors the
@@ -776,7 +697,6 @@ mod tests {
             mix_rating: 0.0,
             mix_media: 0.0,
             mix_popularity: 0.0,
-            mix_interaction: 0.0,
             mix_tag_relation: 0.0,
             idf_lambda: 1.0,
             idf_alpha: 1.0,
@@ -794,8 +714,6 @@ mod tests {
             diversity_w_general: 1.0,
             quality_log_bias: -3.0,
             discrete_smoothing_alpha: 1.0,
-            strong_negative_count: 3,
-            strong_negative_penalty: 0.40,
             recency_personal_floor_frac: 1.0,
             tag_relation_w_global: 0.0,
             tag_relation_w_personal: 0.0,
@@ -804,20 +722,16 @@ mod tests {
             tag_relation_user_min_cooc: 1,
             tag_relation_cooc_ref: 16.0,
             tag_relation_user_cooc_ref: 5.0,
-            strong_negative_wilson_threshold: 0.55,
             recency_log_personal: true,
             feedback_decay_half_life_days: 90.0,
-            meta_interaction_weight: 0.3,
             coldstart_n0: 25.0,
             discrete_pref_floor: 0.05,
             diversity_max_penalty: 0.45,
-            diversity_interaction_damp: 0.35,
             df_floor: 0.4,
             idf_max: 100.0,
             bm25_k: 2.25,
             one_sided_ratio_exp: 0.5,
             coldstart_smoothing_boost: 2.0,
-            interaction_ctr_prior_alpha: 4.0,
             idf_rsj_smoothing: 0.35,
             group_w_artist: 2.40,
             group_w_character: 2.00,
@@ -1086,23 +1000,6 @@ mod tests {
     }
 
     #[test]
-    fn interaction_fit_cached_matches_uncached() {
-        cached_setup!(ctx, idf, global);
-        let mut tags = make_empty_tags();
-        tags.artist.push("skeb".to_string());
-        tags.character.push("cat".to_string());
-        let post = make_post(tags);
-
-        let (u_score, u_veto) = ctx.interaction_fit(&post);
-        let (c_score, c_veto) = ctx.interaction_fit_cached(&cache_post(&post, &idf, &global));
-        assert!(
-            close(u_score, c_score),
-            "interaction_fit score mismatch: uncached={u_score} cached={c_score}"
-        );
-        assert_eq!(u_veto, c_veto, "interaction_fit veto mismatch");
-    }
-
-    #[test]
     fn tag_relation_fit_cached_matches_uncached() {
         let mut priors = default_priors();
         priors.tag_relation_w_global = 1.0;
@@ -1191,10 +1088,6 @@ mod tests {
             close(u_brk.quality_fit, c_brk.quality_fit),
             "breakdown.quality_fit mismatch"
         );
-        assert!(
-            close(u_brk.interaction_fit, c_brk.interaction_fit),
-            "breakdown.interaction_fit mismatch"
-        );
     }
 
     // ==================================================================
@@ -1208,21 +1101,6 @@ mod tests {
         let cached = cache_post(&post, &idf, &global);
         let sim = ctx.tag_similarity_cached(&cached);
         assert!(close(sim, 0.0), "expected 0.0 got {sim}");
-    }
-
-    #[test]
-    fn interaction_fit_cached_no_feedback() {
-        cached_setup!(ctx, idf, global);
-        let mut tags = make_empty_tags();
-        tags.artist.push("unknown".to_string());
-        let post = make_post(tags);
-        let cached = cache_post(&post, &idf, &global);
-        let (score, veto) = ctx.interaction_fit_cached(&cached);
-        assert!(
-            close(score, FEEDBACK_NEUTRAL),
-            "expected neutral, got {score}"
-        );
-        assert!(!veto, "expected no veto");
     }
 
     #[test]

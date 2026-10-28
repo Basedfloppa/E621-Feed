@@ -6,7 +6,7 @@
 //!   list. Used by `/recommendations`.
 //! * [`diversify_indices`] — calibrate-side helper. Operates on
 //!   pre-built [`DiversityFeatures`] + parallel arrays of `(score,
-//!   interaction_fit)`, never clones a `Post`, and only runs MMR over
+//!   per-channel scores)`, never clones a `Post`, and only runs MMR over
 //!   the top-`head_limit` items by raw score (the tail keeps its score
 //!   order). The grid loop calls this once per probe with features
 //!   computed once at dataset prep.
@@ -44,7 +44,7 @@ use crate::models::{Post, ScoredPost};
 use crate::utils::tag_relation::TagRelationGraph;
 
 use super::priors::Priors;
-use super::util::{FEEDBACK_NEUTRAL, normalize_tag};
+use super::util::normalize_tag;
 
 type TagId = u32;
 
@@ -332,7 +332,7 @@ fn pair_redundancy(
 
 /// Index-based MMR re-ranker. Returns indices in their final order.
 ///
-/// `entries[i] = (score, interaction_fit, tiebreak_id)` is parallel to
+/// `entries[i] = (score, tiebreak_id)` is parallel to
 /// `features[i]`. `head_limit` caps how many top-by-score items
 /// participate in MMR; everything past that keeps its raw-score
 /// ordering. Pass `head_limit >= entries.len()` for full-list MMR
@@ -345,7 +345,7 @@ fn pair_redundancy(
 /// recomputation into O(1) reads. This is behaviour-identical to the previous
 /// per-iteration recompute, but removes the `diversity_window` factor.
 pub fn diversify_indices(
-    entries: &[(f32, f32, i64)],
+    entries: &[(f32, i64)],
     features: &[DiversityFeatures],
     graph: &TagRelationGraph,
     user_graph: Option<&TagRelationGraph>,
@@ -404,7 +404,6 @@ pub fn diversify_indices(
 
     let window = priors.diversity_window.max(1);
     let exp = priors.mmr_redundancy_exp;
-    let damp = priors.diversity_interaction_damp.clamp(0.0, 1.0);
     let max_penalty = priors.diversity_max_penalty.clamp(0.0, 1.0);
 
     while !available.is_empty() {
@@ -427,9 +426,9 @@ pub fn diversify_indices(
             } else {
                 max_sim.max(0.0).powf(exp.clamp(0.1, 5.0)).clamp(0.0, 1.0)
             };
-            let (score, interaction, tid) = entries[i];
+            let (score, tid) = entries[i];
             let gap = (reference_score - score).max(0.0);
-            let penalty = (redundancy * gap * (1.0 - damp * interaction)).clamp(0.0, max_penalty);
+            let penalty = (redundancy * gap).clamp(0.0, max_penalty);
             let adj = score - penalty;
             if adj > best_value || (adj == best_value && tid < best_tiebreak) {
                 best_value = adj;
@@ -482,16 +481,7 @@ pub fn diversify_scored_posts(
         .iter()
         .map(|sp| DiversityFeatures::from_post(&sp.post, feature_graph))
         .collect();
-    let entries: Vec<(f32, f32, i64)> = posts
-        .iter()
-        .map(|sp| {
-            let interaction = sp
-                .breakdown
-                .as_ref()
-                .map_or(FEEDBACK_NEUTRAL, |b| b.interaction_fit);
-            (sp.score, interaction, sp.post.id)
-        })
-        .collect();
+    let entries: Vec<(f32, i64)> = posts.iter().map(|sp| (sp.score, sp.post.id)).collect();
 
     let head_limit = if priors.diversity_head_limit == 0 {
         posts.len()
@@ -1113,7 +1103,7 @@ mod tests {
     }
 
     fn naive_mmr_indices(
-        entries: &[(f32, f32, i64)],
+        entries: &[(f32, i64)],
         features: &[DiversityFeatures],
         graph: &TagRelationGraph,
         user_graph: Option<&TagRelationGraph>,
@@ -1133,14 +1123,13 @@ mod tests {
             .iter()
             .map(|&i| entries[i].0)
             .fold(f32::MIN, f32::max);
-        let damp = priors.diversity_interaction_damp.clamp(0.0, 1.0);
         let max_penalty = priors.diversity_max_penalty.clamp(0.0, 1.0);
         while !available.is_empty() {
             let mut best_pos = 0usize;
             let mut best_value = f32::MIN;
             let mut best_tiebreak = i64::MAX;
             for (pos, &i) in available.iter().enumerate() {
-                let (score, interaction, tid) = entries[i];
+                let (score, tid) = entries[i];
                 let redundancy = mmr_redundancy_recompute(
                     &features[i],
                     &selected,
@@ -1150,8 +1139,7 @@ mod tests {
                     priors,
                 );
                 let gap = (reference_score - score).max(0.0);
-                let penalty =
-                    (redundancy * gap * (1.0 - damp * interaction)).clamp(0.0, max_penalty);
+                let penalty = (redundancy * gap).clamp(0.0, max_penalty);
                 let adj = score - penalty;
                 if adj > best_value || (adj == best_value && tid < best_tiebreak) {
                     best_value = adj;
@@ -1179,7 +1167,6 @@ mod tests {
             mix_rating: 0.034,
             mix_media: 0.042,
             mix_popularity: 0.017,
-            mix_interaction: 0.084,
             mix_tag_relation: 0.067,
             mix_uploader: 0.05,
             mix_exclusivity: 0.02,
@@ -1212,23 +1199,17 @@ mod tests {
             diversity_w_species: 0.2,
             diversity_w_general: 0.2,
             discrete_smoothing_alpha: 1.0,
-            strong_negative_count: 3,
-            strong_negative_penalty: 0.40,
-            strong_negative_wilson_threshold: 0.55,
             recency_personal_floor_frac: 1.0,
             recency_log_personal: true,
-            feedback_decay_half_life_days: 90.0,
-            meta_interaction_weight: 0.3,
             coldstart_n0: 25.0,
             discrete_pref_floor: 0.05,
+            feedback_decay_half_life_days: 90.0,
             diversity_max_penalty: 0.45,
-            diversity_interaction_damp: 0.35,
             df_floor: 0.40,
             idf_max: 100.0,
             bm25_k: 2.25,
             one_sided_ratio_exp: 0.5,
             coldstart_smoothing_boost: 2.0,
-            interaction_ctr_prior_alpha: 4.0,
             idf_rsj_smoothing: 0.35,
             group_w_artist: 2.40,
             group_w_character: 2.00,
@@ -1271,7 +1252,7 @@ mod tests {
     /// Build features/posts whose tags are registered (with co-occurring pairs)
     /// in both a global and a user graph so the PMI soft-match path is exercised.
     type Harness = (
-        Vec<(f32, f32, i64)>,
+        Vec<(f32, i64)>,
         Vec<DiversityFeatures>,
         TagRelationGraph,
         TagRelationGraph,
@@ -1297,7 +1278,7 @@ mod tests {
         }
         let graph = TagRelationGraph::with_posts(0); // unused, keep API identical
         let mut features = Vec::with_capacity(n as usize);
-        let mut entries = Vec::with_capacity(n as usize);
+        let mut entries: Vec<(f32, i64)> = Vec::with_capacity(n as usize);
         for i in 0..n {
             let general: Vec<String> = (0..5)
                 .map(|k| format!("tag{}", (i as usize * 7 + k * 3) % 16))
@@ -1333,7 +1314,7 @@ mod tests {
                 },
             };
             features.push(DiversityFeatures::from_post(&p, &user));
-            entries.push(((i as f32) / n as f32, 0.1, i as i64));
+            entries.push(((i as f32) / n as f32, i as i64));
         }
         (entries, features, graph, user, test_priors())
     }

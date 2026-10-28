@@ -74,7 +74,7 @@ global graph.
 
 - Building 10k `Post` structs (each ~20 tags, full e621 shape) costs
   **~0.7 MB** — negligible.
-- Scoring 10k posts through all 12 channels costs **+0.2 MB** — no
+- Scoring 10k posts through all 11 channels costs **+0.2 MB** — no
   measurable per-request allocation; the hot path is allocation-light
   (matches the benchmark: 3.46 µs/post).
 

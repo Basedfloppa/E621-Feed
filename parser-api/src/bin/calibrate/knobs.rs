@@ -20,7 +20,7 @@ use e621_account_parser_api::utils::Priors;
 
 use crate::cache::{
     M_ARTIST_DISCOVERY, M_BOOST, M_CONFIDENCE_DERIVED, M_DISCRETE, M_EXCLUSIVITY, M_GROUP_W,
-    M_INTERACTION, M_NONE, M_NOVELTY, M_RATIO_EXP, M_RECENCY, M_SIM, M_TAG_RELATION, M_UPLOADER,
+    M_NONE, M_NOVELTY, M_RATIO_EXP, M_RECENCY, M_SIM, M_TAG_RELATION, M_UPLOADER,
 };
 
 /// One tunable parameter for the grid search. `apply` mutates the trial
@@ -117,7 +117,6 @@ const PROBES_GROUP_W: &[f32] = &[-0.20, -0.10, 0.10, 0.20];
 const PROBES_GROUP_W_LORE: &[f32] = &[-0.10, -0.05, 0.05, 0.10];
 const PROBES_RSJ: &[f32] = &[-0.20, -0.05, 0.05, 0.20];
 const PROBES_BOOST: &[f32] = &[-0.50, -0.20, 0.20, 0.50];
-const PROBES_CTR_PRIOR: &[f32] = &[-1.50, -0.50, 0.50, 1.50];
 const PROBES_TEMP: &[f32] = &[-0.50, 0.50, 1.50, 3.0];
 const PROBES_STEEP: &[f32] = &[-0.30, -0.10, 0.10, 0.30];
 const PROBES_MMR_EXP: &[f32] = &[-0.30, -0.10, 0.10, 0.30];
@@ -177,13 +176,6 @@ pub(crate) const GRID_KNOBS: &[KnobSpec] = &[
     KnobSpec {
         name: "mix_popularity",
         apply: |p, v| p.mix_popularity = (p.mix_popularity * (1.0 + v)).max(0.0),
-        probes: PROBES_MIX_REL,
-        invalidates: M_NONE,
-        diversify_only: false,
-    },
-    KnobSpec {
-        name: "mix_interaction",
-        apply: |p, v| p.mix_interaction = (p.mix_interaction * (1.0 + v)).max(0.0),
         probes: PROBES_MIX_REL,
         invalidates: M_NONE,
         diversify_only: false,
@@ -533,14 +525,7 @@ pub(crate) const GRID_KNOBS: &[KnobSpec] = &[
         invalidates: M_BOOST,
         diversify_only: false,
     },
-    KnobSpec {
-        name: "interaction_ctr_prior_alpha",
-        apply: |p, v| p.interaction_ctr_prior_alpha = (p.interaction_ctr_prior_alpha + v).max(0.1),
-        probes: PROBES_CTR_PRIOR,
-        invalidates: M_INTERACTION,
-        diversify_only: false,
-    },
-    // -- v5.3 Class B: per-group multipliers (sim+interaction+tag_relation) --
+    // -- v5.3 Class B: per-group multipliers (sim+tag_relation) --
     KnobSpec {
         name: "group_w_artist",
         apply: |p, v| p.group_w_artist = (p.group_w_artist + v).max(0.0),
@@ -685,8 +670,7 @@ pub(crate) const GRID_KNOBS: &[KnobSpec] = &[
         diversify_only: false,
     },
     // -- v5.6: tag-relation co-occurrence thresholds --
-    // (skipped: `strong_negative_*`, `feedback_decay_*`,
-    //  `meta_interaction_weight` — no `feed_interactions` rows in the
+    // (skipped: `feedback_decay_*` — no `account_tag_feedback` rows in the
     //  synthetic split; tune online once real feedback flows in.)
     // Lower clamp = 2: per-account user_relation prunes cooc<2 pairs at
     // build time (memory diet). Probing min_cooc=1 would lie — the graph
@@ -772,15 +756,6 @@ pub(crate) const GRID_KNOBS: &[KnobSpec] = &[
     KnobSpec {
         name: "diversity_max_penalty",
         apply: |p, v| p.diversity_max_penalty = (p.diversity_max_penalty + v).clamp(0.0, 1.0),
-        probes: PROBES_DIV_PENALTY,
-        invalidates: M_NONE,
-        diversify_only: true,
-    },
-    KnobSpec {
-        name: "diversity_interaction_damp",
-        apply: |p, v| {
-            p.diversity_interaction_damp = (p.diversity_interaction_damp + v).clamp(0.0, 1.0);
-        },
         probes: PROBES_DIV_PENALTY,
         invalidates: M_NONE,
         diversify_only: true,
@@ -878,13 +853,6 @@ pub(crate) const MIX_ONLY_KNOBS: &[KnobSpec] = &[
         diversify_only: false,
     },
     KnobSpec {
-        name: "mix_interaction",
-        apply: |p, v| p.mix_interaction = (p.mix_interaction * (1.0 + v)).max(0.0),
-        probes: PROBES_MIX_REL,
-        invalidates: M_NONE,
-        diversify_only: false,
-    },
-    KnobSpec {
         name: "mix_tag_relation",
         apply: |p, v| p.mix_tag_relation = (p.mix_tag_relation * (1.0 + v)).max(0.0),
         probes: PROBES_MIX_REL,
@@ -930,8 +898,8 @@ pub(crate) const CATEGORICAL_KNOBS: &[CategoricalKnob] = &[
         invalidates: M_TAG_RELATION,
     },
     // v5.12: novelty channel — switch on user-feedback mode.
-    // Uses feed_interactions data; skip if no synthetic feedback rows
-    // exist (same rationale as feedback_decay / meta_interaction_weight).
+    // Uses account_tag_feedback impressions; skip if no synthetic feedback
+    // rows exist (same rationale as feedback_decay).
     CategoricalKnob {
         name: "novelty_use_feedback",
         candidates: &["true", "false"],
@@ -955,7 +923,6 @@ mod tests {
             mix_rating: 0.034,
             mix_media: 0.042,
             mix_popularity: 0.017,
-            mix_interaction: 0.084,
             mix_tag_relation: 0.067,
             mix_uploader: 0.05,
             mix_exclusivity: 0.02,
@@ -973,7 +940,6 @@ mod tests {
             "mix_rating" => p.mix_rating,
             "mix_media" => p.mix_media,
             "mix_popularity" => p.mix_popularity,
-            "mix_interaction" => p.mix_interaction,
             "mix_tag_relation" => p.mix_tag_relation,
             "mix_uploader" => p.mix_uploader,
             "mix_exclusivity" => p.mix_exclusivity,
@@ -993,11 +959,11 @@ mod tests {
     }
 
     #[test]
-    fn both_registries_still_expose_all_twelve_mix_knobs() {
+    fn both_registries_still_expose_every_mix_knob() {
         assert_eq!(
             mix_knobs().len(),
-            24,
-            "12 in GRID_KNOBS + 12 in MIX_ONLY_KNOBS"
+            22,
+            "11 in GRID_KNOBS + 11 in MIX_ONLY_KNOBS"
         );
     }
 

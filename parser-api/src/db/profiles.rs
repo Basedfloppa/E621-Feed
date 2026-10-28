@@ -204,7 +204,7 @@ fn refresh_account_profiles_impl(account_id: i32, skip_cooccurrence: bool) -> Re
         set_account_tag_cooccurrence(account_id)?;
     }
     decay_account_tag_feedback(account_id)?;
-    // Record refresh timestamp for time-weighted interaction_fit decay.
+    // Record the refresh timestamp for profile aging.
     let now = Utc::now().to_rfc3339();
     super::with_write_tx(|tx| {
         tx.execute(

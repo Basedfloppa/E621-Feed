@@ -7,8 +7,8 @@ use super::Group;
 use super::context::ScoringContext;
 #[allow(unused_imports)]
 use super::util::{
-    FEEDBACK_NEUTRAL, PairAggregator, WILSON_Z, blend2, blend3, confidence, ctr_score,
-    discrete_preference_smooth, normalize_tag, one_sided_ratio, sigmoid, wilson_lower_bound,
+    FEEDBACK_NEUTRAL, PairAggregator, blend2, blend3, confidence, discrete_preference_smooth,
+    normalize_tag, one_sided_ratio, sigmoid,
 };
 
 impl ScoringContext<'_> {
@@ -212,118 +212,6 @@ impl ScoringContext<'_> {
             alpha,
             self.priors.discrete_pref_floor,
         )
-    }
-
-    #[must_use]
-    pub fn interaction_fit(&self, post: &Post) -> (f32, bool) {
-        let mut total_weight = 0.0f32;
-        let mut weighted = 0.0f32;
-        let mut strong_neg = false;
-
-        let strong_min = self.priors.strong_negative_count.max(1) as f32;
-        let wilson_threshold = self
-            .priors
-            .strong_negative_wilson_threshold
-            .clamp(0.05, 0.99);
-        let p0 = self.user_base_positive_rate;
-        let meta_w = self.priors.meta_interaction_weight.max(0.0);
-        let half_life = f64::from(self.priors.feedback_decay_half_life_days.max(1.0));
-
-        let groups: [(Group, &Vec<String>, f32); 7] = [
-            (
-                Group::Artist,
-                &post.tags.artist,
-                self.group_wts[Group::Artist as usize],
-            ),
-            (
-                Group::Character,
-                &post.tags.character,
-                self.group_wts[Group::Character as usize],
-            ),
-            (
-                Group::Copyright,
-                &post.tags.copyright,
-                self.group_wts[Group::Copyright as usize],
-            ),
-            (
-                Group::Species,
-                &post.tags.species,
-                self.group_wts[Group::Species as usize],
-            ),
-            (
-                Group::General,
-                &post.tags.general,
-                self.group_wts[Group::General as usize],
-            ),
-            (
-                Group::Lore,
-                &post.tags.lore,
-                self.group_wts[Group::Lore as usize],
-            ),
-            (Group::Meta, &post.tags.meta, meta_w),
-        ];
-
-        for (group, tags, group_weight) in groups {
-            if group_weight <= 0.0 {
-                continue;
-            }
-            let group_feedback = &self.feedback[group as usize];
-            for tag in tags {
-                if tag.is_empty() {
-                    continue;
-                }
-                let tlc = normalize_tag(tag);
-                if let Some(fb) = group_feedback.get(tlc.as_ref()) {
-                    let pos = fb.positive.max(0) as f32;
-                    let neg = fb.negative.max(0) as f32;
-                    let imp = fb.impressions.max(0) as f32;
-
-                    // Per-tag staleness decay: use the tag's own
-                    // last_interaction_at instead of the global
-                    // last_refreshed_at, so a tag with recent
-                    // interaction keeps full weight even if the
-                    // overall profile is stale. Counts are already
-                    // decayed by the /process worker, so we only
-                    // apply the decay factor to the confidence
-                    // (ln_1p) scaling — not a second decay on counts.
-                    let tag_staleness = match fb.last_interaction_secs {
-                        Some(secs) => {
-                            let elapsed_days =
-                                ((self.priors.now.timestamp() as f64 - secs) / 86_400.0).max(0.0);
-                            if elapsed_days > 0.0 {
-                                (-std::f32::consts::LN_2 * elapsed_days as f32 / half_life as f32)
-                                    .exp()
-                            } else {
-                                1.0
-                            }
-                        }
-                        None => 1.0,
-                    };
-                    let conf = (pos + neg + imp).ln_1p() * tag_staleness;
-                    if conf <= 0.0 {
-                        continue;
-                    }
-                    let w = group_weight * conf;
-                    total_weight += w;
-                    weighted +=
-                        w * ctr_score(pos, neg, imp, p0, self.priors.interaction_ctr_prior_alpha);
-
-                    if neg >= strong_min {
-                        let neg_lcb = wilson_lower_bound(neg, pos + neg, WILSON_Z);
-                        if neg_lcb >= wilson_threshold {
-                            strong_neg = true;
-                        }
-                    }
-                }
-            }
-        }
-
-        let score = if total_weight <= 0.0 {
-            FEEDBACK_NEUTRAL
-        } else {
-            (weighted / total_weight).clamp(0.0, 1.0)
-        };
-        (score, strong_neg)
     }
 
     #[must_use]
@@ -1067,7 +955,7 @@ mod tests {
     use crate::utils::scorer::context::ScoringContext;
     use crate::utils::scorer::priors::Priors;
     use crate::utils::tag_relation::TagRelationGraph;
-    use chrono::{Duration as ChronoDuration, Utc};
+    use chrono::Utc;
     use std::collections::HashMap;
 
     // ------------------------------------------------------------------
@@ -1092,7 +980,6 @@ mod tests {
             mix_rating: 0.0,
             mix_media: 0.0,
             mix_popularity: 0.0,
-            mix_interaction: 0.0,
             mix_tag_relation: 0.0,
             idf_lambda: 1.0,
             idf_alpha: 1.0,
@@ -1110,8 +997,6 @@ mod tests {
             diversity_w_general: 1.0,
             quality_log_bias: -3.0,
             discrete_smoothing_alpha: 1.0,
-            strong_negative_count: 3,
-            strong_negative_penalty: 0.40,
             recency_personal_floor_frac: 1.0,
             tag_relation_w_global: 0.0,
             tag_relation_w_personal: 0.0,
@@ -1120,20 +1005,16 @@ mod tests {
             tag_relation_user_min_cooc: 1,
             tag_relation_cooc_ref: 16.0,
             tag_relation_user_cooc_ref: 5.0,
-            strong_negative_wilson_threshold: 0.55,
             recency_log_personal: true,
             feedback_decay_half_life_days: 90.0,
-            meta_interaction_weight: 0.3,
             coldstart_n0: 25.0,
             discrete_pref_floor: 0.05,
             diversity_max_penalty: 0.45,
-            diversity_interaction_damp: 0.35,
             df_floor: 0.4,
             idf_max: 100.0,
             bm25_k: 2.25,
             one_sided_ratio_exp: 0.5,
             coldstart_smoothing_boost: 2.0,
-            interaction_ctr_prior_alpha: 4.0,
             idf_rsj_smoothing: 0.35,
             group_w_artist: 2.40,
             group_w_character: 2.00,
@@ -1714,99 +1595,6 @@ mod tests {
     }
 
     // ==================================================================
-    //  interaction_fit
-    // ==================================================================
-
-    #[test]
-    fn interaction_fit_no_feedback() {
-        setup!(ctx);
-        let mut tags = make_empty_tags();
-        tags.artist.push("unknown_artist".to_string());
-        let post = make_post(tags, 0, 0, Rating::S);
-        let (score, veto) = ctx.interaction_fit(&post);
-        assert!(
-            close(score, FEEDBACK_NEUTRAL),
-            "expected neutral, got {score}"
-        );
-        assert!(!veto, "expected no veto");
-    }
-
-    #[test]
-    fn interaction_fit_positive_feedback() {
-        setup!(ctx);
-        let mut tags = make_empty_tags();
-        tags.artist.push("skeb".to_string());
-        let post = make_post(tags, 0, 0, Rating::S);
-        let (score, veto) = ctx.interaction_fit(&post);
-        // Bayesian CTR ≈ 0.769 (p0≈0.945 from profile feedback, alpha=4.0)
-        assert!(close(score, 0.7686), "expected ~0.769 got {score}");
-        assert!(!veto, "expected no veto");
-    }
-
-    #[test]
-    fn interaction_fit_triggers_veto() {
-        let mut profile = default_profile();
-        profile.feedback.push(AccountTagFeedback {
-            tag_name: "hated_tag".to_string(),
-            group_type: "general".to_string(),
-            impression_count: 10,
-            positive_count: 0,
-            negative_count: 10,
-            last_interaction_at: Utc::now().to_rfc3339(),
-        });
-        let priors = default_priors();
-        let idf = build_idf();
-        let global_graph = build_global_graph();
-        let user_graph = build_user_graph();
-        let counts = default_tag_counts();
-        let ctx = ScoringContext::new(&counts, &priors, &idf, &profile, &global_graph, &user_graph);
-
-        let mut tags = make_empty_tags();
-        tags.general.push("hated_tag".to_string());
-        let post = make_post(tags, 0, 0, Rating::S);
-        let (_score, veto) = ctx.interaction_fit(&post);
-        assert!(veto, "expected veto for strongly negative tag");
-    }
-
-    #[test]
-    fn interaction_fit_staleness_decay() {
-        let mut profile = default_profile();
-        // The old test used last_refreshed_at (global staleness) but we
-        // now use per-tag last_interaction_secs. We need a feedback entry
-        // with a stale last_interaction_at.
-        let mut priors = default_priors();
-        priors.feedback_decay_half_life_days = 90.0;
-        let idf = build_idf();
-        let global_graph = build_global_graph();
-        let user_graph = build_user_graph();
-        let counts = default_tag_counts();
-
-        // Build a profile with feedback for "skeb" that's 180 days old.
-        // This replaces the old last_refreshed_at approach with per-tag decay.
-        let _stale_secs = (Utc::now() - ChronoDuration::days(180)).timestamp() as f64;
-        profile.feedback.push(AccountTagFeedback {
-            tag_name: "skeb".to_string(),
-            group_type: "artist".to_string(),
-            impression_count: 5,
-            positive_count: 3,
-            negative_count: 1,
-            last_interaction_at: (Utc::now() - ChronoDuration::days(180)).to_rfc3339(),
-        });
-        let ctx = ScoringContext::new(&counts, &priors, &idf, &profile, &global_graph, &user_graph);
-
-        let mut tags = make_empty_tags();
-        tags.artist.push("skeb".to_string());
-        let post = make_post(tags, 0, 0, Rating::S);
-        let (score, _veto) = ctx.interaction_fit(&post);
-        // Per-tag staleness = exp(-ln2 * 180/90) = 0.25 → score should be
-        // noticeably below neutral (FEEDBACK_NEUTRAL ≈ 0.5) but > 0.
-        assert!(
-            score > 0.0 && score < 0.85,
-            "expected decayed score < 0.85 got {score}"
-        );
-    }
-
-    // ==================================================================
     //  tag_relation_fit
     // ==================================================================
 
@@ -1915,7 +1703,6 @@ mod tests {
         assert!(breakdown.rating_fit >= 0.0 && breakdown.rating_fit <= 1.0);
         assert!(breakdown.media_fit >= 0.0 && breakdown.media_fit <= 1.0);
         assert!(breakdown.popularity_fit >= 0.0 && breakdown.popularity_fit <= 1.0);
-        assert!(breakdown.interaction_fit >= 0.0 && breakdown.interaction_fit <= 1.0);
         assert!(breakdown.tag_relation_fit >= 0.0 && breakdown.tag_relation_fit <= 1.0);
         assert!(breakdown.uploader_fit >= 0.0 && breakdown.uploader_fit <= 1.0);
     }
@@ -1965,42 +1752,6 @@ mod tests {
                 "temperature should push low scores lower: {score_no} -> {score_yes}"
             );
         }
-    }
-
-    #[test]
-    fn veto_applies_penalty() {
-        let mut priors = default_priors();
-        priors.strong_negative_count = 1;
-        priors.strong_negative_wilson_threshold = 0.1;
-        priors.strong_negative_penalty = 0.5;
-
-        let mut profile = default_profile();
-        profile.feedback.push(AccountTagFeedback {
-            tag_name: "bad".to_string(),
-            group_type: "general".to_string(),
-            impression_count: 1,
-            positive_count: 0,
-            negative_count: 5,
-            last_interaction_at: Utc::now().to_rfc3339(),
-        });
-
-        let idf = build_idf();
-        let global_graph = build_global_graph();
-        let user_graph = build_user_graph();
-        let counts = default_tag_counts();
-        let ctx = ScoringContext::new(&counts, &priors, &idf, &profile, &global_graph, &user_graph);
-
-        let mut tags = make_empty_tags();
-        tags.general.push("bad".to_string());
-        tags.artist.push("skeb".to_string());
-        let post = make_post(tags, 100, 10, Rating::S);
-        let (score, _) = ctx.score(&post);
-        // quality_fit = sigmoid(ln1p(100) + ln1p(10) - 3) = sigmoid(4.013) ≈ 0.982
-        // With veto: 0.982 * (1 - 0.5) ≈ 0.491
-        assert!(
-            close(score, 0.4911),
-            "expected ~0.4911 with veto, got {score}"
-        );
     }
 
     // ==================================================================

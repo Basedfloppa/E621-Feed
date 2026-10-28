@@ -54,9 +54,9 @@ use crate::dataset::EvalDataset;
 /// File magic. Bump the trailing byte when the layout changes.
 const MAGIC: &[u8; 8] = b"E621CHC1";
 /// Layout version. Checked verbatim; a mismatch is a miss, not an error.
-const FORMAT_VERSION: u32 = 1;
+const FORMAT_VERSION: u32 = 2;
 /// 12 channels × `f32` + one veto byte.
-const CHANNEL_BYTES: usize = 12 * 4 + 1;
+const CHANNEL_BYTES: usize = 11 * 4;
 /// Where a default-path cache lives, relative to the working directory —
 /// alongside the `calibration_results/grid_*.toml` result files.
 pub(crate) const DEFAULT_CACHE_PATH: &str = "calibration_results/channel-cache.bin";
@@ -219,7 +219,6 @@ fn encode_channel(buf: &mut Vec<u8>, ch: &ChannelScores) {
         ch.rating,
         ch.media,
         ch.popularity,
-        ch.interaction,
         ch.tag_relation,
         ch.uploader,
         ch.exclusivity,
@@ -228,7 +227,6 @@ fn encode_channel(buf: &mut Vec<u8>, ch: &ChannelScores) {
     ] {
         buf.extend_from_slice(&v.to_le_bytes());
     }
-    buf.push(u8::from(ch.veto));
 }
 
 /// Mirror of [`encode_channel`]; `raw` must be a whole number of channels.
@@ -243,13 +241,11 @@ fn decode_channels(raw: &[u8]) -> Vec<ChannelScores> {
             rating: f(3),
             media: f(4),
             popularity: f(5),
-            interaction: f(6),
-            tag_relation: f(7),
-            uploader: f(8),
-            exclusivity: f(9),
-            novelty: f(10),
-            artist_discovery: f(11),
-            veto: chunk[48] != 0,
+            tag_relation: f(6),
+            uploader: f(7),
+            exclusivity: f(8),
+            novelty: f(9),
+            artist_discovery: f(10),
         });
     }
     out
@@ -424,13 +420,11 @@ mod tests {
             rating: seed + 4.0,
             media: seed + 5.0,
             popularity: seed + 6.0,
-            interaction: seed + 7.0,
-            tag_relation: seed + 8.0,
-            uploader: seed + 9.0,
-            exclusivity: seed + 10.0,
-            novelty: seed + 11.0,
-            artist_discovery: seed + 12.0,
-            veto: seed as i32 % 2 == 0,
+            tag_relation: seed + 7.0,
+            uploader: seed + 8.0,
+            exclusivity: seed + 9.0,
+            novelty: seed + 10.0,
+            artist_discovery: seed + 11.0,
         }
     }
 
@@ -466,13 +460,11 @@ mod tests {
             assert_eq!(a.rating, b.rating, "rating");
             assert_eq!(a.media, b.media, "media");
             assert_eq!(a.popularity, b.popularity, "popularity");
-            assert_eq!(a.interaction, b.interaction, "interaction");
             assert_eq!(a.tag_relation, b.tag_relation, "tag_relation");
             assert_eq!(a.uploader, b.uploader, "uploader");
             assert_eq!(a.exclusivity, b.exclusivity, "exclusivity");
             assert_eq!(a.novelty, b.novelty, "novelty");
             assert_eq!(a.artist_discovery, b.artist_discovery, "artist_discovery");
-            assert_eq!(a.veto, b.veto, "veto");
         }
     }
 

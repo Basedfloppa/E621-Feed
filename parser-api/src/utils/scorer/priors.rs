@@ -22,7 +22,6 @@ pub struct Priors {
     pub mix_rating: f32,
     pub mix_media: f32,
     pub mix_popularity: f32,
-    pub mix_interaction: f32,
     #[serde(default = "default_mix_tag_relation")]
     pub mix_tag_relation: f32,
     pub idf_lambda: f32,
@@ -48,10 +47,6 @@ pub struct Priors {
     pub quality_log_bias: f32,
     #[serde(default = "default_discrete_smoothing_alpha")]
     pub discrete_smoothing_alpha: f32,
-    #[serde(default = "default_strong_negative_count")]
-    pub strong_negative_count: i64,
-    #[serde(default = "default_strong_negative_penalty")]
-    pub strong_negative_penalty: f32,
     #[serde(default = "default_recency_personal_floor_frac")]
     pub recency_personal_floor_frac: f32,
 
@@ -69,23 +64,16 @@ pub struct Priors {
     pub tag_relation_cooc_ref: f32,
     #[serde(default = "default_tag_relation_user_cooc_ref")]
     pub tag_relation_user_cooc_ref: f32,
-    #[serde(default = "default_strong_negative_wilson_threshold")]
-    pub strong_negative_wilson_threshold: f32,
     #[serde(default = "default_recency_log_personal")]
     pub recency_log_personal: bool,
     #[serde(default = "default_feedback_decay_half_life_days")]
     pub feedback_decay_half_life_days: f32,
-    /// Meta is excluded from `tag_similarity` / `tag_relation`; only counts here.
-    #[serde(default = "default_meta_interaction_weight")]
-    pub meta_interaction_weight: f32,
     #[serde(default = "default_coldstart_n0")]
     pub coldstart_n0: f32,
     #[serde(default = "default_discrete_pref_floor")]
     pub discrete_pref_floor: f32,
     #[serde(default = "default_diversity_max_penalty")]
     pub diversity_max_penalty: f32,
-    #[serde(default = "default_diversity_interaction_damp")]
-    pub diversity_interaction_damp: f32,
 
     // ---- v5.2: IDF/freq promoted from top-level Config ----
     #[serde(default = "default_df_floor")]
@@ -104,9 +92,6 @@ pub struct Priors {
     /// `rating_fit` / `media_fit`. Was hardcoded at 2.0 pre-v5.3.
     #[serde(default = "default_coldstart_smoothing_boost")]
     pub coldstart_smoothing_boost: f32,
-    /// Bayesian-prior strength for per-tag CTR. Was 4.0 pre-v5.3.
-    #[serde(default = "default_interaction_ctr_prior_alpha")]
-    pub interaction_ctr_prior_alpha: f32,
     /// Robertson-Sparck-Jones IDF smoothing `s` in `(n - dfp + s) / (dfp + s)`.
     /// Was hardcoded at 0.5 pre-v5.3.
     #[serde(default = "default_idf_rsj_smoothing")]
@@ -317,7 +302,6 @@ impl Default for Priors {
             mix_rating: 0.04,
             mix_media: 0.05,
             mix_popularity: 0.02,
-            mix_interaction: 0.10,
             mix_tag_relation: 0.08,
             mix_uploader: 0.05,
             mix_exclusivity: 0.0,
@@ -355,7 +339,6 @@ impl Default for Priors {
             group_w_general: 0.7,
             group_w_lore: 0.4,
             coldstart_smoothing_boost: 2.0,
-            interaction_ctr_prior_alpha: 4.0,
             coldstart_n0: 25.0,
             discrete_pref_floor: 0.05,
             diversity_window: 32,
@@ -365,13 +348,8 @@ impl Default for Priors {
             diversity_w_species: 1.5,
             diversity_w_general: 0.08,
             diversity_max_penalty: 0.45,
-            diversity_interaction_damp: 0.35,
-            strong_negative_count: 3,
-            strong_negative_penalty: 0.4,
-            strong_negative_wilson_threshold: 0.55,
             discrete_smoothing_alpha: 1.0,
             feedback_decay_half_life_days: 90.0,
-            meta_interaction_weight: 0.3,
             tag_relation_pair_aggregator: "mean".to_string(),
             score_temperature: 0.0,
             confidence_steepness: 1.0,
@@ -411,12 +389,6 @@ fn default_quality_log_bias() -> f32 {
 fn default_discrete_smoothing_alpha() -> f32 {
     1.0
 }
-fn default_strong_negative_count() -> i64 {
-    3
-}
-fn default_strong_negative_penalty() -> f32 {
-    0.40
-}
 fn default_recency_personal_floor_frac() -> f32 {
     1.0
 }
@@ -444,17 +416,11 @@ fn default_tag_relation_cooc_ref() -> f32 {
 fn default_tag_relation_user_cooc_ref() -> f32 {
     5.0
 }
-fn default_strong_negative_wilson_threshold() -> f32 {
-    0.55
-}
 fn default_recency_log_personal() -> bool {
     true
 }
 fn default_feedback_decay_half_life_days() -> f32 {
     90.0
-}
-fn default_meta_interaction_weight() -> f32 {
-    0.3
 }
 fn default_coldstart_n0() -> f32 {
     25.0
@@ -464,9 +430,6 @@ fn default_discrete_pref_floor() -> f32 {
 }
 fn default_diversity_max_penalty() -> f32 {
     0.45
-}
-fn default_diversity_interaction_damp() -> f32 {
-    0.35
 }
 fn default_df_floor() -> f32 {
     0.4
@@ -482,9 +445,6 @@ fn default_one_sided_ratio_exp() -> f32 {
 }
 fn default_coldstart_smoothing_boost() -> f32 {
     2.0
-}
-fn default_interaction_ctr_prior_alpha() -> f32 {
-    4.0
 }
 fn default_idf_rsj_smoothing() -> f32 {
     0.35
