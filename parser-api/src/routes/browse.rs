@@ -380,8 +380,8 @@ pub(crate) async fn get_trending(
         .await
         .map_err(ApiError::from_string)?;
 
-    // Сохраняем в каталог (encountered scope: `save_all`). Fire-and-forget,
-    // не задерживает ответ.
+    // Persist to the catalog (encountered scope: `save_all`). Fire-and-forget,
+    // does not hold the response.
     if cfg().catalog.save_all {
         spawn_browse_persist(posts.clone(), "trending", account_id, true, false);
     }

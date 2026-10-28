@@ -68,7 +68,7 @@ pub struct AdminTotals {
 /// Media-cache state for the console's metrics panel.
 ///
 /// ⚠️ `pending`/`stored`/`bytes` are **instance-wide** (`queue_stats()` has no
-/// owner filter — TODO §4.5, «Тенант-скоупинг каталога»), while `enabled`
+/// owner filter — TODO §4.5, "catalog tenant scoping"), while `enabled`
 /// comes from `[catalog]`. On the primary single-owner deployment those are the
 /// same thing; on a multi-owner instance the panel says so explicitly.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]

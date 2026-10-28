@@ -296,7 +296,7 @@ pub fn px_to_viewbox_scale(svg: &web_sys::Element) -> f64 {
 #[inline]
 pub fn node_radius(n: usize) -> f64 {
     // Uniform radius for every node in the graph — count-based sizing was
-    // dropped per UX request ("кружочки одного размера"). Smoothstep
+    // dropped per UX request ("same-size circles"). Smoothstep
     // shrinks the value as density grows so a 250-tag layout doesn't
     // stuff oversized circles into a tight viewport. n=40 → 11, n=250 → 6.5.
     let t = ((n as f64 - 40.0) / (250.0 - 40.0)).clamp(0.0, 1.0);
