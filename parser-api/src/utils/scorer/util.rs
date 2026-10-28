@@ -175,7 +175,7 @@ impl PairAggregator {
 }
 
 #[derive(Default, Clone, Copy)]
-pub(super) struct MixWeights {
+pub(crate) struct MixWeights {
     pub sim: f32,
     pub quality: f32,
     pub recency: f32,
@@ -190,7 +190,7 @@ pub(super) struct MixWeights {
 }
 
 impl MixWeights {
-    pub(super) fn from_priors(p: &Priors) -> Self {
+    pub(crate) fn from_priors(p: &Priors) -> Self {
         // No sign restriction. A channel may carry anti-signal, and the offline
         // evidence for the small channels is confounded (see
         // `docs/calibration.md`), so clamping a negative weight to zero here
@@ -214,8 +214,18 @@ impl MixWeights {
         // bounded and coincides with the old normalisation whenever every
         // weight is non-negative.
         let sum: f32 = raw.iter().map(|x| x.abs()).sum();
-        if sum.is_nan() || sum <= f32::EPSILON {
-            return Self::default();
+        if !sum.is_finite() || sum <= f32::EPSILON {
+            // Every weight is zero (or the config carries a NaN): there is
+            // nothing to blend. Returning all-zero shares used to make every
+            // post score exactly 0.0, so the feed silently collapsed into the
+            // candidate pool's insertion order — with no error and no hint
+            // that the weights were the cause. Rank by tag similarity instead,
+            // the one channel that is always defined, rather than serving an
+            // arbitrary order.
+            return Self {
+                sim: 1.0,
+                ..Self::default()
+            };
         }
         Self {
             sim: raw[0] / sum,
@@ -234,7 +244,7 @@ impl MixWeights {
 
     /// Flatten to the [`blend_score`] channel order.
     #[must_use]
-    pub(super) fn as_array(self) -> [f32; BLEND_CHANNEL_COUNT] {
+    pub(crate) fn as_array(self) -> [f32; BLEND_CHANNEL_COUNT] {
         [
             self.sim,
             self.quality,
@@ -318,6 +328,32 @@ mod tests {
         );
         let l1: f32 = w.iter().map(|x| x.abs()).sum();
         assert!(close(l1, 1.0), "L1 norm should be 1, got {l1}");
+    }
+
+    /// A config with every `mix_*` at zero (or a NaN) has no ranking signal
+    /// to blend. It must not degrade into "all scores are 0.0 and the feed
+    /// keeps the pool order"; tag similarity is the honest fallback.
+    #[test]
+    fn from_priors_without_any_weight_falls_back_to_similarity() {
+        let p = Priors {
+            mix_sim: 0.0,
+            mix_quality: 0.0,
+            mix_recency: 0.0,
+            mix_rating: 0.0,
+            mix_media: 0.0,
+            mix_popularity: 0.0,
+            mix_tag_relation: 0.0,
+            mix_uploader: 0.0,
+            mix_exclusivity: 0.0,
+            mix_novelty: 0.0,
+            mix_artist_discovery: 0.0,
+            ..Priors::default()
+        };
+
+        let w = normalised_mix_weights(&p);
+        assert!(close(w[0], 1.0), "sim should carry the blend, got {}", w[0]);
+        let rest: f32 = w[1..].iter().map(|x| x.abs()).sum();
+        assert!(close(rest, 0.0), "other channels must stay off, got {rest}");
     }
 
     #[test]
