@@ -10,8 +10,9 @@ use rocket_okapi::openapi;
 use crate::db_blocking;
 use e621_account_parser_api::auth::OwnerToken;
 use e621_account_parser_api::utils::{
-    CachedPostFeatures, ChannelTiming, PipelineMetrics, ScoringContext, ScoringMetrics, blacklist,
-    current_global_relation, current_idf, diversify_scored_posts, post_pair_similarity,
+    CachedPostFeatures, ChannelTiming, PipelineMetrics, ScoringContext, ScoringMetrics,
+    apply_exploration_bonus, blacklist, current_global_relation, current_idf,
+    diversify_scored_posts, post_pair_similarity,
 };
 use e621_account_parser_api::{
     api, audit,
@@ -444,11 +445,14 @@ struct RecommendationRequest<'a> {
 ///   path records anything: a selection is not a sighting
 ///   (`migrations/V36__feed_shown_posts.sql`).
 ///
-/// ## Randomisation
-/// `collect_local_candidate_ids` now uses `ORDER BY RANDOM()` (see
-/// `db/feed.rs`) — the same top-N tags produce different candidates on every
-/// call, distributing impressions across the long tail instead of always
-/// promoting the highest-scored posts.
+/// ## Ordering
+/// There is deliberately **no randomisation** in the pool:
+/// `collect_local_candidate_ids` (see `db/feed.rs`) returns the newest ids of
+/// each stream — the four tag streams walk `tags_posts(post_id)` backwards and
+/// recent-popular is ordered by `created_at DESC` — and the result is cached
+/// per account for `CANDIDATE_TTL` (20 s). Freshness is therefore a property of
+/// the ordering, not of the pool size; rotation across visits comes from the
+/// seen-windows below, not from sampling.
 ///
 /// ## Latency
 /// Every read this function needs is issued in one `tokio::join!` at the top.
@@ -741,8 +745,17 @@ async fn build_recommendations_shared(
         p.mark("scoring");
     }
 
+    // Class F: ε-greedy exploration bonus. Applied to the freshly scored list
+    // **before** the threshold and the MMR pass, because both read `score`. A
+    // bonus added after `diversify_scored_posts` only rewrites the number in
+    // the JSON — the order was already fixed — so the "Discovery" knob used to
+    // leave the feed untouched (see `docs/algo-review.md`, П1).
+    apply_exploration_bonus(&mut scored, priors.exploration_epsilon);
+
     // Threshold (if requested) before diversification so we don't pay
-    // MMR cost on posts we're going to drop anyway.
+    // MMR cost on posts we're going to drop anyway. Runs *after* exploration,
+    // so the bonus can lift a novel post over the cutoff — the same promise
+    // the slider makes about the ranking.
     if let Some(threshold) = affinity_threshold {
         scored.retain(|sp| sp.score >= threshold);
     }
@@ -757,16 +770,6 @@ async fn build_recommendations_shared(
         diversify_scored_posts(scored, &global_relation, Some(&user_relation), &priors);
     if let Some(p) = &mut pipe {
         p.mark("diversify_post");
-    }
-
-    // Class F: ε-greedy exploration bonus (applied in the shared pipeline
-    // so both endpoints behave identically).
-    if priors.exploration_epsilon > 1e-4 {
-        let eps = priors.exploration_epsilon.min(0.5);
-        for sp in &mut scored {
-            let tag_novelty = 1.0 - sp.breakdown.as_ref().map_or(0.0, |b| b.tag_similarity);
-            sp.score = (sp.score + eps * tag_novelty).clamp(0.0, 1.0);
-        }
     }
 
     // Human-readable "why this post" reasons for the frontend. Uses the

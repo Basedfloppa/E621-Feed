@@ -16,8 +16,8 @@ pub use idf::{
 pub use scorer::{
     BLEND_CHANNEL_COUNT, BLEND_CHANNEL_NAMES, CachedPostFeatures, CachedTag, ChannelTiming,
     ContextBase, DiversityFeatures, Group, PhaseRecord, PipelineMetrics, Priors, ScoringContext,
-    ScoringMetrics, blend_score, context_fingerprint, diversify_indices, diversify_scored_posts,
-    normalised_mix_weights, post_pair_similarity, post_tag_vector,
+    ScoringMetrics, apply_exploration_bonus, blend_score, context_fingerprint, diversify_indices,
+    diversify_scored_posts, normalised_mix_weights, post_pair_similarity, post_tag_vector,
 };
 pub use tag_relation::{
     TagId, TagRelationGraph, current_global_relation,
