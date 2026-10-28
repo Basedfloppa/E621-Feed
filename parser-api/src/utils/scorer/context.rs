@@ -294,6 +294,36 @@ impl<'a> ScoringContext<'a> {
         let base = ContextBase::new(account_tag_counts, priors, idf, profile);
         let mut ctx = Self::from_base(base, priors, idf, profile, global_relation, user_relation);
         ctx.blacklisted_tags = blacklisted_tags;
+
+        // A blacklisted tag is dropped from the post vector (no dot product,
+        // no post-side norm), so it has to leave the *profile* norm as well.
+        // Keeping it there diluted every cosine by the same factor: the mass of
+        // a tag the user explicitly rejected sat in the denominator of every
+        // similarity, lowering `tag_similarity` for every post — including the
+        // ones that have nothing to do with it. Removing it here makes
+        // "blacklisted" mean "as if never favourited", which is what the
+        // feature promises (see `blacklist_leaves_the_profile_norm`).
+        //
+        // The cost is one pass over the account's tag maps per request, and
+        // only when the blacklist is non-empty. On the live data the effect is
+        // tiny — two of 922 accounts actually have a blacklisted tag inside
+        // their own profile, carrying 0.01–0.05 % of its mass — but it is the
+        // difference between "rejected" and "rejected, and everyone else pays
+        // for it".
+        if !ctx.blacklisted_tags.is_empty() {
+            let mut norm_sq = ctx.u_norm * ctx.u_norm;
+            let mut removed: u32 = 0;
+            for map in &ctx.user {
+                for (tag, weight) in map {
+                    if ctx.blacklisted_tags.contains(tag.as_str()) {
+                        norm_sq -= weight * weight;
+                        removed += 1;
+                    }
+                }
+            }
+            ctx.u_norm = norm_sq.max(0.0).sqrt();
+            ctx.user_tag_count = ctx.user_tag_count.saturating_sub(removed);
+        }
         ctx
     }
 
@@ -500,7 +530,7 @@ mod tests {
     use crate::utils::scorer::priors::Priors;
     use crate::utils::tag_relation::TagRelationGraph;
     use chrono::Utc;
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
 
     fn close(a: f32, b: f32) -> bool {
         (a - b).abs() < 1e-4
@@ -792,6 +822,74 @@ mod tests {
         );
         assert!(base.u_norm > 0.0, "u_norm should be positive");
         assert!(base.fingerprint != 0, "fingerprint should not be zero");
+    }
+
+    /// A blacklisted tag is dropped from the post vector, so it must also leave
+    /// the profile norm. Otherwise the rejected tag dilutes every cosine by the
+    /// same factor and drags down posts that have nothing to do with it.
+    #[test]
+    fn blacklist_leaves_the_profile_norm() {
+        let p = default_priors();
+        let idf = build_idf();
+        let graph = build_graph();
+        let profile = minimal_profile();
+        let counts = vec![
+            TagCount {
+                name: "skeb".to_string(),
+                group_type: "artist".to_string(),
+                count: 10,
+            },
+            TagCount {
+                name: "cat".to_string(),
+                group_type: "character".to_string(),
+                count: 20,
+            },
+        ];
+        // What the profile would look like if `skeb` had never been favourited.
+        let only_cat = vec![TagCount {
+            name: "cat".to_string(),
+            group_type: "character".to_string(),
+            count: 20,
+        }];
+        // A post that has nothing to do with the blacklisted artist.
+        let post = make_post(Tags {
+            character: vec!["cat".to_string()],
+            ..Tags::default()
+        });
+
+        let full = ScoringContext::new(&counts, &p, &idf, &profile, &graph, &graph);
+        let blocked = ScoringContext::new_with_blacklist(
+            &counts,
+            &p,
+            &idf,
+            &profile,
+            &graph,
+            &graph,
+            HashSet::from(["skeb".to_string()]),
+        );
+        let reference = ScoringContext::new(&only_cat, &p, &idf, &profile, &graph, &graph);
+
+        assert!(
+            blocked.u_norm < full.u_norm,
+            "the blacklisted tag must leave the profile norm"
+        );
+        assert!(
+            close(blocked.u_norm, reference.u_norm),
+            "blocking skeb must equal never favouriting it: {} vs {}",
+            blocked.u_norm,
+            reference.u_norm
+        );
+        assert!(
+            close(
+                blocked.tag_similarity(&post),
+                reference.tag_similarity(&post)
+            ),
+            "an unrelated post must keep its similarity"
+        );
+        assert!(
+            full.tag_similarity(&post) < reference.tag_similarity(&post),
+            "the un-blacklisted profile is diluted by the rejected tag"
+        );
     }
 
     #[test]
