@@ -167,10 +167,14 @@ under both distributions:
 | fit on hybrid (`quality` 0.61, `novelty` −0.34, `media` 0.05) | **0.6413** | 0.2463 |
 | fit on catalog (`rating` 0.34, `recency` −0.56, `media` 0.09) | 0.6838 | 0.1823 |
 
-Every fitted set wins on the distribution it was fitted on and collapses on the
-other (0.68 → 0.18, 0.64 → 0.25). The shipped weights are second best under both
-— which is the only property an offline harness can actually certify. Two
-corollaries:
+Two readings matter. First, the order of the models **inverts** between the two
+samplers: the set fitted on catalog negatives is the best of the three on hybrid
+negatives (0.6838) and the worst on catalog negatives (0.1823), and the set
+fitted on hybrid negatives is second on hybrid (0.6413) and second-worst on
+catalog (0.2463). A comparison made inside one sampler therefore says nothing
+about the other. Second, only the shipped weights stay competitive under both
+(0.6070 / 0.8107); that robustness, not a peak on one distribution, is what an
+offline harness can certify. Two corollaries:
 
 - A "better" NDCG inside one sampler is a statement about that sampler. The
   earlier +0.008 between the twelve-channel blend and `sim`-only is the same
