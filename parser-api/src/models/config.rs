@@ -237,7 +237,9 @@ pub struct RuntimeConfig {
     /// Default `40`.
     #[serde(default = "default_candidate_backlog_limit")]
     pub candidate_backlog_limit: i64,
-    /// Leading posts the composition quotas apply to. `0` disables both.
+    /// Size of the band the composition quotas are counted in. `0` disables
+    /// both rules. The floors apply to the first band, the ceiling to every
+    /// band of the feed (see `old_cap`).
     #[serde(default = "default_composition_window")]
     pub composition_window: usize,
     /// Minimum posts younger than `fresh_days` inside the window; `0` disables
@@ -263,7 +265,8 @@ pub struct RuntimeConfig {
     /// fetches. Default `2`.
     #[serde(default = "default_old_quota")]
     pub old_quota: usize,
-    /// Maximum posts older than `old_days` inside the window; `0` disables.
+    /// Maximum posts older than `old_days` in **any** band of
+    /// `composition_window` posts; `0` disables.
     ///
     /// The floor alone stopped being enough with the backlog stream: the
     /// most-favourited work of a followed artist outscores nearly every fresh
@@ -271,6 +274,10 @@ pub struct RuntimeConfig {
     /// (measured 2026-11-02: 10 of the first 20 older than a year, median age
     /// 377 days). The ceiling keeps the backlog an accent instead of a takeover,
     /// and never drops below `old_quota`. Default `4`.
+    ///
+    /// It runs on every band, not only the head: a head-only ceiling moved the
+    /// cliff to the second page instead of removing it (posts 21–50 were 47 %
+    /// older than a year while the head was within its cap).
     #[serde(default = "default_old_cap")]
     pub old_cap: usize,
     #[serde(default = "default_old_days")]

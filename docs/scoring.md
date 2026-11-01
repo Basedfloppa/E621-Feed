@@ -264,23 +264,34 @@ score to a month-old post with a hundred, so the blend fills the head with one
 age band regardless of `mix_recency` (which carries 0.6 % of the blend).
 
 After diversification, `apply_composition_quota` enforces two floors and one
-ceiling inside the first `composition_window` posts:
+ceiling, counted in bands of `composition_window` posts:
 
 | knob | default | meaning |
 |---|---|---|
-|`composition_window`|20|leading posts the quotas apply to|
-|`fresh_quota` / `fresh_days`|6 / 7|at least N posts younger than D days|
-|`old_quota` / `old_days`|2 / 365|at least N posts older than D days; 0 = disabled|
-|`old_cap`|4|**at most** N posts older than `old_days`; 0 = disabled|
+|`composition_window`|20|band size the quotas are counted in|
+|`fresh_quota` / `fresh_days`|6 / 7|first band only: at least N posts younger than D days|
+|`old_quota` / `old_days`|2 / 365|first band only: at least N posts older than D days; 0 = disabled|
+|`old_cap`|4|**every** band: at most N posts older than `old_days`; 0 = disabled|
 
-The pass only **swaps a post inside the window with one outside it** — the
-ranking below the window is preserved exactly, and the list stays a permutation
-of itself. A quota the pool cannot satisfy promotes nothing rather than dropping
-posts, and the cross-floor guard is relative: an unreachable old floor does not
-veto the fresh one (that bug shipped in the first draft and blocked every
-promotion whenever the pool held no old post). The ceiling never undercuts the
-floor (`old_cap` is read as `max(old_cap, old_quota)`), because a ceiling below
-the floor would make the pair unsatisfiable.
+The floors are head rules and the ceiling is a feed rule, and the asymmetry is
+measured rather than aesthetic. A head-only ceiling did not remove the old-post
+cliff, it moved it one page down: on account 298553 (2026-11-02, `old_cap = 4`)
+posts 1–20 held 4 old posts while posts 21–50 held 14 (47 %), with **no** fresh
+post in that band at all — the backlog posts have the best scores and land
+directly under the head. Every band now demotes its own surplus, so a band can
+never be dominated by year-old work. The floors stay on the first band on
+purpose: a floor of fresh posts is a promise about what a reader sees first, and
+demanding it from a band 300 posts down would only shuffle the tail.
+
+The pass only **swaps posts** — an old post leaves its band for a lower one, the
+best non-old post from below takes its place — so the list stays a permutation
+of itself and everything already within the cap keeps its order exactly. A quota
+the pool cannot satisfy promotes nothing rather than dropping posts, and the
+cross-floor guard is relative: an unreachable old floor does not veto the fresh
+one (that bug shipped in the first draft and blocked every promotion whenever
+the pool held no old post). The ceiling never undercuts the floor (`old_cap` is
+read as `max(old_cap, old_quota)`), because a ceiling below the floor would make
+the pair unsatisfiable.
 
 **The old band has a floor and a ceiling, and both are needed.** The floor alone
 was written when the pool held no old posts at all — the live leg is the newest

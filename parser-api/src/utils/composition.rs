@@ -21,6 +21,16 @@
 //! half decade-old posts. The ceiling is the same idea as the floor, pointed the
 //! other way — at most `old_cap` old posts inside the window — and it never
 //! undercuts the old floor.
+//!
+//! The ceiling is **not** a head rule, and that is the difference from the
+//! floors. Below the head the ranking still puts the highest-scored old posts
+//! first, so a head-only ceiling does not remove the cliff: it moves it to the
+//! second page. Measured on the live feed (2026-11-02, account 298553, window
+//! 20, `old_cap = 4`): posts 1–20 held 4 old posts, but posts 21–50 held 14
+//! (47 %), with no fresh post at all. The ceiling therefore runs on every band
+//! of `window` posts, while the floors stay on the first band — a floor of
+//! fresh posts is a promise about what the reader sees first, and demanding it
+//! from a band 300 posts down would only shuffle the tail.
 
 use chrono::{DateTime, Utc};
 
@@ -175,32 +185,40 @@ pub fn apply_composition_quota(
     }
 
     // Ceiling on the old band, applied after both floors: it may not push the
-    // old count below `old_quota`, so the two rules cannot fight.
+    // old count below `old_quota`, so the two rules cannot fight. Unlike the
+    // floors, it runs on *every* band of `window` posts — see the module doc.
     if targets.old_cap > 0 {
         let cap = targets.old_cap.max(targets.old_quota).min(window);
-        let mut count = scored[..window]
-            .iter()
-            .filter(|p| targets.matches(Kind::Old, p, now))
-            .count();
-        while count > cap {
-            // Demote the *lowest-ranked* old post in the window and take the
-            // best non-old post from below it — the mirror image of a floor.
-            let Some(dst) = (0..window)
-                .rev()
-                .find(|&i| targets.matches(Kind::Old, &scored[i], now))
-            else {
-                break;
-            };
-            let Some(src) =
-                (window..scored.len()).find(|&i| !targets.matches(Kind::Old, &scored[i], now))
-            else {
-                break;
-            };
-            scored.swap(dst, src);
-            count -= 1;
-            report.old_demoted += 1;
+        let mut band_start = 0;
+        while band_start + window <= scored.len() {
+            let band_end = band_start + window;
+            let mut count = scored[band_start..band_end]
+                .iter()
+                .filter(|p| targets.matches(Kind::Old, p, now))
+                .count();
+            while count > cap {
+                // Demote the *lowest-ranked* old post in the band and take the
+                // best non-old post from below it — the mirror image of a floor.
+                let Some(dst) = (band_start..band_end)
+                    .rev()
+                    .find(|&i| targets.matches(Kind::Old, &scored[i], now))
+                else {
+                    break;
+                };
+                let Some(src) = (band_end..scored.len())
+                    .find(|&i| !targets.matches(Kind::Old, &scored[i], now))
+                else {
+                    break;
+                };
+                scored.swap(dst, src);
+                count -= 1;
+                report.old_demoted += 1;
+            }
+            if band_start == 0 {
+                report.old_in_window = count;
+            }
+            band_start = band_end;
         }
-        report.old_in_window = count;
     }
 
     // Fill the untouched side of the report so callers can log both counts.
@@ -403,6 +421,68 @@ mod tests {
         let mut posts = head(&[800, 700, 600, 30, 1], now);
         let before: Vec<i64> = posts.iter().map(|p| p.post.id).collect();
         let report = apply_composition_quota(&mut posts, now, &targets_in(4, 0, 1));
+        assert_eq!(report.old_demoted, 0);
+        assert_eq!(posts.iter().map(|p| p.post.id).collect::<Vec<_>>(), before);
+    }
+
+    /// The ceiling is not a head rule. With the backlog stream the pool holds
+    /// dozens of year-old favourites and they outrank fresh posts, so capping
+    /// only the head moved the cliff one page down instead of removing it:
+    /// measured on the live feed, posts 21–50 were 47 % older than a year while
+    /// the head was within its cap.
+    #[test]
+    fn the_old_ceiling_applies_to_every_band_of_the_feed() {
+        let now = Utc::now();
+        // Ten bands. The old cluster sits entirely in the second band; the other
+        // nine are fresh, so there is enough material to spread it out.
+        let mut ages = vec![1i64; 200];
+        for slot in ages.iter_mut().take(20) {
+            *slot = 30;
+        }
+        for slot in ages.iter_mut().take(50).skip(20) {
+            *slot = 800;
+        }
+        let mut posts = head(&ages, now);
+        let mut targets = targets_in(20, 0, 0);
+        targets.old_cap = 4;
+        let report = apply_composition_quota(&mut posts, now, &targets);
+
+        for band in 0..10 {
+            let old = posts[band * 20..(band + 1) * 20]
+                .iter()
+                .filter(|p| targets.matches(Kind::Old, p, now))
+                .count();
+            assert!(
+                old <= 4,
+                "band {band} (posts {}..{}) still holds {old} old posts",
+                band * 20 + 1,
+                (band + 1) * 20
+            );
+        }
+        assert!(
+            report.old_demoted >= 26,
+            "the cluster in band 2 has to be pushed down, demoted {}",
+            report.old_demoted
+        );
+        assert!(report.old_in_window <= 4);
+        let mut ids: Vec<i64> = posts.iter().map(|p| p.post.id).collect();
+        ids.sort_unstable();
+        assert_eq!(ids, (1..=200).collect::<Vec<_>>(), "still a permutation");
+    }
+
+    #[test]
+    fn a_feed_already_within_the_cap_is_left_alone() {
+        let now = Utc::now();
+        // One old post per band: every band is under the cap, so nothing moves.
+        let mut ages = vec![1i64; 200];
+        for band in 0..10 {
+            ages[band * 20 + 5] = 800;
+        }
+        let mut posts = head(&ages, now);
+        let before: Vec<i64> = posts.iter().map(|p| p.post.id).collect();
+        let mut targets = targets_in(20, 0, 0);
+        targets.old_cap = 4;
+        let report = apply_composition_quota(&mut posts, now, &targets);
         assert_eq!(report.old_demoted, 0);
         assert_eq!(posts.iter().map(|p| p.post.id).collect::<Vec<_>>(), before);
     }
