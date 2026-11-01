@@ -10,6 +10,7 @@ pub(crate) mod digest;
 pub(crate) mod feed;
 pub(crate) mod media;
 pub(crate) mod post;
+pub(crate) mod subscriptions;
 pub(crate) mod tag_relations;
 pub(crate) mod taste_profile;
 

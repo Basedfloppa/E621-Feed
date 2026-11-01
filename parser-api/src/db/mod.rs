@@ -24,6 +24,7 @@ mod pools;
 mod posts;
 mod profiles;
 mod sessions;
+mod subscriptions;
 mod tags;
 
 pub use accounts::*;
@@ -39,6 +40,7 @@ pub use pools::*;
 pub use posts::*;
 pub use profiles::*;
 pub use sessions::*;
+pub use subscriptions::*;
 pub use tags::*;
 
 /// Maximum number of values bound into a single `IN (…)` clause.
