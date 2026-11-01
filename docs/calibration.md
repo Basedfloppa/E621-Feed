@@ -14,7 +14,13 @@
      because positives can pre-date training items.
    - `split=time_causal` (default) — sort favourites by `created_at`, hold
      the newest 20% as test. Closer to the production "predict next
-     favourite" task and resilient to id-aliasing on imported data.
+     favourite" task and resilient to id-aliasing on imported data. Still
+     timed by the *post*: a 2019 post favourited yesterday counts as old.
+   - `split=favourites` — the honest temporal split: the profile is every
+     favourite added before one global cutoff, the test set is what came
+     after. Uses `accounts_post.added_at`, so it only runs once the database
+     holds enough timed rows (see below); below that it exits with the count
+     and the reason instead of silently evaluating an empty test set.
 
    Negatives are sampled from the catalog (default: hybrid hard-negatives
    — 70% mixed, popularity- and time-matched, plus 30% tag-similarity-based
@@ -36,10 +42,14 @@
    the `v2` (`[…]`) shape carries a favourite date. `accounts_post.added_at`
    (V40) therefore records the first time *this* process stored the row: a lower
    bound for accounts first synced after the migration, `NULL` for older rows.
-   Until enough favourites have been added after a cutoff, the temporal split
-   can only approximate "what the user knew at T" through the post's creation
-   date; a re-sync keeps the first `added_at`, so the column is a usable
-   holdout the moment a future sync adds a favourite.
+   `split=favourites` takes the `1 − test_fraction` quantile of all timed rows
+   as one global cutoff — a per-account cutoff would score different accounts
+   against different futures — and treats `NULL` as "older than any cutoff",
+   because dropping untimed rows would silently shrink every profile. It needs
+   at least 2 000 timed rows; below that it aborts with the count, since one
+   sync run is not a sample. Measured on 2026-11-02: **0 of 847 641** rows had
+   `added_at` (the column shipped hours earlier), so the mode is implemented
+   and tested but cannot run until accounts are re-synced.
 
    Reports **NDCG@20**, **Recall@50**, **MRR** with **bootstrap 95% CI**
    on NDCG. Probe acceptance during grid uses a **paired** 1-sided 95 %
@@ -190,6 +200,24 @@ gradient), whether a change is inside the noise, and how the head's composition
 moves (age, favourites, artists, tag jaccard). Ranking two models for the live
 feed needs either an `added_at` holdout — favourites the user added after the
 cutoff, which no sampler can fake — or online interleaving.
+
+### Honest baseline under `neg=catalog`
+
+The one distribution that does not reward the similarity channel by
+construction is the whole catalog. Measured 2026-11-02 on the live database
+(`CALIBRATE_NOW=1792972800`, N=150, fingerprint `0x80a85f4114bc546b`,
+2 575.7 negatives per account, negative age median 734 d):
+
+| | |
+|---|---:|
+| NDCG@20 | **0.8122** (95 % CI 0.7887–0.8354, SE 0.0123) |
+| Recall@50 / MRR | 0.1416 / 0.9278 |
+| head@20 | age 73 d, fav 565, artists 13.4, tag-jaccard 0.13 |
+
+This is the number to hold a *ranking* change against: a change that lowers it
+while leaving hybrid-hard flat is not neutral, it is worse at "would the user
+favourite this at all". It is still not the live feed — negatives are uniform
+over six years of catalog, while production scores a pool of recent posts.
 
 ## Quickstart
 

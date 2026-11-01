@@ -70,7 +70,8 @@ const USAGE: &str = "usage: calibrate <mode> [flags]
   modes:  eval | grid [mix-only] | probe | graph   (chainable: 'eval grid')
   flags:  pairs-only, no-pairs, with-diversify, no-cache,
           fit-mix[=<priors.toml>], fit-mix-objective=pl|ndcg, fit-mix-holdout,
-          split=random|post_id|time_causal, neg=uniform|mixed|hybrid, verbose
+          split=random|post_id|time_causal|favourites, neg=uniform|catalog|mixed|hybrid,
+          verbose
   unknown or malformed arguments abort with exit code 2";
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -557,6 +558,7 @@ fn parse_grid_flags(
             "split=random" => opts.split = SplitStrategy::Random,
             "split=post_id" => opts.split = SplitStrategy::PostId,
             "split=time_causal" | "split=time" => opts.split = SplitStrategy::TimeCausal,
+            "split=favourites" | "split=fav" => opts.split = SplitStrategy::Favourites,
             "neg=uniform" => opts.neg_mode = NegMode::Uniform,
             "neg=catalog" => opts.neg_mode = NegMode::Catalog,
             "neg=mixed" => opts.neg_mode = NegMode::Mixed,

@@ -55,6 +55,12 @@ pub(crate) fn split_train_test(
             // we only have post ids here, no created_at to sort by.
             panic!("SplitStrategy::TimeCausal requires split_train_test_time; bug in dispatch");
         }
+        SplitStrategy::Favourites => {
+            // Same reason: the ids alone carry no `added_at`.
+            panic!(
+                "SplitStrategy::Favourites requires split_train_test_favourites; bug in dispatch"
+            );
+        }
     }
 }
 
@@ -71,6 +77,29 @@ pub(crate) fn split_train_test_time(favs: &[(i64, i64)], test_frac: f32) -> (Vec
     let split_at = n.saturating_sub(n_test).max(1);
     let train = sorted[..split_at].iter().map(|(id, _)| *id).collect();
     let test = sorted[split_at..].iter().map(|(id, _)| *id).collect();
+    (train, test)
+}
+
+/// `Favourites` split: rows added at or after `cutoff` are the test set, the
+/// rest is the profile. A row without `added_at` predates the column (V40), so
+/// it is older than any cutoff and belongs to the profile — the alternative,
+/// dropping untimed rows, would silently shrink every account's history.
+///
+/// The cutoff is one instant shared by all accounts on purpose: "what did
+/// people favourite after T" is a question about a moment, and a per-account
+/// quantile would answer a different question for every row of the table.
+pub(crate) fn split_train_test_favourites(
+    favs: &[(i64, Option<i64>)],
+    cutoff: i64,
+) -> (Vec<i64>, Vec<i64>) {
+    let mut train = Vec::with_capacity(favs.len());
+    let mut test = Vec::new();
+    for (id, added) in favs {
+        match added {
+            Some(ts) if *ts >= cutoff => test.push(*id),
+            _ => train.push(*id),
+        }
+    }
     (train, test)
 }
 
@@ -265,4 +294,31 @@ pub(crate) fn sample_hard_pool(
         tries += 1;
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn favourites_split_holds_out_only_rows_added_at_or_after_the_cutoff() {
+        // Boundary is inclusive on the test side: `added_at == cutoff` is a
+        // favourite the profile could not have seen, because the cutoff is the
+        // instant the profile was frozen at.
+        let favs = vec![(1, None), (2, Some(100)), (3, Some(200)), (4, Some(201))];
+        let (train, test) = split_train_test_favourites(&favs, 200);
+        assert_eq!(train, vec![1, 2]);
+        assert_eq!(test, vec![3, 4]);
+    }
+
+    #[test]
+    fn rows_without_a_clock_stay_in_the_profile() {
+        // The whole 847k-row library predates V40, so a split that dropped
+        // untimed rows would produce zero fixtures and look like an empty
+        // database instead of a missing clock.
+        let favs = vec![(1, None), (2, None), (3, Some(500))];
+        let (train, test) = split_train_test_favourites(&favs, 400);
+        assert_eq!(train, vec![1, 2]);
+        assert_eq!(test, vec![3]);
+    }
 }

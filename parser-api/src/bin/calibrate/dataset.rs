@@ -21,7 +21,7 @@ use crate::metrics::pool;
 use crate::options::{GridOptions, NegMode, SplitStrategy};
 use crate::sampling::{
     sample_hard_pool, sample_negatives_mixed, sample_negatives_uniform, split_train_test,
-    split_train_test_time,
+    split_train_test_favourites, split_train_test_time,
 };
 
 // Thread-local scratch HashSet reused across account hydrations within
@@ -315,6 +315,20 @@ pub(crate) fn prepare_eval_dataset(
 
     log_mem("prep start");
 
+    // One cutoff for every account: see `split_train_test_favourites`.
+    let favourites_cutoff = if matches!(opts.split, SplitStrategy::Favourites) {
+        if opts.neg_mode != NegMode::Catalog {
+            eprintln!(
+                "[prep] note: split=favourites answers \"would this user favourite the post \
+                 after T\"; pool-restricted negatives reintroduce the age bias the split removes \
+                 — pair it with --neg=catalog"
+            );
+        }
+        Some(favourites_cutoff(test_fraction)?)
+    } else {
+        None
+    };
+
     let t = std::time::Instant::now();
     eprintln!("[prep] loading IDF index...");
     let idf = IdfIndex::from_db().map_err(|e| anyhow::anyhow!("idf load: {e}"))?;
@@ -369,6 +383,7 @@ pub(crate) fn prepare_eval_dataset(
         account_ids.len(),
         min_favs
     );
+
     let total_accounts = account_ids.len();
     let report_every = (total_accounts / 20).max(5);
     let counter = AtomicUsize::new(0);
@@ -384,30 +399,47 @@ pub(crate) fn prepare_eval_dataset(
         account_ids
         .into_par_iter()
         .filter_map(|account_id| {
-            let (train_ids, test_ids) = if matches!(opts.split, SplitStrategy::TimeCausal) {
-                let favs = match account_favorite_ids_with_ts(account_id) {
-                    Ok(f) => f,
-                    Err(e) => {
-                        eprintln!("fav query (ts) for {account_id} failed: {e}");
+            let (train_ids, test_ids) = match opts.split {
+                SplitStrategy::TimeCausal => {
+                    let favs = match account_favorite_ids_with_ts(account_id) {
+                        Ok(f) => f,
+                        Err(e) => {
+                            eprintln!("fav query (ts) for {account_id} failed: {e}");
+                            return None;
+                        }
+                    };
+                    if favs.len() < min_favs {
                         return None;
                     }
-                };
-                if favs.len() < min_favs {
-                    return None;
+                    split_train_test_time(&favs, test_fraction)
                 }
-                split_train_test_time(&favs, test_fraction)
-            } else {
-                let fav_ids = match account_favorite_ids(account_id) {
-                    Ok(f) => f,
-                    Err(e) => {
-                        eprintln!("fav query for {account_id} failed: {e}");
+                SplitStrategy::Favourites => {
+                    let cutoff = favourites_cutoff.expect("computed before the account loop");
+                    let favs = match account_favorite_ids_with_added(account_id) {
+                        Ok(f) => f,
+                        Err(e) => {
+                            eprintln!("fav query (added_at) for {account_id} failed: {e}");
+                            return None;
+                        }
+                    };
+                    if favs.len() < min_favs {
                         return None;
                     }
-                };
-                if fav_ids.len() < min_favs {
-                    return None;
+                    split_train_test_favourites(&favs, cutoff)
                 }
-                split_train_test(account_id, &fav_ids, test_fraction, opts.split)
+                _ => {
+                    let fav_ids = match account_favorite_ids(account_id) {
+                        Ok(f) => f,
+                        Err(e) => {
+                            eprintln!("fav query for {account_id} failed: {e}");
+                            return None;
+                        }
+                    };
+                    if fav_ids.len() < min_favs {
+                        return None;
+                    }
+                    split_train_test(account_id, &fav_ids, test_fraction, opts.split)
+                }
             };
             if test_ids.is_empty() {
                 return None;
@@ -838,6 +870,68 @@ fn account_favorite_ids(account_id: i32) -> anyhow::Result<Vec<i64>> {
     let mut stmt = conn.prepare("SELECT post_id FROM accounts_post WHERE account_id = ?1")?;
     let rows = stmt.query_map(params![account_id], |r| r.get::<_, i64>(0))?;
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
+/// `(post_id, added_at_epoch)` for one account's library. `None` means the row
+/// was written before `accounts_post.added_at` existed (V40); the split treats
+/// those as "older than any cutoff".
+fn account_favorite_ids_with_added(account_id: i32) -> anyhow::Result<Vec<(i64, Option<i64>)>> {
+    let conn = db::open_db_for_calibration().map_err(|e| anyhow::anyhow!(e))?;
+    let mut stmt = conn.prepare(
+        "SELECT post_id, added_at FROM accounts_post WHERE account_id = ?1 ORDER BY post_id",
+    )?;
+    let rows = stmt.query_map(params![account_id], |r| {
+        let id: i64 = r.get(0)?;
+        let added: Option<String> = r.get(1)?;
+        Ok((id, added))
+    })?;
+    let mut out: Vec<(i64, Option<i64>)> = Vec::new();
+    for r in rows {
+        let (id, added) = r?;
+        let ts = added
+            .as_deref()
+            .and_then(|raw| DateTime::parse_from_rfc3339(raw).ok())
+            .map(|dt| dt.timestamp());
+        out.push((id, ts));
+    }
+    Ok(out)
+}
+
+/// How many favourite rows must carry `added_at` before the `favourites` split
+/// can say anything. Six figures of favourites existed long before the column,
+/// so a handful of timed rows is not a sample — it is one sync run. The number
+/// is deliberately a floor for credibility, not a guarantee of coverage.
+const MIN_TIMED_FAVOURITES: usize = 2000;
+
+/// The instant that divides every account's library into "profile" and "next
+/// favourites": the `1 - test_fraction` quantile of all recorded favourite
+/// times, so the test side is the newest fifth of the clock.
+///
+/// It reads `added_at` from the whole table rather than per account because a
+/// cutoff defined per account is not a moment in time; two accounts would then
+/// be scored against different futures and their NDCG numbers would not add up.
+fn favourites_cutoff(test_fraction: f32) -> anyhow::Result<i64> {
+    let conn = db::open_db_for_calibration().map_err(|e| anyhow::anyhow!(e))?;
+    let mut stmt = conn.prepare("SELECT added_at FROM accounts_post WHERE added_at IS NOT NULL")?;
+    let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+    let mut epochs: Vec<i64> = Vec::new();
+    for r in rows {
+        let raw = r?;
+        if let Ok(dt) = DateTime::parse_from_rfc3339(&raw) {
+            epochs.push(dt.timestamp());
+        }
+    }
+    if epochs.len() < MIN_TIMED_FAVOURITES {
+        anyhow::bail!(
+            "split=favourites needs at least {MIN_TIMED_FAVOURITES} favourites with `added_at`, \
+             but the database has {} — e621 does not expose the favourite time, so the clock only \
+             starts with V40; sync accounts to accumulate it (see docs/eval-protocol.md, L1)",
+            epochs.len()
+        );
+    }
+    epochs.sort_unstable();
+    let idx = ((1.0 - test_fraction).clamp(0.0, 0.999) * epochs.len() as f32) as usize;
+    Ok(epochs[idx.min(epochs.len() - 1)])
 }
 
 /// Same as `account_favorite_ids` but returns `(post_id, created_at_epoch)`

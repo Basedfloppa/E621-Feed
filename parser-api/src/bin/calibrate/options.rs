@@ -9,7 +9,15 @@ pub(crate) enum SplitStrategy {
     /// Time-causal: sort favourites by `created_at` and hold out the
     /// newest 20% — closer to the "predict the user's *next*
     /// favourite" task and less id-aliasing-sensitive than `PostId`.
+    ///
+    /// Still timed by the *post*, not by the favourite: a 2019 post
+    /// favourited yesterday counts as old.
     TimeCausal,
+    /// Timed by `accounts_post.added_at`: the profile is every favourite the
+    /// account had before a single global cutoff, the test set is what it
+    /// favourited after it. This is the only split whose test rows were
+    /// provably absent from the profile.
+    Favourites,
 }
 
 impl SplitStrategy {
@@ -18,6 +26,7 @@ impl SplitStrategy {
             SplitStrategy::PostId => "post_id",
             SplitStrategy::Random => "random",
             SplitStrategy::TimeCausal => "time_causal",
+            SplitStrategy::Favourites => "favourites",
         }
     }
 }
