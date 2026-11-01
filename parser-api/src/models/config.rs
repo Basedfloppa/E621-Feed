@@ -226,6 +226,33 @@ pub struct RuntimeConfig {
     /// allowed to be larger than any single inferred one. Default `120`.
     #[serde(default = "default_candidate_preferred_limit")]
     pub candidate_preferred_limit: usize,
+    /// Leading posts the composition quotas apply to. `0` disables both.
+    #[serde(default = "default_composition_window")]
+    pub composition_window: usize,
+    /// Minimum posts younger than `fresh_days` inside the window; `0` disables
+    /// the rule.
+    ///
+    /// The ranking cannot express "I want a page that mixes ages": a fresh post
+    /// with no favourites loses a few thousandths to a month-old one with a
+    /// hundred, so a relevant-only blend fills the head with one age band no
+    /// matter which `mix_recency` is set to. The quota is a floor, not a weight:
+    /// it moves only the slots that are missing and leaves the rest of the order
+    /// alone.
+    #[serde(default = "default_fresh_quota")]
+    pub fresh_quota: usize,
+    #[serde(default = "default_fresh_days")]
+    pub fresh_days: f64,
+    /// Minimum posts older than `old_days` inside the window; `0` disables.
+    ///
+    /// Disabled by default because the candidate pool does not contain old posts
+    /// yet: the live leg is the newest page and every local stream walks post ids
+    /// downwards. Enable it together with the backlog stream, which is what puts
+    /// old, taste-matched posts into the pool in the first place.
+    #[serde(default = "default_old_quota")]
+    pub old_quota: usize,
+    #[serde(default = "default_old_days")]
+    pub old_days: f64,
+
     /// Ceiling for the co-occurrence-neighbour stream (tags that co-occur with
     /// the account's own). Default `80`.
     #[serde(default = "default_candidate_cooccurrence_limit")]
@@ -432,6 +459,11 @@ pub struct RuntimeConfig {
 impl Default for RuntimeConfig {
     fn default() -> Self {
         Self {
+            composition_window: default_composition_window(),
+            fresh_quota: default_fresh_quota(),
+            fresh_days: default_fresh_days(),
+            old_quota: default_old_quota(),
+            old_days: default_old_days(),
             local_candidate_limit: default_local_candidate_limit(),
             dedup_lookback_days: default_dedup_lookback_days(),
             candidate_anchor_tags: default_candidate_anchor_tags(),
@@ -507,6 +539,29 @@ fn default_db_path() -> String {
 }
 fn default_e621_cache_max_entries() -> usize {
     5000
+}
+
+fn default_composition_window() -> usize {
+    20
+}
+
+fn default_fresh_quota() -> usize {
+    6
+}
+
+fn default_fresh_days() -> f64 {
+    7.0
+}
+
+fn default_old_quota() -> usize {
+    // Off until the candidate pool carries old posts at all: both the live leg
+    // (newest page) and the local streams (newest ids per tag) are recent, so an
+    // old floor would be an unreachable knob. The backlog stream turns it on.
+    0
+}
+
+fn default_old_days() -> f64 {
+    365.0
 }
 
 fn default_local_candidate_limit() -> i64 {

@@ -220,6 +220,39 @@ across grid widths.
 |`diversity_user_pmi_weight`|global PMI dominates diversity signal|per-user tag co-occurrence patterns drive diversity personalisation; 0 = disable user graph|
 |`diversity_head_limit`|MMR runs over the whole candidate pool — the historical behaviour, kept at 0|MMR runs over the top N by score only; the tail keeps raw-score order and the O(N²) redundancy matrix shrinks to N²|
 
+## Composition floors
+
+Ranking optimises one number; the reader sees a page. The two disagree in a way
+no weight fixes: a fresh post with no favourites yet loses a few thousandths of
+score to a month-old post with a hundred, so the blend fills the head with one
+age band regardless of `mix_recency` (which carries 0.6 % of the blend).
+
+After diversification, `apply_composition_quota` enforces two floors inside the
+first `composition_window` posts:
+
+| knob | default | meaning |
+|---|---|---|
+|`composition_window`|20|leading posts the floors apply to|
+|`fresh_quota` / `fresh_days`|6 / 7|at least N posts younger than D days|
+|`old_quota` / `old_days`|0 / 365|at least N posts older than D days; 0 = disabled|
+
+The pass only **swaps a post inside the window with one outside it** — the
+ranking below the window is preserved exactly, and the list stays a permutation
+of itself. A floor the pool cannot satisfy promotes nothing rather than dropping
+posts, and the cross-floor guard is relative: an unreachable old floor does not
+veto the fresh one (that bug shipped in the first draft and blocked every
+promotion whenever the pool held no old post).
+
+`old_quota` ships at 0 because the candidate pool has no old posts at all: the
+live leg is the newest e621 page and every local stream walks post ids
+downwards. It becomes meaningful only together with a backlog stream that puts
+old, taste-matched posts into the pool.
+
+Measured on the live feed (2026-11-01, after the `order:id_desc` fix): account
+298553's head went from 4 to 6 posts under a week old while the page held 166;
+658288 already had 13 and 1504863 20, so the floor only touches pages that are
+missing the band.
+
 ## Search result scoring
 
 The Search page normally returns raw e621 matches. Enabling **Score results**

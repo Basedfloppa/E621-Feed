@@ -1,4 +1,5 @@
 pub mod blacklist;
+pub mod composition;
 mod explain;
 mod idf;
 mod page_fetch;
@@ -6,6 +7,7 @@ mod scorer;
 mod tag_relation;
 pub mod taste_themes;
 
+pub use composition::{CompositionReport, CompositionTargets, apply_composition_quota};
 pub use explain::explain_scored_posts;
 
 pub use page_fetch::fetch_pages;

@@ -772,6 +772,34 @@ async fn build_recommendations_shared(
         p.mark("diversify_post");
     }
 
+    // Composition floors run after the re-order, so the MMR pass cannot undo
+    // them, and they only swap inside/outside the head window: everything
+    // below the window keeps the order it earned.
+    let composition = e621_account_parser_api::utils::CompositionTargets {
+        window: cfg.runtime.composition_window,
+        fresh_quota: cfg.runtime.fresh_quota,
+        fresh_days: cfg.runtime.fresh_days,
+        old_quota: cfg.runtime.old_quota,
+        old_days: cfg.runtime.old_days,
+    };
+    let composition_report = e621_account_parser_api::utils::apply_composition_quota(
+        &mut scored,
+        Utc::now(),
+        &composition,
+    );
+    if composition_report.fresh_promoted + composition_report.old_promoted > 0 {
+        debug!(
+            "[feed] composition: promoted {} fresh and {} old post(s); window now {} fresh / {} old",
+            composition_report.fresh_promoted,
+            composition_report.old_promoted,
+            composition_report.fresh_in_window,
+            composition_report.old_in_window,
+        );
+    }
+    if let Some(p) = &mut pipe {
+        p.mark("composition");
+    }
+
     // Human-readable "why this post" reasons for the frontend. The account's
     // tag counts are used only to name the specific tag that carries the most
     // weight in the taste profile — never to re-score — and the reasons are

@@ -281,6 +281,18 @@ dedup_lookback_days = 14                # live-post window, in days
 # is what happened before: the pool came out at 134 posts from the artist stream
 # alone and the other streams contributed nothing.
 candidate_anchor_tags = 20              # anchor tags per group, ranked by IDF
+
+# Composition floors for the head of the feed. The blend optimises relevance,
+# so a fresh post with no favourites yet loses the last thousandths to a
+# month-old one and the head fills with one age band. These are floors, not
+# weights: the pass swaps the missing slots in from below the window and leaves
+# the rest of the order untouched. 0 disables a rule.
+composition_window = 20        # leading posts the quotas apply to
+fresh_quota = 6                # minimum posts younger than fresh_days inside the window
+fresh_days = 7.0
+old_quota = 0                  # minimum posts older than old_days; 0 until the backlog stream exists
+old_days = 365.0
+
 candidate_recent_days = 60              # recent-popular lookback window
 candidate_stream_share = 0.34           # per-stream ceiling as a fraction of local_candidate_limit
 candidate_preferred_limit = 120         # ceiling for the explicit preferred-tags stream
