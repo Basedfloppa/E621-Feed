@@ -282,6 +282,17 @@ pub struct RuntimeConfig {
     pub old_cap: usize,
     #[serde(default = "default_old_days")]
     pub old_days: f64,
+    /// Maximum posts by the same artist in **any** band of
+    /// `composition_window` posts; `0` disables.
+    ///
+    /// The diversity pass already penalises a repeated artist, but it competes
+    /// with score gaps of thousandths: measured 2026-11-02, one artist held
+    /// seven of the first twenty posts at 298553 and nine at 658288. The quota
+    /// is the same lever as the age ceilings — move the excess out, pull the
+    /// best other-artist posts in, and leave every score alone. Default `0`
+    /// (off): the example config turns it on at 3.
+    #[serde(default = "default_artist_cap")]
+    pub artist_cap: usize,
 
     /// Ceiling for the co-occurrence-neighbour stream (tags that co-occur with
     /// the account's own). Default `80`.
@@ -495,6 +506,7 @@ impl Default for RuntimeConfig {
             old_quota: default_old_quota(),
             old_cap: default_old_cap(),
             old_days: default_old_days(),
+            artist_cap: default_artist_cap(),
             local_candidate_limit: default_local_candidate_limit(),
             dedup_lookback_days: default_dedup_lookback_days(),
             candidate_anchor_tags: default_candidate_anchor_tags(),
@@ -601,6 +613,10 @@ fn default_old_cap() -> usize {
 
 fn default_old_days() -> f64 {
     365.0
+}
+
+fn default_artist_cap() -> usize {
+    0
 }
 
 fn default_local_candidate_limit() -> i64 {

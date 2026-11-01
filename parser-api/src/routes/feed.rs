@@ -782,6 +782,7 @@ async fn build_recommendations_shared(
         old_quota: cfg.runtime.old_quota,
         old_cap: cfg.runtime.old_cap,
         old_days: cfg.runtime.old_days,
+        artist_cap: cfg.runtime.artist_cap,
     };
     let composition_report = e621_account_parser_api::utils::apply_composition_quota(
         &mut scored,
@@ -791,13 +792,15 @@ async fn build_recommendations_shared(
     if composition_report.fresh_promoted
         + composition_report.old_promoted
         + composition_report.old_demoted
+        + composition_report.artists_demoted
         > 0
     {
         debug!(
-            "[feed] composition: promoted {} fresh and {} old post(s), demoted {} stale; window now {} fresh / {} old",
+            "[feed] composition: promoted {} fresh and {} old post(s), demoted {} stale and {} by a repeated artist; window now {} fresh / {} old",
             composition_report.fresh_promoted,
             composition_report.old_promoted,
             composition_report.old_demoted,
+            composition_report.artists_demoted,
             composition_report.fresh_in_window,
             composition_report.old_in_window,
         );

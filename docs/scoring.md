@@ -272,6 +272,7 @@ ceiling, counted in bands of `composition_window` posts:
 |`fresh_quota` / `fresh_days`|6 / 7|first band only: at least N posts younger than D days|
 |`old_quota` / `old_days`|2 / 365|first band only: at least N posts older than D days; 0 = disabled|
 |`old_cap`|4|**every** band: at most N posts older than `old_days`; 0 = disabled|
+|`artist_cap`|0 (3 in the example)|**every** band: at most N posts by the same artist; 0 = disabled|
 
 The floors are head rules and the ceiling is a feed rule, and the asymmetry is
 measured rather than aesthetic. A head-only ceiling did not remove the old-post
@@ -292,6 +293,27 @@ one (that bug shipped in the first draft and blocked every promotion whenever
 the pool held no old post). The ceiling never undercuts the floor (`old_cap` is
 read as `max(old_cap, old_quota)`), because a ceiling below the floor would make
 the pair unsatisfiable.
+
+**The artist ceiling is the same lever on a different axis.** The MMR pass
+already penalises a repeated artist, but the penalty competes with score
+differences of thousandths, so it cannot express "this page is one artist". The
+quota moves the excess out and pulls the best other-artist posts in without
+touching a score. Measured on the live feed (2026-11-02, `artist_cap = 3`):
+
+| account | most frequent artist in the head, before → after | band maxima (1–20 / 21–40 / 41–60) | age quotas |
+|---|---|---|---|
+| 298553 | felino **7 → 3** | 7 / 5 / 5 → **3 / 3 / 3** | 4 old, 6 fresh — unchanged |
+| 658288 | sound_warning **6 → 3** (all collabs) | 6 / 7 / 8 → **3 / 3 / 3** | 0 old, 14 → 15 fresh |
+| 1504863 | no repeated artist | 1 / 1 / 4 → 1 / 1 / 3 | unchanged |
+
+A post credited to several artists counts for each of them, which is what makes
+the collab-heavy head at 658288 collapse from eight `sound_warning` credits to
+three. Every swap preserves the age class of the post it replaces, so the artist
+ceiling cannot undo the age ceilings — and the check is *relative* to what the
+band holds: the first version demanded the absolute old floor and therefore
+vetoed every swap on an account whose pool has no old post at all (658288 kept
+its eight credits while 298553 was capped, which is how the bug was caught).
+Cost: `phase_composition` 0.03 ms → **2.1–2.8 ms** on 212–359 posts.
 
 **The old band has a floor and a ceiling, and both are needed.** The floor alone
 was written when the pool held no old posts at all — the live leg is the newest

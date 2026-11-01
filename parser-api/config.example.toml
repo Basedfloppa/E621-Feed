@@ -296,6 +296,7 @@ fresh_days = 7.0
 old_quota = 2                  # minimum posts older than old_days in the first band; also switches the backlog stream on
 old_cap = 4                    # maximum posts older than old_days in any band
 old_days = 365.0
+artist_cap = 3                 # maximum posts by one artist in a band; 0 disables
 
 candidate_recent_days = 60              # recent-popular lookback window
 candidate_stream_share = 0.34           # per-stream ceiling as a fraction of local_candidate_limit

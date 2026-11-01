@@ -31,6 +31,20 @@
 //! of `window` posts, while the floors stay on the first band — a floor of
 //! fresh posts is a promise about what the reader sees first, and demanding it
 //! from a band 300 posts down would only shuffle the tail.
+//!
+//! The artist ceiling is the same idea on a different axis. The MMR pass
+//! already penalises a post for repeating an artist, but the penalty competes
+//! with score differences of thousandths — measured 2026-11-02: seven posts by
+//! one artist in the first twenty at 298553 and nine at 658288, all favourites
+//! of that artist. A quota moves the excess out and pulls the best other-artist
+//! posts in without touching a single score.
+//!
+//! Artist swaps preserve the age class of the post they replace (a fresh post
+//! is replaced by a fresh one, an old by an old), so the two ceilings cannot
+//! undo each other. When no such replacement exists the artist ceiling stops:
+//! an unsatisfiable rule must not break the age one.
+
+use std::collections::HashMap;
 
 use chrono::{DateTime, Utc};
 
@@ -50,6 +64,8 @@ pub struct CompositionTargets {
     /// Never lowered below `old_quota`: a ceiling must not eat the floor.
     pub old_cap: usize,
     pub old_days: f64,
+    /// Maximum posts by the same artist in a band; `0` disables.
+    pub artist_cap: usize,
 }
 
 impl Default for CompositionTargets {
@@ -61,6 +77,7 @@ impl Default for CompositionTargets {
             old_quota: 0,
             old_cap: 0,
             old_days: 365.0,
+            artist_cap: 0,
         }
     }
 }
@@ -72,6 +89,7 @@ pub struct CompositionReport {
     pub old_in_window: usize,
     pub old_promoted: usize,
     pub old_demoted: usize,
+    pub artists_demoted: usize,
 }
 
 #[derive(Clone, Copy)]
@@ -221,6 +239,87 @@ pub fn apply_composition_quota(
         }
     }
 
+    // Artist ceiling: the same bands, the same idea on a different axis. It
+    // runs after the age ceilings and every swap preserves the age class of the
+    // post it replaces, so the three rules cannot undo each other.
+    if targets.artist_cap > 0 {
+        let cap = targets.artist_cap.max(1);
+        let mut band_start = 0;
+        while band_start + window <= scored.len() {
+            let band_end = band_start + window;
+            loop {
+                let mut counts: HashMap<&str, usize> = HashMap::new();
+                for p in &scored[band_start..band_end] {
+                    for a in &p.post.tags.artist {
+                        *counts.entry(a.as_str()).or_default() += 1;
+                    }
+                }
+                // First artist over the cap in band order, so the choice does
+                // not depend on a HashMap walk.
+                let mut over: Option<&str> = None;
+                'scan: for p in &scored[band_start..band_end] {
+                    for a in &p.post.tags.artist {
+                        if counts.get(a.as_str()).copied().unwrap_or(0) > cap {
+                            over = Some(a.as_str());
+                            break 'scan;
+                        }
+                    }
+                }
+                let Some(over) = over else { break };
+                let Some(victim) = (band_start..band_end)
+                    .rev()
+                    .find(|&i| scored[i].post.tags.artist.iter().any(|a| a == over))
+                else {
+                    break;
+                };
+                let fresh = scored[band_start..band_end]
+                    .iter()
+                    .filter(|p| targets.matches(Kind::Fresh, p, now))
+                    .count();
+                let old = scored[band_start..band_end]
+                    .iter()
+                    .filter(|p| targets.matches(Kind::Old, p, now))
+                    .count();
+                let victim_artists: Vec<&str> = scored[victim]
+                    .post
+                    .tags
+                    .artist
+                    .iter()
+                    .map(|a| a.as_str())
+                    .collect();
+                let src = (band_end..scored.len()).find(|&i| {
+                    let candidate = &scored[i];
+                    let adds_ok = candidate.post.tags.artist.iter().all(|a| {
+                        let a = a.as_str();
+                        // Keeping the over-represented artist in the band is
+                        // the one thing this swap exists to prevent.
+                        if a == over {
+                            return false;
+                        }
+                        let current = counts.get(a).copied().unwrap_or(0);
+                        let leaves = victim_artists.contains(&a);
+                        current + 1 - usize::from(leaves) <= cap
+                    });
+                    adds_ok
+                        && swap_keeps_age(
+                            targets,
+                            band_start == 0,
+                            window,
+                            fresh,
+                            old,
+                            &scored[victim],
+                            candidate,
+                            now,
+                        )
+                });
+                let Some(src) = src else { break };
+                scored.swap(victim, src);
+                report.artists_demoted += 1;
+            }
+            band_start = band_end;
+        }
+    }
+
     // Fill the untouched side of the report so callers can log both counts.
     if targets.fresh_quota == 0 {
         report.fresh_in_window = scored[..window]
@@ -235,6 +334,47 @@ pub fn apply_composition_quota(
             .count();
     }
     report
+}
+
+/// Whether replacing `victim` with `src` keeps the band's age rules: the head's
+/// fresh and old floors and the old ceiling in every band. The artist ceiling
+/// uses this to spend only swaps the age ceilings can still honour.
+#[allow(clippy::too_many_arguments)]
+fn swap_keeps_age(
+    targets: &CompositionTargets,
+    head_band: bool,
+    window: usize,
+    fresh: usize,
+    old: usize,
+    victim: &ScoredPost,
+    src: &ScoredPost,
+    now: DateTime<Utc>,
+) -> bool {
+    let fresh_after = fresh - usize::from(targets.matches(Kind::Fresh, victim, now))
+        + usize::from(targets.matches(Kind::Fresh, src, now));
+    let old_after = old - usize::from(targets.matches(Kind::Old, victim, now))
+        + usize::from(targets.matches(Kind::Old, src, now));
+    // Floors are relative to what the band already holds. The first draft
+    // demanded the absolute floor, which vetoed every artist swap on an
+    // account whose pool has no old post at all (measured 2026-11-02: 658288
+    // kept eight posts by `sound_warning` while 298553 was capped to three) —
+    // the same trap the cross-floor guard hit in the age pass.
+    let fresh_floor = if head_band {
+        targets.fresh_quota.min(window).min(fresh)
+    } else {
+        0
+    };
+    let old_floor = if head_band {
+        targets.old_quota.min(window).min(old)
+    } else {
+        0
+    };
+    let old_ceiling = if targets.old_cap > 0 {
+        targets.old_cap.max(targets.old_quota).min(window)
+    } else {
+        window
+    };
+    fresh_after >= fresh_floor && old_after >= old_floor && old_after <= old_ceiling
 }
 
 #[cfg(test)]
@@ -290,7 +430,15 @@ mod tests {
             old_quota: old,
             old_cap: 0,
             old_days: 365.0,
+            artist_cap: 0,
         }
+    }
+
+    /// Post with an explicit artist list; `post_at` leaves `tags` empty.
+    fn post_by(id: i64, days_ago: i64, artists: &[&str], now: DateTime<Utc>) -> ScoredPost {
+        let mut p = post_at(id, days_ago, now);
+        p.post.tags.artist = artists.iter().map(|a| a.to_string()).collect();
+        p
     }
 
     fn targets(fresh: usize, old: usize) -> CompositionTargets {
@@ -484,6 +632,190 @@ mod tests {
         targets.old_cap = 4;
         let report = apply_composition_quota(&mut posts, now, &targets);
         assert_eq!(report.old_demoted, 0);
+        assert_eq!(posts.iter().map(|p| p.post.id).collect::<Vec<_>>(), before);
+    }
+
+    /// The MMR penalty competes with score gaps of thousandths, so one artist
+    /// can own a third of the head. The ceiling moves the excess out and pulls
+    /// the best other-artist posts in — measured 2026-11-02: 7 of 20 at 298553
+    /// and 9 at 658288.
+    #[test]
+    fn the_artist_ceiling_spreads_a_dense_artist() {
+        let now = Utc::now();
+        let mut posts: Vec<ScoredPost> = (0..6)
+            .map(|i| post_by(i + 1, 30, &["felino"], now))
+            .collect();
+        for (i, artist) in ["b", "c", "d", "e", "f", "g"].iter().enumerate() {
+            posts.push(post_by(i as i64 + 7, 30, &[artist], now));
+        }
+        let mut targets = targets_in(6, 0, 0);
+        targets.artist_cap = 2;
+        let report = apply_composition_quota(&mut posts, now, &targets);
+
+        let in_band = &posts[..6];
+        let felino = in_band
+            .iter()
+            .filter(|p| p.post.tags.artist.iter().any(|a| a == "felino"))
+            .count();
+        assert_eq!(
+            felino,
+            2,
+            "band still: {:?}",
+            in_band.iter().map(|p| p.post.id).collect::<Vec<_>>()
+        );
+        assert_eq!(report.artists_demoted, 4);
+        let mut ids: Vec<i64> = posts.iter().map(|p| p.post.id).collect();
+        ids.sort_unstable();
+        assert_eq!(ids, (1..=12).collect::<Vec<_>>(), "still a permutation");
+    }
+
+    /// A post credited to two artists counts for both.
+    #[test]
+    fn a_post_with_two_artists_counts_for_both() {
+        let now = Utc::now();
+        let mut posts = vec![
+            post_by(1, 30, &["a"], now),
+            post_by(2, 30, &["a"], now),
+            post_by(3, 30, &["a", "b"], now),
+            post_by(4, 30, &["c"], now),
+        ];
+        let mut targets = targets_in(3, 0, 0);
+        targets.artist_cap = 2;
+        let report = apply_composition_quota(&mut posts, now, &targets);
+        assert_eq!(report.artists_demoted, 1);
+        let in_band = &posts[..3];
+        assert_eq!(
+            in_band
+                .iter()
+                .filter(|p| p.post.tags.artist.iter().any(|a| a == "a"))
+                .count(),
+            2
+        );
+    }
+
+    /// The artist ceiling must spend only swaps the age ceilings can honour:
+    /// here the only other-artist post below the band is old, and pulling it in
+    /// would break `old_cap`, so the pass takes the age-safe candidate.
+    #[test]
+    fn the_artist_ceiling_keeps_the_old_ceiling() {
+        let now = Utc::now();
+        let mut posts = vec![
+            post_by(1, 800, &["x"], now),
+            post_by(2, 30, &["a"], now),
+            post_by(3, 30, &["a"], now),
+            post_by(4, 800, &["y"], now),
+            post_by(5, 30, &["z"], now),
+        ];
+        let mut targets = targets_in(3, 0, 0);
+        targets.old_cap = 1;
+        targets.artist_cap = 1;
+        let report = apply_composition_quota(&mut posts, now, &targets);
+        assert_eq!(report.artists_demoted, 1);
+        let band = &posts[..3];
+        let old = band
+            .iter()
+            .filter(|p| targets.matches(Kind::Old, p, now))
+            .count();
+        assert_eq!(
+            old,
+            1,
+            "old ceiling survived the artist swap: {:?}",
+            band.iter().map(|p| p.post.id).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            band.iter()
+                .filter(|p| p.post.tags.artist.iter().any(|a| a == "a"))
+                .count(),
+            1
+        );
+        assert!(
+            band.iter().any(|p| p.post.id == 5),
+            "the age-safe candidate (id 5) was promoted: {:?}",
+            band.iter().map(|p| p.post.id).collect::<Vec<_>>()
+        );
+    }
+
+    /// Collab-heavy shapes are the hard case: the over-represented artist is
+    /// the *second* tag on every post, so each carrier looks like a different
+    /// artist otherwise. Measured on the live feed at 658288 (2026-11-02):
+    /// 8 of the first 20 carry `sound_warning` next to eight different names.
+    #[test]
+    fn the_artist_ceiling_caps_a_collab_artist() {
+        let now = Utc::now();
+        let mut posts = Vec::new();
+        for i in 0..20 {
+            let mut p = post_at(i + 1, 1, now);
+            p.post.tags.artist = if i % 2 == 1 {
+                vec![format!("co{i}"), "sw".to_string()]
+            } else {
+                vec![format!("solo{i}")]
+            };
+            posts.push(p);
+        }
+        for i in 0..40 {
+            let mut p = post_at(21 + i, 1, now);
+            p.post.tags.artist = vec![format!("other{i}")];
+            posts.push(p);
+        }
+        let mut targets = targets_in(20, 0, 0);
+        targets.artist_cap = 3;
+        let report = apply_composition_quota(&mut posts, now, &targets);
+        let sw = posts[..20]
+            .iter()
+            .filter(|p| p.post.tags.artist.iter().any(|a| a == "sw"))
+            .count();
+        assert_eq!(
+            sw,
+            3,
+            "band: {:?}",
+            posts[..20].iter().map(|p| p.post.id).collect::<Vec<_>>()
+        );
+        assert!(
+            report.artists_demoted >= 7,
+            "demoted {}",
+            report.artists_demoted
+        );
+    }
+
+    /// An unreachable old floor must not veto the artist ceiling. This is the
+    /// exact shape that shipped and failed on the live feed: the pool held no
+    /// old post for the account, so the head's old count was 0 while
+    /// `old_quota = 2`, and every artist swap was rejected.
+    #[test]
+    fn an_unreachable_old_floor_does_not_block_the_artist_ceiling() {
+        let now = Utc::now();
+        let mut posts = Vec::new();
+        for i in 0..6 {
+            let mut p = post_at(i + 1, 1, now);
+            p.post.tags.artist = vec!["sw".to_string()];
+            posts.push(p);
+        }
+        for i in 0..10 {
+            let mut p = post_at(7 + i, 1, now);
+            p.post.tags.artist = vec![format!("other{i}")];
+            posts.push(p);
+        }
+        let mut targets = targets_in(6, 0, 2); // old_quota = 2, no old post exists
+        targets.artist_cap = 2;
+        let report = apply_composition_quota(&mut posts, now, &targets);
+        let sw = posts[..6]
+            .iter()
+            .filter(|p| p.post.tags.artist.iter().any(|a| a == "sw"))
+            .count();
+        assert_eq!(
+            sw, 2,
+            "the artist ceiling ran despite the unreachable floor"
+        );
+        assert!(report.artists_demoted >= 4);
+    }
+
+    #[test]
+    fn the_artist_ceiling_is_disabled_at_zero() {
+        let now = Utc::now();
+        let mut posts = head(&[30, 30, 30], now);
+        let before: Vec<i64> = posts.iter().map(|p| p.post.id).collect();
+        let report = apply_composition_quota(&mut posts, now, &targets(0, 0));
+        assert_eq!(report.artists_demoted, 0);
         assert_eq!(posts.iter().map(|p| p.post.id).collect::<Vec<_>>(), before);
     }
 
