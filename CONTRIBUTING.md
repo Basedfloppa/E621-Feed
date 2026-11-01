@@ -136,6 +136,8 @@ Fix or update a vulnerable dependency whenever possible. If an advisory is trans
 
 Revisit ignored advisories whenever their parent dependency is upgraded.
 
+The two gates do not scan the same set. The pre-commit hook runs `cargo audit` over the whole `Cargo.lock`, while `cargo deny` resolves the feature graph. `Cargo.lock` also lists dependencies of features that are not enabled, so `cargo audit` can flag a crate that `cargo tree -i` cannot find, and the hook refuses the commit for it. Fix that entry anyway: the crate compiles the moment someone turns the feature on. Pass the current version in the package spec to keep the diff down to a version and a checksum — `cargo update -p tokio@1.53.1 --precise 1.53.3` — because `cargo update -p tokio --precise …` re-resolves the surrounding graph and moves unrelated packages with it.
+
 ## Scope and style
 
 - Keep backend changes in `parser-api/` and frontend changes in `parser-web/`.

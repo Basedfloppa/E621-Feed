@@ -16,7 +16,7 @@ path = "src/bin/catalog_seed.rs"
 
 [package]
 name = "e621-account-parser-api"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 # SPDX id of the repository `LICENCE` file ("MIT No Attribution"). Declared so
 # `cargo deny check licenses` can settle the workspace crates instead of
