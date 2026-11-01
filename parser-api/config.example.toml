@@ -163,7 +163,7 @@ score_temperature = 0.0     # 0 = identity; >0 sigmoid-sharpens the final score
 confidence_steepness = 1.0  # 1 = n/(n+n0); >1 sharpens warm-up
 mmr_redundancy_exp = 1.0    # 1 = linear MMR penalty
 tag_sim_jaccard_blend = 0.0 # 0 = pure cosine; small >0 hedges sparse profiles
-exploration_epsilon = 0.0   # ε-greedy exploration bonus; 0 = disabled (default)
+exploration_epsilon = 0.0   # ε-greedy bonus: score += ε·novelty·jitter, jitter per session, ε decays with scroll; 0 = off
 
 # Optional point splits. NaN disables a split and follows the parent value.
 # Kept commented so that copying this file engages no split, matching the

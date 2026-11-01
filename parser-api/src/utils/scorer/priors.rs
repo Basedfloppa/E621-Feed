@@ -170,7 +170,12 @@ pub struct Priors {
 
     // ---- Class F: exploration ----
     /// ε-greedy exploration bonus. 0 = disabled (pure exploit).
-    /// Applied post-scoring as `score += ε * (1 - tag_similarity)`.
+    ///
+    /// Applied post-scoring as `score += ε * (1 - tag_similarity) * jitter`,
+    /// where `jitter ∈ [0, 1]` is drawn per candidate from a session seed and
+    /// `ε` decays with the scroll depth (`utils::scorer::exploration_*`). The
+    /// draw is what rotates the promoted set between sessions; without it the
+    /// same posts win every time and the knob is a constant (П2).
     #[serde(default = "default_exploration_epsilon")]
     pub exploration_epsilon: f32,
 

@@ -12,7 +12,7 @@ use e621_account_parser_api::auth::OwnerToken;
 use e621_account_parser_api::utils::{
     CachedPostFeatures, ChannelTiming, PipelineMetrics, ScoringContext, ScoringMetrics,
     apply_exploration_bonus, blacklist, current_global_relation, current_idf,
-    diversify_scored_posts, post_pair_similarity,
+    diversify_scored_posts, exploration_decay, exploration_seed, post_pair_similarity,
 };
 use e621_account_parser_api::{
     api, audit,
@@ -294,6 +294,7 @@ pub(crate) async fn get_recommendations(
             page,
             affinity_threshold,
             exploration,
+            session: session.as_deref(),
             session_shown: &session_shown,
             ctx_label: "recommendations",
         },
@@ -416,6 +417,8 @@ struct RecommendationRequest<'a> {
     page: Option<i32>,
     affinity_threshold: Option<f32>,
     exploration: Option<f32>,
+    /// Session token; together with the depth it seeds the exploration draws.
+    session: Option<&'a str>,
     /// Posts this scroll already showed; dropped in the merge step.
     session_shown: &'a HashSet<i64>,
     ctx_label: &'a str,
@@ -474,6 +477,7 @@ async fn build_recommendations_shared(
         page,
         affinity_threshold,
         exploration,
+        session,
         session_shown,
         ctx_label,
     } = req;
@@ -750,7 +754,18 @@ async fn build_recommendations_shared(
     // bonus added after `diversify_scored_posts` only rewrites the number in
     // the JSON — the order was already fixed — so the "Discovery" knob used to
     // leave the feed untouched (see `docs/algo-review.md`, П1).
-    apply_exploration_bonus(&mut scored, priors.exploration_epsilon);
+    //
+    // Two things make it exploration rather than a constant (П2): the bonus is
+    // multiplied by a per-candidate draw seeded from (account, session, depth),
+    // so the promoted set rotates between sessions, and the strength decays
+    // with the scroll — the first screen is where a bet on novelty pays.
+    let depth = session_shown.len();
+    let eps = priors.exploration_epsilon * exploration_decay(depth);
+    apply_exploration_bonus(
+        &mut scored,
+        eps,
+        exploration_seed(account_id, session, depth),
+    );
 
     // Threshold (if requested) before diversification so we don't pay
     // MMR cost on posts we're going to drop anyway. Runs *after* exploration,
@@ -899,6 +914,7 @@ pub(crate) async fn get_recommendations_continue(
             page: None,
             affinity_threshold: None,
             exploration: None,
+            session: Some(&session),
             session_shown: &shown_ids,
             ctx_label: "continue",
         },

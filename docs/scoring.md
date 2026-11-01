@@ -511,7 +511,7 @@ Default mix weight is 0 (disabled). Enable with a small non-zero value
 
 |Variable|Lower →|Higher →|
 |---|---|---|
-|`exploration_epsilon`|pure exploit (default 0)|more exploration toward novel content (capped at 0.5)|
+|`exploration_epsilon`|pure exploit (default 0)|**stochastic** exploration toward novel content: `score += ε·(1−sim)·jitter`, one draw per candidate from a seed of (account, session, depth); ε halves every 100 posts of scroll (capped at 0.5)|
 
 ## Tag-relation graph + Cluster-PMI
 
