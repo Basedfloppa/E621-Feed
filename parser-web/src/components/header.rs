@@ -136,7 +136,7 @@ pub fn header() -> Html {
             Step {
                 id: "nav-tabs".into(),
                 title: Some("Navigation tabs".into()),
-                text: "The app is organized into tabs: For You (personalized feed), Trending, Search, Favorites, Digest, and History, plus Home, Account, and Settings. The active tab is highlighted; on small screens they live in the sidebar menu.".into(),
+                text: "The app is organized into tabs: For You (personalized feed), Trending, Search, Favorites, Digest, History, and Watchlist, plus Home, Account, and Settings. The active tab is highlighted; on small screens they live in the sidebar menu.".into(),
                 route: Some("/".into()),
                 attach_to: Some(AttachTo { element: "#header".into(), on: "bottom".into() }),
                 buttons: Some(vec![
@@ -435,6 +435,12 @@ pub fn header() -> Html {
                             >
                                 {"History"}
                             </a>
+                            <a role="tab"
+                                class={classes!("tab", is_active("/subscriptions").then_some("tab-active"))}
+                                href="/subscriptions"
+                            >
+                                {"Watchlist"}
+                            </a>
                             if show_catalog {
                                 <a role="tab"
                                     class={classes!("tab", is_active("/catalog").then_some("tab-active"))}
@@ -577,6 +583,14 @@ pub fn header() -> Html {
                             href="/history"
                         >
                             {"History"}
+                        </a>
+                    </li>
+                    <li>
+                        <a
+                            class={classes!("text-base-content", is_active("/subscriptions").then_some("menu-active"))}
+                            href="/subscriptions"
+                        >
+                            {"Watchlist"}
                         </a>
                     </li>
                     if show_catalog {

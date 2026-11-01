@@ -8,6 +8,7 @@ mod history;
 mod home;
 mod search;
 mod settings;
+mod subscriptions;
 mod trending;
 
 pub use account::*;
@@ -20,4 +21,5 @@ pub use history::*;
 pub use home::*;
 pub use search::*;
 pub use settings::*;
+pub use subscriptions::*;
 pub use trending::*;

@@ -11,6 +11,7 @@ use rusqlite::params;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use crate::errors::NOT_FOUND_ERR_MARKER;
 use crate::models::ScoredPost;
 
 use super::{hydrate_posts_by_ids, open_db};
@@ -66,8 +67,10 @@ pub fn add_subscription(account_id: i32, tag: &str) -> Result<Subscription, Stri
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .map_err(|e| match e {
+            // Marker → 404: a tag this instance has never synced is a client
+            // mistake, not a server failure.
             rusqlite::Error::QueryReturnedNoRows => format!(
-                "Unknown tag '{name}': it is not in the local catalog yet. Subscribe to a tag that appears in a post you have synced."
+                "{NOT_FOUND_ERR_MARKER}Unknown tag '{name}': it is not in the local catalog yet. Subscribe to a tag that appears in a post you have synced."
             ),
             other => format!("Lookup tag '{name}': {other}"),
         })?;

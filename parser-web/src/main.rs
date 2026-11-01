@@ -42,6 +42,8 @@ pub enum Route {
     Digest,
     #[at("/history")]
     History,
+    #[at("/subscriptions")]
+    Subscriptions,
     #[at("/catalog")]
     Catalog,
     #[at("/admin")]
@@ -62,6 +64,7 @@ fn switch(routes: Route) -> Html {
         Route::Settings => html! { <SettingsPage />},
         Route::Digest => html! { <DigestPage />},
         Route::History => html! { <HistoryPage />},
+        Route::Subscriptions => html! { <SubscriptionsPage />},
         Route::Catalog => html! { <CatalogPage />},
         Route::Admin => html! { <AdminPage />},
         Route::NotFound => html! { <h1>{ "404" }</h1> },

@@ -7,6 +7,7 @@ mod events;
 mod ownership;
 mod post;
 mod session;
+mod subscriptions;
 mod tour;
 
 pub use admin::*;
@@ -18,4 +19,5 @@ pub use events::*;
 pub use ownership::*;
 pub use post::*;
 pub use session::*;
+pub use subscriptions::*;
 pub use tour::*;
