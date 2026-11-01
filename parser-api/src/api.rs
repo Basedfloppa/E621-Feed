@@ -1206,13 +1206,18 @@ fn build_e621_tags_query(user_query: &str, blacklist: &str) -> String {
 
 /// Tag query for `/recommendations`: the newest matching posts first.
 ///
-/// `order:id` (descending) is explicit rather than left to e621's default
-/// ordering. The feed's pool is meant to be a *time-based* page of the newest
-/// posts matching the account's anchors, with only a small local supplement;
-/// inheriting the default sort would make that guarantee depend on upstream
-/// behaviour, and it costs one slot of the tag budget.
+/// `order:id_desc` is the *descending* form on purpose. Bare `order:id` on e621
+/// means **ascending** (oldest first) — measured: `order:id` and `order:id_asc`
+/// both return id 14 from 2007, `order:id_desc` returns the current id. This
+/// function used the bare form and therefore pulled the oldest page of the
+/// catalog into a feed whose whole premise is freshness.
 fn build_recommendation_tags(blacklist: &str, boost: &[String]) -> String {
-    build_e621_tags_query_with_budget("order:id", blacklist, boost, TagQueryBudget::from_config())
+    build_e621_tags_query_with_budget(
+        "order:id_desc",
+        blacklist,
+        boost,
+        TagQueryBudget::from_config(),
+    )
 }
 
 /// `get_posts` with a caller-supplied `tags` query — used by the
@@ -1496,7 +1501,13 @@ mod tests {
         // The feed pool is time-based: the newest posts come from this
         // request, so the sort order cannot be left to e621's default.
         let out = super::build_recommendation_tags("", &["dragon".to_string()]);
-        assert_eq!(out, "order:id ( ~dragon )");
+        // Bare `order:id` is *ascending* on e621 (oldest first), so the feed
+        // must ask for the descending form explicitly.
+        assert_eq!(out, "order:id_desc ( ~dragon )");
+        assert!(
+            !out.contains(" order:id "),
+            "the ascending order token must never reach the feed query: {out}"
+        );
 
         // And the order term comes out of the same 40-term budget as every
         // other term, so a full blacklist cannot push it past the limit.
@@ -1505,7 +1516,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join(" ");
         let out = super::build_recommendation_tags(&blob, &["dragon".to_string()]);
-        assert!(out.starts_with("order:id "), "{out}");
+        assert!(out.starts_with("order:id_desc "), "{out}");
         // 40 slots = order:id + the one-term boost group + 38 exclusions. The
         // group's parens are separators, not terms, so count the exclusions.
         assert_eq!(out.matches(" -t").count(), E621_TAG_LIMIT - 2, "{out}");

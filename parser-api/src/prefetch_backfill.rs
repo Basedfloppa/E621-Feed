@@ -124,8 +124,10 @@ async fn run_backfill_tick(cooldown_secs: u64) -> Result<(), String> {
                 }
             }
 
-            // 2) Fetch fresh posts (page 1).
-            let query_fresh = format!("{tag_name} order:id");
+            // 2) Fetch fresh posts (page 1). `order:id_desc`, not `order:id`:
+            //    the bare token sorts ascending on e621, so this leg used to
+            //    store the same oldest posts the retro leg fetched.
+            let query_fresh = format!("{tag_name} order:id_desc");
             match api::get_posts_by_tags(
                 blacklist,
                 &query_fresh,
