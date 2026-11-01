@@ -205,19 +205,25 @@ cutoff, which no sampler can fake — or online interleaving.
 
 The one distribution that does not reward the similarity channel by
 construction is the whole catalog. Measured 2026-11-02 on the live database
-(`CALIBRATE_NOW=1792972800`, N=150, fingerprint `0x80a85f4114bc546b`,
-2 575.7 negatives per account, negative age median 734 d):
+(`CALIBRATE_NOW=1792972800`, N=150, fingerprint `0x0de3f607bde8f05e`):
 
 | | |
 |---|---:|
-| NDCG@20 | **0.8122** (95 % CI 0.7887–0.8354, SE 0.0123) |
-| Recall@50 / MRR | 0.1416 / 0.9278 |
-| head@20 | age 73 d, fav 565, artists 13.4, tag-jaccard 0.13 |
+| NDCG@20 | **0.8123** (95 % CI 0.7889–0.8348, SE 0.0122) |
+| Recall@50 / MRR | 0.1436 / 0.9039 |
+| head@20 | age 71 d, fav 525, artists 13.2, tag-jaccard 0.13 |
 
 This is the number to hold a *ranking* change against: a change that lowers it
 while leaving hybrid-hard flat is not neutral, it is worse at "would the user
 favourite this at all". It is still not the live feed — negatives are uniform
 over six years of catalog, while production scores a pool of recent posts.
+
+The catalog drifts as the server caches new posts, so a single number is only
+comparable to a run on the same fingerprint. The pair from 2026-11-02
+(П17/П18, one commit) is the shape to copy: same `0x0de3…` dataset before and
+after, hybrid-hard **0.4437 → 0.4451**, catalog **0.8093 → 0.8123** — both
+inside one SE, which is the honest way to say "the comment and duration
+components now mean what their names say" without claiming quality.
 
 ## Quickstart
 

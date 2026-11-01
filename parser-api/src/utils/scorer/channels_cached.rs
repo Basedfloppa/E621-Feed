@@ -15,7 +15,7 @@ use super::cached::{CachedPostFeatures, CachedTag};
 use super::context::ScoringContext;
 use super::util::{
     FEEDBACK_NEUTRAL, PairAggregator, blend2, blend3, confidence, discrete_preference_smooth,
-    one_sided_ratio, sigmoid,
+    one_sided_ratio, sigmoid, smoothed_one_sided_ratio,
 };
 use crate::utils::tag_relation::TagId;
 
@@ -269,10 +269,11 @@ impl ScoringContext<'_> {
             self.profile.quality.avg_score_total,
             exp,
         );
-        let rel_comments = one_sided_ratio(
+        let rel_comments = smoothed_one_sided_ratio(
             post.comment_count.max(0) as f32,
             self.profile.quality.avg_comment_count,
             exp,
+            1.0,
         );
         let mut score = blend3(
             absolute,
@@ -314,8 +315,10 @@ impl ScoringContext<'_> {
         );
         let dur_val = post.duration;
         let dur_base = self.profile.quality.avg_duration;
-        let duration_fit = if dur_val > 0.0 || dur_base > 0.0 {
+        let duration_fit = if dur_val > 0.0 {
             one_sided_ratio(dur_val, dur_base, exp)
+        } else if dur_base > 0.0 {
+            FEEDBACK_NEUTRAL
         } else {
             1.0
         };
@@ -1032,6 +1035,40 @@ mod tests {
         let u = ctx.quality_fit(&post);
         let c = ctx.quality_fit_cached(&cache_post(&post, &idf, &global));
         assert!(close(u, c), "quality_fit mismatch: uncached={u} cached={c}");
+    }
+
+    #[test]
+    fn popularity_fit_cached_treats_an_image_as_neutral() {
+        let mut priors = default_priors();
+        priors.popularity_w_duration = 0.2;
+        let idf = build_idf();
+        let global = build_global_graph();
+        let user_graph = build_user_graph();
+        let mut profile = default_profile();
+        profile.quality.avg_duration = 12.0;
+        let counts = default_tag_counts();
+        let ctx = ScoringContext::new(&counts, &priors, &idf, &profile, &global, &user_graph);
+        let post = make_post(make_empty_tags());
+        let u = ctx.popularity_fit(&post);
+        let c = ctx.popularity_fit_cached(&cache_post(&post, &idf, &global));
+        assert!(close(u, c), "uncached={u} cached={c}");
+        // `make_post` gives fav_count == avg_fav_count, so fav_fit is 1.0 and
+        // the neutral duration term is the only thing between the value and
+        // the historical zero floor.
+        let old = blend2(
+            1.0,
+            priors.popularity_w_fav,
+            0.0,
+            priors.popularity_w_duration,
+        );
+        let expected = blend2(
+            1.0,
+            priors.popularity_w_fav,
+            FEEDBACK_NEUTRAL,
+            priors.popularity_w_duration,
+        );
+        assert!(close(c, expected), "cached={c}, expected {expected}");
+        assert!(c > old + 1e-6, "cached still at the zero floor: {c}");
     }
 
     #[test]

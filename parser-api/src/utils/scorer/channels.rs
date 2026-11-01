@@ -8,7 +8,7 @@ use super::context::ScoringContext;
 #[allow(unused_imports)]
 use super::util::{
     FEEDBACK_NEUTRAL, PairAggregator, blend2, blend3, confidence, discrete_preference_smooth,
-    normalize_tag, one_sided_ratio, sigmoid,
+    normalize_tag, one_sided_ratio, sigmoid, smoothed_one_sided_ratio,
 };
 
 impl ScoringContext<'_> {
@@ -106,10 +106,13 @@ impl ScoringContext<'_> {
             self.profile.quality.avg_score_total,
             exp,
         );
-        let rel_comments = one_sided_ratio(
+        // Smoothed, not raw: the median favourite has no comments, so a raw
+        // ratio put half the library at zero and cost the channel its range.
+        let rel_comments = smoothed_one_sided_ratio(
             post.stats.comment_count.max(0) as f32,
             self.profile.quality.avg_comment_count,
             exp,
+            1.0,
         );
         let mut score = blend3(
             absolute,
@@ -150,8 +153,13 @@ impl ScoringContext<'_> {
         );
         let dur_val = post.files.meta.duration.unwrap_or(0.0) as f32;
         let dur_base = self.profile.quality.avg_duration;
-        let duration_fit = if dur_val > 0.0 || dur_base > 0.0 {
+        // An image has no length to compare with the user's video average.
+        // Zero here made a fifth of the channel measure the media type (П18);
+        // neutral says "no evidence" instead of "too short".
+        let duration_fit = if dur_val > 0.0 {
             one_sided_ratio(dur_val, dur_base, exp)
+        } else if dur_base > 0.0 {
+            FEEDBACK_NEUTRAL
         } else {
             1.0
         };
@@ -1393,6 +1401,31 @@ mod tests {
         assert!(close(q, 0.9654), "expected ~0.965 got {q}");
     }
 
+    /// The median favourite has no comments, so the raw ratio pinned half the
+    /// library to zero and the channel lost its range (П17). Add-one smoothing
+    /// keeps the ordering strict and lifts the zero-comment post off the floor.
+    #[test]
+    fn quality_fit_counts_comments_without_a_zero_cliff() {
+        // The fixture's default prior has the comment component switched off;
+        // the defect lives in the component, so give it weight.
+        let mut priors = default_priors();
+        priors.quality_w_relative_comments = 1.0;
+        let idf = build_idf();
+        let global_graph = build_global_graph();
+        let user_graph = build_user_graph();
+        let profile = default_profile();
+        let counts = default_tag_counts();
+        let ctx = ScoringContext::new(&counts, &priors, &idf, &profile, &global_graph, &user_graph);
+        let at = |comments: i64| {
+            let mut post = make_post(make_empty_tags(), 50, 10, Rating::S);
+            post.stats.comment_count = comments;
+            ctx.quality_fit(&post)
+        };
+        let (none, one, average) = (at(0), at(1), at(10));
+        assert!(none < one, "0 comments {none} vs 1 comment {one}");
+        assert!(one < average, "1 comment {one} vs average {average}");
+    }
+
     #[test]
     fn quality_fit_with_upvote_ratio() {
         let mut priors = default_priors();
@@ -1449,6 +1482,43 @@ mod tests {
     // ==================================================================
     //  popularity_fit
     // ==================================================================
+
+    /// An image has no duration. When the profile has a video average, the
+    /// duration term used to read the missing value as zero ("too short") and
+    /// a fifth of the channel measured the media type (П18).
+    #[test]
+    fn popularity_fit_treats_an_image_as_neutral_when_the_profile_has_videos() {
+        let mut priors = default_priors();
+        priors.popularity_w_duration = 0.2;
+        let idf = build_idf();
+        let global_graph = build_global_graph();
+        let user_graph = build_user_graph();
+        let mut profile = default_profile();
+        profile.quality.avg_duration = 12.0;
+        let counts = default_tag_counts();
+        let ctx = ScoringContext::new(&counts, &priors, &idf, &profile, &global_graph, &user_graph);
+
+        let image = make_post(make_empty_tags(), 0, 25, Rating::S);
+        let pop = ctx.popularity_fit(&image);
+        let fav = one_sided_ratio(25.0, 50.0, priors.one_sided_ratio_exp);
+        let expected = blend2(
+            fav,
+            priors.popularity_w_fav,
+            FEEDBACK_NEUTRAL,
+            priors.popularity_w_duration,
+        );
+        let old = blend2(
+            fav,
+            priors.popularity_w_fav,
+            0.0,
+            priors.popularity_w_duration,
+        );
+        assert!(close(pop, expected), "got {pop}, expected {expected}");
+        assert!(
+            pop > old + 1e-6,
+            "image still at the zero floor: {pop} vs {old}"
+        );
+    }
 
     #[test]
     fn popularity_fit_fav_only() {

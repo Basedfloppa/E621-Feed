@@ -95,6 +95,28 @@ pub(super) fn one_sided_ratio(value: f32, baseline: f32, exp: f32) -> f32 {
     r.min(1.0).powf(exp).clamp(0.0, 1.0)
 }
 
+/// `one_sided_ratio` with add-`k` smoothing on both sides of the ratio.
+///
+/// A raw ratio is zero whenever the value is zero, which is right for
+/// favourites but wrong for comments: the median favourite has no comments at
+/// all, so the component pinned half the library to zero and the quality
+/// channel lost the top of its range (see `docs/algo-review.md`, П17). Adding
+/// the same `k` to numerator and denominator keeps the ordering strict — one
+/// comment always beats none — and keeps the ratio at 1 when the value equals
+/// the baseline. A zero baseline still means "the profile has nothing to
+/// compare against" and keeps the historical neutral/full-marks split.
+#[inline]
+pub(super) fn smoothed_one_sided_ratio(value: f32, baseline: f32, exp: f32, k: f32) -> f32 {
+    let value = value.max(0.0);
+    if baseline <= 1e-6 {
+        return if value > 0.0 { 1.0 } else { FEEDBACK_NEUTRAL };
+    }
+    let k = k.max(0.0);
+    let r = (value + k) / (baseline + k);
+    let exp = exp.max(1e-3);
+    r.min(1.0).powf(exp).clamp(0.0, 1.0)
+}
+
 #[inline]
 pub(super) fn discrete_preference_smooth(
     total: i64,
@@ -361,6 +383,28 @@ mod tests {
         // No baseline + positive value → full marks; no value → neutral.
         assert!(close(one_sided_ratio(3.0, 0.0, 0.5), 1.0));
         assert!(close(one_sided_ratio(0.0, 0.0, 0.5), FEEDBACK_NEUTRAL));
+    }
+
+    #[test]
+    fn smoothed_ratio_has_no_zero_cliff() {
+        // Zero against a positive baseline used to be exactly zero, which is
+        // what pinned the median post's comment component to the floor.
+        let zero = smoothed_one_sided_ratio(0.0, 10.0, 0.5, 1.0);
+        let one = smoothed_one_sided_ratio(1.0, 10.0, 0.5, 1.0);
+        assert!(close(zero, (1.0f32 / 11.0).sqrt()), "got {zero}");
+        assert!(zero < one, "0 comments {zero} vs 1 comment {one}");
+        assert!(close(smoothed_one_sided_ratio(10.0, 10.0, 0.5, 1.0), 1.0));
+    }
+
+    #[test]
+    fn smoothed_ratio_keeps_the_no_baseline_contract() {
+        // Nothing in the profile to compare against: no comments is "no
+        // evidence" and a positive count gets full marks, as before.
+        assert!(close(
+            smoothed_one_sided_ratio(0.0, 0.0, 0.5, 1.0),
+            FEEDBACK_NEUTRAL
+        ));
+        assert!(close(smoothed_one_sided_ratio(3.0, 0.0, 0.5, 1.0), 1.0));
     }
 
     #[test]
