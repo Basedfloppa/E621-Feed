@@ -290,7 +290,8 @@ candidate_anchor_tags = 20              # anchor tags per group, ranked by IDF
 composition_window = 20        # leading posts the quotas apply to
 fresh_quota = 6                # minimum posts younger than fresh_days inside the window
 fresh_days = 7.0
-old_quota = 0                  # minimum posts older than old_days; 0 until the backlog stream exists
+old_quota = 2                  # minimum posts older than old_days; also switches the backlog stream on
+old_cap = 4                    # maximum posts older than old_days inside the window
 old_days = 365.0
 
 candidate_recent_days = 60              # recent-popular lookback window
@@ -298,6 +299,8 @@ candidate_stream_share = 0.34           # per-stream ceiling as a fraction of lo
 candidate_preferred_limit = 120         # ceiling for the explicit preferred-tags stream
 candidate_cooccurrence_limit = 80       # ceiling for the co-occurrence-neighbour stream
 candidate_cooccurrence_min_cooc = 2     # min cooc_count for a partner tag to qualify
+candidate_backlog_tags = 6              # anchor tags walked for old posts (each costs a scan + sort)
+candidate_backlog_limit = 40            # ceiling for the backlog stream's share of the pool
 # --- live e621 query budget --------------------------------------------------
 # e621 answers 422 above 40 terms. The budget is split three ways; the blacklist
 # is enforced in-process for live posts as well, so 0 here costs recall, not

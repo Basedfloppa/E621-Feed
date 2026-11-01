@@ -217,8 +217,8 @@ pub struct RuntimeConfig {
     /// capped independently because their densities differ by orders of
     /// magnitude — artist tags match far more posts than character tags, so a
     /// shared pool counter lets the densest stream consume every slot and the
-    /// rest contribute nothing. Default `0.34` (five streams, the three
-    /// inferred ones sized for roughly equal shares).
+    /// rest contribute nothing. Default `0.34` (the fresh streams, sized for
+    /// roughly equal shares; the backlog stream has its own ceiling).
     #[serde(default = "default_candidate_stream_share")]
     pub candidate_stream_share: f64,
     /// Ceiling for the explicit preferred-tags stream. Preferred tags are the
@@ -226,6 +226,17 @@ pub struct RuntimeConfig {
     /// allowed to be larger than any single inferred one. Default `120`.
     #[serde(default = "default_candidate_preferred_limit")]
     pub candidate_preferred_limit: usize,
+    /// Anchor tags the backlog stream walks to find old posts. Each tag costs a
+    /// scan of its postings plus a sort by favourites, so this is deliberately
+    /// smaller than `candidate_anchor_tags`: the stream only has to fill a floor
+    /// of a few slots. Default `6`.
+    #[serde(default = "default_candidate_backlog_tags")]
+    pub candidate_backlog_tags: usize,
+    /// Ceiling for the backlog stream's contribution to the candidate pool.
+    /// Gated on `old_quota > 0`: without an old floor the stream is pure cost.
+    /// Default `40`.
+    #[serde(default = "default_candidate_backlog_limit")]
+    pub candidate_backlog_limit: i64,
     /// Leading posts the composition quotas apply to. `0` disables both.
     #[serde(default = "default_composition_window")]
     pub composition_window: usize,
@@ -244,12 +255,24 @@ pub struct RuntimeConfig {
     pub fresh_days: f64,
     /// Minimum posts older than `old_days` inside the window; `0` disables.
     ///
-    /// Disabled by default because the candidate pool does not contain old posts
-    /// yet: the live leg is the newest page and every local stream walks post ids
-    /// downwards. Enable it together with the backlog stream, which is what puts
-    /// old, taste-matched posts into the pool in the first place.
+    /// This is also the switch for the backlog stream: the stream that puts old,
+    /// taste-matched posts into the candidate pool only runs while `old_quota >
+    /// 0`, because a pool full of year-old posts is a cost with no floor to fill.
+    /// `old_days` is shared with that stream so "old" means the same thing on
+    /// both sides — two knobs could let the floor ask for posts the pool never
+    /// fetches. Default `2`.
     #[serde(default = "default_old_quota")]
     pub old_quota: usize,
+    /// Maximum posts older than `old_days` inside the window; `0` disables.
+    ///
+    /// The floor alone stopped being enough with the backlog stream: the
+    /// most-favourited work of a followed artist outscores nearly every fresh
+    /// post, so `old_quota = 2` produced a head that was half decade-old posts
+    /// (measured 2026-11-02: 10 of the first 20 older than a year, median age
+    /// 377 days). The ceiling keeps the backlog an accent instead of a takeover,
+    /// and never drops below `old_quota`. Default `4`.
+    #[serde(default = "default_old_cap")]
+    pub old_cap: usize,
     #[serde(default = "default_old_days")]
     pub old_days: f64,
 
@@ -463,6 +486,7 @@ impl Default for RuntimeConfig {
             fresh_quota: default_fresh_quota(),
             fresh_days: default_fresh_days(),
             old_quota: default_old_quota(),
+            old_cap: default_old_cap(),
             old_days: default_old_days(),
             local_candidate_limit: default_local_candidate_limit(),
             dedup_lookback_days: default_dedup_lookback_days(),
@@ -470,6 +494,8 @@ impl Default for RuntimeConfig {
             candidate_recent_days: default_candidate_recent_days(),
             candidate_stream_share: default_candidate_stream_share(),
             candidate_preferred_limit: default_candidate_preferred_limit(),
+            candidate_backlog_tags: default_candidate_backlog_tags(),
+            candidate_backlog_limit: default_candidate_backlog_limit(),
             candidate_cooccurrence_limit: default_candidate_cooccurrence_limit(),
             candidate_cooccurrence_min_cooc: default_candidate_cooccurrence_min_cooc(),
             e621_tag_limit: default_e621_tag_limit(),
@@ -554,10 +580,16 @@ fn default_fresh_days() -> f64 {
 }
 
 fn default_old_quota() -> usize {
-    // Off until the candidate pool carries old posts at all: both the live leg
-    // (newest page) and the local streams (newest ids per tag) are recent, so an
-    // old floor would be an unreachable knob. The backlog stream turns it on.
-    0
+    // Two slots is the whole point of the backlog stream: one old post reads as
+    // a mistake, a small group reads as intent. The floor costs nothing when the
+    // pool has no old posts, so this no longer has to ship at 0.
+    2
+}
+
+fn default_old_cap() -> usize {
+    // Two in the head reads as intent, ten reads as a broken feed. Four leaves
+    // room for the ranking's own taste either side of the two the floor asks for.
+    4
 }
 
 fn default_old_days() -> f64 {
@@ -581,6 +613,12 @@ fn default_candidate_stream_share() -> f64 {
 }
 fn default_candidate_preferred_limit() -> usize {
     120
+}
+fn default_candidate_backlog_tags() -> usize {
+    6
+}
+fn default_candidate_backlog_limit() -> i64 {
+    40
 }
 fn default_candidate_cooccurrence_limit() -> usize {
     80

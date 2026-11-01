@@ -220,6 +220,42 @@ across grid widths.
 |`diversity_user_pmi_weight`|global PMI dominates diversity signal|per-user tag co-occurrence patterns drive diversity personalisation; 0 = disable user graph|
 |`diversity_head_limit`|MMR runs over the whole candidate pool — the historical behaviour, kept at 0|MMR runs over the top N by score only; the tail keeps raw-score order and the O(N²) redundancy matrix shrinks to N²|
 
+## Candidate pool
+
+A `/recommendations` page is scored over the union of two sources: the **live
+leg** (the newest e621 page matching the account's boost tags, `order:id_desc`)
+and a **local supplement** of up to `local_candidate_limit` posts from the
+catalog. The supplement is what reaches posts the live query's tag budget cannot
+express, and it is built from six streams drained round-robin:
+
+| stream | what it contributes | ceiling |
+|---|---|---|
+| artist anchors | newest posts of the account's IDF-ranked artist tags | `candidate_stream_share` × pool |
+| character anchors | same, for character tags | same |
+| recent-popular | posts from the last `candidate_recent_days` above the account's own favourite baseline | same |
+| preferred tags | newest posts of the tags the user pinned explicitly | `candidate_preferred_limit` |
+| co-occurrence neighbours | newest posts of tags that co-occur with the account's | `candidate_cooccurrence_limit` |
+| **backlog** | **old posts of the account's anchor tags, by favourites** | `candidate_backlog_limit` |
+
+Round-robin matters: a sequential union let the densest stream take every slot
+(the pool measured 134 posts from artist anchors and nothing else).
+
+The **backlog stream** is the only one that deliberately looks backwards. Every
+other stream walks post ids or `created_at` descending, so the pool never held
+anything older than the live page — which is exactly why `old_quota` shipped
+disabled. It walks `candidate_backlog_tags` of the same anchors, keeps posts
+older than `old_days`, and orders them by `fav_count` **inside that cut**: walking
+`tags_posts` forwards would return the 2007 tail of a tag (no favourites, no
+relation to the account) and the composition floor would then promote those.
+The cut and the floor share `old_days` on purpose, so "old" cannot mean two
+different things.
+
+Cost is one scan of the tag's postings plus a `temp b-tree` sort, because
+favourites are not part of that index: measured on the local catalog (2026-11-02)
+0.1–7 ms for personal artist/character tags and 25–90 ms for catalog-wide ones
+(`anthro`, `male`). The pool is cached per account for 20 s, so this is a rebuild
+cost, not a per-request one, and the stream only runs while `old_quota > 0`.
+
 ## Composition floors
 
 Ranking optimises one number; the reader sees a page. The two disagree in a way
@@ -227,31 +263,54 @@ no weight fixes: a fresh post with no favourites yet loses a few thousandths of
 score to a month-old post with a hundred, so the blend fills the head with one
 age band regardless of `mix_recency` (which carries 0.6 % of the blend).
 
-After diversification, `apply_composition_quota` enforces two floors inside the
-first `composition_window` posts:
+After diversification, `apply_composition_quota` enforces two floors and one
+ceiling inside the first `composition_window` posts:
 
 | knob | default | meaning |
 |---|---|---|
-|`composition_window`|20|leading posts the floors apply to|
+|`composition_window`|20|leading posts the quotas apply to|
 |`fresh_quota` / `fresh_days`|6 / 7|at least N posts younger than D days|
-|`old_quota` / `old_days`|0 / 365|at least N posts older than D days; 0 = disabled|
+|`old_quota` / `old_days`|2 / 365|at least N posts older than D days; 0 = disabled|
+|`old_cap`|4|**at most** N posts older than `old_days`; 0 = disabled|
 
 The pass only **swaps a post inside the window with one outside it** — the
 ranking below the window is preserved exactly, and the list stays a permutation
-of itself. A floor the pool cannot satisfy promotes nothing rather than dropping
+of itself. A quota the pool cannot satisfy promotes nothing rather than dropping
 posts, and the cross-floor guard is relative: an unreachable old floor does not
 veto the fresh one (that bug shipped in the first draft and blocked every
-promotion whenever the pool held no old post).
+promotion whenever the pool held no old post). The ceiling never undercuts the
+floor (`old_cap` is read as `max(old_cap, old_quota)`), because a ceiling below
+the floor would make the pair unsatisfiable.
 
-`old_quota` ships at 0 because the candidate pool has no old posts at all: the
-live leg is the newest e621 page and every local stream walks post ids
-downwards. It becomes meaningful only together with a backlog stream that puts
-old, taste-matched posts into the pool.
+**The old band has a floor and a ceiling, and both are needed.** The floor alone
+was written when the pool held no old posts at all — the live leg is the newest
+e621 page and every local stream walks post ids downwards — so it could not fire
+and shipped at 0. The backlog stream changed that (see “Candidate pool”): it
+brings back the most-favourited work of the artists an account follows, and that
+work outscores nearly every fresh post. With `old_quota = 2` and no ceiling the
+head measured **10 of 20 posts older than a year, median age 377 days** on
+account 298553 — the floor had turned into a takeover. With `old_cap = 4` the
+same account lands at 4 old / 6 fresh, median 28–32 days, and the old posts that
+survive the pass are the ones the scorer actually wanted (“From pcraxkers — an
+artist you favourite”), not the ones the swap happened to reach.
 
-Measured on the live feed (2026-11-01, after the `order:id_desc` fix): account
-298553's head went from 4 to 6 posts under a week old while the page held 166;
-658288 already had 13 and 1504863 20, so the floor only touches pages that are
-missing the band.
+Measured on the live feed (2026-11-02, `old_quota = 2`, `old_cap = 4`,
+`candidate_backlog_limit = 40`): 298553 — head median 28–32 d, 6 fresh (<7 d),
+4 old (>365 d), pool holds 28–33 old posts; 658288 — median 15 d, 10 fresh,
+4 old; 1504863 (no anchors yet, so the backlog stream is empty) — 20 fresh,
+0 old, which is the degradation the quotas are supposed to have.
+
+**The offline harness cannot price this change, and it says so loudly.** Same
+run, same clock (`CALIBRATE_NOW=1792972800`, N=150), one flag apart: without the
+backlog stream NDCG@20 is **0.6039** (fingerprint `0x875d…`), with it **0.4421**
+(`0xfaac…`). That is not evidence the live feed got worse — it is the harness's
+construction showing through. Negatives are mined by tag similarity, and the
+backlog brings back exactly the posts that look most like the account's
+favourites (top work of the same artists) minus the ones it actually favourited,
+so they become the hardest possible negatives: the median negative age moves
+from −4 d to 118 d and the ranker is punished for putting them first, which is
+precisely what a reader asked for. The four live numbers above are the criterion
+for this pass, not NDCG.
 
 ## Search result scoring
 

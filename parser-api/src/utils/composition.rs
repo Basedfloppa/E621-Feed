@@ -11,9 +11,16 @@
 //! re-order, and it only ever swaps a post **inside** the window with one
 //! **outside** it — the ranking below the window is preserved exactly.
 //!
-//! Two quotas exist and they are independent: a floor of recent posts and a
+//! Two floors exist and they are independent: a floor of recent posts and a
 //! floor of old ones. Both are minimums inside the same window, so a page can
 //! satisfy them at once (fresh posts at the top, a couple of older picks below).
+//!
+//! Old posts also carry a ceiling. A floor alone is not enough once the backlog
+//! stream feeds the pool: the most-favourited work of an artist someone follows
+//! outscores almost every fresh post, so `old_quota = 2` measured a head that was
+//! half decade-old posts. The ceiling is the same idea as the floor, pointed the
+//! other way — at most `old_cap` old posts inside the window — and it never
+//! undercuts the old floor.
 
 use chrono::{DateTime, Utc};
 
@@ -29,6 +36,9 @@ pub struct CompositionTargets {
     pub fresh_days: f64,
     /// Minimum posts older than `old_days` inside the window; `0` disables.
     pub old_quota: usize,
+    /// Maximum posts older than `old_days` inside the window; `0` disables.
+    /// Never lowered below `old_quota`: a ceiling must not eat the floor.
+    pub old_cap: usize,
     pub old_days: f64,
 }
 
@@ -39,6 +49,7 @@ impl Default for CompositionTargets {
             fresh_quota: 0,
             fresh_days: 7.0,
             old_quota: 0,
+            old_cap: 0,
             old_days: 365.0,
         }
     }
@@ -50,6 +61,7 @@ pub struct CompositionReport {
     pub fresh_promoted: usize,
     pub old_in_window: usize,
     pub old_promoted: usize,
+    pub old_demoted: usize,
 }
 
 #[derive(Clone, Copy)]
@@ -162,6 +174,35 @@ pub fn apply_composition_quota(
         }
     }
 
+    // Ceiling on the old band, applied after both floors: it may not push the
+    // old count below `old_quota`, so the two rules cannot fight.
+    if targets.old_cap > 0 {
+        let cap = targets.old_cap.max(targets.old_quota).min(window);
+        let mut count = scored[..window]
+            .iter()
+            .filter(|p| targets.matches(Kind::Old, p, now))
+            .count();
+        while count > cap {
+            // Demote the *lowest-ranked* old post in the window and take the
+            // best non-old post from below it — the mirror image of a floor.
+            let Some(dst) = (0..window)
+                .rev()
+                .find(|&i| targets.matches(Kind::Old, &scored[i], now))
+            else {
+                break;
+            };
+            let Some(src) =
+                (window..scored.len()).find(|&i| !targets.matches(Kind::Old, &scored[i], now))
+            else {
+                break;
+            };
+            scored.swap(dst, src);
+            count -= 1;
+            report.old_demoted += 1;
+        }
+        report.old_in_window = count;
+    }
+
     // Fill the untouched side of the report so callers can log both counts.
     if targets.fresh_quota == 0 {
         report.fresh_in_window = scored[..window]
@@ -229,6 +270,7 @@ mod tests {
             fresh_quota: fresh,
             fresh_days: 7.0,
             old_quota: old,
+            old_cap: 0,
             old_days: 365.0,
         }
     }
@@ -309,6 +351,60 @@ mod tests {
         let report = apply_composition_quota(&mut posts, now, &targets(1, 1));
         assert_eq!(report, CompositionReport::default());
         assert_eq!(posts[0].post.id, 1);
+    }
+
+    /// The floor and the ceiling are the same rule pointed two ways: the backlog
+    /// stream made "at least two old posts" turn into "ten old posts", because
+    /// favourites beat freshness on score. The ceiling has to demote the worst
+    /// old posts and leave the rest of the window alone.
+    #[test]
+    fn the_old_ceiling_demotes_the_lowest_ranked_old_posts() {
+        let now = Utc::now();
+        // Window of 5: four old, one middle-aged; below it, two fresh and one
+        // month-old. Ceiling 2 must demote two old posts for the best non-old
+        // ones, which are the fresh posts.
+        let mut posts = head(&[800, 700, 600, 500, 30, 1, 2, 40], now);
+        let mut targets = targets_in(5, 0, 1);
+        targets.old_cap = 2;
+        let report = apply_composition_quota(&mut posts, now, &targets);
+        assert_eq!(report.old_demoted, 2);
+        assert_eq!(report.old_in_window, 2);
+        let in_window: Vec<i64> = posts[..5].iter().map(|p| p.post.id).collect();
+        assert!(
+            in_window.contains(&1) && in_window.contains(&2),
+            "fresh posts promoted: {in_window:?}"
+        );
+        assert_eq!(
+            posts[5].post.id, 4,
+            "the demoted old post takes the slot below"
+        );
+        assert_eq!(
+            posts[4].post.id, 5,
+            "the middle-aged post stays where it was"
+        );
+    }
+
+    #[test]
+    fn the_old_ceiling_never_undercuts_the_old_floor() {
+        let now = Utc::now();
+        // Floor asks for 3 old, ceiling says 1: the floor wins, because a
+        // ceiling below the floor would make the pair unsatisfiable.
+        let mut posts = head(&[800, 700, 600, 30, 1, 2], now);
+        let mut targets = targets_in(4, 0, 3);
+        targets.old_cap = 1;
+        let report = apply_composition_quota(&mut posts, now, &targets);
+        assert_eq!(report.old_in_window, 3);
+        assert_eq!(report.old_demoted, 0);
+    }
+
+    #[test]
+    fn the_old_ceiling_is_disabled_at_zero() {
+        let now = Utc::now();
+        let mut posts = head(&[800, 700, 600, 30, 1], now);
+        let before: Vec<i64> = posts.iter().map(|p| p.post.id).collect();
+        let report = apply_composition_quota(&mut posts, now, &targets_in(4, 0, 1));
+        assert_eq!(report.old_demoted, 0);
+        assert_eq!(posts.iter().map(|p| p.post.id).collect::<Vec<_>>(), before);
     }
 
     #[test]

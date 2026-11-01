@@ -780,6 +780,7 @@ async fn build_recommendations_shared(
         fresh_quota: cfg.runtime.fresh_quota,
         fresh_days: cfg.runtime.fresh_days,
         old_quota: cfg.runtime.old_quota,
+        old_cap: cfg.runtime.old_cap,
         old_days: cfg.runtime.old_days,
     };
     let composition_report = e621_account_parser_api::utils::apply_composition_quota(
@@ -787,11 +788,16 @@ async fn build_recommendations_shared(
         Utc::now(),
         &composition,
     );
-    if composition_report.fresh_promoted + composition_report.old_promoted > 0 {
+    if composition_report.fresh_promoted
+        + composition_report.old_promoted
+        + composition_report.old_demoted
+        > 0
+    {
         debug!(
-            "[feed] composition: promoted {} fresh and {} old post(s); window now {} fresh / {} old",
+            "[feed] composition: promoted {} fresh and {} old post(s), demoted {} stale; window now {} fresh / {} old",
             composition_report.fresh_promoted,
             composition_report.old_promoted,
+            composition_report.old_demoted,
             composition_report.fresh_in_window,
             composition_report.old_in_window,
         );

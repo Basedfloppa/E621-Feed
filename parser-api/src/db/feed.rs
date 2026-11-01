@@ -822,6 +822,20 @@ pub struct CandidatePoolTuning {
     pub preferred_limit: usize,
     pub cooccurrence_limit: usize,
     pub cooccurrence_min_cooc: i64,
+    /// Age (days) a post must exceed to count as backlog material. Shares the
+    /// composition quota's `old_days` on purpose: the floor asks for posts older
+    /// than that threshold, so the pool has to supply posts older than the same
+    /// one — two knobs would let the stream and the floor disagree silently.
+    pub backlog_days: f64,
+    /// Anchor tags the backlog stream walks. Each one costs a full scan of that
+    /// tag's postings (the `fav_count` sort cannot use the index), so this stays
+    /// deliberately small.
+    pub backlog_tags: usize,
+    /// Cap on the backlog stream's contribution to the pool.
+    pub backlog_limit: i64,
+    /// Gated on `old_quota`: with no old floor there is nothing to feed, and
+    /// walking six old-tag scans per pool rebuild is pure cost.
+    pub backlog_enabled: bool,
 }
 
 impl CandidatePoolTuning {
@@ -835,6 +849,10 @@ impl CandidatePoolTuning {
             preferred_limit: rt.candidate_preferred_limit,
             cooccurrence_limit: rt.candidate_cooccurrence_limit,
             cooccurrence_min_cooc: rt.candidate_cooccurrence_min_cooc,
+            backlog_days: rt.old_days,
+            backlog_tags: rt.candidate_backlog_tags,
+            backlog_limit: rt.candidate_backlog_limit,
+            backlog_enabled: rt.old_quota > 0,
         }
     }
 
@@ -944,6 +962,81 @@ pub fn rank_tags_by_idf(rows: Vec<(String, i64)>, idf: &IdfIndex, want: usize) -
     scored.into_iter().map(|(_, name)| name).collect()
 }
 
+/// Old posts carrying any of `tags`, ranked by favourites **among the old ones**.
+///
+/// Every other stream walks `tags_posts(post_id)` backwards, so it returns the
+/// newest posts of a tag and the pool never holds anything older than the live
+/// e621 page. That is why `old_quota` shipped at 0: the floor had nothing to
+/// promote. This stream is the material it needs.
+///
+/// The ordering is the part that makes the stream useful rather than merely old:
+/// walking `tags_posts` forwards would return the 2007 tail of a tag — posts
+/// with no favourites and no relation to what the account likes — and the floor
+/// would then promote exactly those. Sorting the cut by `fav_count` picks "old
+/// and worth looking at", and the scorer still has the last word on which of
+/// these actually reaches the head.
+///
+/// Cost is one scan of the tag's postings plus a `temp b-tree` sort, because the
+/// favourites are not part of that index: measured on the local catalog
+/// (2026-11-02) 0.1–7 ms for personal artist/character tags and 25–90 ms for
+/// catalog-wide ones (`anthro`, `male`). Callers cap the tag list, and the pool
+/// itself is cached per account for 20 s, so this is a rebuild cost rather than
+/// a per-request one.
+fn local_candidates_backlog(
+    conn: &Connection,
+    tags: &[String],
+    older_than_days: f64,
+    limit: i64,
+) -> Result<Vec<i64>, String> {
+    if limit <= 0 || tags.is_empty() {
+        return Ok(Vec::new());
+    }
+    // Milliseconds, matching how `posts.created_at` is stored (`…T…:…:….000+00:00`):
+    // a bare `to_rfc3339()` drops them, and the string comparison then puts a
+    // post created inside the cutoff second on the wrong side of the bound.
+    let cutoff = (Utc::now()
+        - chrono::Duration::seconds((older_than_days.max(0.0) * 86_400.0) as i64))
+    .to_rfc3339_opts(chrono::SecondsFormat::Millis, false);
+    let mut merged: Vec<(i64, i64)> = Vec::with_capacity(tags.len() * limit as usize);
+    for tag in tags {
+        let mut stmt = conn
+            .prepare(
+                "SELECT p.fav_count, tp.post_id
+                 FROM tags_posts tp
+                 INNER JOIN posts p ON p.id = tp.post_id
+                 WHERE tp.tag_id = (SELECT id FROM tags WHERE name = ?1)
+                   AND p.created_at < ?2
+                   AND p.is_deleted = 0
+                   AND p.preview_url IS NOT NULL
+                 ORDER BY p.fav_count DESC
+                 LIMIT ?3",
+            )
+            .map_err(|e| format!("prep backlog stream: {e}"))?;
+        let rows = stmt
+            .query_map(params![tag, cutoff, limit], |r| {
+                Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))
+            })
+            .map_err(|e| format!("query backlog stream: {e}"))?;
+        for row in rows {
+            merged.push(row.map_err(|e| format!("collect backlog stream: {e}"))?);
+        }
+    }
+    // One order across tags, so the tag walked first cannot decide the pool: a
+    // dense anchor would otherwise fill the cap with its own posts.
+    merged.sort_unstable_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.cmp(&a.1)));
+    let mut out: Vec<i64> = Vec::with_capacity(limit as usize);
+    let mut seen: HashSet<i64> = HashSet::with_capacity(merged.len());
+    for (_, id) in merged {
+        if seen.insert(id) {
+            out.push(id);
+            if out.len() as i64 >= limit {
+                break;
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// Recent posts above the account's own popularity baseline, newest first.
 ///
 /// `?1=created_at cutoff ?2=fav_count threshold ?3=limit`. The baseline is
@@ -984,13 +1077,19 @@ fn local_candidates_recent_popular(
 /// Build the local candidate pool from pre-loaded sources.
 ///
 /// Streams: IDF-ranked artist anchors, IDF-ranked character anchors,
-/// recent-popular, explicit preferred tags, co-occurrence neighbours. Each
+/// recent-popular, explicit preferred tags, co-occurrence neighbours, and — when
+/// `old_quota` asks for it — the backlog of old, favourite-carrying posts. Each
 /// stream is capped independently and the streams are drained **round-robin**,
-/// so the pool is a union of all five rather than the first few that happen to
-/// be dense. Round-robin (not one stream after another) is what keeps the last
-/// streams alive: a sequential union let artist + character + recent-popular
-/// fill every slot, and the explicit preferred-tags stream — the only signal
-/// the user states rather than one we infer — contributed nothing.
+/// so the pool is a union of all of them rather than the first few that happen
+/// to be dense. Round-robin (not one stream after another) is what keeps the
+/// last streams alive: a sequential union let artist + character +
+/// recent-popular fill every slot, and the explicit preferred-tags stream — the
+/// only signal the user states rather than one we infer — contributed nothing.
+///
+/// The backlog stream is the odd one out in two ways: it is the only one that
+/// looks backwards in time on purpose, and it carries its own ceiling rather
+/// than `stream_cap` (see the call site), because its job is to fill a floor of
+/// a couple of slots, not a share of the page.
 pub fn collect_candidate_ids(
     conn: &Connection,
     input: &CandidatePoolInput,
@@ -1028,23 +1127,57 @@ pub fn collect_candidate_ids(
         .cloned()
         .collect();
 
-    let mut streams: Vec<std::vec::IntoIter<i64>> = [
-        local_candidates_for_tag_names(conn, &artist_anchors, cap)?,
-        local_candidates_for_tag_names(conn, &character_anchors, cap)?,
-        local_candidates_recent_popular(conn, input.fav_baseline, tuning.recent_days, cap)?,
-        local_candidates_for_tag_names(conn, &preferred, cap)?,
-        local_candidates_for_tag_names(conn, &neighbours, cap)?,
-    ]
-    .into_iter()
-    .map(Vec::into_iter)
-    .collect();
+    let mut streams: Vec<(i64, std::vec::IntoIter<i64>)> = vec![
+        (
+            cap,
+            local_candidates_for_tag_names(conn, &artist_anchors, cap)?.into_iter(),
+        ),
+        (
+            cap,
+            local_candidates_for_tag_names(conn, &character_anchors, cap)?.into_iter(),
+        ),
+        (
+            cap,
+            local_candidates_recent_popular(conn, input.fav_baseline, tuning.recent_days, cap)?
+                .into_iter(),
+        ),
+        (
+            cap,
+            local_candidates_for_tag_names(conn, &preferred, cap)?.into_iter(),
+        ),
+        (
+            cap,
+            local_candidates_for_tag_names(conn, &neighbours, cap)?.into_iter(),
+        ),
+    ];
+
+    // Backlog gets its own ceiling instead of `cap`: the stream exists to make
+    // `old_quota` reachable, and a share sized for the fresh streams (0.34 of
+    // the pool) would hand a fifth of every page to year-old posts. Its tags
+    // mirror the other inferred streams — the same anchors, just cut in time.
+    if tuning.backlog_enabled && tuning.backlog_limit > 0 {
+        let backlog_tags: Vec<String> = artist_anchors
+            .iter()
+            .chain(character_anchors.iter())
+            .chain(preferred.iter())
+            .take(tuning.backlog_tags)
+            .cloned()
+            .collect();
+        let backlog = local_candidates_backlog(
+            conn,
+            &backlog_tags,
+            tuning.backlog_days,
+            tuning.backlog_limit,
+        )?;
+        streams.push((tuning.backlog_limit.min(cap).max(1), backlog.into_iter()));
+    }
 
     let mut out: Vec<i64> = Vec::with_capacity(limit as usize);
     let mut seen: HashSet<i64> = HashSet::with_capacity(limit as usize);
     let mut taken = vec![0usize; streams.len()];
     'fill: loop {
         let mut progressed = false;
-        for (i, stream) in streams.iter_mut().enumerate() {
+        for (i, (stream_cap, stream)) in streams.iter_mut().enumerate() {
             if out.len() as i64 >= limit {
                 break 'fill;
             }
@@ -1052,7 +1185,7 @@ pub fn collect_candidate_ids(
             // pool's running size: a shared counter is what let the first
             // (densest) stream consume every slot while the rest broke out on
             // their first element.
-            if taken[i] >= cap as usize {
+            if taken[i] >= *stream_cap as usize {
                 continue;
             }
             // Skip ids another stream already contributed before charging
@@ -1513,6 +1646,10 @@ pub(crate) mod tests {
             preferred_limit: 10,
             cooccurrence_limit: 10,
             cooccurrence_min_cooc: 2,
+            backlog_days: 365.0,
+            backlog_tags: 6,
+            backlog_limit: 40,
+            backlog_enabled: false,
         };
         assert_eq!(
             tuning.stream_cap(0),
@@ -1525,6 +1662,157 @@ pub(crate) mod tests {
             ..tuning
         };
         assert_eq!(full.stream_cap(400), 400);
+    }
+
+    /// The backlog stream is the only one that looks backwards in time, and the
+    /// ordering inside it is the point: oldest-but-unfavourited posts are the
+    /// 2007 tail of a tag, and promoting those would be worse than promoting
+    /// nothing. Only old, live, preview-carrying posts qualify.
+    #[test]
+    fn backlog_stream_returns_old_posts_by_favourites() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE posts (
+                id INTEGER PRIMARY KEY, created_at TEXT NOT NULL, score_total INTEGER NOT NULL,
+                fav_count INTEGER NOT NULL, rating TEXT NOT NULL, last_seen_at TEXT NOT NULL,
+                is_deleted INTEGER NOT NULL DEFAULT 0, preview_url TEXT
+             );
+             CREATE TABLE tags (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, group_type TEXT NOT NULL);
+             CREATE TABLE tags_posts (tag_id INTEGER NOT NULL, post_id INTEGER NOT NULL);
+             INSERT INTO tags (id, name, group_type) VALUES (1, 'art', 'artist');",
+        )
+        .unwrap();
+        let old = (Utc::now() - chrono::Duration::days(800)).to_rfc3339();
+        let young = (Utc::now() - chrono::Duration::days(10)).to_rfc3339();
+        let insert = |id: i64, created: &str, fav: i64, deleted: i64, preview: Option<&str>| {
+            conn.execute(
+                "INSERT INTO posts (id, created_at, score_total, fav_count, rating, last_seen_at, is_deleted, preview_url)
+                 VALUES (?1,?2,100,?3,'q',?2,?4,?5)",
+                rusqlite::params![id, created, fav, deleted, preview],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO tags_posts (tag_id, post_id) VALUES (1,?1)",
+                [id],
+            )
+            .unwrap();
+        };
+        insert(1, &old, 5, 0, Some("p/1.jpg"));
+        insert(2, &old, 100, 0, Some("p/2.jpg"));
+        insert(3, &old, 20, 0, Some("p/3.jpg"));
+        // Young + popular: the whole reason the cutoff exists is that these are
+        // *not* eligible however many favourites they carry.
+        insert(4, &young, 9_000, 0, Some("p/4.jpg"));
+        insert(5, &old, 9_500, 1, Some("p/5.jpg")); // deleted
+        insert(6, &old, 9_400, 0, None); // no preview → the card cannot render
+
+        let ids = local_candidates_backlog(&conn, &["art".to_string()], 365.0, 10).unwrap();
+        assert_eq!(ids, vec![2, 3, 1], "old posts, favourites first");
+
+        let capped = local_candidates_backlog(&conn, &["art".to_string()], 365.0, 2).unwrap();
+        assert_eq!(capped, vec![2, 3], "the ceiling truncates the tail");
+
+        let none = local_candidates_backlog(&conn, &[], 365.0, 10).unwrap();
+        assert!(none.is_empty(), "no anchors means no stream");
+    }
+
+    /// `old_quota` is the switch for the whole backlog path: the stream costs a
+    /// scan per anchor tag, and a pool nobody asks old posts from should not pay
+    /// for it. Turning the quota on must make the same fixture yield old posts.
+    #[test]
+    fn the_backlog_stream_runs_only_when_the_old_quota_asks_for_it() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE posts (
+                id INTEGER PRIMARY KEY, created_at TEXT NOT NULL, score_total INTEGER NOT NULL,
+                fav_count INTEGER NOT NULL, rating TEXT NOT NULL, last_seen_at TEXT NOT NULL,
+                is_deleted INTEGER NOT NULL DEFAULT 0, preview_url TEXT
+             );
+             CREATE TABLE tags (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, group_type TEXT NOT NULL);
+             CREATE TABLE tags_posts (tag_id INTEGER NOT NULL, post_id INTEGER NOT NULL);
+             INSERT INTO tags (id, name, group_type) VALUES (1, 'art', 'artist');",
+        )
+        .unwrap();
+        let old = (Utc::now() - chrono::Duration::days(800)).to_rfc3339();
+        let young = (Utc::now() - chrono::Duration::days(10)).to_rfc3339();
+        // Post ids grow with time on e621, so the fixture keeps old posts at low
+        // ids: that is what makes the two paths separable. The anchor stream
+        // walks `tags_posts(post_id)` backwards and takes the newest ids, so it
+        // reaches the young half only; old posts exist in this pool solely
+        // because the backlog stream looked for them.
+        for id in 1..=50i64 {
+            conn.execute(
+                "INSERT INTO posts (id, created_at, score_total, fav_count, rating, last_seen_at, is_deleted, preview_url)
+                 VALUES (?1,?2,100,?1,'q',?2,0,'p/'||?1||'.jpg')",
+                rusqlite::params![id, old],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO tags_posts (tag_id, post_id) VALUES (1,?1)",
+                [id],
+            )
+            .unwrap();
+        }
+        for id in 51..=300i64 {
+            conn.execute(
+                "INSERT INTO posts (id, created_at, score_total, fav_count, rating, last_seen_at, is_deleted, preview_url)
+                 VALUES (?1,?2,100,0,'q',?2,0,'p/'||?1||'.jpg')",
+                rusqlite::params![id, young],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO tags_posts (tag_id, post_id) VALUES (1,?1)",
+                [id],
+            )
+            .unwrap();
+        }
+
+        let idf = IdfIndex::from_df(&HashMap::new(), 1000);
+        let input = CandidatePoolInput {
+            tag_counts: vec![("art".to_string(), "artist".to_string(), 300)],
+            cooccurrence: Vec::new(),
+            preferred: Vec::new(),
+            fav_baseline: 1.0,
+        };
+        let base = CandidatePoolTuning {
+            anchor_tags: 20,
+            recent_days: 60,
+            stream_share: 0.34,
+            preferred_limit: 50,
+            cooccurrence_limit: 50,
+            cooccurrence_min_cooc: 2,
+            backlog_days: 365.0,
+            backlog_tags: 6,
+            backlog_limit: 40,
+            backlog_enabled: false,
+        };
+
+        let off = collect_candidate_ids(&conn, &input, &idf, &base, 60).unwrap();
+        assert!(
+            off.iter().all(|id| *id > 50),
+            "without the backlog stream the pool must not see old posts: {off:?}"
+        );
+
+        let on = CandidatePoolTuning {
+            backlog_enabled: true,
+            ..base
+        };
+        let pool = collect_candidate_ids(&conn, &input, &idf, &on, 60).unwrap();
+        let old_in_pool: Vec<i64> = pool.iter().copied().filter(|id| *id <= 50).collect();
+        assert!(
+            !old_in_pool.is_empty(),
+            "the backlog stream contributed no old posts: {pool:?}"
+        );
+
+        // Its own ceiling, not `stream_cap`: the floor needs a few slots, and a
+        // share of the page would hand an old-post stream a fifth of it.
+        let tight = CandidatePoolTuning {
+            backlog_limit: 2,
+            ..on
+        };
+        let pool = collect_candidate_ids(&conn, &input, &idf, &tight, 60).unwrap();
+        let old_in_pool: Vec<i64> = pool.iter().copied().filter(|id| *id <= 50).collect();
+        assert_eq!(old_in_pool, vec![50, 49], "ceiling 2, favourites first");
     }
 
     /// Regression: the pool used to come out of a single stream. The loop
@@ -1592,6 +1880,10 @@ pub(crate) mod tests {
             preferred_limit: 50,
             cooccurrence_limit: 50,
             cooccurrence_min_cooc: 2,
+            backlog_days: 365.0,
+            backlog_tags: 6,
+            backlog_limit: 40,
+            backlog_enabled: false,
         };
 
         let pool = collect_candidate_ids(&conn, &input, &idf, &tuning, 60).unwrap();
@@ -1672,6 +1964,10 @@ pub(crate) mod tests {
             preferred_limit: 50,
             cooccurrence_limit: 50,
             cooccurrence_min_cooc: 2,
+            backlog_days: 365.0,
+            backlog_tags: 6,
+            backlog_limit: 40,
+            backlog_enabled: false,
         };
 
         let pool = collect_candidate_ids(&conn, &input, &idf, &tuning, 60).unwrap();
@@ -1747,6 +2043,10 @@ pub(crate) mod tests {
             preferred_limit: 50,
             cooccurrence_limit: 50,
             cooccurrence_min_cooc: 2,
+            backlog_days: 365.0,
+            backlog_tags: 6,
+            backlog_limit: 40,
+            backlog_enabled: false,
         };
 
         // cap = ceil(20 * 0.34) = 7, so a sequential union stops after three
