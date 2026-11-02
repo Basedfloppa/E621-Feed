@@ -4,7 +4,7 @@ path = "src/main.rs"
 
 [package]
 name = "e621-account-parser-web"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 # SPDX id of the repository `LICENCE` file ("MIT No Attribution").
 license = "MIT-0"
